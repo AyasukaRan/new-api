@@ -35,6 +35,7 @@ export interface QuotaDataItem {
 
 export interface SourceQuotaDataItem {
   client_tool: string
+  created_at?: number
   count: number
   token_used: number
   quota: number
@@ -196,6 +197,12 @@ export interface DashboardFilters {
   end_timestamp?: Date
   time_granularity?: TimeGranularity
   username?: string
+}
+
+export interface DashboardChartTimeDomain {
+  start_timestamp: number
+  end_timestamp: number
+  buckets: Array<{ start: number; end: number; label: string }>
 }
 
 export type ConsumptionDistributionChartType = 'bar' | 'area'

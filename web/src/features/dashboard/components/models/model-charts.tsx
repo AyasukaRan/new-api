@@ -18,9 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { VChart } from '@visactor/react-vchart'
 import { PieChart as PieChartIcon } from 'lucide-react'
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { useEffect, useMemo, useState, useRef, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { Button } from '@/components/ui/button'
 import { IconBadge } from '@/components/ui/icon-badge'
 import { useThemeCustomization } from '@/context/theme-customization-provider'
 import { useTheme } from '@/context/theme-provider'
@@ -30,6 +31,7 @@ import {
 } from '@/features/dashboard/constants'
 import { processChartData } from '@/features/dashboard/lib'
 import type {
+  DashboardChartTimeDomain,
   ModelAnalyticsChartTab,
   QuotaDataItem,
 } from '@/features/dashboard/types'
@@ -54,6 +56,13 @@ interface ModelChartsProps {
   loading?: boolean
   timeGranularity?: TimeGranularity
   defaultChartTab?: ModelAnalyticsChartTab
+  timeDomain?: DashboardChartTimeDomain
+  activeTab?: ModelAnalyticsChartTab
+  onActiveTabChange?: (tab: ModelAnalyticsChartTab) => void
+  title?: string
+  description?: string
+  headerActions?: ReactNode
+  children?: ReactNode
 }
 
 export function ModelCharts(props: ModelChartsProps) {
@@ -64,9 +73,11 @@ export function ModelCharts(props: ModelChartsProps) {
     '--radius-md',
     `${customization.preset}:${customization.radius}`
   )
-  const [activeTab, setActiveTab] = useState<ModelAnalyticsChartTab>(
+  const [localTab, setLocalTab] = useState<ModelAnalyticsChartTab>(
     props.defaultChartTab ?? 'trend'
   )
+  const activeTab = props.activeTab ?? localTab
+  const title = props.title ?? t('Model Call Analytics')
   const [themeReady, setThemeReady] = useState(false)
   const themeManagerRef = useRef<
     (typeof import('@visactor/vchart'))['ThemeManager'] | null
@@ -74,7 +85,7 @@ export function ModelCharts(props: ModelChartsProps) {
   const timeGranularity = props.timeGranularity ?? DEFAULT_TIME_GRANULARITY
 
   useEffect(() => {
-    if (props.defaultChartTab) setActiveTab(props.defaultChartTab)
+    if (props.defaultChartTab) setLocalTab(props.defaultChartTab)
   }, [props.defaultChartTab])
 
   useEffect(() => {
@@ -102,9 +113,17 @@ export function ModelCharts(props: ModelChartsProps) {
         props.loading ? [] : props.data,
         timeGranularity,
         t,
-        chartRadius
+        chartRadius,
+        props.timeDomain
       ),
-    [props.data, props.loading, timeGranularity, t, chartRadius]
+    [
+      props.data,
+      props.loading,
+      props.timeDomain,
+      timeGranularity,
+      t,
+      chartRadius,
+    ]
   )
 
   const spec = chartData[CHART_SPEC_KEYS[activeTab]]
@@ -119,35 +138,51 @@ export function ModelCharts(props: ModelChartsProps) {
   ].join('-')
 
   return (
-    <div className='overflow-hidden rounded-lg border'>
+    <div
+      role='group'
+      aria-label={title}
+      className='overflow-hidden rounded-lg border'
+    >
       <div className='flex w-full flex-col gap-1.5 border-b px-3 py-2 sm:gap-3 sm:px-5 sm:py-3 lg:flex-row lg:items-center lg:justify-between'>
-        <div className='flex items-center gap-2'>
-          <IconBadge tone='chart-4' size='sm'>
-            <PieChartIcon />
-          </IconBadge>
-          <div className='text-sm font-semibold'>
-            {t('Model Call Analytics')}
+        <div className='min-w-0 space-y-1'>
+          <div className='flex items-center gap-2'>
+            <IconBadge tone='chart-4' size='sm'>
+              <PieChartIcon />
+            </IconBadge>
+            <div className='text-sm font-semibold'>{title}</div>
+            <span className='text-muted-foreground text-xs'>
+              {t('Total:')} {chartData.totalCountDisplay}
+            </span>
           </div>
-          <span className='text-muted-foreground text-xs'>
-            {t('Total:')} {chartData.totalCountDisplay}
-          </span>
+          {props.description && (
+            <p className='text-muted-foreground text-xs'>{props.description}</p>
+          )}
         </div>
 
-        <div className='bg-muted/60 inline-flex h-7 w-full overflow-x-auto rounded-lg border p-0.5 sm:h-8 sm:w-auto'>
-          {MODEL_ANALYTICS_CHART_OPTIONS.map((tab) => (
-            <button
-              key={tab.value}
-              type='button'
-              onClick={() => setActiveTab(tab.value)}
-              className={`shrink-0 rounded-md px-3 text-xs font-medium transition-colors ${
-                activeTab === tab.value
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t(tab.labelKey)}
-            </button>
-          ))}
+        <div className='flex min-w-0 flex-wrap items-center gap-2 lg:justify-end'>
+          <div className='bg-muted/60 inline-flex max-w-full overflow-x-auto rounded-lg border p-0.5'>
+            {MODEL_ANALYTICS_CHART_OPTIONS.map((tab) => (
+              <Button
+                key={tab.value}
+                type='button'
+                variant='ghost'
+                size='sm'
+                aria-pressed={activeTab === tab.value}
+                onClick={() => {
+                  if (props.activeTab === undefined) setLocalTab(tab.value)
+                  props.onActiveTabChange?.(tab.value)
+                }}
+                className={`shrink-0 rounded-md px-3 text-xs font-medium transition-colors ${
+                  activeTab === tab.value
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {t(tab.labelKey)}
+              </Button>
+            ))}
+          </div>
+          {props.headerActions}
         </div>
       </div>
 
@@ -164,6 +199,9 @@ export function ModelCharts(props: ModelChartsProps) {
           />
         )}
       </div>
+      {props.children && (
+        <div className='border-t p-4 sm:p-5'>{props.children}</div>
+      )}
     </div>
   )
 }

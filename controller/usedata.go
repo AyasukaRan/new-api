@@ -135,7 +135,11 @@ func GetAllSourceQuotaDates(c *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, c.Query("username"), c.GetInt("id"), c.GetInt("role"))
+	timeSeries, ok := parseSourceQuotaTimeSeries(c)
+	if !ok {
+		return
+	}
+	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, c.Query("username"), c.GetInt("id"), c.GetInt("role"), timeSeries)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -152,10 +156,26 @@ func GetUserSourceQuotaDates(c *gin.Context) {
 		common.ApiErrorMsg(c, "时间跨度不能超过 1 个月")
 		return
 	}
-	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, "", c.GetInt("id"), common.RoleCommonUser)
+	timeSeries, ok := parseSourceQuotaTimeSeries(c)
+	if !ok {
+		return
+	}
+	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, "", c.GetInt("id"), common.RoleCommonUser, timeSeries)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	common.ApiSuccess(c, rows)
+}
+
+func parseSourceQuotaTimeSeries(c *gin.Context) (bool, bool) {
+	if _, exists := c.Request.URL.Query()["time_series"]; !exists {
+		return false, true
+	}
+	timeSeries, err := strconv.ParseBool(c.Query("time_series"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid time_series"})
+		return false, false
+	}
+	return timeSeries, true
 }

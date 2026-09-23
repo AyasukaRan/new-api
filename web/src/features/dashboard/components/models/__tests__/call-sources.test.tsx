@@ -27,14 +27,33 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
+import { useState } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-import type { DashboardFilters } from '@/features/dashboard/types'
+import { buildChartTimeDomain } from '@/features/dashboard/lib/charts'
+import type {
+  DashboardFilters,
+  ModelAnalyticsChartTab,
+} from '@/features/dashboard/types'
 import { api } from '@/lib/api'
+import { computeTimeRange } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { CallSources } from '../call-sources'
+import { ModelCharts } from '../model-charts'
+
+// VChart needs a canvas; retain the real chart processing and inspect its output.
+vi.mock('@visactor/react-vchart', () => ({
+  VChart: (props: { spec: { type: string; data: unknown } }) => (
+    <output aria-label={`Rendered ${props.spec.type} chart`}>
+      {JSON.stringify(props.spec.data)}
+    </output>
+  ),
+}))
+vi.mock('@visactor/vchart', () => ({
+  ThemeManager: { setCurrentTheme: vi.fn() },
+}))
 
 let client: QueryClient
 const filters: DashboardFilters = {
@@ -46,11 +65,18 @@ const filters: DashboardFilters = {
 const rows = [
   {
     client_tool: 'DeepSeek Harness',
+    created_at: 1790035200,
     count: 3,
     token_used: 1200,
     quota: 500000,
   },
-  { client_tool: '', count: 1, token_used: 100, quota: 0 },
+  {
+    client_tool: '',
+    created_at: 1790038800,
+    count: 1,
+    token_used: 100,
+    quota: 0,
+  },
 ]
 
 beforeEach(async () => {
@@ -79,6 +105,131 @@ function renderSources(currentFilters = filters) {
     </QueryClientProvider>
   )
 }
+
+it('groups hourly source rows once for the table while retaining each hour in the chart', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: [
+        ...rows,
+        {
+          client_tool: 'DeepSeek Harness',
+          created_at: 1790038800,
+          count: 2,
+          token_used: 800,
+          quota: 500000,
+        },
+      ],
+    },
+  })
+  renderSources()
+
+  const table = await screen.findByRole('table', { name: 'Call Sources' })
+  const identified = within(table).getByRole('row', {
+    name: /DeepSeek Harness/,
+  })
+  expect(within(identified).getByText('5')).toBeVisible()
+  expect(within(identified).getByText('2,000')).toBeVisible()
+  expect(within(identified).getByText('$2')).toBeVisible()
+  expect(within(table).getAllByRole('row')).toHaveLength(3)
+  const chart = await screen.findByLabelText('Rendered area chart')
+  const series = JSON.parse(chart.textContent ?? '[]')[0].values as Array<{
+    Model: string
+    Count: number
+  }>
+  expect(
+    series
+      .filter((row) => row.Model === 'DeepSeek Harness')
+      .map((row) => row.Count)
+      .filter(Boolean)
+  ).toEqual([3, 2])
+  expect(
+    series
+      .filter((row) => row.Model === 'Unidentified source')
+      .reduce((sum, row) => sum + row.Count, 0)
+  ).toBe(1)
+  expect(get).toHaveBeenCalledTimes(1)
+})
+
+function SynchronizedCharts(props: { filters: DashboardFilters }) {
+  const [activeTab, setActiveTab] = useState<ModelAnalyticsChartTab>('top')
+  const timeDomain = buildChartTimeDomain(
+    computeTimeRange(
+      1,
+      props.filters.start_timestamp,
+      props.filters.end_timestamp
+    ),
+    props.filters.time_granularity
+  )
+  return (
+    <QueryClientProvider client={client}>
+      <CallSources
+        filters={props.filters}
+        timeDomain={timeDomain}
+        activeTab={activeTab}
+        onActiveTabChange={setActiveTab}
+      />
+      <ModelCharts
+        data={[
+          { model_name: 'deepseek-flash', created_at: 1790035200, count: 4 },
+        ]}
+        timeDomain={timeDomain}
+        activeTab={activeTab}
+        onActiveTabChange={setActiveTab}
+      />
+    </QueryClientProvider>
+  )
+}
+
+it('keeps source and model chart types synchronized in both directions without refetching', async () => {
+  const get = vi
+    .spyOn(api, 'get')
+    .mockResolvedValue({ data: { success: true, data: rows } })
+  const user = userEvent.setup()
+  render(<SynchronizedCharts filters={filters} />)
+  const sources = await screen.findByRole('group', { name: 'Call Sources' })
+  const models = screen.getByRole('group', { name: 'Model Call Analytics' })
+  expect(
+    within(sources).getByRole('button', { name: 'Call Count Ranking' })
+  ).toHaveAttribute('aria-pressed', 'true')
+  expect(
+    within(models).getByRole('button', { name: 'Call Count Ranking' })
+  ).toHaveAttribute('aria-pressed', 'true')
+
+  await user.click(
+    within(sources).getByRole('button', { name: 'Call Count Distribution' })
+  )
+  expect(
+    within(models).getByRole('button', { name: 'Call Count Distribution' })
+  ).toHaveAttribute('aria-pressed', 'true')
+  expect(
+    await within(models).findByLabelText('Rendered pie chart')
+  ).toBeVisible()
+  expect(
+    await within(sources).findByLabelText('Rendered pie chart')
+  ).toBeVisible()
+
+  await user.click(within(models).getByRole('button', { name: 'Call Trend' }))
+  expect(
+    within(sources).getByRole('button', { name: 'Call Trend' })
+  ).toHaveAttribute('aria-pressed', 'true')
+  const sourceChart = await within(sources).findByLabelText(
+    'Rendered area chart'
+  )
+  const modelChart = await within(models).findByLabelText('Rendered area chart')
+  const sourceTimes = (
+    JSON.parse(sourceChart.textContent ?? '[]')[0].values as Array<{
+      Time: string
+    }>
+  ).map((row) => row.Time)
+  const modelTimes = (
+    JSON.parse(modelChart.textContent ?? '[]')[0].values as Array<{
+      Time: string
+    }>
+  ).map((row) => row.Time)
+  expect([...new Set(sourceTimes)]).toEqual([...new Set(modelTimes)])
+  expect(get).toHaveBeenCalledTimes(1)
+})
 
 it('includes unidentified historical requests in the shares and preserves free usage', async () => {
   vi.spyOn(api, 'get').mockResolvedValue({
@@ -133,7 +284,11 @@ it('uses the self endpoint without username and sends the selected exact time ra
   renderSources()
   await screen.findByRole('table')
   expect(get).toHaveBeenCalledWith('/api/data/sources/self', {
-    params: { start_timestamp: 1790035200, end_timestamp: 1790121600 },
+    params: {
+      start_timestamp: 1790035200,
+      end_timestamp: 1790121600,
+      time_series: true,
+    },
   })
 })
 
@@ -150,6 +305,7 @@ it('follows the administrator username filter and refreshes the displayed source
     params: {
       start_timestamp: 1790035200,
       end_timestamp: 1790121600,
+      time_series: true,
       username: 'other-user',
     },
   })
@@ -172,6 +328,7 @@ it('follows the administrator username filter and refreshes the displayed source
     params: {
       start_timestamp: 1790035200,
       end_timestamp: 1790121600,
+      time_series: true,
       username: 'second-user',
     },
   })

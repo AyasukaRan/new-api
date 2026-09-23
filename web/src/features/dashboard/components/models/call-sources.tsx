@@ -28,8 +28,16 @@ import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { getSourceQuotaData } from '@/features/dashboard/api'
+import { DEFAULT_TIME_GRANULARITY } from '@/features/dashboard/constants'
+import { buildChartTimeDomain } from '@/features/dashboard/lib/charts'
 import { getDefaultDays } from '@/features/dashboard/lib/filters'
-import type { DashboardFilters } from '@/features/dashboard/types'
+import type {
+  DashboardChartTimeDomain,
+  DashboardFilters,
+  ModelAnalyticsChartTab,
+  QuotaDataItem,
+  SourceQuotaDataItem,
+} from '@/features/dashboard/types'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatQuotaWithCurrency } from '@/lib/currency'
 import { formatNumber } from '@/lib/format'
@@ -44,9 +52,13 @@ import { useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { PanelWrapper } from '../ui/panel-wrapper'
+import { ModelCharts } from './model-charts'
 
 interface CallSourcesProps {
   filters?: DashboardFilters
+  timeDomain?: DashboardChartTimeDomain
+  activeTab?: ModelAnalyticsChartTab
+  onActiveTabChange?: (tab: ModelAnalyticsChartTab) => void
 }
 
 export function CallSources(props: CallSourcesProps) {
@@ -57,18 +69,30 @@ export function CallSources(props: CallSourcesProps) {
   const userId = useAuthStore((state) => state.auth.user?.id)
   const role = useAuthStore((state) => state.auth.user?.role)
   const isAdmin = Boolean(role && role >= ROLE.ADMIN)
+  const timeGranularity =
+    props.filters?.time_granularity ?? DEFAULT_TIME_GRANULARITY
   const params = useMemo(
     () => ({
-      ...computeTimeRange(
-        getDefaultDays(props.filters?.time_granularity),
-        props.filters?.start_timestamp,
-        props.filters?.end_timestamp
-      ),
+      ...(props.timeDomain
+        ? {
+            start_timestamp: props.timeDomain.start_timestamp,
+            end_timestamp: props.timeDomain.end_timestamp,
+          }
+        : computeTimeRange(
+            getDefaultDays(props.filters?.time_granularity),
+            props.filters?.start_timestamp,
+            props.filters?.end_timestamp
+          )),
+      time_series: true,
       ...(isAdmin && props.filters?.username?.trim()
         ? { username: props.filters.username.trim() }
         : {}),
     }),
-    [props.filters, isAdmin]
+    [props.filters, props.timeDomain, isAdmin]
+  )
+  const timeDomain = useMemo(
+    () => props.timeDomain ?? buildChartTimeDomain(params, timeGranularity),
+    [props.timeDomain, timeGranularity, params]
   )
   const query = useQuery({
     queryKey: ['dashboard', 'sources', userId, role, params],
@@ -84,11 +108,43 @@ export function CallSources(props: CallSourcesProps) {
     enabled: userId !== undefined,
     staleTime: 60_000,
   })
-  const rows = query.data ?? []
-  const totalRequests = useMemo(
-    () => query.data?.reduce((total, row) => total + row.count, 0) ?? 0,
-    [query.data]
-  )
+  const { rows, chartData, totalRequests } = useMemo(() => {
+    const bySource = new Map<string, SourceQuotaDataItem>()
+    const chartData: QuotaDataItem[] = []
+    let totalRequests = 0
+    for (const row of query.data ?? []) {
+      const source = row.client_tool || ''
+      const total = bySource.get(source) ?? {
+        client_tool: source,
+        count: 0,
+        token_used: 0,
+        quota: 0,
+      }
+      total.count += row.count
+      total.token_used += row.token_used
+      total.quota += row.quota
+      bySource.set(source, total)
+      totalRequests += row.count
+      if (
+        typeof row.created_at === 'number' &&
+        Number.isFinite(row.created_at)
+      ) {
+        chartData.push({
+          model_name: source || t('Unidentified source'),
+          created_at: row.created_at,
+          count: row.count,
+          token_used: row.token_used,
+          quota: row.quota,
+        })
+      }
+    }
+    const rows = [...bySource.values()].sort(
+      (left, right) =>
+        right.count - left.count ||
+        left.client_tool.localeCompare(right.client_tool)
+    )
+    return { rows, chartData, totalRequests }
+  }, [query.data, t])
   const percentFormatter = useMemo(
     () =>
       new Intl.NumberFormat(locale, {
@@ -123,98 +179,107 @@ export function CallSources(props: CallSourcesProps) {
     content = <EmptyState title={t('No data available')} className='min-h-48' />
   } else {
     content = (
-      <>
-        <div className='text-muted-foreground mb-3 text-sm'>
-          {t('Total:')}{' '}
-          <span className='text-foreground font-medium tabular-nums'>
-            {formatNumber(totalRequests, locale)}
-          </span>{' '}
-          {t('Requests')}
-        </div>
-        <StaticDataTable
-          data={rows}
-          getRowKey={(row) => row.client_tool}
-          className='max-h-[420px] overflow-auto'
-          tableClassName='min-w-[640px]'
-          tableProps={{ 'aria-label': t('Call Sources'), withContainer: false }}
-          columns={[
-            {
-              id: 'source',
-              header: t('Source'),
-              cellClassName: 'max-w-64',
-              cell: (row) => row.client_tool || t('Unidentified source'),
+      <StaticDataTable
+        data={rows}
+        getRowKey={(row) => row.client_tool}
+        className='max-h-[420px] overflow-auto'
+        tableClassName='min-w-[640px]'
+        tableProps={{ 'aria-label': t('Call Sources'), withContainer: false }}
+        columns={[
+          {
+            id: 'source',
+            header: t('Source'),
+            cellClassName: 'max-w-64',
+            cell: (row) => row.client_tool || t('Unidentified source'),
+          },
+          {
+            id: 'requests',
+            header: t('Requests'),
+            className: 'text-right',
+            cellClassName: 'text-right tabular-nums',
+            cell: (row) => formatNumber(row.count, locale),
+          },
+          {
+            id: 'share',
+            header: t('Request share'),
+            className: 'min-w-36',
+            cell: (row) => {
+              const share = totalRequests > 0 ? row.count / totalRequests : 0
+              const source = row.client_tool || t('Unidentified source')
+              return (
+                <div className='space-y-1.5'>
+                  <span className='text-muted-foreground tabular-nums'>
+                    {percentFormatter.format(share)}
+                  </span>
+                  <Progress
+                    value={share * 100}
+                    aria-label={`${source} ${t('Request share')}`}
+                  />
+                </div>
+              )
             },
-            {
-              id: 'requests',
-              header: t('Requests'),
-              className: 'text-right',
-              cellClassName: 'text-right tabular-nums',
-              cell: (row) => formatNumber(row.count, locale),
-            },
-            {
-              id: 'share',
-              header: t('Request share'),
-              className: 'min-w-36',
-              cell: (row) => {
-                const share = totalRequests > 0 ? row.count / totalRequests : 0
-                const source = row.client_tool || t('Unidentified source')
-                return (
-                  <div className='space-y-1.5'>
-                    <span className='text-muted-foreground tabular-nums'>
-                      {percentFormatter.format(share)}
-                    </span>
-                    <Progress
-                      value={share * 100}
-                      aria-label={`${source} ${t('Request share')}`}
-                    />
-                  </div>
-                )
-              },
-            },
-            {
-              id: 'tokens',
-              header: t('Tokens'),
-              className: 'text-right',
-              cellClassName: 'text-right tabular-nums',
-              cell: (row) => formatNumber(row.token_used, locale),
-            },
-            {
-              id: 'cost',
-              header: t('Cost'),
-              className: 'text-right',
-              cellClassName: 'text-right tabular-nums',
-              cell: (row) => formatQuotaWithCurrency(row.quota, { locale }),
-            },
-          ]}
-        />
-      </>
+          },
+          {
+            id: 'tokens',
+            header: t('Tokens'),
+            className: 'text-right',
+            cellClassName: 'text-right tabular-nums',
+            cell: (row) => formatNumber(row.token_used, locale),
+          },
+          {
+            id: 'cost',
+            header: t('Cost'),
+            className: 'text-right',
+            cellClassName: 'text-right tabular-nums',
+            cell: (row) => formatQuotaWithCurrency(row.quota, { locale }),
+          },
+        ]}
+      />
     )
   }
 
+  const description = t(
+    'Successful requests by client. Older records without source information appear as unidentified.'
+  )
+  const refreshButton = (
+    <Button
+      variant='ghost'
+      size='sm'
+      disabled={query.isFetching}
+      onClick={() => {
+        void query.refetch()
+      }}
+    >
+      <RefreshCw className='size-3.5' aria-hidden='true' />
+      {t('Refresh')}
+    </Button>
+  )
+
   return (
     <section aria-label={t('Call Sources')} aria-busy={query.isFetching}>
-      <PanelWrapper
-        title={t('Call Sources')}
-        description={t(
-          'Successful requests by client. Older records without source information appear as unidentified.'
-        )}
-        className='rounded-lg'
-        headerActions={
-          <Button
-            variant='ghost'
-            size='sm'
-            disabled={query.isFetching}
-            onClick={() => {
-              void query.refetch()
-            }}
-          >
-            <RefreshCw className='size-3.5' aria-hidden='true' />
-            {t('Refresh')}
-          </Button>
-        }
-      >
-        {content}
-      </PanelWrapper>
+      {query.isSuccess && rows.length > 0 ? (
+        <ModelCharts
+          title={t('Call Sources')}
+          description={description}
+          headerActions={refreshButton}
+          data={chartData}
+          timeGranularity={timeGranularity}
+          timeDomain={timeDomain}
+          activeTab={props.activeTab}
+          onActiveTabChange={props.onActiveTabChange}
+        >
+          {content}
+        </ModelCharts>
+      ) : (
+        <PanelWrapper
+          title={t('Call Sources')}
+          description={description}
+          className='rounded-lg'
+          headerActions={refreshButton}
+        >
+          {content}
+        </PanelWrapper>
+      )}
     </section>
   )
 }

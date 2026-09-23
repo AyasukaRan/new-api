@@ -20,11 +20,13 @@ import { dataScheme as vchartDefaultDataScheme } from '@visactor/vchart/esm/them
 
 import { MAX_CHART_TREND_POINTS } from '@/features/dashboard/constants'
 import type {
+  DashboardChartTimeDomain,
   QuotaDataItem,
   ProcessedChartData,
   ProcessedUserChartData,
 } from '@/features/dashboard/types'
 import { getCurrencyDisplay } from '@/lib/currency'
+import dayjs from '@/lib/dayjs'
 import { formatChartTime, type TimeGranularity } from '@/lib/time'
 
 type TFunction = (key: string) => string
@@ -37,6 +39,59 @@ type TooltipLineItem = {
   shapeFill?: string
   shapeStroke?: string
   shapeSize?: number
+}
+
+// This is a display limit: adjacent buckets are combined, never dropped.
+const MAX_TIME_BUCKETS = 512
+
+export function buildChartTimeDomain(
+  range: { start_timestamp: number; end_timestamp: number },
+  granularity: TimeGranularity = 'hour'
+): DashboardChartTimeDomain | undefined {
+  if (
+    !Number.isFinite(range.start_timestamp) ||
+    !Number.isFinite(range.end_timestamp) ||
+    range.end_timestamp < range.start_timestamp
+  ) {
+    return undefined
+  }
+  const unit = granularity === 'hour' ? 'hour' : 'day'
+  const first = dayjs(range.start_timestamp * 1000).startOf(unit)
+  const end = dayjs(range.end_timestamp * 1000)
+  if (!first.isValid() || !end.isValid()) return undefined
+
+  const baseStep = granularity === 'week' ? 7 : 1
+  const unitSeconds = unit === 'hour' ? 3600 : 86400
+  const estimatedCount =
+    Math.floor(
+      (range.end_timestamp - first.unix()) / (baseStep * unitSeconds)
+    ) + 1
+  const stride = Math.max(1, Math.ceil(estimatedCount / MAX_TIME_BUCKETS))
+  const step = baseStep * stride
+  const showYear = first.year() !== end.year()
+  const dateFormat = showYear ? 'YYYY-MM-DD' : 'MM-DD'
+  const labelFormat = unit === 'hour' ? `${dateFormat} HH:mm` : dateFormat
+  const buckets: DashboardChartTimeDomain['buckets'] = []
+
+  // Calendar-day addition preserves local midnight through daylight-saving changes.
+  for (let index = 0; index < MAX_TIME_BUCKETS; index++) {
+    const start = first.add(index * step, unit)
+    if (start.unix() > range.end_timestamp) break
+    let next = first.add((index + 1) * step, unit).unix()
+    if (index === MAX_TIME_BUCKETS - 1) {
+      next = Math.max(next, range.end_timestamp + 1)
+    }
+    let label = start.format(labelFormat)
+    if (step > 1) {
+      const last = dayjs(Math.min(next - 1, range.end_timestamp) * 1000)
+      label += ` – ${last.format(labelFormat)}`
+    }
+    // Repeated local hours during a DST rollback must remain separate buckets.
+    if (buckets.at(-1)?.label === label) label += ` ${start.format('Z')}`
+    buckets.push({ start: start.unix(), end: next, label })
+  }
+
+  return { ...range, buckets }
 }
 
 export function getDashboardChartColors(domainLength: number): string[] {
@@ -71,7 +126,8 @@ export function processChartData(
   data: QuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
-  chartCornerRadius?: number
+  chartCornerRadius?: number,
+  timeDomain?: DashboardChartTimeDomain
 ): ProcessedChartData {
   const tt: TFunction = t ?? ((x) => x)
   const otherLabel = tt('Other')
@@ -227,7 +283,31 @@ export function processChartData(
 
   data.forEach((item) => {
     const timestamp = Number(item.created_at)
-    const timeKey = formatChartTime(timestamp, timeGranularity)
+    let timeKey: string
+    if (timeDomain) {
+      if (
+        !Number.isFinite(timestamp) ||
+        timestamp < timeDomain.start_timestamp ||
+        timestamp > timeDomain.end_timestamp
+      ) {
+        return
+      }
+      let low = 0
+      let high = timeDomain.buckets.length - 1
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2)
+        if (timeDomain.buckets[middle].start <= timestamp) {
+          low = middle + 1
+        } else {
+          high = middle - 1
+        }
+      }
+      const bucket = timeDomain.buckets[high]
+      if (!bucket || timestamp >= bucket.end) return
+      timeKey = bucket.label
+    } else {
+      timeKey = formatChartTime(timestamp, timeGranularity)
+    }
     const model = item.model_name || 'Unknown'
     const quota = Number(item.quota) || 0
     const count = Number(item.count) || 0
@@ -291,7 +371,9 @@ export function processChartData(
     )
     return padded
   }
-  const chartTimes = fillTimePoints(sortedTimes)
+  const chartTimes = timeDomain
+    ? timeDomain.buckets.map((bucket) => bucket.label)
+    : fillTimePoints(sortedTimes)
 
   const totalTimes = [...modelTotalsMap.values()].reduce(
     (sum, x) => sum + (Number(x.count) || 0),
@@ -340,7 +422,6 @@ export function processChartData(
     timeData = timeData.map((item) => ({ ...item, TimeSum: timeSum }))
     lineValues.push(...timeData)
   })
-  lineValues.sort((a, b) => a.Time.localeCompare(b.Time))
 
   // Area chart: top models by quota + "Other" bucket (too many series = unreadable)
   const MAX_AREA_MODELS = 15
@@ -382,7 +463,6 @@ export function processChartData(
       })
     }
   })
-  areaValues.sort((a, b) => a.Time.localeCompare(b.Time))
 
   // Line chart: model call trend (top models + "Other" bucket)
   const MAX_TREND_MODELS = 20
@@ -426,7 +506,6 @@ export function processChartData(
     }
     modelLineValues.push(...timeData)
   })
-  modelLineValues.sort((a, b) => a.Time.localeCompare(b.Time))
 
   // Rank bar: model call count ranking (top 20 + "Other" bucket)
   const MAX_RANK_MODELS = 20

@@ -32,6 +32,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ROLE } from '@/lib/roles'
+import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -46,6 +47,7 @@ import {
   getSavedGranularity,
   saveChartPreferences,
 } from './lib'
+import { buildChartTimeDomain } from './lib/charts'
 import {
   type DashboardSectionId,
   DASHBOARD_DEFAULT_SECTION,
@@ -54,6 +56,7 @@ import {
 import type {
   DashboardChartPreferences,
   DashboardFilters,
+  ModelAnalyticsChartTab,
   QuotaDataItem,
   UserChartsFilters,
 } from './types'
@@ -209,6 +212,9 @@ export function Dashboard() {
   const [dataLoading, setDataLoading] = useState(false)
   const [chartPreferences, setChartPreferences] =
     useState<DashboardChartPreferences>(() => getSavedChartPreferences())
+  const [analyticsTab, setAnalyticsTab] = useState<ModelAnalyticsChartTab>(
+    () => chartPreferences.modelAnalyticsChart
+  )
   const [modelFilters, setModelFilters] = useState<DashboardFilters>(() =>
     buildDefaultDashboardFilters(getSavedChartPreferences())
   )
@@ -223,6 +229,18 @@ export function Dashboard() {
     }
   )
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
+  const chartTimeDomain = useMemo(
+    () =>
+      buildChartTimeDomain(
+        computeTimeRange(
+          getDefaultDays(modelFilters.time_granularity),
+          modelFilters.start_timestamp,
+          modelFilters.end_timestamp
+        ),
+        modelFilters.time_granularity || DEFAULT_TIME_GRANULARITY
+      ),
+    [modelFilters]
+  )
 
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
     setModelFilters(filters)
@@ -243,6 +261,7 @@ export function Dashboard() {
   const handleChartPreferencesChange = useCallback(
     (preferences: DashboardChartPreferences) => {
       setChartPreferences(preferences)
+      setAnalyticsTab(preferences.modelAnalyticsChart)
       setModelFilters(buildDefaultDashboardFilters(preferences))
       saveChartPreferences(preferences)
     },
@@ -371,7 +390,12 @@ export function Dashboard() {
               )}
               <FadeIn delay={0.1}>
                 <Suspense fallback={<ModelChartsFallback />}>
-                  <LazyCallSources filters={modelFilters} />
+                  <LazyCallSources
+                    filters={modelFilters}
+                    timeDomain={chartTimeDomain}
+                    activeTab={analyticsTab}
+                    onActiveTabChange={setAnalyticsTab}
+                  />
                 </Suspense>
               </FadeIn>
               <FadeIn delay={0.1}>
@@ -379,6 +403,7 @@ export function Dashboard() {
                   <LazyConsumptionDistributionChart
                     data={modelData}
                     loading={dataLoading}
+                    timeDomain={chartTimeDomain}
                     defaultChartType={
                       chartPreferences.consumptionDistributionChart
                     }
@@ -393,7 +418,9 @@ export function Dashboard() {
                   <LazyModelCharts
                     data={modelData}
                     loading={dataLoading}
-                    defaultChartTab={chartPreferences.modelAnalyticsChart}
+                    timeDomain={chartTimeDomain}
+                    activeTab={analyticsTab}
+                    onActiveTabChange={setAnalyticsTab}
                     timeGranularity={
                       modelFilters.time_granularity || DEFAULT_TIME_GRANULARITY
                     }

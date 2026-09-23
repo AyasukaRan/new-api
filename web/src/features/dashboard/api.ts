@@ -90,6 +90,7 @@ export async function getSourceQuotaData(
     start_timestamp: number
     end_timestamp: number
     username?: string
+    time_series?: boolean
   },
   isAdmin = false
 ) {
@@ -102,6 +103,7 @@ export async function getSourceQuotaData(
     params: {
       start_timestamp: params.start_timestamp,
       end_timestamp: params.end_timestamp,
+      ...(params.time_series ? { time_series: true } : {}),
       ...(isAdmin && params.username ? { username: params.username } : {}),
     },
   })

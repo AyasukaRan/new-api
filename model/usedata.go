@@ -190,21 +190,30 @@ func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaDat
 // An empty client_tool preserves legacy and unrecognized requests as one group.
 type SourceQuotaData struct {
 	ClientTool string `json:"client_tool"`
+	CreatedAt  int64  `json:"created_at,omitempty"`
 	Count      int64  `json:"count"`
 	TokenUsed  int64  `json:"token_used"`
 	Quota      int64  `json:"quota"`
 }
 
-func GetSourceQuotaData(startTime int64, endTime int64, username string, userID int, role int) ([]SourceQuotaData, error) {
+func GetSourceQuotaData(startTime int64, endTime int64, username string, userID int, role int, timeSeries bool) ([]SourceQuotaData, error) {
 	rows := make([]SourceQuotaData, 0)
+	selectColumns := "COALESCE(client_tool, '') as client_tool, sum(count) as count, sum(token_used) as token_used, sum(quota) as quota"
+	groupColumns := "COALESCE(client_tool, '')"
+	orderColumns := "count DESC, client_tool ASC"
+	if timeSeries {
+		selectColumns += ", created_at"
+		groupColumns += ", created_at"
+		orderColumns = "created_at ASC, " + orderColumns
+	}
 	query := DB.Table("quota_data").
-		Select("COALESCE(client_tool, '') as client_tool, sum(count) as count, sum(token_used) as token_used, sum(quota) as quota").
+		Select(selectColumns).
 		Where("created_at >= ? AND created_at <= ?", startTime, endTime)
 	if role < common.RoleAdminUser {
 		query = query.Where("user_id = ?", userID)
 	} else if username != "" {
 		query = query.Where("username = ?", username)
 	}
-	err := query.Group("COALESCE(client_tool, '')").Order("count DESC, client_tool ASC").Find(&rows).Error
+	err := query.Group(groupColumns).Order(orderColumns).Find(&rows).Error
 	return rows, err
 }
