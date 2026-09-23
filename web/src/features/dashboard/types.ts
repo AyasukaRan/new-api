@@ -33,6 +33,13 @@ export interface QuotaDataItem {
   quota?: number
 }
 
+export interface SourceQuotaDataItem {
+  client_tool: string
+  count: number
+  token_used: number
+  quota: number
+}
+
 export interface FlowQuotaDataItem {
   user_id?: number
   username?: string

@@ -1108,7 +1108,7 @@ func TestInputPreConsumeMultiplierLegacyAndRequestPrices(t *testing.T) {
 		model        string
 		multiplier   float64
 		prompt, want int
-		channel int
+		channel      int
 	}{
 		{"legacy-input-policy", 0.5, 100, 75, 0},
 		{"legacy-input-policy", 2.5, 100, 375, 0},

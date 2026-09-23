@@ -1,10 +1,19 @@
 package model
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
@@ -190,4 +199,172 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 60, rows[0].TokenUsed)
 	require.Equal(t, "default", rows[1].UseGroup)
 	require.Equal(t, 25, rows[1].Quota)
+}
+
+// This is the released schema before request-source aggregation was added.
+type quotaDataBeforeSource struct {
+	Id        int    `json:"id"`
+	UserID    int    `gorm:"index"`
+	Username  string `gorm:"index:idx_qdt_model_user_name,priority:2;size:64;default:''"`
+	ModelName string `gorm:"index:idx_qdt_model_user_name,priority:1;size:64;default:''"`
+	CreatedAt int64  `gorm:"bigint;index:idx_qdt_created_at,priority:2"`
+	UseGroup  string `gorm:"index;size:64;default:''"`
+	TokenID   int    `gorm:"index;default:0"`
+	ChannelID int    `gorm:"index;default:0"`
+	NodeName  string `gorm:"index;size:64;default:''"`
+	TokenUsed int    `gorm:"default:0"`
+	Count     int    `gorm:"default:0"`
+	Quota     int    `gorm:"default:0"`
+}
+
+func TestSourceQuotaDataMigrationAndAggregation(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			dsn := os.Getenv("TEST_" + strings.ToUpper(dialect) + "_DSN")
+			if dialect == "sqlite" {
+				dsn = "local"
+				previousPath := common.SQLitePath
+				common.SQLitePath = filepath.Join(t.TempDir(), "source-quota.db")
+				t.Cleanup(func() { common.SQLitePath = previousPath })
+			}
+			if dsn == "" {
+				t.Skip("test database DSN is not configured")
+			}
+			t.Setenv("SOURCE_QUOTA_TEST_DSN", dsn)
+			db, _, err := chooseDB("SOURCE_QUOTA_TEST_DSN", false)
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+			require.False(t, db.Migrator().HasTable(&QuotaData{}), "use an isolated source migration database")
+			versionQuery := "SELECT VERSION()"
+			if dialect == "sqlite" {
+				versionQuery = "SELECT sqlite_version()"
+			}
+			var version string
+			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+			t.Logf("database: %s %s", dialect, version)
+			previousDB := DB
+			DB = db
+			t.Cleanup(func() { DB = previousDB })
+			for _, scenario := range []string{"fresh", "upgrade"} {
+				t.Run(scenario, func(t *testing.T) {
+					t.Cleanup(func() { require.NoError(t, db.Migrator().DropTable(&QuotaData{})) })
+					legacy := quotaDataBeforeSource{UserID: 1, Username: "alice", ModelName: "model", CreatedAt: 3600, UseGroup: "default", TokenID: 2, ChannelID: 3, NodeName: "node", Count: 2, TokenUsed: 50, Quota: 500}
+					if scenario == "upgrade" {
+						require.NoError(t, db.Table("quota_data").AutoMigrate(&quotaDataBeforeSource{}))
+						require.NoError(t, db.Table("quota_data").Create(&legacy).Error)
+					}
+					require.NoError(t, db.AutoMigrate(&QuotaData{}))
+					if scenario == "fresh" {
+						require.NoError(t, db.Table("quota_data").Create(&legacy).Error)
+					}
+					recorder := &migrationSQLRecorder{}
+					for range 2 {
+						require.NoError(t, db.Session(&gorm.Session{Logger: recorder}).AutoMigrate(&QuotaData{}))
+					}
+					assert.Empty(t, recorder.schemaMutations(), "restarting must not keep altering the schema")
+					var saved QuotaData
+					require.NoError(t, db.First(&saved, legacy.Id).Error)
+					assert.Equal(t, QuotaData{Id: legacy.Id, UserID: 1, Username: "alice", ModelName: "model", CreatedAt: 3600, UseGroup: "default", TokenID: 2, ChannelID: 3, NodeName: "node", Count: 2, TokenUsed: 50, Quota: 500}, saved)
+					for _, name := range []string{"idx_qdt_model_user_name", "idx_qdt_created_at"} {
+						assert.True(t, db.Migrator().HasIndex(&QuotaData{}, name))
+					}
+					CacheQuotaDataLock.Lock()
+					CacheQuotaData = make(map[string]*QuotaData)
+					CacheQuotaDataLock.Unlock()
+					params := QuotaDataLogParams{UserID: 1, Username: "alice", ModelName: "model", CreatedAt: 3601, UseGroup: "default", TokenID: 2, ChannelID: 3, NodeName: "node", ClientTool: "DeepSeek Harness", TokenUsed: 15, Quota: 100}
+					LogQuotaData(params)
+					LogQuotaData(params)
+					SaveQuotaDataCache()
+					LogQuotaData(params)
+					params.ClientTool = "OpenAI Python SDK"
+					params.TokenUsed, params.Quota = 25, 200
+					LogQuotaData(params)
+					params.UserID, params.Username = 2, "bob"
+					LogQuotaData(params)
+					params.CreatedAt = 7201
+					LogQuotaData(params)
+					SaveQuotaDataCache()
+					rows, err := GetSourceQuotaData(3600, 7199, "", 0, common.RoleAdminUser)
+					require.NoError(t, err)
+					assert.Equal(t, []SourceQuotaData{{"DeepSeek Harness", 3, 45, 300}, {"", 2, 50, 500}, {"OpenAI Python SDK", 2, 50, 400}}, rows)
+					selfRows, err := GetSourceQuotaData(3600, 7199, "bob", 1, common.RoleCommonUser)
+					require.NoError(t, err)
+					assert.Equal(t, []SourceQuotaData{{"DeepSeek Harness", 3, 45, 300}, {"", 2, 50, 500}, {"OpenAI Python SDK", 1, 25, 200}}, selfRows)
+					filtered, err := GetSourceQuotaData(3600, 7199, "bob", 0, common.RoleAdminUser)
+					require.NoError(t, err)
+					assert.Equal(t, []SourceQuotaData{{"OpenAI Python SDK", 1, 25, 200}}, filtered)
+					modelRows, err := GetAllQuotaDates(3600, 7199, "")
+					require.NoError(t, err)
+					require.Len(t, modelRows, 1)
+					assert.Equal(t, 7, modelRows[0].Count)
+					assert.Equal(t, 145, modelRows[0].TokenUsed)
+					assert.Equal(t, 1200, modelRows[0].Quota)
+					var total int64
+					require.NoError(t, db.Model(&QuotaData{}).Count(&total).Error)
+					assert.EqualValues(t, 5, total, "sources must remain separate across cache flushes")
+				})
+			}
+		})
+	}
+}
+
+func TestSourceQuotaLabelValidation(t *testing.T) {
+	var absent *LogOther
+	assert.Empty(t, absent.ClientTool())
+	for _, test := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"known", "DeepSeek Harness", "DeepSeek Harness"},
+		{"declared", "CI-regression", "CI-regression"},
+		{"boundary", strings.Repeat("a", 64), strings.Repeat("a", 64)},
+		{"oversized", strings.Repeat("a", 65), ""},
+		{"blank", " ", ""},
+		{"wrong type", 42, ""},
+		{"nul", "client\x00private", ""},
+		{"invalid utf8", string([]byte{0xff}), ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			other := NewLogOther()
+			other.SetPublic("client_tool", test.value)
+			assert.Equal(t, test.want, other.ClientTool())
+		})
+	}
+}
+
+func TestSourceQuotaRecordingExcludesProbesAndErrors(t *testing.T) {
+	truncateTables(t)
+	previousExport, previousConsume := common.DataExportEnabled, common.LogConsumeEnabled
+	common.DataExportEnabled, common.LogConsumeEnabled = true, true
+	t.Cleanup(func() { common.DataExportEnabled, common.LogConsumeEnabled = previousExport, previousConsume })
+	CacheQuotaDataLock.Lock()
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+	user := &User{Username: "source-owner", Group: "default", AffCode: "source"}
+	require.NoError(t, DB.Create(user).Error)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx.Set("username", user.Username)
+	other := NewLogOther()
+	other.SetPublic("client_tool", "curl")
+	other.SetAdmin("secret", "never-in-source-response")
+	params := RecordConsumeLogParams{ModelName: "model", Quota: 20, PromptTokens: 7, CompletionTokens: 3, Other: other}
+	RecordConsumeLog(ctx, user.Id, params)
+	params.IsChannelTest = true
+	RecordConsumeLog(ctx, user.Id, params)
+	RecordErrorLog(ctx, user.Id, 0, "model", "", "failed", 0, 0, false, "default", other)
+	RecordTaskBillingLog(RecordTaskBillingLogParams{UserId: user.Id, ModelName: "task", Quota: 30, LogType: LogTypeConsume, Other: other})
+	RecordTaskBillingLog(RecordTaskBillingLogParams{UserId: user.Id, ModelName: "task", Quota: 30, LogType: LogTypeRefund, Other: other})
+	params.IsChannelTest, params.Other = false, nil
+	RecordConsumeLog(ctx, user.Id, params)
+	SaveQuotaDataCache()
+	rows, err := GetSourceQuotaData(1, time.Now().Unix(), "", user.Id, common.RoleCommonUser)
+	require.NoError(t, err)
+	assert.Equal(t, []SourceQuotaData{{"curl", 2, 10, 50}, {"", 1, 10, 20}}, rows)
+	payload, err := common.Marshal(rows)
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), "never-in-source-response")
 }

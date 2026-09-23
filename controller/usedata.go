@@ -129,3 +129,33 @@ func GetUserFlowQuotaDates(c *gin.Context) {
 	})
 	return
 }
+
+func GetAllSourceQuotaDates(c *gin.Context) {
+	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	if !ok {
+		return
+	}
+	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, c.Query("username"), c.GetInt("id"), c.GetInt("role"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, rows)
+}
+
+func GetUserSourceQuotaDates(c *gin.Context) {
+	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	if !ok {
+		return
+	}
+	if endTimestamp-startTimestamp > 2592000 {
+		common.ApiErrorMsg(c, "时间跨度不能超过 1 个月")
+		return
+	}
+	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, "", c.GetInt("id"), common.RoleCommonUser)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, rows)
+}

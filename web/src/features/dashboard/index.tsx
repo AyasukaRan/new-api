@@ -95,6 +95,12 @@ const LazyConsumptionDistributionChart = lazy(() =>
   }))
 )
 
+const LazyCallSources = lazy(() =>
+  import('./components/models/call-sources').then((m) => ({
+    default: m.CallSources,
+  }))
+)
+
 const LazyPerformanceOverview = lazy(() =>
   import('./components/models/performance-overview').then((m) => ({
     default: m.PerformanceOverview,
@@ -363,6 +369,11 @@ export function Dashboard() {
                   </Suspense>
                 </FadeIn>
               )}
+              <FadeIn delay={0.1}>
+                <Suspense fallback={<ModelChartsFallback />}>
+                  <LazyCallSources filters={modelFilters} />
+                </Suspense>
+              </FadeIn>
               <FadeIn delay={0.1}>
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyConsumptionDistributionChart

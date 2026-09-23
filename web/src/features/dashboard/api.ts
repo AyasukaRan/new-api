@@ -21,6 +21,7 @@ import { api } from '@/lib/api'
 import type {
   FlowQuotaDataItem,
   QuotaDataItem,
+  SourceQuotaDataItem,
   UptimeGroupResult,
 } from './types'
 
@@ -81,6 +82,29 @@ export async function getFlowQuotaDates(
     data?: FlowQuotaDataItem[]
     message?: string
   }>(endpoint, { params })
+  return res.data
+}
+
+export async function getSourceQuotaData(
+  params: {
+    start_timestamp: number
+    end_timestamp: number
+    username?: string
+  },
+  isAdmin = false
+) {
+  const endpoint = isAdmin ? '/api/data/sources' : '/api/data/sources/self'
+  const res = await api.get<{
+    success: boolean
+    data?: SourceQuotaDataItem[]
+    message?: string
+  }>(endpoint, {
+    params: {
+      start_timestamp: params.start_timestamp,
+      end_timestamp: params.end_timestamp,
+      ...(isAdmin && params.username ? { username: params.username } : {}),
+    },
+  })
   return res.data
 }
 

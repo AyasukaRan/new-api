@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,4 +133,43 @@ func TestGetUserFlowQuotaDatesRejectsInvalidTimeRange(t *testing.T) {
 	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 	require.False(t, payload.Success)
 	require.Equal(t, "invalid start_timestamp", payload.Message)
+}
+
+func TestSourceQuotaEndpointsScopeAndTimeRange(t *testing.T) {
+	setupFlowControllerTestDB(t)
+	require.NoError(t, model.DB.Model(&model.QuotaData{}).Where("user_id = ?", 1).Update("client_tool", "curl").Error)
+	for _, test := range []struct {
+		name    string
+		handler gin.HandlerFunc
+		query   string
+		want    []model.SourceQuotaData
+		message string
+	}{
+		{name: "admin all", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100}, {ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70}}},
+		{name: "admin username", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob", want: []model.SourceQuotaData{{ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70}}},
+		{name: "self ignores another user and test selector", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob&user_id=2&source=test", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100}}},
+		{name: "empty range is array", handler: GetUserSourceQuotaDates, query: "start_timestamp=2001&end_timestamp=2002", want: []model.SourceQuotaData{}},
+		{name: "invalid start", handler: GetAllSourceQuotaDates, query: "start_timestamp=bad&end_timestamp=2000", message: "invalid start_timestamp"},
+		{name: "invalid end", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=0", message: "invalid end_timestamp"},
+		{name: "reversed range", handler: GetAllSourceQuotaDates, query: "start_timestamp=2000&end_timestamp=1000", message: "invalid time range"},
+		{name: "self range limit", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2593001", message: "时间跨度不能超过 1 个月"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Set("id", 1)
+			ctx.Set("role", common.RoleAdminUser)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/sources?"+test.query, nil)
+			test.handler(ctx)
+			var response struct {
+				Success bool                    `json:"success"`
+				Message string                  `json:"message"`
+				Data    []model.SourceQuotaData `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.Equal(t, test.message == "", response.Success)
+			assert.Equal(t, test.message, response.Message)
+			assert.Equal(t, test.want, response.Data)
+		})
+	}
 }

@@ -42,7 +42,7 @@ function Fixture() {
         <QuotaSettingsSection
           defaultValues={{
             QuotaForNewUser: 0,
-          DefaultSubscriptionPlanId: 0,
+            DefaultSubscriptionPlanId: 0,
             QuotaForInviter: 0,
             QuotaForInvitee: 0,
             TopUpLink: '',

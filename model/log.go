@@ -467,16 +467,17 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	}
 	if common.DataExportEnabled && !params.IsChannelTest {
 		LogQuotaData(QuotaDataLogParams{
-			UserID:    userId,
-			Username:  username,
-			ModelName: params.ModelName,
-			Quota:     params.Quota,
-			CreatedAt: createdAt,
-			TokenUsed: params.PromptTokens + params.CompletionTokens,
-			UseGroup:  params.Group,
-			TokenID:   params.TokenId,
-			ChannelID: params.ChannelId,
-			NodeName:  common.NodeName,
+			UserID:     userId,
+			Username:   username,
+			ModelName:  params.ModelName,
+			Quota:      params.Quota,
+			CreatedAt:  createdAt,
+			TokenUsed:  params.PromptTokens + params.CompletionTokens,
+			UseGroup:   params.Group,
+			TokenID:    params.TokenId,
+			ChannelID:  params.ChannelId,
+			NodeName:   common.NodeName,
+			ClientTool: params.Other.ClientTool(),
 		})
 	}
 }
@@ -530,15 +531,16 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 			nodeName = common.NodeName
 		}
 		LogQuotaData(QuotaDataLogParams{
-			UserID:    params.UserId,
-			Username:  username,
-			ModelName: params.ModelName,
-			Quota:     params.Quota,
-			CreatedAt: createdAt,
-			UseGroup:  params.Group,
-			TokenID:   params.TokenId,
-			ChannelID: params.ChannelId,
-			NodeName:  nodeName,
+			UserID:     params.UserId,
+			Username:   username,
+			ModelName:  params.ModelName,
+			Quota:      params.Quota,
+			CreatedAt:  createdAt,
+			UseGroup:   params.Group,
+			TokenID:    params.TokenId,
+			ChannelID:  params.ChannelId,
+			NodeName:   nodeName,
+			ClientTool: params.Other.ClientTool(),
 		})
 	}
 }

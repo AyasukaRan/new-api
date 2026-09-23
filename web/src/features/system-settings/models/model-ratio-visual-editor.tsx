@@ -164,13 +164,26 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const [pendingEditorAction, setPendingEditorAction] = useState<
     (() => void) | null
   >(null)
-  const requestEditorChange = useCallback(
-    (action: () => void) => {
-      if (editorDirty) setPendingEditorAction(() => action)
-      else action()
-    },
-    [editorDirty]
-  )
+  // Keep table callbacks stable while reading the latest editor state.
+  // Rebuilding the columns remounts cells and loses selected text.
+  const editorStateRef = useRef({
+    name: editData?.name,
+    open: editorOpen,
+    inSheet: editorInSheet,
+    dirty: editorDirty,
+  })
+  useEffect(() => {
+    editorStateRef.current = {
+      name: editData?.name,
+      open: editorOpen,
+      inSheet: editorInSheet,
+      dirty: editorDirty,
+    }
+  }, [editData?.name, editorOpen, editorInSheet, editorDirty])
+  const requestEditorChange = useCallback((action: () => void) => {
+    if (editorStateRef.current.dirty) setPendingEditorAction(() => action)
+    else action()
+  }, [])
   const pricingConfig = useModelPricing(
     editData?.name ? [editData.name] : [],
     Boolean(editData?.name)
@@ -190,13 +203,6 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const [globalFilter, setGlobalFilter] = useState('')
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const editorPanelRef = useRef<ModelPricingEditorPanelHandle>(null)
-  // Read through a ref so the table column definitions (and therefore every
-  // rendered cell) do not need to be rebuilt each time a row is opened for
-  // editing; rebuilding them remounts cells and drops the user's text selection.
-  const editingModelNameRef = useRef<string | null>(null)
-  useEffect(() => {
-    editingModelNameRef.current = editData?.name ?? null
-  }, [editData])
   const [pagination, setPagination] = useState<PaginationState>({
     pageIndex: 0,
     pageSize: 20,
@@ -364,8 +370,11 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
   const handleEdit = useCallback(
     (model: ModelRow) => {
-      if (editorOpen && editData?.name === model.name) {
-        if (editorInSheet) setSheetOpen(true)
+      if (
+        editorStateRef.current.open &&
+        editorStateRef.current.name === model.name
+      ) {
+        if (editorStateRef.current.inSheet) setSheetOpen(true)
         return
       }
       requestEditorChange(() => {
@@ -396,7 +405,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         setSheetOpen(isMobile)
       })
     },
-    [editData?.name, editorOpen, editorInSheet, isMobile, requestEditorChange]
+    [isMobile, requestEditorChange]
   )
 
   const handleAdd = useCallback(() => {
@@ -511,15 +520,17 @@ const ModelRatioVisualEditorComponent = forwardRef<
           JSON.stringify(billingExprMap, null, 2)
         )
 
-        if (editingModelNameRef.current === name) {
+        if (editorStateRef.current.name === name) {
           setEditData(null)
           setEditorOpen(false)
           setSheetOpen(false)
         }
       }
-      if (editingModelNameRef.current === name)
+      if (editorStateRef.current.name === name) {
         requestEditorChange(deletePricing)
-      else deletePricing()
+      } else {
+        deletePricing()
+      }
     },
     [
       requestEditorChange,

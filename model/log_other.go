@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -169,6 +172,23 @@ func (o *LogOther) jsonString() string {
 // privileged scopes. API projections must use the role-specific formatter.
 func (o *LogOther) JSONString() string {
 	return o.jsonString()
+}
+
+// ClientTool returns the public request-source label recorded for this call.
+func (o *LogOther) ClientTool() string {
+	if o == nil {
+		return ""
+	}
+	clientTool, _ := o.public["client_tool"].(string)
+	if len(clientTool) > 64 || strings.TrimSpace(clientTool) == "" || !utf8.ValidString(clientTool) {
+		return ""
+	}
+	for _, char := range clientTool {
+		if unicode.IsControl(char) {
+			return ""
+		}
+	}
+	return clientTool
 }
 
 // Snapshot returns a detached top-level view for tests and read-only
