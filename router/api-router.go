@@ -244,6 +244,11 @@ func SetApiRouter(router *gin.Engine) {
 			performanceRoute.POST("/gc", controller.ForceGC)
 			performanceRoute.GET("/logs", controller.GetLogFiles)
 			performanceRoute.DELETE("/logs", controller.CleanupLogFiles)
+			profilingRoute := performanceRoute.Group("/profiling", middleware.DisableCache())
+			profilingRoute.GET("/status", controller.GetProfilingStatus)
+			profilingRoute.POST("/query", controller.QueryProfiling)
+			profilingRoute.POST("/capture", controller.CaptureProfiling)
+			profilingRoute.GET("/profiles/:id", controller.DownloadProfiling)
 		}
 		ratioSyncRoute := apiRouter.Group("/ratio_sync")
 		ratioSyncRoute.Use(middleware.RootAuth())

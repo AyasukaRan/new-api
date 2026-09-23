@@ -1,0 +1,49 @@
+# Merge after the main compose file to enable the platform's authenticated
+# profiling page: docker compose -f docker-compose.yml -f deploy/profiling/docker-compose.yml up -d
+services:
+  new-api:
+    # Allow the gateway to finish requests and persist buffered monitoring data.
+    stop_grace_period: 130s
+    environment:
+      - PYROSCOPE_URL=http://pyroscope:4040
+      - PYROSCOPE_APP_NAME=new-api
+      - PYROSCOPE_MUTEX_RATE=100
+      # Average one blocking sample per millisecond spent blocked.
+      - PYROSCOPE_BLOCK_RATE=1000000
+      # Enables authenticated platform capture, not a separate public debug port.
+      - ENABLE_PPROF=true
+
+  pyroscope:
+    image: grafana/pyroscope:2.3.1@sha256:86a9ee7448487409ead8ada78789de7b78b739711b92b5d7224a1a54abf3eeb2
+    restart: unless-stopped
+    command:
+      - -target=all
+      - -architecture.storage=v2
+      - -storage.backend=filesystem
+      - -storage.filesystem.dir=/data/shared
+      - -metastore.data-dir=/data/metastore/data
+      - -metastore.raft.dir=/data/metastore/raft
+      - -metastore.raft.snapshots-dir=/data/metastore/raft
+      - -retention-period=168h
+      - -compaction-worker.job-concurrency=1
+      - -querier.max-query-parallelism=2
+      - -self-profiling.disable-push=true
+      - -usage-stats.enabled=false
+    environment:
+      - GOMAXPROCS=1
+      - GOMEMLIMIT=768MiB
+    cpus: '1.0'
+    mem_limit: 1g
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - pyroscope_data:/data
+      - pyroscope_compactor:/data-compactor
+      - pyroscope_metastore:/data-metastore
+    networks:
+      - new-api-network
+
+volumes:
+  pyroscope_data:
+  pyroscope_compactor:
+  pyroscope_metastore:

@@ -158,8 +158,9 @@ export function GuideNavigation(props: GuideNavigationProps) {
                                 : undefined
                             }
                             onClick={() => {
-                              if (props.articleId !== article.id)
+                              if (props.articleId !== article.id) {
                                 setMobileOpen(false)
+                              }
                             }}
                             className={cn(
                               'focus-visible:ring-ring block rounded-lg px-3 py-2 text-sm leading-relaxed outline-none focus-visible:ring-2',

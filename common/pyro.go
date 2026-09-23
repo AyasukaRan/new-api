@@ -1,14 +1,32 @@
 package common
 
 import (
+	"os"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/grafana/pyroscope-go"
 )
 
+var pyroscopeRunning atomic.Bool
+
+func PyroscopeRunning() bool {
+	return pyroscopeRunning.Load()
+}
+
 func StartPyroScope() error {
 
 	pyroscopeUrl := GetEnvOrDefaultString("PYROSCOPE_URL", "")
+	if pyroscopeUrl == "" && os.Getenv("ENABLE_PPROF") != "true" {
+		return nil
+	}
+
+	// Keep lock/block sampling useful for both the continuous collector and
+	// authenticated snapshots without sampling nearly every blocking event.
+	mutexRate := max(0, GetEnvOrDefault("PYROSCOPE_MUTEX_RATE", 100))
+	blockRate := max(0, GetEnvOrDefault("PYROSCOPE_BLOCK_RATE", 1_000_000))
+	runtime.SetMutexProfileFraction(mutexRate)
+	runtime.SetBlockProfileRate(blockRate)
 	if pyroscopeUrl == "" {
 		return nil
 	}
@@ -18,12 +36,6 @@ func StartPyroScope() error {
 	pyroscopeBasicAuthPassword := GetEnvOrDefaultString("PYROSCOPE_BASIC_AUTH_PASSWORD", "")
 	pyroscopeHostname := GetEnvOrDefaultString("HOSTNAME", "new-api")
 
-	mutexRate := GetEnvOrDefault("PYROSCOPE_MUTEX_RATE", 5)
-	blockRate := GetEnvOrDefault("PYROSCOPE_BLOCK_RATE", 5)
-
-	runtime.SetMutexProfileFraction(mutexRate)
-	runtime.SetBlockProfileRate(blockRate)
-
 	_, err := pyroscope.Start(pyroscope.Config{
 		ApplicationName: pyroscopeAppName,
 
@@ -32,6 +44,8 @@ func StartPyroScope() error {
 		BasicAuthPassword: pyroscopeBasicAuthPassword,
 
 		Logger: nil,
+		// Observe natural collections instead of forcing a full GC every upload.
+		DisableGCRuns: true,
 
 		Tags: map[string]string{"hostname": pyroscopeHostname},
 
@@ -52,5 +66,6 @@ func StartPyroScope() error {
 	if err != nil {
 		return err
 	}
+	pyroscopeRunning.Store(true)
 	return nil
 }

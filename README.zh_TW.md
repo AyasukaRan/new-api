@@ -334,8 +334,8 @@ docker run --name new-api -d --restart always \
 | `PYROSCOPE_APP_NAME` | Pyroscope 應用名                                        | `new-api` |
 | `PYROSCOPE_BASIC_AUTH_USER` | Pyroscope Basic Auth 用戶名                        | - |
 | `PYROSCOPE_BASIC_AUTH_PASSWORD` | Pyroscope Basic Auth 密碼                  | - |
-| `PYROSCOPE_MUTEX_RATE` | Pyroscope mutex 採樣率                               | `5` |
-| `PYROSCOPE_BLOCK_RATE` | Pyroscope block 採樣率                               | `5` |
+| `PYROSCOPE_MUTEX_RATE` | Pyroscope mutex 採樣率                               | `100` |
+| `PYROSCOPE_BLOCK_RATE` | Pyroscope block 採樣率                               | `1000000` |
 | `HOSTNAME` | Pyroscope 標籤裡的主機名                                          | `new-api` |
 
 📖 **完整配置：** [環境變數文件](https://docs.newapi.pro/zh/docs/installation/config-maintenance/environment-variables)

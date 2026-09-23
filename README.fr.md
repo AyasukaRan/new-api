@@ -335,8 +335,8 @@ docker run --name new-api -d --restart always \
 | `PYROSCOPE_APP_NAME` | Nom de l'application Pyroscope | `new-api` |
 | `PYROSCOPE_BASIC_AUTH_USER` | Utilisateur Basic Auth Pyroscope | - |
 | `PYROSCOPE_BASIC_AUTH_PASSWORD` | Mot de passe Basic Auth Pyroscope | - |
-| `PYROSCOPE_MUTEX_RATE` | Taux d'échantillonnage mutex Pyroscope | `5` |
-| `PYROSCOPE_BLOCK_RATE` | Taux d'échantillonnage block Pyroscope | `5` |
+| `PYROSCOPE_MUTEX_RATE` | Taux d'échantillonnage mutex Pyroscope | `100` |
+| `PYROSCOPE_BLOCK_RATE` | Taux d'échantillonnage block Pyroscope | `1000000` |
 | `HOSTNAME` | Nom d'hôte tagué pour Pyroscope | `new-api` |
 
 📖 **Configuration complète:** [Documentation des variables d'environnement](https://docs.newapi.pro/en/docs/installation/config-maintenance/environment-variables)

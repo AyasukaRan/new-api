@@ -6,7 +6,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,11 +33,8 @@ import (
 	_ "github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
-	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-
-	_ "net/http/pprof"
 )
 
 //go:embed web/dist
@@ -157,11 +153,7 @@ func main() {
 	}
 
 	if os.Getenv("ENABLE_PPROF") == "true" {
-		gopool.Go(func() {
-			log.Println(http.ListenAndServe("0.0.0.0:8005", nil))
-		})
-		go common.Monitor()
-		common.SysLog("pprof enabled")
+		common.SysLog("authenticated pprof diagnostics enabled")
 	}
 
 	err = common.StartPyroScope()
