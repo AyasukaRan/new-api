@@ -189,7 +189,6 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 		return nil, err
 	}
 	names := []string{name}
-	aliPromptExtend, otherImageRoute := false, false
 	for _, channel := range channels {
 		if !slices.Contains(channel.GetModels(), name) {
 			continue
@@ -229,13 +228,6 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 			}
 			if upstream != name {
 				names = append(names, upstream)
-			}
-		}
-		if channel.Status == common.ChannelStatusEnabled {
-			if channel.Type == constant.ChannelTypeAli && strings.Contains(upstream, "z-image") {
-				aliPromptExtend = true
-			} else {
-				otherImageRoute = true
 			}
 		}
 	}
@@ -280,13 +272,7 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 		price := effective["ModelPrice"].(float64)
 		expression = `tier("request", fixed(` + decimal.NewFromFloat(price).String() + `))`
 		if preview.BillingDetails.ImageCount {
-			if aliPromptExtend && otherImageRoute {
-				return &ModelPricingConversion{UnsupportedReason: "This model has different image request multipliers across channels. Use separate billing model names to convert them."}, nil
-			}
 			expression = `tier("image", fixed(` + decimal.NewFromFloat(price).String() + `)) * image_count`
-			if aliPromptExtend {
-				preview.BillingDetails.RequestRules = append(preview.BillingDetails.RequestRules, LegacyPricingRule{`param("parameters.prompt_extend") == true`, common.ZImagePromptExtendMultiplier})
-			}
 			for _, rule := range preview.BillingDetails.RequestRules {
 				expression += ` * (` + rule.Condition + ` ? ` + decimal.NewFromFloat(rule.Multiplier).String() + ` : 1)`
 			}

@@ -2,6 +2,7 @@ package helper
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -115,7 +116,7 @@ func TestFixedPricePreConsumeAndRealtimeRejection(t *testing.T) {
 	}
 }
 
-func TestModelPriceHelperTieredPreConsumeMaxTokensFallback(t *testing.T) {
+func TestModelPriceHelperTieredInputPreConsumeMultiplier(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	saved := map[string]string{}
@@ -129,41 +130,25 @@ func TestModelPriceHelperTieredPreConsumeMaxTokensFallback(t *testing.T) {
 
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 		"billing_setting.billing_mode":    `{"tiered-fallback-model":"tiered_expr"}`,
-		"billing_setting.billing_expr":    `{"tiered-fallback-model":"tier(\"base\", p * 3 + c * 15)"}`,
+		"billing_setting.billing_expr":    `{"tiered-fallback-model":"len <= 1200 ? tier(\"base\", p * 3 + c * 15) : tier(\"long\", p * 30 + c * 150)"}`,
 		"group_ratio_setting.group_ratio": `{"default":1,"free":0}`,
 	}))
 
-	const promptTokens = 1000
-
 	cases := []struct {
-		name      string
-		group     string
-		maxTokens int
-		expected  int
+		name       string
+		group      string
+		prompt     int
+		maxTokens  int
+		multiplier float64
+		expected   int
 	}{
-		{
-			// max_tokens omitted in a paid group -> fall back to 8192 completion tokens.
-			// p*3 + c*15 = 1000*3 + 8192*15 = 125880 -> /1e6 * 500000 = 62940
-			name:      "non-free group falls back to 8192 completion tokens",
-			group:     "default",
-			maxTokens: 0,
-			expected:  62940,
-		},
-		{
-			// explicit max_tokens is used verbatim, no fallback.
-			// 1000*3 + 100*15 = 4500 -> /1e6 * 500000 = 2250
-			name:      "explicit max_tokens is used verbatim",
-			group:     "default",
-			maxTokens: 100,
-			expected:  2250,
-		},
-		{
-			// free group (ratio 0) stays zero; fallback is gated on non-zero group ratio.
-			name:      "free group stays zero without fallback",
-			group:     "free",
-			maxTokens: 0,
-			expected:  0,
-		},
+		{"default uses only input", "default", 1000, 0, 1, 1500},
+		{"explicit output limit does not increase reservation", "default", 1000, 100, 1, 1500},
+		{"fraction below one", "default", 1000, 0, 0.5, 750},
+		{"fraction above one preserves context tier", "default", 1000, 0, 2.5, 3750},
+		{"small input has no token floor", "default", 100, 0, 1, 150},
+		{"zero input", "default", 0, 100, 1, 0},
+		{"free group", "free", 1000, 0, 2.5, 0},
 	}
 
 	for _, tc := range cases {
@@ -186,9 +171,18 @@ func TestModelPriceHelperTieredPreConsumeMaxTokensFallback(t *testing.T) {
 				},
 			}
 
-			priceData, err := ModelPriceHelper(ctx, info, promptTokens, &types.TokenCountMeta{MaxTokens: tc.maxTokens})
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = tc.multiplier
+			priceData, err := ModelPriceHelper(ctx, info, tc.prompt, &types.TokenCountMeta{MaxTokens: tc.maxTokens})
 			require.NoError(t, err)
-			require.Equal(t, tc.expected, priceData.QuotaToPreConsume)
+			assert.Equal(t, tc.expected, priceData.QuotaToPreConsume)
+			require.NotNil(t, info.TieredBillingSnapshot)
+			actual, err := billingexpr.ComputeTieredQuotaWithRequest(info.TieredBillingSnapshot, billingexpr.TokenParams{P: 1000, C: 100, Len: 1000}, *info.BillingRequestInput)
+			require.NoError(t, err)
+			wantActual := 2250
+			if tc.group == "free" {
+				wantActual = 0
+			}
+			assert.Equal(t, wantActual, actual.ActualQuotaAfterGroup, "reservation multiplier must not change settlement")
 		})
 	}
 }
@@ -831,7 +825,7 @@ func TestChannelReservationIgnoresOtherChannelsInactivePrices(t *testing.T) {
 	info := &relaycommon.RelayInfo{OriginModelName: "current-channel-estimate", UserGroup: "default", UsingGroup: "default"}
 	price, err := ModelPriceHelper(channelPricingContext(t, 9), info, 1000, &types.TokenCountMeta{MaxTokens: 100})
 	require.NoError(t, err)
-	assert.Equal(t, 1100, price.QuotaToPreConsume)
+	assert.Equal(t, 1000, price.QuotaToPreConsume)
 	assert.Equal(t, 1.0, price.ModelRatio)
 }
 
@@ -891,7 +885,7 @@ func TestRefreshPricingFollowsTheChannelAcrossBillingModes(t *testing.T) {
 			ExprString:                expr,
 			GroupRatio:                1,
 			EstimatedPromptTokens:     100,
-			EstimatedCompletionTokens: 50,
+			EstimatedCompletionTokens: 0,
 			QuotaPerUnit:              common.QuotaPerUnit,
 		}
 	}
@@ -980,9 +974,9 @@ func TestChannelPricingExplicitShapesAndAllLanes(t *testing.T) {
 				assert.Equal(t, 6.0, price.AudioRatio)
 				assert.Equal(t, 7.0, price.AudioCompletionRatio)
 				assert.True(t, price.AudioPricingEnabled)
-				// 1,000 input at the worst input lane (6.4) + 100
-				// output audio at 6*7, all scaled by model ratio 2.
-				assert.GreaterOrEqual(t, price.QuotaToPreConsume, 21200)
+				// Reserve the selected channel's input cost only; output and
+				// measured subcategories retain their settlement prices.
+				assert.Equal(t, 2000, price.QuotaToPreConsume)
 			}
 		})
 	}
@@ -1039,7 +1033,7 @@ func TestChannelPricingRetryRebuildsModesAndReservesBeforeSending(t *testing.T) 
 		case 3:
 			require.NotNil(t, info.TieredBillingSnapshot)
 			assert.Equal(t, "fast", info.TieredBillingSnapshot.EstimatedTier)
-			assert.Equal(t, 50, info.TieredBillingSnapshot.EstimatedCompletionTokens)
+			assert.Zero(t, info.TieredBillingSnapshot.EstimatedCompletionTokens)
 			ok, quota, _ := service.TryTieredSettle(info, billingexpr.TokenParams{P: 100, C: 50, Len: 100})
 			assert.True(t, ok)
 			assert.Equal(t, 950, quota)
@@ -1067,7 +1061,7 @@ func TestChannelPricingMissingFixedPriceAndBadRuntimeExpressionFail(t *testing.T
 	}}`)
 	for _, channel := range []int{1, 2, 3} {
 		info := &relaycommon.RelayInfo{OriginModelName: "unpriced-channel-model", UserGroup: "default", UsingGroup: "default", BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"bad":true}`)}}
-		_, err := ModelPriceHelper(channelPricingContext(t, channel), info, 1000, &types.TokenCountMeta{MaxTokens: 1000})
+		_, err := ModelPriceHelper(channelPricingContext(t, channel), info, 1000000, &types.TokenCountMeta{MaxTokens: 1000})
 		require.Error(t, err, "missing, negative or overflowing channel charges cannot be forwarded")
 	}
 }
@@ -1089,3 +1083,68 @@ func TestTaskChannelPricingFixedAndTokenChoices(t *testing.T) {
 		}
 	}
 }
+
+func TestInputPreConsumeMultiplierLegacyAndRequestPrices(t *testing.T) {
+	previous := config.GlobalConfig.ExportAllConfigs()
+	previousRatios, previousPrices := ratio_setting.ModelRatio2JSONString(), ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(previous))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousRatios))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+	})
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"legacy-input-policy":1.5}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"request-input-policy":0.01}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode":    `{"fixed-input-policy":"tiered_expr","image-input-policy":"tiered_expr"}`,
+		"billing_setting.billing_expr":    `{"fixed-input-policy":"tier(\"request\", fixed(0.01))","image-input-policy":"tier(\"image\", p * 3) * image_count"}`,
+		"group_ratio_setting.group_ratio": `{"default":1}`,
+	}))
+	withChannelModelPricing(t, `{"legacy-input-policy":{
+		"9901":{"billing_mode":"per_token","model_ratio":2,"completion_ratio":99},
+		"9902":{"billing_mode":"per_request","model_price":0.02},
+		"9903":{"billing_mode":"tiered_expr","billing_expr":"tier(\"channel\", p * 3 + c * 99)"}
+	}}`)
+	for _, tc := range []struct {
+		model        string
+		multiplier   float64
+		prompt, want int
+		channel int
+	}{
+		{"legacy-input-policy", 0.5, 100, 75, 0},
+		{"legacy-input-policy", 2.5, 100, 375, 0},
+		{"legacy-input-policy", 1, 0, 0, 0},
+		{"request-input-policy", 2.5, 100, 5000, 0},
+		{"fixed-input-policy", 2.5, 100, 5000, 0},
+		{"image-input-policy", 2.5, 100, 375, 0},
+		{"legacy-input-policy", 0.5, 100, 100, 9901},
+		{"legacy-input-policy", 2.5, 100, 10000, 9902},
+		{"legacy-input-policy", 2.5, 100, 375, 9903},
+	} {
+		t.Run(tc.model+"/"+fmt.Sprint(tc.multiplier, "/", tc.prompt, "/channel=", tc.channel), func(t *testing.T) {
+			operation_setting.GetQuotaSetting().PreConsumeMultiplier = tc.multiplier
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			common.SetContextKey(ctx, constant.ContextKeyChannelId, tc.channel)
+			info := &relaycommon.RelayInfo{OriginModelName: tc.model, UserGroup: "default", UsingGroup: "default", BillingRequestInput: &billingexpr.RequestInput{}}
+			price, err := ModelPriceHelper(ctx, info, tc.prompt, &types.TokenCountMeta{MaxTokens: 10000})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, price.QuotaToPreConsume)
+			if tc.model == "image-input-policy" {
+				reservation := &priceTestReservation{held: price.QuotaToPreConsume}
+				info.Billing = reservation
+				operation_setting.GetQuotaSetting().PreConsumeMultiplier = 10
+				require.Nil(t, service.PrepareImageBillingForRequest(ctx, info, 2))
+				assert.Equal(t, 750, reservation.held, "retry must reuse the original fractional multiplier")
+			}
+		})
+	}
+}
+
+// priceTestReservation observes the reservation requested before image submission.
+type priceTestReservation struct{ held int }
+
+func (s *priceTestReservation) Settle(int) error         { return nil }
+func (s *priceTestReservation) Refund(*gin.Context)      {}
+func (s *priceTestReservation) NeedsRefund() bool        { return false }
+func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
+func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }

@@ -814,31 +814,46 @@ func TestResponsesWebSocketCancelErrorDoesNotFinishActiveRequest(t *testing.T) {
 }
 
 func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing.T) {
-	preConsumed := make(chan int, 1)
-	tokenID := make(chan int, 1)
-	fixture := newResponsesWSBillingTest(t, `tier("output", c * 2)`, func(ws *websocket.Conn, _ *http.Request) {
-		if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
-			return
-		}
-		var token model.Token
-		if !assert.NoError(t, model.DB.First(&token, <-tokenID).Error) {
-			return
-		}
-		preConsumed <- token.RemainQuota
-		if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`))) {
-			return
-		}
-		_, _, _ = ws.ReadMessage()
-	})
-	tokenID <- fixture.token.Id
-	require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hi","max_output_tokens":10}`)))
-	rejection := readResponsesWSTestEvent(t, fixture.client)
-	assert.Equal(t, "error", rejection["type"])
-	assert.Equal(t, float64(http.StatusBadRequest), rejection["status"])
-	assert.Equal(t, 2990, <-preConsumed, "the rejected request reserved quota before contacting upstream")
-	fixture.waitForTokenQuota(t, 3000)
-	fixture.closeAndWait(t)
-	assertResponsesWSAccounting(t, fixture, nil)
+	for _, tc := range []struct {
+		name, upstream, wantType, wantMessage string
+		status                                int
+	}{
+		{name: "structured error", upstream: `{"type":"error","response_id":"rejected","status":400,"error":{"type":"invalid_request_error","code":"invalid_input","message":"Invalid input"}}`, status: http.StatusBadRequest, wantType: "invalid_request_error", wantMessage: "Invalid input"},
+		// A frame without an error object is still reported as a request error.
+		{name: "bare error", upstream: `{"type":"error","status":500,"message":"upstream rejected"}`, status: http.StatusInternalServerError, wantType: "invalid_request_error", wantMessage: "upstream rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			preConsumed := make(chan int, 1)
+			tokenID := make(chan int, 1)
+			// Pre-consume no longer estimates completion tokens, so an output-priced expression reserves nothing to refund.
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.002))`, func(ws *websocket.Conn, _ *http.Request) {
+				if _, _, err := ws.ReadMessage(); !assert.NoError(t, err) {
+					return
+				}
+				var token model.Token
+				if !assert.NoError(t, model.DB.First(&token, <-tokenID).Error) {
+					return
+				}
+				preConsumed <- token.RemainQuota
+				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(tc.upstream))) {
+					return
+				}
+				_, _, _ = ws.ReadMessage()
+			})
+			tokenID <- fixture.token.Id
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hi","max_output_tokens":10}`)))
+			rejection := readResponsesWSTestEvent(t, fixture.client)
+			assert.Equal(t, "error", rejection["type"])
+			assert.Equal(t, float64(tc.status), rejection["status"])
+			rejectionError, _ := rejection["error"].(map[string]any)
+			assert.Equal(t, tc.wantType, rejectionError["type"])
+			assert.Equal(t, tc.wantMessage, rejectionError["message"])
+			assert.Equal(t, 2000, <-preConsumed, "the rejected request reserved quota before contacting upstream")
+			fixture.waitForTokenQuota(t, 3000)
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, nil)
+		})
+	}
 }
 
 func TestResponsesStreamOutcomesPreserveAccounting(t *testing.T) {

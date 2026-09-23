@@ -57,6 +57,21 @@ type migrationDecimalV3 struct {
 	Price float64 `gorm:"type:decimal(12,6);not null;default:1.25"`
 }
 
+// Matches the plugin payload columns shipped before the long-text migration.
+type taskPluginLegacyPayload struct {
+	Id         int64
+	Key        string `gorm:"size:128;not null;uniqueIndex:uk_task_plugin_key_version,priority:1"`
+	APIVersion int    `gorm:"not null"`
+	Version    string `gorm:"size:64;not null;uniqueIndex:uk_task_plugin_key_version,priority:2"`
+	Source     string `gorm:"type:text;not null"`
+	SourceHash string `gorm:"size:64;not null"`
+	Icon       string `gorm:"size:524288"`
+	Enabled    bool   `gorm:"not null"`
+	Active     bool   `gorm:"not null;index"`
+	CreatedAt  int64  `gorm:"not null"`
+	Remark     string `gorm:"type:text"`
+}
+
 func TestMigrationSchemaStability(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {
@@ -83,6 +98,41 @@ func TestMigrationSchemaStability(t *testing.T) {
 			t.Cleanup(func() { _ = sqlDB.Close() })
 			recorder := &migrationSQLRecorder{}
 			db = db.Session(&gorm.Session{Logger: recorder})
+
+			t.Run("plugin_payload_fresh_and_upgrade", func(t *testing.T) {
+				for _, upgrade := range []bool{false, true} {
+					const table = "migration_plugin_payloads"
+					tableDB := db.Table(table).Session(&gorm.Session{})
+					require.NoError(t, db.Migrator().DropTable(table))
+					t.Cleanup(func() { _ = db.Migrator().DropTable(table) })
+					if upgrade {
+						require.NoError(t, tableDB.AutoMigrate(&taskPluginLegacyPayload{}))
+						require.NoError(t, tableDB.Create(&taskPluginLegacyPayload{
+							Key: "preserved", APIVersion: 1, Version: "1.0.0",
+							Source: "original-source", SourceHash: "original-hash", Icon: "original-icon", Enabled: true, Active: true,
+						}).Error)
+					}
+					require.NoError(t, tableDB.AutoMigrate(&TaskPlugin{}))
+					recorder.reset()
+					require.NoError(t, tableDB.AutoMigrate(&TaskPlugin{}))
+					assert.Empty(t, recorder.schemaMutations())
+					if upgrade {
+						var saved TaskPlugin
+						require.NoError(t, tableDB.First(&saved, 1).Error)
+						assert.Equal(t, LongText("original-source"), saved.Source)
+						assert.Equal(t, LongText("original-icon"), saved.Icon)
+						assert.True(t, saved.Enabled)
+						assert.True(t, saved.Active)
+						require.Error(t, tableDB.Create(&TaskPlugin{Key: "preserved", Version: "1.0.0"}).Error)
+					}
+					payload := TaskPlugin{Key: "large", Version: "1.0.0", Source: LongText(strings.Repeat("s", 70*1024)), Icon: LongText(strings.Repeat("i", 512*1024))}
+					require.NoError(t, tableDB.Create(&payload).Error)
+					var saved TaskPlugin
+					require.NoError(t, tableDB.First(&saved, payload.Id).Error)
+					assert.Equal(t, payload.Source, saved.Source)
+					assert.Equal(t, payload.Icon, saved.Icon)
+				}
+			})
 
 			t.Run("identity_and_indexes", func(t *testing.T) {
 				const table = "migration_identity_test"
