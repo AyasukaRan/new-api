@@ -604,6 +604,47 @@ func TestResponsesWSPassthroughPreservesRawPricingParameters(t *testing.T) {
 	require.NoError(t, storage.Close())
 }
 
+func TestResponsesWSRequestMetadataIsPerCreateAndIncludesTerminalTools(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/1.0.0")
+	for _, test := range []struct {
+		input      string
+		events     []string
+		wantTools  []string
+		wantEffort string
+	}{
+		{
+			input:     `{"type":"response.create","model":"gpt-5.1","reasoning":{"effort":"high"},"input":"hello"}`,
+			events:    []string{`{"type":"response.output_item.added","item":{"id":"fc1","type":"function_call","name":"Read"}}`, `{"type":"response.done","response":{"id":"resp_1","status":"completed","output":[{"id":"fc1","type":"function_call","name":"Read"},{"type":"custom_tool_call","name":"Bash"}]}}`},
+			wantTools: []string{"Bash", "Read"}, wantEffort: "high",
+		},
+		{
+			input:     `{"type":"response.create","model":"gpt-5.1","reasoning":{"effort":"low"},"previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"fc1","output":"secret"}]}`,
+			events:    []string{`{"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Done"}]}]}}`},
+			wantTools: []string{}, wantEffort: "low",
+		},
+	} {
+		create, _, err := normalizeResponsesWSTestMessage([]byte(test.input))
+		require.NoError(t, err)
+		info := relaycommon.GenRelayInfoResponses(c, &create.Request)
+		info.ChannelMeta = &relaycommon.ChannelMeta{}
+		info.ClientWs = &websocket.Conn{}
+		info.IsStream = true
+		finish := service.BeginRequestMetadata(c, info)
+		for _, event := range test.events {
+			service.ObserveRequestMetadataEvent(c, []byte(event))
+		}
+		other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 0, 0, 1)
+		assert.Equal(t, "Codex CLI", other.Snapshot()["client_tool"])
+		assert.Equal(t, test.wantEffort, other.Snapshot()["reasoning_effort"])
+		assert.Equal(t, test.wantTools, other.Snapshot()["invoked_tools"])
+		assert.Equal(t, "complete", other.Snapshot()["tool_observation"])
+		assert.NotContains(t, other.JSONString(), "secret")
+		finish()
+	}
+}
+
 func TestResponsesWSStreamIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name, fields, want string

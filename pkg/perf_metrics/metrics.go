@@ -19,6 +19,10 @@ import (
 
 var hotBuckets sync.Map
 
+// Protects the SQL/memory handoff so a flush cannot hide or double-count a
+// bucket in queries, or discard a sample added while that bucket is removed.
+var metricsMu sync.RWMutex
+
 // seriesSchema is a stable client cache/schema marker. Do not change it when
 // hiding fields or making response-only privacy hardening changes.
 const seriesSchema = "dbcd0a3c01b55203"
@@ -27,16 +31,80 @@ func Init() {
 	go flushLoop()
 }
 
-// RecordRelayResult samples one finished relay exactly once, at the request
-// boundary, regardless of how many channel attempts it took.
+// RecordRelayResult samples one finished relay exactly once at the request
+// boundary and publishes the final availability result after all retries.
 func RecordRelayResult(ctx context.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) {
-	if info == nil {
-		return
-	}
 	outcome := ClassifyRelayOutcome(ctx, info, apiErr)
 	if outcome == OutcomeIgnored {
 		return
 	}
+	Record(RelaySample(info, outcome == OutcomeSuccess, info.PerformanceOutputTokens))
+	RecordChannelRelayResult(info, outcome == OutcomeSuccess)
+}
+
+func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
+	if info == nil {
+		return
+	}
+	Record(RelaySample(info, success, outputTokens))
+}
+
+// RelayObservation applies the same health classification to each upstream
+// attempt as the final request. A nil observation does not change availability.
+func RelayObservation(ctx context.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) *bool {
+	outcome := ClassifyRelayOutcome(ctx, info, apiErr)
+	if outcome == OutcomeIgnored {
+		return nil
+	}
+	return common.GetPointer(outcome == OutcomeSuccess)
+}
+
+// RecordChannelRelayResult records one final upstream outcome after retries. Billing
+// samples can be asynchronous or repeated during settlement, so callers must
+// record this at the relay boundary, never at a settlement call site.
+func RecordChannelRelayResult(info *relaycommon.RelayInfo, success bool) {
+	if info == nil || info.IsChannelTest {
+		return
+	}
+	RecordChannelSample(RelaySample(info, success, 0), SourceRelayResult)
+}
+
+// RecordChannelUsage observes settlement data without counting a new request.
+// It runs at the settlement call site, before a retry can change RelayInfo.
+func RecordChannelUsage(info *relaycommon.RelayInfo, inputTokens, outputTokens, usedQuota int64) {
+	if info == nil || info.IsChannelTest {
+		return
+	}
+	sample := ChannelAttemptSample(info, info.GetChannelID(), true, time.Now())
+	sample.InputTokens = inputTokens
+	sample.OutputTokens = outputTokens
+	sample.UsedQuota = usedQuota
+	RecordChannelSample(sample, SourceUsage)
+}
+
+func RecordChannelAttempt(info *relaycommon.RelayInfo, channelID int, success bool) {
+	if info == nil || info.IsChannelTest {
+		return
+	}
+	RecordChannelSample(ChannelAttemptSample(info, channelID, success, time.Now()), SourceRequest)
+}
+
+func ChannelAttemptSample(info *relaycommon.RelayInfo, channelID int, success bool, completedAt time.Time) Sample {
+	startedAt := info.ChannelAttemptStartTime
+	if startedAt.IsZero() {
+		startedAt = info.StartTime
+	}
+	latencyMs := max(int64(0), completedAt.Sub(startedAt).Milliseconds())
+	sample := Sample{Model: info.OriginModelName, Group: info.UsingGroup, ChannelID: channelID, Success: success, LatencyMs: latencyMs, GenerationMs: latencyMs}
+	if info.IsStream && info.HasSendResponse() && !info.FirstResponseTime.Before(startedAt) {
+		sample.HasTtft = true
+		sample.TtftMs = info.FirstResponseTime.Sub(startedAt).Milliseconds()
+		sample.GenerationMs = max(int64(0), completedAt.Sub(info.FirstResponseTime).Milliseconds())
+	}
+	return sample
+}
+
+func RelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) Sample {
 	now := time.Now()
 	hasTtft := info.IsStream && info.HasSendResponse()
 	ttftMs := int64(0)
@@ -51,16 +119,17 @@ func RecordRelayResult(ctx context.Context, info *relaycommon.RelayInfo, apiErr 
 	if generationMs <= 0 {
 		generationMs = latencyMs
 	}
-	Record(Sample{
+	return Sample{
 		Model:        info.OriginModelName,
 		Group:        info.UsingGroup,
+		ChannelID:    info.GetChannelID(),
 		LatencyMs:    latencyMs,
 		TtftMs:       ttftMs,
 		HasTtft:      hasTtft,
-		Success:      outcome == OutcomeSuccess,
-		OutputTokens: info.PerformanceOutputTokens,
+		Success:      success,
+		OutputTokens: outputTokens,
 		GenerationMs: generationMs,
-	})
+	}
 }
 
 func Record(sample Sample) {
@@ -80,8 +149,10 @@ func Record(sample Sample) {
 		group:    sample.Group,
 		bucketTs: bucketStart(time.Now().Unix()),
 	}
+	metricsMu.RLock()
 	actual, _ := hotBuckets.LoadOrStore(key, &atomicBucket{})
 	actual.(*atomicBucket).add(sample)
+	metricsMu.RUnlock()
 	gopool.Go(func() {
 		recordRedis(key, sample)
 	})
@@ -103,8 +174,10 @@ func Query(params QueryParams) (QueryResult, error) {
 	allowedGroups := allowedGroupSet(params.AllowedGroups)
 
 	merged := map[bucketKey]counters{}
+	metricsMu.RLock()
 	rows, err := model.GetPerfMetrics(params.Model, params.Group, startTs, endTs)
 	if err != nil {
+		metricsMu.RUnlock()
 		return QueryResult{}, err
 	}
 	for _, row := range rows {
@@ -144,8 +217,12 @@ func Query(params QueryParams) (QueryResult, error) {
 		mergeCounters(merged, k, value.(*atomicBucket).snapshot())
 		return true
 	})
+	metricsMu.RUnlock()
 
 	result := buildQueryResult(params.Model, merged)
+	if err := attachModelAvailability(&result, params, merged, startTs); err != nil {
+		return QueryResult{}, err
+	}
 	result.WindowStart, result.WindowEnd = startTs, endTs
 	return result, nil
 }
@@ -154,12 +231,13 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 	startTs, endTs := queryWindow(time.Now(), hours)
 	allowedGroups := allowedGroupSet(groups)
 
+	metricsMu.RLock()
 	rows, err := model.GetPerfMetricsSummaryBucketsAll(startTs, endTs, groups)
 	if err != nil {
+		metricsMu.RUnlock()
 		return SummaryAllResult{}, err
 	}
 
-	totals := map[string]counters{}
 	modelBuckets := map[string]map[int64]counters{}
 	for _, row := range rows {
 		value := counters{
@@ -169,7 +247,6 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 			outputTokens:   row.OutputTokens,
 			generationMs:   row.GenerationMs,
 		}
-		mergeModelTotals(totals, row.ModelName, value)
 		mergeModelBucket(modelBuckets, row.ModelName, row.BucketTs, value)
 	}
 
@@ -187,57 +264,46 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 		if snap.requestCount == 0 {
 			return true
 		}
-		mergeModelTotals(totals, k.model, snap)
 		mergeModelBucket(modelBuckets, k.model, k.bucketTs, snap)
 		return true
 	})
+	metricsMu.RUnlock()
 
 	all := counters{}
-	models := make([]ModelSummary, 0, len(totals))
-	for name, total := range totals {
-		if total.requestCount == 0 {
-			continue
+	models := make([]ModelSummary, 0, len(modelBuckets))
+	for name, buckets := range modelBuckets {
+		for _, value := range buckets {
+			all = addCounterValues(all, value)
 		}
-		all.requestCount += total.requestCount
-		all.successCount += total.successCount
-		all.totalLatencyMs += total.totalLatencyMs
-		all.outputTokens += total.outputTokens
-		all.generationMs += total.generationMs
-		avgLatency := total.totalLatencyMs / total.requestCount
-		successRate := float64(total.successCount) / float64(total.requestCount) * 100
-		avgTps := 0.0
-		if total.generationMs > 0 {
-			avgTps = float64(total.outputTokens) / (float64(total.generationMs) / 1000.0)
+		item := modelPerformanceSummary(name, buckets)
+		if item.RequestCount > 0 {
+			models = append(models, item)
 		}
-		models = append(models, ModelSummary{
-			ModelName:           name,
-			AvgLatencyMs:        avgLatency,
-			SuccessRate:         math.Round(successRate*100) / 100,
-			AvgTps:              math.Round(avgTps*100) / 100,
-			RecentSuccessSeries: recentSuccessSeries(modelBuckets[name]),
-			RequestCount:        total.requestCount,
-		})
 	}
 	sort.Slice(models, func(i, j int) bool {
 		return models[i].RequestCount > models[j].RequestCount
 	})
 
-	return SummaryAllResult{Summary: summarize(all), WindowStart: startTs, WindowEnd: endTs, Models: models}, nil
+	result := SummaryAllResult{Summary: summarize(all), WindowStart: startTs, WindowEnd: endTs, Models: models}
+	if err := attachSummaryAvailability(&result, hours, groups, modelBuckets, startTs); err != nil {
+		return SummaryAllResult{}, err
+	}
+	return result, nil
 }
 
-func mergeModelTotals(totals map[string]counters, modelName string, value counters) {
-	if value.requestCount == 0 {
-		return
+func modelPerformanceSummary(modelName string, buckets map[int64]counters) ModelSummary {
+	total := counters{}
+	for _, value := range buckets {
+		total = addCounterValues(total, value)
 	}
-	current := totals[modelName]
-	current.requestCount += value.requestCount
-	current.successCount += value.successCount
-	current.totalLatencyMs += value.totalLatencyMs
-	current.ttftSumMs += value.ttftSumMs
-	current.ttftCount += value.ttftCount
-	current.outputTokens += value.outputTokens
-	current.generationMs += value.generationMs
-	totals[modelName] = current
+	return ModelSummary{
+		ModelName:           modelName,
+		AvgLatencyMs:        avg(total.totalLatencyMs, total.requestCount),
+		SuccessRate:         math.Round(successRate(total)*100) / 100,
+		AvgTps:              math.Round(avgTps(total)*100) / 100,
+		RecentSuccessSeries: recentSuccessSeries(buckets),
+		RequestCount:        total.requestCount,
+	}
 }
 
 func mergeModelBucket(modelBuckets map[string]map[int64]counters, modelName string, bucketTs int64, value counters) {
@@ -331,7 +397,7 @@ func buildQueryResult(modelName string, merged map[bucketKey]counters) QueryResu
 	groupBuckets := map[string]map[int64]counters{}
 	modelBuckets := map[string]map[int64]counters{}
 	for key, value := range merged {
-		if value.requestCount == 0 {
+		if value.requestCount == 0 && (value.outputTokens <= 0 || value.generationMs <= 0) {
 			continue
 		}
 		if _, ok := groupBuckets[key.group]; !ok {
@@ -370,7 +436,14 @@ func buildQueryResult(modelName string, merged map[bucketKey]counters) QueryResu
 			total.ttftCount += value.ttftCount
 			total.outputTokens += value.outputTokens
 			total.generationMs += value.generationMs
-			series = append(series, bucketPoint(ts, value))
+			if value.requestCount > 0 {
+				series = append(series, bucketPoint(ts, value))
+			}
+		}
+		// Settlements can finish in a later bucket than their request, but
+		// settlement data alone cannot create a monitored group or outcome.
+		if total.requestCount == 0 {
+			continue
 		}
 		all.requestCount += total.requestCount
 		all.successCount += total.successCount

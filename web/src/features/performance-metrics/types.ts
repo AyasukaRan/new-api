@@ -37,6 +37,19 @@ export type PerformanceGroup = {
   success_rate: number
   avg_tps: number
   series: PerformanceSeriesPoint[]
+  availability_rate?: number | null
+  availability_series?: SuccessRatePoint[] | null
+}
+
+export type PerformanceChannel = {
+  channel_index: number
+  current_available?: boolean
+  current_observed_at?: number
+  success_rate?: number | null
+  availability_rate?: number | null
+  avg_latency_ms: number
+  avg_tps: number
+  series?: SuccessRatePoint[] | null
 }
 
 export type PerformanceMetricsData = {
@@ -48,8 +61,46 @@ export type PerformanceMetricsData = {
     window_start?: number
     window_end?: number
     model_name: string
+    avg_latency_ms?: number
+    avg_tps?: number
+    current_available?: boolean
+    current_observed_at?: number
     series_schema?: string
     groups: PerformanceGroup[]
+    availability_rate?: number | null
+    availability_series?: SuccessRatePoint[] | null
+    channels?: PerformanceChannel[] | null
+  }
+}
+
+export type AdminPerformanceKey = {
+  key_index: number
+  key_hint: string
+  enabled: boolean
+  current_available?: boolean | null
+  observed_at: number
+  success?: boolean
+  source?: 'request' | 'probe'
+  status_code?: number
+  error?: string
+}
+
+export type AdminPerformanceChannel = {
+  channel_id: number
+  channel_name: string
+  status: number
+  current_available?: boolean | null
+  current_observed_at?: number
+  availability_rate?: number | null
+  keys: AdminPerformanceKey[]
+}
+
+export type AdminPerformanceMetricsData = {
+  success: boolean
+  message?: string
+  data: {
+    model_name: string
+    channels: AdminPerformanceChannel[]
   }
 }
 
@@ -57,11 +108,15 @@ export type SuccessRatePoint = { ts: number; success_rate: number }
 
 export type PerfModelSummary = {
   model_name: string
+  current_available?: boolean
+  current_observed_at?: number
   avg_latency_ms: number
   success_rate: number
   avg_tps: number
   recent_success_series?: SuccessRatePoint[]
   request_count?: number
+  availability_rate?: number | null
+  availability_series?: SuccessRatePoint[] | null
 }
 
 export type PerfSummaryAllData = {

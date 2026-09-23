@@ -54,7 +54,7 @@ export function getChannelTypeIcon(type: number): string {
     58: 'NewAPI', // Advanced Custom
     59: 'Sub2API', // Sub2API
     60: 'NewAPI', // New API
-    62: 'Vllm', // vLLM
+    64: 'Vllm', // vLLM
     63: 'SGLang', // SGLang
     3: 'Azure', // Azure
 
@@ -77,6 +77,7 @@ export function getChannelTypeIcon(type: number): string {
     26: 'Zhipu', // Zhipu V4
     17: 'Qwen', // Ali
     18: 'Spark', // Xunfei
+    62: 'Spark', // iFlytek MaaS
     23: 'Hunyuan', // Tencent
     19: 'Ai360', // 360
     25: 'Moonshot', // Moonshot

@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
@@ -98,7 +99,7 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
-		key, _, newAPIError := ch.GetNextEnabledKey()
+		key, _, newAPIError := ch.GetNextRelayKey()
 		if newAPIError != nil {
 			return service.TaskErrorWrapper(newAPIError, "channel_no_available_key", newAPIError.StatusCode)
 		}
@@ -193,7 +194,7 @@ func ApplyOriginTaskAffinity(c *gin.Context, info *relaycommon.RelayInfo) *dto.T
 
 // RelayTaskSubmit 完成 task 提交的全部流程（每次尝试调用一次）：
 // 刷新渠道元数据 → 确定 platform/adaptor → 验证请求 →
-// 估算计费(EstimateBilling) → 计算价格 → 预扣费（仅首次）→
+// 估算计费(EstimateBilling) → 计算价格 → 按当前渠道补足预扣费 →
 // 构建/发送/解析上游请求 → 提交后计费调整(AdjustBillingOnSubmit)。
 // 共享控制器编排负责未落库退款、最终额度预留、落库和结算。
 func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitResult, *dto.TaskError) {
@@ -258,6 +259,24 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	}
 	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
 	useTiered := exists || billing_setting.GetBillingMode(modelName) == billing_setting.BillingModeTieredExpr
+	billingModelName := modelName
+	// An explicit channel price takes precedence over plugin and global prices.
+	// Preserve the client alias first, then the selected channel's mapped name.
+	billingChannelId := common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+	if info.TaskRelayInfo != nil {
+		if locked, ok := info.LockedChannel.(*model.Channel); ok && locked != nil {
+			billingChannelId = locked.Id
+		}
+	}
+	for _, name := range []string{modelName, info.UpstreamModelName} {
+		if mode, expression, configured := ratio_setting.ChannelBillingMode(name, billingChannelId); configured {
+			billingModelName = name
+			useTiered = mode == billing_setting.BillingModeTieredExpr
+			exprStr, exists = expression, strings.TrimSpace(expression) != ""
+			break
+		}
+	}
+
 	if useTiered {
 		provider, supported := adaptor.(channel.TaskUsageFactsProvider)
 		if billingexpr.UsesFixedPricing(exprStr) {
@@ -295,7 +314,8 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		priceData = types.PriceData{Quota: quota, QuotaToPreConsume: quota, GroupRatioInfo: groupRatioInfo}
 		info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{BillingMode: billing_setting.BillingModeTieredExpr, ModelName: modelName, ExprString: exprStr, ExprHash: billingexpr.ExprHashString(exprStr), GroupRatio: groupRatioInfo.GroupRatio, EstimatedQuotaBeforeGroup: cost * common.QuotaPerUnit, EstimatedQuotaAfterGroup: quota, EstimatedTier: trace.MatchedTier, QuotaPerUnit: common.QuotaPerUnit, ExprVersion: billingexpr.ExprVersion(exprStr), TaskUsageBilling: true, UsageFacts: facts}
 	} else {
-		priceData, err = helper.ModelPriceHelperPerCall(c, info)
+		info.TieredBillingSnapshot = nil
+		priceData, err = helper.ModelPriceHelperPerCall(c, info, billingModelName)
 		if err != nil {
 			return nil, service.TaskErrorWrapper(err, "model_price_error", http.StatusBadRequest)
 		}
@@ -330,12 +350,11 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		noteTaskQuotaClamp(info, clamp)
 	}
 
-	// 7. 预扣费（仅首次 — 重试时 info.Billing 已存在，跳过）
-	if info.Billing == nil && !info.PriceData.FreeModel {
-		info.ForcePreConsume = true
-		if apiErr := service.PreConsumeBilling(c, info.PriceData.Quota, info); apiErr != nil {
-			return nil, service.TaskErrorFromAPIError(apiErr)
-		}
+	// 7. 每次上游尝试前补足当前渠道的额度；较便宜的重试留待结算时退款。
+	info.PriceData.QuotaToPreConsume = info.PriceData.Quota
+	info.ForcePreConsume = true
+	if apiErr := service.PrepareBillingForSelectedChannel(c, info); apiErr != nil {
+		return nil, service.TaskErrorFromAPIError(apiErr)
 	}
 
 	// 8. 构建请求体

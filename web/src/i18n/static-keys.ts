@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Model test',
   'This operation is only supported for vLLM or SGLang channels',
   'Invalid inference server address',
   'Channel type does not match the status endpoint',
@@ -110,6 +111,7 @@ export const STATIC_I18N_KEYS = [
   'Audio and Realtime pricing must be converted manually.',
   'Video pricing must be converted manually.',
   'Image prices with count, size or quality adjustments must be converted manually.',
+  'Overlapping cache and media pricing must be converted manually.',
   'Configure an input price before converting this model.',
   'Prices changed while preparing the conversion. Try again.',
   // Billing expression simulation diagnostics and conditional labels.
@@ -812,6 +814,7 @@ export const STATIC_I18N_KEYS = [
   'Account binding',
   'Account unlinking',
   'Email confirmation code resend',
+  'Model highlighted in the test dialog; health checks test all configured models',
   // Model and vendor management labels.
   'Vendors',
   'Vendor management',

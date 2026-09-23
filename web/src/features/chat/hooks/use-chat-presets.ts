@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMemo } from 'react'
 
 import type { SystemStatus } from '@/features/auth/types'
+import { currentBaseUrl } from '@/lib/base-path'
 import { useStatus } from '@/hooks/use-status'
 
 import {
@@ -51,7 +52,7 @@ function extractServerAddress(status: SystemStatus | null) {
   }
 
   if (typeof window !== 'undefined') {
-    return window.location.origin
+    return currentBaseUrl()
   }
 
   return ''

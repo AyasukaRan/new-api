@@ -29,7 +29,7 @@ export const CHANNEL_TYPE_NEW_API = 60
 
 export const CHANNEL_TYPE_TASK_PLUGIN = 61
 
-export const CHANNEL_TYPE_VLLM = 62
+export const CHANNEL_TYPE_VLLM = 64
 
 export const CHANNEL_TYPE_SGLANG = 63
 
@@ -92,8 +92,9 @@ export const CHANNEL_TYPES = {
   59: 'Sub2API',
   60: 'New API',
   61: 'Task Plugin',
-  62: 'vLLM',
+  62: 'iFlytek MaaS',
   63: 'SGLang',
+  64: 'vLLM',
 } as const
 
 export type ChannelProviderPresentation = {
@@ -173,7 +174,8 @@ export const CHANNEL_PROVIDER_PRESENTATION: Partial<
   60: {
     descriptionKey: 'Connect to model services from another New API instance',
   },
-  62: { descriptionKey: 'Connect to self-hosted models served by vLLM' },
+  62: { descriptionKey: 'iFlytek MaaS' },
+  64: { descriptionKey: 'Connect to self-hosted models served by vLLM' },
   63: { descriptionKey: 'Connect to self-hosted models served by SGLang' },
 } satisfies Record<
   Exclude<keyof typeof CHANNEL_TYPES, 0 | typeof CHANNEL_TYPE_TASK_PLUGIN>,
@@ -182,8 +184,8 @@ export const CHANNEL_PROVIDER_PRESENTATION: Partial<
 
 const CHANNEL_TYPE_DISPLAY_ORDER: number[] = [
   1, 14, 24, 33, 43, 3, 41, 17, 45, 25, 26, 23, 48, 60, 58, 59, 61, 42, 34, 20,
-  4, 62, 40, 27, 15, 46, 18, 31, 35, 49, 19, 47, 37, 38, 39, 11, 8, 57, 22, 21,
-  44, 2, 5, 36, 50, 51, 52, 53, 54, 55, 56,
+  4, 64, 63, 62, 40, 27, 15, 46, 18, 31, 35, 49, 19, 47, 37, 38, 39, 11, 8, 57,
+  22, 21, 44, 2, 5, 36, 50, 51, 52, 53, 54, 55, 56,
 ]
 
 export const CHANNEL_TYPE_OPTIONS: { value: number; label: string }[] = (() => {
@@ -358,6 +360,9 @@ export const ERROR_MESSAGES = {
     'HTTP/2 connection shards must be between 1 and 8',
   INVALID_HTTP1_WITH_SHARDS:
     'HTTP/2 connection shards must be 1 when HTTP/1.1 is selected',
+  INVALID_BATCH_BASE_URL: 'Batch base URL must start with http:// or https://',
+  INVALID_BALANCE_QUERY_BASE_URL:
+    'Balance query address must be an HTTP or HTTPS URL',
   CREATE_FAILED: 'Failed to create channel',
   UPDATE_FAILED: 'Failed to update channel',
   DELETE_FAILED: 'Failed to delete channel',
@@ -478,7 +483,8 @@ export const FIELD_DESCRIPTIONS = {
     'For this channel, map the model name in client requests to the model name sent upstream.',
   PRIORITY: 'Higher priority channels are selected first',
   WEIGHT: 'Used for load balancing. Higher weight = more requests',
-  TEST_MODEL: 'Model to use when testing channel connectivity',
+  TEST_MODEL:
+    'Model highlighted in the test dialog; health checks test all configured models',
   AUTO_BAN: 'Automatically disable channel on repeated failures',
   STATUS_CODE_MAPPING: 'Map response status codes (JSON format)',
   TAG: 'Group channels by tag for batch operations',
@@ -520,6 +526,7 @@ export const MODEL_FETCHABLE_TYPES = new Set([
   60,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
+  62,
 ])
 
 export const FIELD_PASSTHROUGH_TYPES = new Set([
@@ -554,6 +561,7 @@ export const CLAUDE_FIELD_PASSTHROUGH_TYPES = new Set([
 
 export const TYPE_TO_KEY_PROMPT: Record<number, string> = {
   15: 'Format: APIKey|SecretKey',
+  62: 'Format: MaaS API key (starts with ak-), not the Spark APPID|APISecret|APIKey triple',
   18: 'Format: APPID|APISecret|APIKey',
   22: 'Format: APIKey-AppId, e.g., fastgpt-0sp2gtvfdgyi4k30jwlgwf1i-64f335d84283f05518e9e041',
   23: 'Format: TokenHub API Key, or legacy AppId|SecretId|SecretKey',
@@ -563,7 +571,7 @@ export const TYPE_TO_KEY_PROMPT: Record<number, string> = {
   57: 'Paste Codex OAuth JSON credential (access_token / refresh_token / account_id)',
   59: 'Enter API key for this channel',
   60: 'Enter API key for this channel',
-  62: 'vLLM API key, or EMPTY if authentication is disabled',
+  64: 'vLLM API key, or EMPTY if authentication is disabled',
   63: 'SGLang API key, or EMPTY if authentication is disabled',
 }
 
@@ -572,3 +580,24 @@ export const CHANNEL_TYPE_WARNINGS: Record<number, string> = {
   8: 'If connecting to upstream One API or New API relay projects, use OpenAI type instead unless you know what you are doing',
   37: 'Dify channels only support chatflow and agent, and agent does not support images',
 }
+
+/**
+ * Provider billing APIs a channel can be queried with, mirroring
+ * `constant.BalanceQueryTypes` on the server. A gateway often speaks one
+ * provider's relay protocol while exposing another's billing endpoint, so the
+ * channel's own type is not always the right one to ask.
+ */
+/** Sentinel for "no override"; Base UI Select cannot hold an empty value. */
+export const BALANCE_QUERY_DEFAULT = '__channel_type__'
+
+export const BALANCE_QUERY_TYPES = [
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'custom', label: 'Custom' },
+  { value: 'aiproxy', label: 'AIProxy' },
+  { value: 'api2gpt', label: 'API2GPT' },
+  { value: 'aigc2d', label: 'AIGC2D' },
+  { value: 'siliconflow', label: 'SiliconFlow' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'moonshot', label: 'Moonshot' },
+] as const

@@ -18,12 +18,20 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Row } from '@tanstack/react-table'
-import { render, screen, waitFor, cleanup, act } from '@testing-library/react'
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  within,
+  act,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AxiosError } from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { pricingOptions } from '@/features/model-pricing/pricing'
+import { ModelPricingEditorPanel } from '@/features/system-settings/models/model-pricing-sheet'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -50,6 +58,8 @@ const model = {
 afterEach(() => {
   cleanup()
   useAuthStore.getState().auth.reset()
+  vi.restoreAllMocks()
+  for (const client of scopedClients.splice(0)) client.clear()
 })
 
 function renderModelActions(currentModel: Model = model, role = 100) {
@@ -404,6 +414,20 @@ describe('metadata editing', () => {
       'Existing vendor'
     )
     const user = userEvent.setup()
+    await user.click(screen.getByRole('tab', { name: 'Pricing' }))
+    expect(
+      await screen.findByText(
+        'Model pricing is managed by a super administrator.'
+      )
+    ).toBeVisible()
+    expect(
+      get.mock.calls.some(
+        ([url]) =>
+          String(url).startsWith('/api/option') ||
+          String(url).startsWith('/api/channel')
+      )
+    ).toBe(false)
+    await user.click(screen.getByRole('tab', { name: 'Model metadata' }))
     expect(screen.getByText('Gemini.Color')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Custom model icon' }))
     const icon = screen.getByRole('combobox', { name: 'Icon' })
@@ -422,8 +446,8 @@ describe('metadata editing', () => {
     await user.type(vendorInput, 'Another')
     await user.click(screen.getByRole('option', { name: 'Another vendor' }))
     expect(vendorInput).toHaveValue('Another vendor')
-    await user.clear(description)
-    await user.type(description, 'Updated metadata')
+    await user.clear(screen.getByLabelText('Description'))
+    await user.type(screen.getByLabelText('Description'), 'Updated metadata')
     await user.click(
       screen.getByRole('button', { name: /Update Model|Save metadata/ })
     )
@@ -439,6 +463,189 @@ describe('metadata editing', () => {
       vendor_id: 4,
       endpoints: '',
     })
+  })
+
+  it('uses the same price editor for global and channel scopes and preserves failed channel saves', async () => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'root', role: 100 })
+    let channelPricing: Record<string, unknown> = {
+      [model.model_name]: {
+        '7': { billing_mode: 'per_request', model_price: 3 },
+      },
+      'another-model': { '9': { model_ratio: 4 } },
+    }
+    vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      if (url === '/api/models/7') {
+        return { data: { success: true, data: model } }
+      }
+      if (url === '/api/vendors/') {
+        return { data: { success: true, data: { items: [] } } }
+      }
+      if (url === '/api/option/model_pricing') {
+        return {
+          data: {
+            success: true,
+            data: {
+              entries: [
+                {
+                  model_name: model.model_name,
+                  version: 'v1',
+                  configured: { ModelPrice: 1.5 },
+                  effective: { ModelPrice: 1.5 },
+                },
+              ],
+              options: pricingOptions({
+                ModelPrice: JSON.stringify({ [model.model_name]: 1.5 }),
+              }),
+              empty_version: 'empty',
+            },
+          },
+        }
+      }
+      if (url === '/api/option/') {
+        return {
+          data: {
+            success: true,
+            data: [
+              {
+                key: 'ChannelModelPricing',
+                value: JSON.stringify(channelPricing),
+              },
+            ],
+          },
+        }
+      }
+      if (url === '/api/channel') {
+        return {
+          data: {
+            success: true,
+            data: {
+              items: [
+                {
+                  id: 7,
+                  name: 'Primary channel',
+                  status: 1,
+                  models: model.model_name,
+                },
+                {
+                  id: 8,
+                  name: 'Unrelated channel',
+                  status: 1,
+                  models: 'different-model',
+                },
+              ],
+              total: 2,
+            },
+          },
+        }
+      }
+      return { data: { success: true, data: [], vendors: [] } }
+    })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValueOnce({
+        data: { success: false, message: 'Channel write failed' },
+      })
+      .mockImplementation(async (_url, request) => {
+        channelPricing = JSON.parse((request as { value: string }).value)
+        return { data: { success: true } }
+      })
+    const patch = vi.spyOn(api, 'patch')
+    const close = vi.fn()
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <ModelsProvider>
+          <ModelMutateDrawer open onOpenChange={close} currentRow={model} />
+        </ModelsProvider>
+      </QueryClientProvider>
+    )
+    await waitFor(() =>
+      expect(screen.getByLabelText('Description')).toHaveValue('Original')
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('tab', { name: 'Pricing' }))
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('0.01')).toHaveValue('1.5')
+    )
+    await user.clear(screen.getByPlaceholderText('0.01'))
+    await user.type(screen.getByPlaceholderText('0.01'), '2')
+    await user.click(screen.getByRole('combobox', { name: 'Pricing scope' }))
+    expect(
+      screen.queryByRole('option', { name: /Unrelated channel/ })
+    ).not.toBeInTheDocument()
+    await user.click(
+      await screen.findByRole('option', { name: /Primary channel/ })
+    )
+    await user.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', {
+        name: 'Cancel',
+      })
+    )
+    expect(screen.getByPlaceholderText('0.01')).toHaveValue('2')
+    await user.click(screen.getByRole('combobox', { name: 'Pricing scope' }))
+    await user.click(
+      await screen.findByRole('option', { name: /Primary channel/ })
+    )
+    await user.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', {
+        name: 'Discard changes',
+      })
+    )
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('0.01')).toHaveValue('3')
+    )
+    expect(
+      screen.queryByRole('button', { name: 'Restore default pricing' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('tab', { name: 'Per-token (deprecated)' })
+    ).toBeVisible()
+    expect(screen.getByRole('tab', { name: 'Expression' })).toBeVisible()
+    expect(
+      screen.queryByRole('textbox', { name: 'Model name' })
+    ).not.toBeInTheDocument()
+    await user.clear(screen.getByPlaceholderText('0.01'))
+    await user.type(screen.getByPlaceholderText('0.01'), '4')
+    await user.click(
+      screen.getByRole('button', { name: 'Save channel pricing' })
+    )
+    expect(await screen.findByText('Channel write failed')).toBeVisible()
+    expect(screen.getByPlaceholderText('0.01')).toHaveValue('4')
+    await user.keyboard('{Escape}')
+    await user.click(
+      within(await screen.findByRole('alertdialog')).getByRole('button', {
+        name: 'Cancel',
+      })
+    )
+    expect(close).not.toHaveBeenCalled()
+    await user.click(
+      screen.getByRole('button', { name: 'Save channel pricing' })
+    )
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Save channel pricing' })
+      ).toBeDisabled()
+    )
+    expect(channelPricing).toMatchObject({
+      [model.model_name]: {
+        '7': { billing_mode: 'per_request', model_price: 4 },
+      },
+      'another-model': { '9': { model_ratio: 4 } },
+    })
+    await user.click(screen.getByRole('combobox', { name: 'Pricing scope' }))
+    await user.click(await screen.findByRole('option', { name: 'Global' }))
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText('0.01')).toHaveValue('1.5')
+    )
+    expect(patch).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    client.clear()
   })
   it('keeps metadata drafts while saving pricing independently and preserves the price draft across tabs', async () => {
     useAuthStore.getState().auth.setUser({ id: 1, username: 'root', role: 100 })
@@ -566,4 +773,183 @@ describe('metadata editing', () => {
     )
     client.clear()
   })
+})
+
+const scopedClients: QueryClient[] = []
+function renderScopedPricingEditor(reject = false) {
+  let map = { alpha: { '7': { billing_mode: 'per_request', model_price: 3 } } }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/option/') {
+      return {
+        data: {
+          success: true,
+          data: [{ key: 'ChannelModelPricing', value: JSON.stringify(map) }],
+        },
+      }
+    }
+    if (url === '/api/channel') {
+      return {
+        data: {
+          success: true,
+          data: {
+            items: [{ id: 7, name: 'Primary', models: 'alpha', status: 1 }],
+            total: 1,
+          },
+        },
+      }
+    }
+    return { data: { success: true, data: [], vendors: [] } }
+  })
+  const put = vi.spyOn(api, 'put').mockImplementation(async (_url, request) => {
+    if (reject) return { data: { success: false, message: 'Write refused' } }
+    map = JSON.parse((request as { value: string }).value)
+    return { data: { success: true } }
+  })
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false },
+    },
+  })
+  scopedClients.push(client)
+  render(
+    <QueryClientProvider client={client}>
+      <ModelPricingEditorPanel
+        editData={{ name: 'alpha', price: '1.5', billingMode: 'per-request' }}
+      />
+    </QueryClientProvider>
+  )
+  return put
+}
+async function chooseChannel(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('combobox', { name: 'Pricing scope' }))
+  await user.click(await screen.findByRole('option', { name: /Primary/ }))
+  await waitFor(() =>
+    expect(screen.getByPlaceholderText('0.01')).toHaveValue('3')
+  )
+}
+it('discard after a failed save reloads unchanged server prices', async () => {
+  renderScopedPricingEditor(true)
+  const user = userEvent.setup()
+  await chooseChannel(user)
+  await user.clear(screen.getByPlaceholderText('0.01'))
+  await user.type(screen.getByPlaceholderText('0.01'), '4')
+  await user.click(screen.getByRole('button', { name: 'Save channel pricing' }))
+  await screen.findByText('Write refused')
+  await user.click(
+    screen.getByRole('button', { name: 'Reload channel pricing' })
+  )
+  await user.click(
+    within(await screen.findByRole('alertdialog')).getByRole('button', {
+      name: 'Discard changes',
+    })
+  )
+  await waitFor(() =>
+    expect(screen.queryByText('Write refused')).not.toBeInTheDocument()
+  )
+  expect(screen.getByPlaceholderText('0.01')).toHaveValue('3')
+})
+it('an equivalent numeric value stays unchanged and the next real edit is protected', async () => {
+  const put = renderScopedPricingEditor()
+  const user = userEvent.setup()
+  await chooseChannel(user)
+  await user.clear(screen.getByPlaceholderText('0.01'))
+  await user.type(screen.getByPlaceholderText('0.01'), '3.0')
+  expect(put).not.toHaveBeenCalled()
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: 'Save channel pricing' })
+    ).toBeDisabled()
+  )
+  await user.clear(screen.getByPlaceholderText('0.01'))
+  await user.type(screen.getByPlaceholderText('0.01'), '4')
+  await user.click(screen.getByRole('combobox', { name: 'Pricing scope' }))
+  await user.click(await screen.findByRole('option', { name: 'Global' }))
+  expect(screen.queryByRole('alertdialog')).toBeInTheDocument()
+})
+
+it('channel pricing inherits the effective global multiplier and identifies disabled lanes as inherited', async () => {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'root', role: 100 })
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/models/7') return { data: { success: true, data: model } }
+    if (url === '/api/vendors/') {
+      return { data: { success: true, data: { items: [] } } }
+    }
+    if (url === '/api/option/model_pricing') {
+      return {
+        data: {
+          success: true,
+          data: {
+            entries: [
+              {
+                model_name: model.model_name,
+                version: 'v1',
+                configured: { ModelRatio: 2, CompletionRatio: 9 },
+                effective: { ModelRatio: 2, CompletionRatio: 2 },
+              },
+            ],
+            options: pricingOptions({
+              ModelRatio: JSON.stringify({ [model.model_name]: 2 }),
+              CompletionRatio: JSON.stringify({ [model.model_name]: 9 }),
+            }),
+            empty_version: 'empty',
+          },
+        },
+      }
+    }
+    if (url === '/api/option/') return { data: { success: true, data: [] } }
+    if (url === '/api/channel') {
+      return {
+        data: {
+          success: true,
+          data: {
+            items: [
+              { id: 7, name: 'Primary', models: model.model_name, status: 1 },
+            ],
+            total: 1,
+          },
+        },
+      }
+    }
+    return { data: { success: true, data: [], vendors: [] } }
+  })
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false },
+    },
+  })
+  scopedClients.push(client)
+  render(
+    <QueryClientProvider client={client}>
+      <ModelsProvider>
+        <ModelMutateDrawer open onOpenChange={() => {}} currentRow={model} />
+      </ModelsProvider>
+    </QueryClientProvider>
+  )
+  const user = userEvent.setup()
+  await waitFor(() =>
+    expect(screen.getByLabelText('Description')).toHaveValue('Original')
+  )
+  await user.click(screen.getByRole('tab', { name: 'Pricing' }))
+  await waitFor(() =>
+    expect(screen.getByPlaceholderText('15')).toHaveValue('36')
+  )
+  await user.click(screen.getByRole('combobox', { name: 'Pricing scope' }))
+  await user.click(await screen.findByRole('option', { name: /Primary/ }))
+  await waitFor(() =>
+    expect(screen.getByPlaceholderText('15')).toHaveValue('8')
+  )
+  expect(
+    screen.queryByRole('button', { name: 'Restore default pricing' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('switch', { name: 'Completion price' }))
+  expect(
+    screen.getAllByText('Inherits global multiplier').length
+  ).toBeGreaterThan(0)
+  expect(
+    screen.getAllByText(
+      'Disabled lanes inherit the global multiplier. Enter 0 for free usage.'
+    ).length
+  ).toBeGreaterThan(0)
 })

@@ -257,6 +257,7 @@ export type ModelSettings = {
   'billing_setting.billing_expr': string
   'billing_setting.plugin_billing_expr': string
   'tool_price_setting.prices': string
+  ChannelModelPricing: string
   TopupGroupRatio: string
   GroupRatio: string
   UserUsableGroups: string
@@ -271,6 +272,7 @@ export type ModelSettings = {
 
 export type BillingSettings = {
   QuotaForNewUser: number
+  DefaultSubscriptionPlanId: number
   PreConsumedQuota: number
   QuotaForInviter: number
   QuotaForInvitee: number
@@ -297,6 +299,7 @@ export type BillingSettings = {
   'billing_setting.billing_expr': string
   'billing_setting.plugin_billing_expr': string
   'tool_price_setting.prices': string
+  ChannelModelPricing: string
   TopupGroupRatio: string
   GroupRatio: string
   UserUsableGroups: string
@@ -374,6 +377,10 @@ export type OperationsSettings = {
   WorkerValidKey: string
   WorkerAllowHttpImageRequestEnabled: boolean
   LogConsumeEnabled: boolean
+  LogRequestBodyEnabled: boolean
+  RequestTraceEnabled: boolean
+  RequestTraceRetentionDays: number
+  RequestTraceMaxBytes: number
   'performance_setting.disk_cache_enabled': boolean
   'performance_setting.disk_cache_threshold_mb': number
   'performance_setting.disk_cache_max_size_mb': number
@@ -461,6 +468,8 @@ export type UpstreamConfig = {
 export type FetchUpstreamRatiosRequest = {
   upstreams: UpstreamConfig[]
   timeout: number
+  /** Restricts the sync to the models these channels are configured to serve. */
+  scope_channel_ids?: number[]
 }
 
 export type TestResult = {

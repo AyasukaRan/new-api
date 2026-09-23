@@ -34,6 +34,25 @@ export const channelInfoSchema = z.object({
 
 export type ChannelInfo = z.infer<typeof channelInfoSchema>
 
+export const channelKeyBalanceSchema = z.object({
+  index: z.number(),
+  balance: z.number().nullable(),
+  error: z.string().optional(),
+})
+
+export const channelBalanceMonitorSchema = z.object({
+  checked_at: z.number(),
+  balance: z.number().nullable(),
+  balance_updated_time: z.number(),
+  known_balance: z.number(),
+  partial: z.boolean(),
+  success: z.boolean(),
+  configuration_changed: z.boolean(),
+  key_balances: z.array(channelKeyBalanceSchema),
+})
+export type ChannelBalanceMonitor = z.infer<typeof channelBalanceMonitorSchema>
+export type ChannelKeyBalance = z.infer<typeof channelKeyBalanceSchema>
+
 export const channelSchema = z.object({
   id: z.number(),
   type: z.number(),
@@ -50,6 +69,7 @@ export const channelSchema = z.object({
   other: z.string().default(''),
   balance: z.number().default(0), // in USD
   balance_updated_time: z.number(),
+  balance_monitor: channelBalanceMonitorSchema.nullish(),
   models: z.string().default(''),
   group: z.string().default('default'),
   used_quota: z.number().default(0),
@@ -90,6 +110,18 @@ export interface ChannelSettings {
   system_prompt_override?: boolean
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
+  /** Opt out of balance queries while retaining recorded balances. */
+  balance_query_disabled?: boolean
+  /** Which provider's billing API to query; empty uses the channel's type. */
+  balance_query_type?: string
+  /** Where to send the balance request when it is not the relay base URL. */
+  balance_query_base_url?: string
+  /** Whether this channel may serve batch inference alongside its relay traffic. */
+  batch_enabled?: boolean
+  /** Where batch requests go when the vendor does not serve them from the relay base URL. */
+  batch_base_url?: string
+  /** The credential the batch API accepts when it is not the channel key. */
+  batch_key?: string
 }
 
 export interface ChannelOtherSettings {
@@ -203,9 +235,50 @@ export interface ChannelTestResponse {
 export interface ChannelBalanceResponse {
   success: boolean
   message?: string
-  balance?: number
+  balance?: number | null
+  balance_monitor?: ChannelBalanceMonitor
+  partial?: boolean
+  known_balance?: number
   currency?: string
   raw_response?: string
+  key_balances?: ChannelKeyBalance[]
+}
+
+export interface ChannelBalanceSample {
+  id: number
+  channel_id: number
+  checked_at: number
+  balance: number | null
+  balance_updated_time: number
+  known_balance: number
+  partial: boolean
+  success: boolean
+  used_quota: number
+  key_balances: ChannelKeyBalance[]
+}
+
+export interface ChannelMonitoring {
+  used_quota: number
+  balance: ChannelBalanceMonitor | null
+  balance_history: ChannelBalanceSample[]
+  usage: {
+    channel_id: number
+    hours: number
+    request_count: number
+    success_count: number
+    success_rate?: number
+    probe_count: number
+    availability_rate?: number
+    input_tokens: number
+    output_tokens: number
+    used_quota: number
+    recorded_used_quota: number
+    recorded_input_tokens: number
+    recorded_output_tokens: number
+    billing_record_count: number
+    avg_latency_ms: number
+    series: { ts: number; success_rate: number }[]
+  }
 }
 
 export interface FetchModelsResponse {

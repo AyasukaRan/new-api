@@ -160,12 +160,17 @@ type RelayInfo struct {
 	IsClaudeBetaQuery                     bool // /v1/messages?beta=true
 	IsChannelTest                         bool // channel test request
 	RetryIndex                            int
-	LastError                             *types.NewAPIError
-	RuntimeHeadersOverride                map[string]any
-	UseRuntimeHeadersOverride             bool
-	ParamOverrideAudit                    []string
+	// ChannelAttemptStartTime scopes channel performance to the current
+	// upstream attempt; StartTime remains the client's end-to-end request time.
+	ChannelAttemptStartTime   time.Time
+	LastError                 *types.NewAPIError
+	RuntimeHeadersOverride    map[string]any
+	UseRuntimeHeadersOverride bool
+	ParamOverrideAudit        []string
 
 	PriceData hosttypes.PriceData
+	// Retry pricing reuses the original request estimates and image multipliers.
+	PricingTokenCountMeta *types.TokenCountMeta
 
 	// QuotaClamp is set (non-nil) when a quota conversion saturated at the
 	// supported single-request bound (or NaN fallback) while computing this request's charge.
@@ -428,6 +433,7 @@ var streamSupportedChannels = map[int]bool{
 	constant.ChannelTypeVLLM:           true,
 	constant.ChannelTypeSGLang:         true,
 	constant.ChannelTypeTencent:        true,
+	constant.ChannelTypeIFlytekMaaS:    true,
 }
 
 func GenRelayInfoWs(c *gin.Context, ws *websocket.Conn) *RelayInfo {

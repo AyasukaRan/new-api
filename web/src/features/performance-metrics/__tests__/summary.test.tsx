@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PerformanceOverview } from '@/features/dashboard/components/models/performance-overview'
@@ -90,6 +90,19 @@ function renderModelDetails() {
     data: {
       model_name: 'test-model',
       summary,
+      current_available: true,
+      current_observed_at: windowEnd,
+      availability_rate: 100,
+      availability_series: [{ ts: windowStart, success_rate: 100 }],
+      channels: groups.map((group, index) => ({
+        channel_index: index + 1,
+        current_available: index === 0,
+        current_observed_at: windowEnd,
+        availability_rate: group.success_rate,
+        avg_latency_ms: group.avg_latency_ms,
+        avg_tps: group.avg_tps,
+        series: group.series,
+      })),
       series: [
         {
           ts: windowStart,
@@ -145,27 +158,38 @@ describe('server performance summaries', () => {
     }
   )
 
-  it('shows the server summary and series incident count for model details instead of averaging groups', () => {
+  it('keeps model availability distinct from weighted request success and uses weighted latency', () => {
     renderModelDetails()
-    expect(screen.getByText('99.01%')).toBeVisible()
+    const availability = screen.getByRole('group', {
+      name: 'Availability (last 24h)',
+    })
+    expect(within(availability).getByText('100.00%')).toBeVisible()
+    expect(screen.queryByText('99.01%')).not.toBeInTheDocument()
     expect(screen.queryByText('50.00%')).not.toBeInTheDocument()
-    expect(screen.getByText('1 incidents in the last 24 hours')).toBeVisible()
+    expect(screen.getByText('1.01s')).toBeVisible()
   })
 
-  it('feeds the uptime chart from the backend series rather than group averages', async () => {
+  it('feeds availability from channel-aware history and latency from the weighted backend series', async () => {
     renderModelDetails()
     await waitFor(() => expect(chart).toHaveBeenCalled())
     const specs = chart.mock.calls.map(([props]) => props.spec)
     const uptime = specs.find((value) => value.data[0].id === 'uptime')
     const uptimeValues = uptime?.data[0].values.map((value) => value.uptime)
-    expect(uptimeValues).toContain(99.01)
-    expect(uptimeValues).not.toContain(50)
+    expect(uptimeValues).toContain(100)
+    expect(uptimeValues).not.toContain(99.01)
+    const latency = specs.find((value) => value.data[0].id === 'latency')
+    expect(latency?.data[0].values.map((value) => value.ttft)).toEqual([100])
   })
 
-  it('shows each group success rate in its own sparkline label', () => {
+  it('shows availability once per channel without exposing group names', () => {
     renderModelDetails()
-    expect(screen.getByText('100.00%')).toBeVisible()
-    expect(screen.getByText('0.00%')).toBeVisible()
+    const channels = screen.getByRole('table', { name: 'Channel availability' })
+    expect(within(channels).getByText('Channel 1')).toBeVisible()
+    expect(within(channels).getByText('Channel 2')).toBeVisible()
+    expect(within(channels).getByText('100.00%')).toBeVisible()
+    expect(within(channels).getByText('0.00%')).toBeVisible()
+    expect(within(channels).queryByText('a')).not.toBeInTheDocument()
+    expect(within(channels).queryByText('b')).not.toBeInTheDocument()
   })
 
   it('displays the supplied group summary instead of averaging hourly percentages', () => {

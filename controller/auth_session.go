@@ -60,13 +60,22 @@ func AuthLogout(c *gin.Context) {
 				writeAuthSessionError(c, service.ErrLoginSessionMismatch)
 				return
 			}
+			session, err := model.GetUserSessionBySID(identity.SessionID)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				writeAuthSessionError(c, err)
+				return
+			}
+			if session != nil && session.UserID != identity.UserID {
+				writeAuthSessionError(c, service.ErrLoginSessionMismatch)
+				return
+			}
 			if _, err := model.RevokeUserSession(identity.UserID, identity.SessionID, "logout"); err != nil {
 				writeAuthSessionError(c, err)
 				return
 			}
 			cookieCleared := false
 			if cookieErr == nil && hasCookieSID && cookieSID == identity.SessionID {
-				if err := service.RevokeByRefreshToken(rawRefreshToken, identity.SessionID, "logout"); err != nil {
+				if _, err := service.RevokeByRefreshToken(rawRefreshToken, identity.SessionID, "logout"); err != nil {
 					writeAuthSessionError(c, err)
 					return
 				}
@@ -76,7 +85,7 @@ func AuthLogout(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"success": true,
 				"message": "",
-				"data":    gin.H{"revoked_sid": identity.SessionID, "cookie_cleared": cookieCleared},
+				"data":    authLogoutData{RevokedSID: identity.SessionID, CookieCleared: cookieCleared},
 			})
 			return
 		}
@@ -86,12 +95,22 @@ func AuthLogout(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 		return
 	}
-	if err := service.RevokeByRefreshToken(rawRefreshToken, expectedSID, "logout"); err != nil {
+	session, err := service.RevokeByRefreshToken(rawRefreshToken, expectedSID, "logout")
+	if err != nil {
 		writeAuthSessionError(c, err)
 		return
 	}
 	service.ClearRefreshCookie(c)
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
+	data := authLogoutData{CookieCleared: true}
+	if session != nil {
+		data.RevokedSID = session.SID
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": data})
+}
+
+type authLogoutData struct {
+	RevokedSID    string `json:"revoked_sid,omitempty"`
+	CookieCleared bool   `json:"cookie_cleared"`
 }
 
 func GetLoginSessions(c *gin.Context) {

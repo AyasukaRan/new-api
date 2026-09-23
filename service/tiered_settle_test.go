@@ -770,7 +770,7 @@ func TestImageCacheBilling(t *testing.T) {
 		{"negative image count", &dto.CachedTokenDetails{ImageTokens: common.GetPointer(-1)}, expression, 100, 300, 600, 0, 4338},
 		{"image count exceeds cache", &dto.CachedTokenDetails{ImageTokens: common.GetPointer(301)}, expression, 100, 300, 600, 0, 4338},
 		{"modality sum exceeds cache", &dto.CachedTokenDetails{ImageTokens: common.GetPointer(200), TextTokens: common.GetPointer(101)}, expression, 100, 300, 600, 0, 4338},
-		{"old expression unchanged", &dto.CachedTokenDetails{ImageTokens: common.GetPointer(200)}, `p * 5 + cr * 1.25 + img * 8 + c * 30`, 100, 300, 600, 0, 4338},
+		{"existing cache precedence", &dto.CachedTokenDetails{ImageTokens: common.GetPointer(200)}, `p * 5 + cr * 1.25 + img * 8 + c * 30`, 300, 300, 400, 0, 4038},
 		{"only image cache separately priced", &dto.CachedTokenDetails{ImageTokens: common.GetPointer(200)}, `p * 5 + img_cr * 2 + c * 30`, 800, 100, 400, 200, 3700},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -787,6 +787,17 @@ func TestImageCacheBilling(t *testing.T) {
 			assert.Equal(t, tc.quota, result.ActualQuotaAfterGroup)
 		})
 	}
+	t.Run("audio and image cache share the input budget", func(t *testing.T) {
+		usage := &dto.Usage{PromptTokens: 1000, CompletionTokens: 100,
+			PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 300, ImageTokens: 600, AudioTokens: 300,
+				CachedTokensDetails: &dto.CachedTokenDetails{ImageTokens: common.GetPointer(200), AudioTokens: common.GetPointer(100)}}}
+		const expression = `p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + ai * 10 + c * 30`
+		params := BuildTieredTokenParams(usage, false, billingexpr.UsedVars(expression))
+		assert.Equal(t, billingexpr.TokenParams{P: 100, C: 100, Len: 1000, CR: 100, Img: 400, ImgCR: 200, AI: 200}, params)
+		result, err := billingexpr.ComputeTieredQuota(makeSnapshot(expression, 1, 1000, 100), params)
+		require.NoError(t, err)
+		assert.Equal(t, 4613, result.ActualQuotaAfterGroup)
+	})
 }
 
 func TestBuildTieredTokenParams_Claude_WithCache(t *testing.T) {

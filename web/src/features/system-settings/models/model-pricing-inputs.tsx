@@ -73,6 +73,7 @@ export function PriceLane(props: {
   placeholder: string
   value: string
   enabled: boolean
+  disabledDescription?: string
   disabled?: boolean
   compact?: boolean
   disabledReason?: string
@@ -111,13 +112,14 @@ export function PriceLane(props: {
         disabled={effectiveDisabled}
         onChange={props.onChange}
       />
-      {!props.compact && (
+      {(!props.compact || (!props.enabled && props.disabledDescription)) && (
         <p className='text-muted-foreground text-xs'>
           {props.enabled
             ? t('{{currency}} price per 1M tokens.', {
                 currency: (props.currency ?? USD_PRICING_CURRENCY).label,
               })
-            : t('Disabled lanes are omitted on save.')}
+            : (props.disabledDescription ??
+              t('Disabled lanes are omitted on save.'))}
         </p>
       )}
     </SettingsControlGroup>

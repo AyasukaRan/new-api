@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -95,6 +96,46 @@ func TestSystemTaskSchedulerCreatesWhenDueAndDedups(t *testing.T) {
 
 	runSystemTaskScheduler()
 	require.Equal(t, int64(2), countSystemTasks(t, handler.taskType))
+}
+
+type activityScheduledHandler struct {
+	stubScheduledHandler
+	due bool
+	err error
+}
+
+func (h *activityScheduledHandler) ShouldSchedule(time.Time, *model.SystemTask) (bool, error) {
+	return h.due, h.err
+}
+
+func TestSystemTaskSchedulerUsesActivityDeadlineAndDedups(t *testing.T) {
+	truncate(t)
+	handler := &activityScheduledHandler{stubScheduledHandler: stubScheduledHandler{taskType: "test_idle_activity", enabled: true, interval: time.Hour}}
+	withSystemTaskRegistry(t, handler)
+	runSystemTaskScheduler()
+	require.Zero(t, countSystemTasks(t, handler.taskType), "recent request activity postpones initial probing")
+	handler.due, handler.err = true, errors.New("activity unavailable")
+	runSystemTaskScheduler()
+	require.Zero(t, countSystemTasks(t, handler.taskType), "an unreadable activity deadline must not cause probes")
+	handler.err = nil
+	runSystemTaskScheduler()
+	require.Equal(t, int64(1), countSystemTasks(t, handler.taskType))
+	runSystemTaskScheduler()
+	require.Equal(t, int64(1), countSystemTasks(t, handler.taskType), "pending task still deduplicates activity deadlines")
+	latest, err := model.GetLatestSystemTask(handler.taskType)
+	require.NoError(t, err)
+	_, claimed, err := model.ClaimSystemTask(latest.ID, handler.taskType, "idle-runner", common.GetTimestamp()+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	runSystemTaskScheduler()
+	require.Equal(t, int64(1), countSystemTasks(t, handler.taskType), "running task retains its lease")
+	require.NoError(t, model.FinishSystemTask(latest.TaskID, "idle-runner", model.SystemTaskStatusSucceeded, nil, ""))
+	handler.due = false
+	runSystemTaskScheduler()
+	require.Equal(t, int64(1), countSystemTasks(t, handler.taskType))
+	handler.due = true
+	runSystemTaskScheduler()
+	require.Equal(t, int64(2), countSystemTasks(t, handler.taskType), "another model's idle deadline can precede the last task plus a full interval")
 }
 
 func TestSystemTaskSchedulerSkipsDisabled(t *testing.T) {

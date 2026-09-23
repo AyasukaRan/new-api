@@ -26,6 +26,7 @@ import {
 
 const defaultBillingSettings: BillingSettings = {
   QuotaForNewUser: 0,
+  DefaultSubscriptionPlanId: 0,
   PreConsumedQuota: 0,
   QuotaForInviter: 0,
   QuotaForInvitee: 0,
@@ -52,6 +53,7 @@ const defaultBillingSettings: BillingSettings = {
   'billing_setting.billing_expr': '{}',
   'billing_setting.plugin_billing_expr': '{}',
   'tool_price_setting.prices': '{}',
+  ChannelModelPricing: '{}',
   TopupGroupRatio: '',
   GroupRatio: '',
   UserUsableGroups: '',

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG } from '../constants'
 import { useChannels } from './channels-provider'
 import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
+import { ChannelMonitoringDialog } from './dialogs/channel-monitoring-dialog'
 import { ChannelTestDialog } from './dialogs/channel-test-dialog'
 import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
 import { EditTagDialog } from './dialogs/edit-tag-dialog'
@@ -61,6 +62,11 @@ export function ChannelsDialogs() {
       <ChannelTestDialog
         open={open === 'test-channel'}
         onOpenChange={(v) => !v && setOpen(null)}
+      />
+
+      <ChannelMonitoringDialog
+        open={open === 'channel-monitoring'}
+        onOpenChange={(value) => !value && setOpen(null)}
       />
 
       {/* Balance Query Dialog */}

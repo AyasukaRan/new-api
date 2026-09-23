@@ -1,9 +1,11 @@
 package relay
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -16,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -100,6 +103,118 @@ func TestTaskModel2DtoNormalizesLegacyAction(t *testing.T) {
 
 	assert.Equal(t, constant.TaskActionFirstTailToVideo, dtoTask.Action)
 	assert.Equal(t, "firstTailGenerate", task.Action)
+}
+
+type taskRetryReservation struct {
+	quota   int
+	targets []int
+	err     error
+}
+
+func (b *taskRetryReservation) Settle(int) error         { return nil }
+func (b *taskRetryReservation) Refund(*gin.Context)      {}
+func (b *taskRetryReservation) NeedsRefund() bool        { return b.quota > 0 }
+func (b *taskRetryReservation) GetPreConsumedQuota() int { return b.quota }
+func (b *taskRetryReservation) Reserve(target int) error {
+	b.targets = append(b.targets, target)
+	if b.err != nil {
+		return b.err
+	}
+	if target > b.quota {
+		b.quota = target
+	}
+	return nil
+}
+
+func TestRelayTaskSubmitReservesSelectedChannelBeforeRetry(t *testing.T) {
+	saveBillingConfig(t)
+	savedPricing := ratio_setting.ChannelModelPricing2JSONString()
+	savedPrices := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(savedPricing))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"alias-model":0.001}`))
+	require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(`{"alias-model":{
+		"1":{"billing_mode":"tiered_expr","billing_expr":"0.1"},
+		"2":{"billing_mode":"per_request","model_price":0.2},
+		"3":{"billing_mode":"per_token","model_ratio":2},
+		"4":{"billing_mode":"per_request","model_price":0.01}
+		,"5":{"billing_mode":"per_request","model_price":2}
+	},"declared-model":{
+		"7":{"billing_mode":"per_request","model_price":0.004},
+		"8":{"billing_mode":"per_token","model_ratio":0.02}
+	}}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode":          `{"declared-model":"tiered_expr"}`,
+		"billing_setting.billing_expr":          `{"declared-model":"10"}`,
+		billing_setting.PluginBillingExprOption: `{"bill-fallback::declared-model":"0.03"}`,
+	}))
+	service.InitHttpClient()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	c, info := newTaskSubmitContext(t, "alias-model", `{"alias-model":"declared-model"}`)
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+	c.Set("group", "default")
+	info.UserGroup, info.UsingGroup, info.OriginModelName = "default", "default", "alias-model"
+	pinMappingOrderPlugin(t, c, billingFallbackPlugin+`export function extractUsage(){return {seconds:2};}`)
+	reservation := &taskRetryReservation{}
+	info.Billing = reservation
+	for index, attempt := range []struct {
+		channel int
+		quota   int
+		tiered  bool
+	}{
+		{1, 50_000, true},
+		{2, 200_000, false},
+		{3, 1_000_000, false},
+		{4, 10_000, false},
+	} {
+		// A pinned task can carry a different routing channel in its context.
+		common.SetContextKey(c, constant.ContextKeyChannelId, 99)
+		info.LockedChannel = &model.Channel{Id: attempt.channel}
+		_, taskErr := RelayTaskSubmit(c, info)
+		require.NotNil(t, taskErr)
+		require.Equal(t, "fail_to_fetch_task", taskErr.Code)
+		assert.EqualValues(t, index+1, requests.Load())
+		assert.Equal(t, attempt.quota, info.PriceData.Quota)
+		assert.Equal(t, attempt.quota, info.PriceData.QuotaToPreConsume)
+		if index < 3 {
+			require.Len(t, reservation.targets, index+1)
+			assert.Equal(t, attempt.quota, reservation.targets[index])
+		} else {
+			assert.Len(t, reservation.targets, 3, "a cheaper attempt needs no additional reservation")
+		}
+		assert.Equal(t, attempt.tiered, info.TieredBillingSnapshot != nil)
+	}
+	assert.Equal(t, 1_000_000, info.FinalPreConsumedQuota, "cheaper retries retain the existing reservation")
+	info.LockedChannel = &model.Channel{Id: 6}
+	_, taskErr := RelayTaskSubmit(c, info)
+	require.NotNil(t, taskErr)
+	require.Equal(t, "fail_to_fetch_task", taskErr.Code)
+	assert.Equal(t, 15_000, info.PriceData.Quota, "a channel without an explicit override uses the plugin's mapped-model expression")
+	require.NotNil(t, info.TieredBillingSnapshot)
+	assert.Equal(t, 1_000_000, info.FinalPreConsumedQuota)
+	for _, attempt := range []struct{ channel, quota int }{{7, 4000}, {8, 10000}} {
+		info.LockedChannel = &model.Channel{Id: attempt.channel}
+		_, taskErr = RelayTaskSubmit(c, info)
+		require.NotNil(t, taskErr)
+		require.Equal(t, "fail_to_fetch_task", taskErr.Code)
+		assert.Equal(t, attempt.quota, info.PriceData.Quota, "the mapped model's selected channel price overrides the alias's global price")
+		assert.Nil(t, info.TieredBillingSnapshot)
+		assert.Equal(t, "alias-model", info.OriginModelName)
+		assert.Equal(t, "declared-model", info.UpstreamModelName)
+		assert.Empty(t, info.BillingModelName, "channel price lookup must not change subscription model eligibility")
+	}
+	reservation.err = errors.New("insufficient quota")
+	info.LockedChannel = &model.Channel{Id: 5}
+	_, taskErr = RelayTaskSubmit(c, info)
+	require.NotNil(t, taskErr)
+	assert.EqualValues(t, 7, requests.Load(), "a failed reservation must stop before contacting the provider")
 }
 
 const mappingOrderSubmitPlugin = `

@@ -1500,3 +1500,182 @@ func TestAppendToolSurchargeLogInfoWritesOnlyStructuredFields(t *testing.T) {
 	assert.NotContains(t, fields, "image_generation_call")
 	assert.NotContains(t, fields, "image_generation_call_price")
 }
+
+func TestChannelPricingSettlesAllTokenLanesTogether(t *testing.T) {
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "channel-multimodal",
+		StartTime:       time.Now(),
+		PriceData: hosttypes.PriceData{
+			ChannelPricing: true, AudioPricingEnabled: true,
+			ModelRatio: 2, CompletionRatio: 4, CacheRatio: 0.1,
+			CacheCreationRatio: 1.25, CacheCreation5mRatio: 1.25, CacheCreation1hRatio: 2,
+			ImageRatio: 2, AudioRatio: 3, AudioCompletionRatio: 5,
+			GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1},
+		},
+	}
+	usage := &dto.Usage{
+		PromptTokens: 1000, CompletionTokens: 200,
+		PromptTokensDetails:    dto.InputTokenDetails{CachedTokens: 100, CachedCreationTokens: 50, ImageTokens: 60, AudioTokens: 40},
+		CompletionTokenDetails: dto.OutputTokenDetails{AudioTokens: 30},
+	}
+	// (750 text + 100*.1 cache + 50*1.25 write + 60*2 image +
+	// 40*3 audio + 170*4 completion + 30*3*5 audio output) * 2.
+	assert.Equal(t, 4385, calculateTextQuotaSummary(ctx, info, usage).Quota)
+	assert.Nil(t, info.QuotaClamp)
+
+	usage.UsageSemantic = "anthropic"
+	usage.PromptTokens = 850 // Claude input already excludes read/write cache.
+	usage.ClaudeCacheCreation5mTokens = 10
+	usage.ClaudeCacheCreation1hTokens = 20
+	// Cache write becomes 20*1.25 + 10*1.25 + 20*2 = 77.5.
+	assert.Equal(t, 4415, calculateTextQuotaSummary(ctx, info, usage).Quota)
+	assert.Nil(t, info.QuotaClamp)
+}
+
+func TestChannelPricingZeroLanesStayFree(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		usage dto.Usage
+	}{
+		{"cache", dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 1000}}},
+		{"cache write", dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{CachedCreationTokens: 1000}}},
+		{"image", dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{ImageTokens: 1000}}},
+		{"audio", dto.Usage{PromptTokens: 1000, CompletionTokens: 200, PromptTokensDetails: dto.InputTokenDetails{AudioTokens: 1000}, CompletionTokenDetails: dto.OutputTokenDetails{AudioTokens: 200}}},
+		{"output", dto.Usage{CompletionTokens: 200}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{
+				OriginModelName: "gemini-2.5-flash", StartTime: time.Now(),
+				PriceData: hosttypes.PriceData{ChannelPricing: true, AudioPricingEnabled: true, ModelRatio: 2, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
+			}
+			assert.Zero(t, calculateTextQuotaSummary(ctx, info, &test.usage).Quota, "explicit zero must not become a one-quota minimum or a global Gemini audio price")
+		})
+	}
+	quota, clamp := calculateAudioQuota(QuotaInfo{ChannelPricing: true, ModelRatio: 2, GroupRatio: 1, InputDetails: TokenDetails{AudioTokens: 1000}})
+	assert.Zero(t, quota)
+	assert.Nil(t, clamp)
+}
+
+func TestPrepareChannelBillingCreatesAndRefundsReservationAfterFreeAttempt(t *testing.T) {
+	truncate(t)
+	const userID = 741
+	seedUser(t, userID, 500000)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{
+		UserId: userID, OriginModelName: "channel-fixed-price", IsPlayground: true, ForcePreConsume: true,
+		UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
+		PriceData:   hosttypes.PriceData{FreeModel: true, UsePrice: true},
+	}
+	require.Nil(t, PrepareBillingForSelectedChannel(ctx, info))
+	require.Nil(t, info.Billing)
+
+	// The effective pricing resolver selects a paid retry after a free one.
+	info.PriceData.FreeModel = false
+	info.PriceData.QuotaToPreConsume = 100000
+	require.Nil(t, PrepareBillingForSelectedChannel(ctx, info))
+	require.NotNil(t, info.Billing)
+	assert.Equal(t, 100000, info.FinalPreConsumedQuota)
+	quota, err := model.GetUserQuota(userID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 400000, quota)
+
+	info.PriceData.FreeModel = true
+	info.PriceData.QuotaToPreConsume = 0
+	require.Nil(t, PrepareBillingForSelectedChannel(ctx, info))
+	assert.Equal(t, 100000, info.FinalPreConsumedQuota, "a cheaper retry releases funds only at settlement")
+	assert.False(t, info.PriceData.FreeModel, "an existing session must still settle/refund")
+	require.NoError(t, SettleBilling(ctx, info, 0))
+	quota, err = model.GetUserQuota(userID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 500000, quota)
+}
+
+func TestChannelRealtimeExpressionUsesAudioAndCacheTokens(t *testing.T) {
+	truncate(t)
+	const userID = 742
+	seedUser(t, userID, 500000)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/realtime", nil)
+	const expr = `tier("audio", p * 2 + c * 4 + ai * 6 + ao * 10 + cr)`
+	info := &relaycommon.RelayInfo{
+		UserId: userID, OriginModelName: "channel-realtime", IsPlayground: true, ForcePreConsume: true,
+		UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
+		ChannelMeta: &relaycommon.ChannelMeta{}, StartTime: time.Now(),
+		PriceData:             hosttypes.PriceData{ChannelPricing: true, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
+		TieredBillingSnapshot: &billingexpr.BillingSnapshot{BillingMode: "tiered_expr", ExprString: expr, GroupRatio: 1, QuotaPerUnit: common.QuotaPerUnit},
+	}
+	require.Nil(t, PreConsumeBilling(ctx, 5000, info))
+	PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{
+		InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500,
+		InputTokenDetails:  dto.InputTokenDetails{AudioTokens: 100, CachedTokens: 200, TextTokens: 900},
+		OutputTokenDetails: dto.OutputTokenDetails{AudioTokens: 50, TextTokens: 450},
+	}, "")
+	quota, err := model.GetUserQuota(userID, false)
+	require.NoError(t, err)
+	// (700*2 + 450*4 + 100*6 + 50*10 + 200) * .5 = 2250.
+	assert.Equal(t, 497750, quota)
+}
+
+func TestChannelFixedPriceAudioAndRealtimeSettlement(t *testing.T) {
+	for _, realtime := range []bool{false, true} {
+		name := "audio"
+		if realtime {
+			name = "realtime"
+		}
+		t.Run(name, func(t *testing.T) {
+			truncate(t)
+			const userID = 743
+			seedUser(t, userID, 500000)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", "/v1/audio/speech", nil)
+			info := &relaycommon.RelayInfo{
+				UserId: userID, OriginModelName: "channel-audio", IsPlayground: true, ForcePreConsume: true, UsePrice: true,
+				UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
+				ChannelMeta: &relaycommon.ChannelMeta{}, StartTime: time.Now(),
+				PriceData: hosttypes.PriceData{ChannelPricing: true, UsePrice: true, ModelPrice: 0.1, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
+			}
+			require.Nil(t, PreConsumeBilling(ctx, 50000, info))
+			input := dto.InputTokenDetails{AudioTokens: 1000}
+			output := dto.OutputTokenDetails{AudioTokens: 500}
+			if realtime {
+				PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500, InputTokenDetails: input, OutputTokenDetails: output}, "")
+			} else {
+				PostAudioConsumeQuota(ctx, info, &dto.Usage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, PromptTokensDetails: input, CompletionTokenDetails: output}, "")
+			}
+			quota, err := model.GetUserQuota(userID, false)
+			require.NoError(t, err)
+			assert.Equal(t, 450000, quota, "nonempty audio usage settles the configured $0.1 fixed price")
+		})
+	}
+}
+
+func TestChannelCachedAudioAndImagesArePricedOnce(t *testing.T) {
+	for _, test := range []struct {
+		name                         string
+		prompt, cached, audio, image int
+		details                      *dto.CachedTokenDetails
+		want                         int
+	}{
+		{"fully cached audio without breakdown", 2000, 2000, 2000, 0, nil, 200},
+		{"fully cached audio with breakdown", 2000, 2000, 2000, 0, &dto.CachedTokenDetails{AudioTokens: common.GetPointer(2000)}, 200},
+		{"partial known audio", 2000, 1000, 1000, 0, &dto.CachedTokenDetails{AudioTokens: common.GetPointer(600), TextTokens: common.GetPointer(400)}, 3900},
+		{"partial known audio and image", 2000, 1000, 1000, 40, &dto.CachedTokenDetails{AudioTokens: common.GetPointer(600), ImageTokens: common.GetPointer(20), TextTokens: common.GetPointer(380)}, 3980},
+		{"unknown overlap stays within uncached budget", 2000, 1000, 1500, 0, nil, 8100},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{OriginModelName: "cache-audio", StartTime: time.Now(), PriceData: hosttypes.PriceData{
+				ChannelPricing: true, AudioPricingEnabled: true, ModelRatio: 1, CacheRatio: .1, AudioRatio: 8, ImageRatio: 5, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1},
+			}}
+			usage := &dto.Usage{PromptTokens: test.prompt, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: test.cached, AudioTokens: test.audio, ImageTokens: test.image, CachedTokensDetails: test.details}}
+			assert.Equal(t, test.want, calculateTextQuotaSummary(ctx, info, usage).Quota)
+			params := BuildTieredTokenParams(usage, false, map[string]bool{"cr": true, "ai": true, "img": true})
+			assert.InDelta(t, float64(test.want), params.P+params.CR*.1+params.AI*8+params.Img*5, .00001)
+			assert.LessOrEqual(t, params.P+params.CR+params.AI+params.Img, float64(test.prompt))
+			withoutCacheLane := BuildTieredTokenParams(usage, false, map[string]bool{"ai": true})
+			assert.Equal(t, float64(test.audio), withoutCacheLane.AI, "an expression that does not price cache retains the full audio input")
+		})
+	}
+}

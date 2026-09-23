@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ComponentProps, ReactNode } from 'react'
+import { useId, type ComponentProps, type ReactNode } from 'react'
 
 import { FormItem } from '@/components/ui/form'
 import { Label } from '@/components/ui/label'
@@ -108,7 +108,7 @@ export function SettingsSwitchRow({
 }
 
 export function SettingsSwitchField({
-  controlId,
+  controlId: providedControlId,
   checked,
   onCheckedChange,
   label,
@@ -117,6 +117,8 @@ export function SettingsSwitchField({
   className,
   ...props
 }: SettingsSwitchFieldProps) {
+  const generatedControlId = useId()
+  const controlId = providedControlId ?? generatedControlId
   return (
     <SettingsSwitchRow className={className} {...props}>
       <SettingsSwitchContent>
@@ -134,6 +136,7 @@ export function SettingsSwitchField({
       </SettingsSwitchContent>
       <Switch
         id={controlId}
+        aria-label={props['aria-label']}
         aria-describedby={
           controlId && description ? `${controlId}-description` : undefined
         }

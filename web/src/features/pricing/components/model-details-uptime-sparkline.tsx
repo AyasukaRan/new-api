@@ -53,6 +53,8 @@ type UptimeSparklineProps = {
   overallSuccessRate?: number
   size?: SparklineSize
   showOverall?: boolean
+  overallRate?: number
+  ariaLabel?: string
   emptyLabel?: string
   className?: string
 }
@@ -66,6 +68,7 @@ function heightFor(uptime: number): string {
 }
 
 export function UptimeSparkline(props: UptimeSparklineProps) {
+  const { t } = useTranslation()
   const size = props.size ?? 'md'
   const showOverall = props.showOverall ?? true
 
@@ -78,6 +81,7 @@ export function UptimeSparkline(props: UptimeSparklineProps) {
   }
 
   const overall =
+    props.overallRate ??
     props.overallSuccessRate ??
     props.series.reduce((s, p) => s + p.uptime_pct, 0) / props.series.length
 
@@ -90,7 +94,7 @@ export function UptimeSparkline(props: UptimeSparklineProps) {
       <div
         className={cn('flex items-end', containerHeight, gap)}
         role='img'
-        aria-label={`30 day uptime ${overall.toFixed(2)}%`}
+        aria-label={props.ariaLabel ?? t('Availability samples')}
       >
         {props.series.map((day) => (
           <Tooltip key={day.date}>
@@ -120,7 +124,7 @@ export function UptimeSparkline(props: UptimeSparklineProps) {
               <div>{formatUptimePct(day.uptime_pct)}</div>
               {day.outage_minutes > 0 && (
                 <div className='text-muted-foreground'>
-                  {day.outage_minutes} min outage
+                  {day.outage_minutes} {t('min downtime')}
                 </div>
               )}
             </TooltipContent>

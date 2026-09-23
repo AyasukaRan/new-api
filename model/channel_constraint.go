@@ -10,6 +10,7 @@ import (
 var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginIdentity,
+	dto.FilterBatchCapable,
 	dto.FilterResponsesWebSocket,
 }
 
@@ -19,6 +20,9 @@ var filterEvalOrder = []dto.ChannelFilterKind{
 func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.ChannelFilter) (bool, dto.ChannelFilterKind) {
 	if ch == nil {
 		return false, ""
+	}
+	if !ch.HasRelayBalanceForRequest(filters) {
+		return false, dto.FilterChannelBalance
 	}
 	for _, kind := range filterEvalOrder {
 		for _, filter := range filters {
@@ -104,6 +108,15 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 			return filter.TaskPluginKey != "" && (key == filter.TaskPluginKey || slices.Contains(filter.TaskPluginKeys, key))
 		}
 		return filter.TaskPluginKey == "" || slices.Contains(filter.TaskPluginChannelTypes, ch.Type)
+	case dto.FilterBatchCapable:
+		// A dedicated task-plugin channel exists only to serve its plugin, so
+		// it needs no separate opt-in. A vendor channel also serving chat does:
+		// the account behind it may have no batch entitlement at all, and the
+		// batch API may want a different host and credential.
+		if ch.Type == constant.ChannelTypeTaskPlugin {
+			return true
+		}
+		return ch.GetSetting().BatchEnabled
 	case dto.FilterResponsesWebSocket:
 		if !ch.GetSetting().ResponsesWebSocketEnabled {
 			return false

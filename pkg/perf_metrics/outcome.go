@@ -24,20 +24,41 @@ func ClassifyRelayOutcome(ctx context.Context, info *relaycommon.RelayInfo, apiE
 	if info == nil || info.PerformanceBusinessRejection {
 		return OutcomeIgnored
 	}
-	if ctx != nil && ctx.Err() == context.Canceled {
-		return OutcomeIgnored
-	}
 	if apiErr != nil && errors.Is(apiErr, context.Canceled) {
 		return OutcomeIgnored
 	}
 	stream := info.StreamStatus.OutcomeSnapshot()
+	// Closing a client after a terminal response must not erase an observed
+	// success or an upstream rejection that arrived before the disconnect.
+	if ctx != nil && ctx.Err() == context.Canceled && stream.Response == relaycommon.ResponseOutcomeUnknown && stream.EndReason != relaycommon.StreamEndReasonDone &&
+		(apiErr == nil || apiErr.GetErrorCode() == types.ErrorCodeDoRequestFailed) {
+		return OutcomeIgnored
+	}
+	if apiErr != nil && IsContentModerationError(apiErr) {
+		if !stream.HasErrors || isContentModerationStreamStop(info.StreamStatus) {
+			return OutcomeIgnored
+		}
+		return OutcomeFailure
+	}
+	if isContentModerationStreamStop(info.StreamStatus) {
+		return OutcomeIgnored
+	}
 	if stream.Response == relaycommon.ResponseOutcomeFailed {
+		if stream.HasErrors && info.StreamStatus.TotalErrorCount() > 1 {
+			return OutcomeFailure
+		}
 		return classifyFailure(false, stream.ErrorCode, stream.ErrorType, stream.ErrorStatus)
 	}
 	if apiErr != nil {
+		if stream.HasErrors {
+			return OutcomeFailure
+		}
 		root := rootAPIError(apiErr)
 		local := root.GetErrorType() == types.ErrorTypeNewAPIError
 		return classifyFailure(local, string(root.GetErrorCode()), root.ToOpenAIError().Type, root.StatusCode)
+	}
+	if info.StreamStatus != nil && errors.Is(info.StreamStatus.EndError, context.Canceled) {
+		return OutcomeIgnored
 	}
 	deadlineExceeded := info.StreamStatus != nil && errors.Is(info.StreamStatus.EndError, context.DeadlineExceeded)
 	if stream.Response == relaycommon.ResponseOutcomeCancelled || stream.EndReason == relaycommon.StreamEndReasonPingFail {
@@ -60,7 +81,7 @@ func ClassifyRelayOutcome(ctx context.Context, info *relaycommon.RelayInfo, apiE
 		return OutcomeFailure
 	}
 	switch stream.EndReason {
-	case relaycommon.StreamEndReasonTimeout, relaycommon.StreamEndReasonScannerErr, relaycommon.StreamEndReasonPanic:
+	case relaycommon.StreamEndReasonTimeout, relaycommon.StreamEndReasonScannerErr, relaycommon.StreamEndReasonPanic, relaycommon.StreamEndReasonHandlerStop:
 		return OutcomeFailure
 	}
 	if stream.ExpectsTerminal && stream.Response == relaycommon.ResponseOutcomeUnknown && stream.EndReason != relaycommon.StreamEndReasonDone {
@@ -106,8 +127,12 @@ func classifyFailure(local bool, code, errorType string, status int) Outcome {
 			"overloaded_error", "server_error", "internal_error", "service_unavailable", "model_not_found",
 			"insufficient_user_quota", "pre_consume_token_quota_failed":
 			return OutcomeFailure
-		case "context_length_exceeded", "invalid_request", "invalid_request_error", "invalid_argument",
-			"sensitive_words_detected", "prompt_blocked", "content_filter", "content_policy_violation", "safety":
+		case "sensitive_words_detected", "prompt_blocked", "content_filter", "content_filter_error", "content_policy_violation", "responsibleaipolicyviolation", "safety":
+			if status == 401 || status == 402 || status == 429 || status >= 500 {
+				return OutcomeFailure
+			}
+			return OutcomeIgnored
+		case "context_length_exceeded", "invalid_request", "invalid_request_error", "invalid_argument":
 			return OutcomeIgnored
 		}
 		if strings.HasPrefix(value, "violation_fee.") {

@@ -18,15 +18,25 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, Flame, ShieldCheck, TrendingDown } from 'lucide-react'
+import {
+  ArrowRight,
+  Clock3,
+  Flame,
+  ShieldCheck,
+  TrendingDown,
+} from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { StaggerContainer, StaggerItem } from '@/components/page-transition'
 import { Button } from '@/components/ui/button'
 import { getUserQuotaDates } from '@/features/dashboard/api'
 import { useSummaryCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
 import type { QuotaDataItem } from '@/features/dashboard/types'
+import { getSelfSubscriptionFull } from '@/features/subscriptions/api'
+import { formatTimestamp } from '@/features/subscriptions/lib/format'
 import { useStatus } from '@/hooks/use-status'
 import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
 import { formatNumber, formatQuota } from '@/lib/format'
@@ -147,11 +157,54 @@ export function SummaryCards() {
   const usedQuota = Number(user?.used_quota ?? 0)
   const requestCount = Number(user?.request_count ?? 0)
 
+  const subscriptionsQuery = useQuery({
+    queryKey: ['dashboard', 'self-subscriptions', user?.id],
+    queryFn: async ({ signal }) => {
+      const response = await getSelfSubscriptionFull(signal)
+      if (!response.success || !response.data) {
+        throw new Error('Subscription query failed')
+      }
+      return response.data
+    },
+    enabled: user != null,
+    staleTime: 30 * 1000,
+    refetchInterval: 60 * 1000,
+    gcTime: 0,
+    placeholderData: undefined,
+  })
+  const subscriptionSummary = useMemo(() => {
+    const now = Date.now() / 1000
+    const active = (subscriptionsQuery.data?.subscriptions ?? [])
+      .map((record) => record.subscription)
+      .filter(
+        (subscription) =>
+          subscription.status === 'active' && subscription.end_time > now
+      )
+    let remaining = 0
+    let used = 0
+    let unlimited = false
+    let nextResetTime = 0
+    for (const subscription of active) {
+      const total = Number(subscription.amount_total) || 0
+      const amountUsed = Math.max(0, Number(subscription.amount_used) || 0)
+      used += amountUsed
+      if (total <= 0) unlimited = true
+      else remaining += Math.max(0, total - amountUsed)
+      const reset = subscription.next_reset_time ?? 0
+      if (reset > 0 && (nextResetTime === 0 || reset < nextResetTime)) {
+        nextResetTime = reset
+      }
+    }
+    return { count: active.length, remaining, used, unlimited, nextResetTime }
+  }, [subscriptionsQuery.data])
+  const hasSubscriptions = subscriptionSummary.count > 0
+
   const usageTrendQuery = useQuery({
     queryKey: [
       'dashboard',
       'overview',
       'summary-sparklines',
+      user?.id,
       summaryTimeRange.start_timestamp,
       summaryTimeRange.end_timestamp,
     ],
@@ -164,6 +217,7 @@ export function SummaryCards() {
         })
       ),
     staleTime: 60 * 1000,
+    enabled: user != null,
   })
 
   const summaryValues = useMemo(() => {
@@ -229,6 +283,38 @@ export function SummaryCards() {
     runwayDisplay = t('No recent usage')
   }
 
+  let creditTitle = t('Credit remaining')
+  let creditValue = formatQuota(remainQuota)
+  let creditStatus = t(healthCfg.labelKey)
+  let creditDotClass = healthCfg.dotClass
+  let usageLabel = t('Last 24h usage')
+  let usageValue = todayUsageDisplay
+  let timingLabel = t('Runway')
+  let timingValue = runwayDisplay
+  let TimingIcon = ShieldCheck
+  if (hasSubscriptions) {
+    creditTitle = t('Subscription remaining')
+    creditValue = subscriptionSummary.unlimited
+      ? t('Unlimited')
+      : formatQuota(subscriptionSummary.remaining)
+    creditStatus = t('Active')
+    creditDotClass = 'bg-success'
+    if (!subscriptionSummary.unlimited && subscriptionSummary.remaining <= 0) {
+      creditStatus = t('Subscription quota depleted')
+      creditDotClass = 'bg-destructive'
+    }
+    usageLabel = t('Current period usage')
+    usageValue = formatQuota(subscriptionSummary.used)
+    timingLabel = t('Next subscription refresh')
+    timingValue =
+      subscriptionSummary.nextResetTime > 0
+        ? formatTimestamp(subscriptionSummary.nextResetTime)
+        : t('No Reset')
+    TimingIcon = Clock3
+  } else if (runwayDays !== null && runwayDays < 3) {
+    TimingIcon = TrendingDown
+  }
+
   const items = useSummaryCardsConfig({
     ...summaryValues,
     todayUsageDisplay,
@@ -288,67 +374,81 @@ export function SummaryCards() {
           </StaggerContainer>
         </div>
 
-        <div className='flex flex-col justify-between gap-3 border-t bg-[linear-gradient(135deg,color-mix(in_oklch,var(--overview-accent-2)_12%,var(--background))_0%,color-mix(in_oklch,oklch(0.82_0.04_155)_8%,var(--background))_48%,color-mix(in_oklch,var(--overview-accent-1)_7%,var(--background))_100%)] p-3 sm:gap-4 sm:p-5 xl:border-t-0 xl:border-l'>
-          <div className='flex flex-col gap-2 sm:gap-3'>
-            <div className='flex items-center justify-between'>
-              <span className='text-muted-foreground text-xs font-medium'>
-                {t('Credit remaining')}
-              </span>
-              <span className='flex items-center gap-1.5'>
-                <span
-                  className={cn('size-1.5 rounded-full', healthCfg.dotClass)}
-                  aria-hidden='true'
-                />
-                <span className='text-muted-foreground text-[11px] font-medium'>
-                  {t(healthCfg.labelKey)}
+        <div
+          role='group'
+          aria-label={t('Credit remaining')}
+          className='flex flex-col justify-between gap-3 border-t bg-[linear-gradient(135deg,color-mix(in_oklch,var(--overview-accent-2)_12%,var(--background))_0%,color-mix(in_oklch,oklch(0.82_0.04_155)_8%,var(--background))_48%,color-mix(in_oklch,var(--overview-accent-1)_7%,var(--background))_100%)] p-3 sm:gap-4 sm:p-5 xl:border-t-0 xl:border-l'
+        >
+          {subscriptionsQuery.isLoading && (
+            <LoadingState size='sm' className='min-h-32' />
+          )}
+          {subscriptionsQuery.isError && (
+            <ErrorState
+              className='min-h-32'
+              onRetry={() => void subscriptionsQuery.refetch()}
+            />
+          )}
+          {!subscriptionsQuery.isLoading && !subscriptionsQuery.isError && (
+            <div className='flex flex-col gap-2 sm:gap-3'>
+              <div className='flex items-center justify-between'>
+                <span className='text-muted-foreground text-xs font-medium'>
+                  {creditTitle}
                 </span>
-              </span>
-            </div>
-
-            <div className='font-mono text-xl font-semibold tracking-tight sm:text-2xl'>
-              {formatQuota(remainQuota)}
-            </div>
-
-            <div className='grid grid-cols-2 gap-2'>
-              <div className='bg-background/60 rounded-lg px-2.5 py-2'>
-                <div className='text-muted-foreground flex items-center gap-1 text-[11px] leading-none font-medium'>
-                  <Flame className='size-3 shrink-0' aria-hidden='true' />
-                  <span className='truncate'>{t('Last 24h usage')}</span>
-                </div>
-                <div className='text-foreground mt-1.5 truncate text-xs font-semibold tabular-nums'>
-                  {formatQuota(recentUsage)}
-                </div>
+                <span className='flex items-center gap-1.5'>
+                  <span
+                    className={cn('size-1.5 rounded-full', creditDotClass)}
+                    aria-hidden='true'
+                  />
+                  <span className='text-muted-foreground text-[11px] font-medium'>
+                    {creditStatus}
+                  </span>
+                </span>
               </div>
-              <div className='bg-background/60 rounded-lg px-2.5 py-2'>
-                <div className='text-muted-foreground flex items-center gap-1 text-[11px] leading-none font-medium'>
-                  {runwayDays !== null && runwayDays < 3 ? (
-                    <TrendingDown
+
+              <div className='font-mono text-xl font-semibold tracking-tight sm:text-2xl'>
+                {creditValue}
+              </div>
+
+              <div className='grid grid-cols-2 gap-2'>
+                <div className='bg-background/60 rounded-lg px-2.5 py-2'>
+                  <div className='text-muted-foreground flex items-center gap-1 text-[11px] leading-none font-medium'>
+                    <Flame className='size-3 shrink-0' aria-hidden='true' />
+                    <span className='truncate'>{usageLabel}</span>
+                  </div>
+                  <div className='text-foreground mt-1.5 truncate text-xs font-semibold tabular-nums'>
+                    {usageValue}
+                  </div>
+                </div>
+                <div className='bg-background/60 rounded-lg px-2.5 py-2'>
+                  <div className='text-muted-foreground flex items-center gap-1 text-[11px] leading-none font-medium'>
+                    <TimingIcon
                       className='size-3 shrink-0'
                       aria-hidden='true'
                     />
-                  ) : (
-                    <ShieldCheck
-                      className='size-3 shrink-0'
-                      aria-hidden='true'
-                    />
-                  )}
-                  <span className='truncate'>{t('Runway')}</span>
-                </div>
-                <div
-                  className={cn(
-                    'mt-1.5 truncate text-xs font-semibold tabular-nums',
-                    healthLevel === 'critical' && 'text-destructive',
-                    healthLevel === 'caution' && 'text-warning'
-                  )}
-                >
-                  {runwayDisplay}
+                    <span className='truncate'>{timingLabel}</span>
+                  </div>
+                  <div
+                    className={cn(
+                      'mt-1.5 text-xs font-semibold tabular-nums',
+                      !hasSubscriptions &&
+                        healthLevel === 'critical' &&
+                        'text-destructive',
+                      !hasSubscriptions &&
+                        healthLevel === 'caution' &&
+                        'text-warning'
+                    )}
+                  >
+                    {timingValue}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          )}
 
           <Button className='justify-between' render={<Link to='/wallet' />}>
-            <span>{t('Wallet')}</span>
+            <span>
+              {hasSubscriptions ? t('My Subscriptions') : t('Wallet')}
+            </span>
             <ArrowRight data-icon='inline-end' />
           </Button>
         </div>

@@ -305,7 +305,7 @@ func TestUserSessionPreviousRefreshHashNormalizesLegacyPadding(t *testing.T) {
 
 	revoked, err := RevokeUserSessionByRefreshHash(valid.SID, digest, "legacy-padded-refresh-logout")
 	require.NoError(t, err)
-	assert.True(t, revoked, "refresh-cookie logout must accept a legacy CHAR-padded previous digest inside its grace window")
+	assert.NotNil(t, revoked, "refresh-cookie logout must accept a legacy CHAR-padded previous digest inside its grace window")
 }
 
 func TestUserSessionCacheExcludesRefreshDigests(t *testing.T) {
@@ -377,14 +377,14 @@ func TestRevokeUserSessionByRefreshHashRequiresSecret(t *testing.T) {
 
 	revoked, err := RevokeUserSessionByRefreshHash(session.SID, "wrong-hash", "logout")
 	require.NoError(t, err)
-	assert.False(t, revoked)
+	assert.Nil(t, revoked)
 	active, err := GetUserSessionCached(session.SID)
 	require.NoError(t, err)
 	assert.Equal(t, UserSessionStatusActive, active.Status)
 
 	revoked, err = RevokeUserSessionByRefreshHash(session.SID, session.RefreshHash, "logout")
 	require.NoError(t, err)
-	assert.True(t, revoked)
+	assert.NotNil(t, revoked)
 	_, err = GetUserSessionCached(session.SID)
 	assert.ErrorIs(t, err, ErrUserSessionInactive)
 }

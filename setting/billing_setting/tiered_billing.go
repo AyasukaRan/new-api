@@ -78,6 +78,33 @@ func GetBillingExpr(model string) (string, bool) {
 	return "", false
 }
 
+// GetChannelBillingMode reports how a model is priced on one channel.
+//
+// The same model can be served by upstreams that charge in different shapes —
+// one with a tiered expression, another at a flat token ratio — so the mode is
+// resolved per channel and only falls back to the model's global mode when the
+// channel pins nothing.
+func GetChannelBillingMode(model string, channelId int) string {
+	if mode, _, ok := ratio_setting.ChannelBillingMode(model, channelId); ok {
+		return mode
+	}
+	return GetBillingMode(model)
+}
+
+// GetChannelBillingExpr returns the expression to bill a model with on one
+// channel. A channel that pins expression billing must carry its own
+// expression: inheriting the global one would bill it at a price nobody chose
+// for that upstream.
+func GetChannelBillingExpr(model string, channelId int) (string, bool) {
+	if mode, expr, ok := ratio_setting.ChannelBillingMode(model, channelId); ok {
+		if mode != BillingModeTieredExpr {
+			return "", false
+		}
+		return expr, expr != ""
+	}
+	return GetBillingExpr(model)
+}
+
 func GetBuiltinBillingExpr(model string) (string, bool) {
 	expression, ok := builtinBillingExpr[model]
 	return expression, ok
@@ -188,6 +215,44 @@ func GetPricingSyncData(base map[string]any) map[string]any {
 
 func SmokeTestExpr(exprStr string) error {
 	return smokeTestExpr(exprStr)
+}
+
+// ValidateChannelBillingExpressions smoke-tests every per-channel expression in
+// a ChannelModelPricing payload.
+//
+// ratio_setting compiles them for syntax, but it cannot run this check: the
+// smoke vectors live here and that package is a dependency of this one. An
+// expression that compiles can still return a negative or non-finite price, and
+// the only other place that would surface is a live request that has already
+// been served.
+func ValidateChannelBillingExpressions(jsonStr string) error {
+	return ValidateChannelBillingExpressionsWithSchema(jsonStr, nil)
+}
+
+// ValidateChannelBillingExpressionsWithSchema also resolves mapped task model
+// aliases through the caller's existing model lookup, without a model-package
+// dependency here. A directly declared plugin owns its model's usage schema.
+func ValidateChannelBillingExpressionsWithSchema(jsonStr string, resolveSchema func(string) (map[string]jsplugin.UsageFieldSchema, bool)) error {
+	generation := jsplugin.DefaultRegistry.Generation()
+	for _, entry := range ratio_setting.ChannelBillingExpressions(jsonStr) {
+		var schema map[string]jsplugin.UsageFieldSchema
+		var hasSchema bool
+		if plugin, ok := generation.GetByModel(entry.Model); ok {
+			schema, hasSchema = plugin.Meta.UsageSchema, true
+		} else if resolveSchema != nil {
+			schema, hasSchema = resolveSchema(entry.Model)
+		}
+		var err error
+		if hasSchema {
+			err = SmokeTestTaskExpr(entry.Expr, schema)
+		} else {
+			err = smokeTestExpr(entry.Expr)
+		}
+		if err != nil {
+			return fmt.Errorf("billing expression for model %s on channel %d: %w", entry.Model, entry.ChannelId, err)
+		}
+	}
+	return nil
 }
 
 func smokeTestExpr(exprStr string) error {

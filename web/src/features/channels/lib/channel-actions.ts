@@ -20,6 +20,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { perfMetricsQueryKeys } from '@/features/performance-metrics/api'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import {
@@ -283,7 +284,8 @@ export async function handleTestChannel(
     responseTime?: number,
     error?: string,
     errorCode?: string
-  ) => void
+  ) => void,
+  queryClient?: QueryClient
 ): Promise<void> {
   const payload =
     options && (options.testModel || options.endpointType || options.stream)
@@ -339,6 +341,15 @@ export async function handleTestChannel(
       })
     }
     onTestComplete?.(false, undefined, errorMsg)
+  } finally {
+    await Promise.all([
+      queryClient?.invalidateQueries({
+        queryKey: perfMetricsQueryKeys.summaries,
+      }),
+      queryClient?.invalidateQueries({
+        queryKey: perfMetricsQueryKeys.details,
+      }),
+    ])
   }
 }
 
@@ -626,7 +637,7 @@ export async function handleFixAbilities(
 }
 
 /**
- * Test all enabled channels
+ * Test every configured model on channels included in monitoring
  */
 export async function handleTestAllChannels(
   queryClient?: QueryClient,
@@ -637,7 +648,7 @@ export async function handleTestAllChannels(
     if (response.success) {
       toast.success(
         i18next.t(
-          'Testing all enabled channels started. Please refresh to see results.'
+          'Testing all configured models has started. Results will appear in monitoring.'
         )
       )
       queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })

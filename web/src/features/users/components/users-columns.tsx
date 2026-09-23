@@ -44,9 +44,11 @@ import {
 import type { User } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
 import { UserQuotaCell } from './user-quota-cell'
+import { useUsers } from './users-provider'
 
 export function useUsersColumns(): ColumnDef<User>[] {
   const { t } = useTranslation()
+  const { setOpen, setCurrentRow } = useUsers()
   useSystemConfigStore((state) => state.config.currency)
   const { meta: currency } = getCurrencyDisplay()
   const quotaUnit = currency.kind === 'tokens' ? t('Tokens') : currency.symbol
@@ -182,7 +184,21 @@ export function useUsersColumns(): ColumnDef<User>[] {
       header: `${t('Available Balance')} (${quotaUnit})`,
       cell: ({ row }) => {
         const user = row.original
-        return <UserQuotaCell remaining={user.quota} used={user.used_quota} />
+        return (
+          <UserQuotaCell
+            used={user.used_quota}
+            remaining={user.quota}
+            subscriptions={user.subscriptions}
+            onManageSubscriptions={
+              isUserDeleted(user)
+                ? undefined
+                : () => {
+                    setCurrentRow(user)
+                    setOpen('subscriptions')
+                  }
+            }
+          />
+        )
       },
       size: 180,
       minSize: 160,

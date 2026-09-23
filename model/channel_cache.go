@@ -126,15 +126,34 @@ func GetRandomSatisfiedChannel(
 	}
 
 	channelSyncLock.RLock()
-	defer channelSyncLock.RUnlock()
+	exactIDs, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
+	exactIDs = append([]int(nil), exactIDs...)
+	normalizedModel := ratio_setting.RoutingMatchModelName(model)
+	normalizedIDs, _ := filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+	normalizedIDs = append([]int(nil), normalizedIDs...)
+	candidates := make(map[int]*Channel, len(exactIDs)+len(normalizedIDs))
+	for _, id := range exactIDs {
+		candidates[id] = channelsIDM[id]
+	}
+	for _, id := range normalizedIDs {
+		candidates[id] = channelsIDM[id]
+	}
+	channelSyncLock.RUnlock()
 
-	// First, try to find channels with the exact model name.
-	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
-
-	// If no channels found, try to find channels with the normalized model name.
+	// Balance checks may wait for a key-status update or refresh from SQL.
+	// Release the cache lock first: status writers acquire polling then cache.
+	filterRelayCandidates := func(ids []int) []int {
+		kept := make([]int, 0, len(ids))
+		for _, id := range ids {
+			if channel := candidates[id]; channel == nil || channel.HasRelayBalanceForRequest(filters) {
+				kept = append(kept, id)
+			}
+		}
+		return kept
+	}
+	channels := filterRelayCandidates(exactIDs)
 	if len(channels) == 0 {
-		normalizedModel := ratio_setting.RoutingMatchModelName(model)
-		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		channels = filterRelayCandidates(normalizedIDs)
 	}
 
 	if len(channels) == 0 {
@@ -142,7 +161,7 @@ func GetRandomSatisfiedChannel(
 	}
 
 	if len(channels) == 1 {
-		if channel, ok := channelsIDM[channels[0]]; ok {
+		if channel := candidates[channels[0]]; channel != nil {
 			return channel, nil
 		}
 		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
@@ -150,7 +169,7 @@ func GetRandomSatisfiedChannel(
 
 	uniquePriorities := make(map[int]bool)
 	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
+		if channel := candidates[channelId]; channel != nil {
 			uniquePriorities[int(channel.GetPriority())] = true
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
@@ -171,7 +190,7 @@ func GetRandomSatisfiedChannel(
 	var sumWeight = 0
 	var targetChannels []*Channel
 	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
+		if channel := candidates[channelId]; channel != nil {
 			if channel.GetPriority() == targetPriority {
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)

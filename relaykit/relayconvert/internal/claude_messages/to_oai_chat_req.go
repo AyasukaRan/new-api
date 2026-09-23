@@ -173,12 +173,19 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 			}
 			var toolCalls []dto.ToolCallRequest
 			mediaMessages := make([]dto.MediaContent, 0, len(content))
+			var thinking strings.Builder
+			hasThinking := false
 
 			for _, mediaMsg := range content {
 				if _, exists := toolNames[mediaMsg.Id]; !exists {
 					toolNames[mediaMsg.Id] = mediaMsg.Name
 				}
 				switch mediaMsg.Type {
+				case "thinking":
+					if claudeMessage.Role == "assistant" && mediaMsg.Thinking != nil {
+						hasThinking = true
+						thinking.WriteString(*mediaMsg.Thinking)
+					}
 				case "text", "input_text":
 					message := dto.MediaContent{
 						Type:         "text",
@@ -224,14 +231,18 @@ func ClaudeMessagesRequestToOpenAIChat(ctx context.Context, claudeRequest dto.Cl
 				}
 			}
 
+			if hasThinking {
+				text := thinking.String()
+				openAIMessage.ReasoningContent = &text
+			}
 			if len(toolCalls) > 0 {
 				openAIMessage.SetToolCalls(toolCalls)
 			}
-			if len(mediaMessages) > 0 && len(toolCalls) == 0 {
+			if len(mediaMessages) > 0 {
 				openAIMessage.SetMediaContent(mediaMessages)
 			}
 		}
-		if len(openAIMessage.ParseContent()) > 0 || len(openAIMessage.ToolCalls) > 0 {
+		if len(openAIMessage.ParseContent()) > 0 || len(openAIMessage.ToolCalls) > 0 || openAIMessage.ReasoningContent != nil {
 			openAIMessages = append(openAIMessages, openAIMessage)
 		}
 	}

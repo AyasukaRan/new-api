@@ -50,14 +50,15 @@ function StatBadge(props: {
 
 export function CommonLogsStats() {
   const { t } = useTranslation()
-  const { isAdminView: isAdmin } = useLogsViewScope()
+  const { isAdminView: isAdmin, logSource } = useLogsViewScope()
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
 
   const { data: stats, isLoading } = useQuery({
-    queryKey: ['usage-logs-stats', isAdmin, searchParams],
+    queryKey: ['usage-logs-stats', isAdmin, logSource, searchParams],
     queryFn: async () => {
       const params = buildApiParams({
+        source: logSource,
         page: 1,
         pageSize: 1,
         searchParams,
@@ -73,7 +74,11 @@ export function CommonLogsStats() {
         ? result.data || DEFAULT_LOG_STATS
         : DEFAULT_LOG_STATS
     },
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[1] === isAdmin &&
+      previousQuery.queryKey[2] === logSource
+        ? previousData
+        : undefined,
   })
 
   if (isLoading) {
@@ -89,7 +94,7 @@ export function CommonLogsStats() {
   return (
     <div className='flex flex-wrap items-center gap-2'>
       <StatBadge
-        label={t('Usage')}
+        label={logSource === 'test' ? t('Estimated test cost') : t('Usage')}
         value={sensitiveVisible ? formatLogQuota(stats?.quota || 0) : '••••'}
         accent='bg-sky-500/70'
       />

@@ -1,20 +1,26 @@
 package helper
 
 import (
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	hosttypes "github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -694,4 +700,392 @@ func TestModelPriceHelperNativeGeminiNoThinkingDoesNotAliasBillingModel(t *testi
 	assert.Equal(t, "gemini-3-pro", info.GetBillingModelName())
 	assert.Equal(t, 1.25, priceData.ModelRatio)
 	assert.NotEqual(t, 37.5, priceData.ModelRatio)
+}
+
+func withChannelModelPricing(t *testing.T, jsonStr string) {
+	t.Helper()
+	original := ratio_setting.ChannelModelPricing2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(original))
+	})
+	require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(jsonStr))
+}
+
+func channelPricingContext(t *testing.T, channelId int) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if channelId > 0 {
+		common.SetContextKey(ctx, constant.ContextKeyChannelId, channelId)
+	}
+	return ctx
+}
+
+// Each lane resolves on its own: an operator has to be able to make one
+// channel's output dearer without touching its input or cache price.
+func TestApplyChannelPricingResolvesLanesIndependently(t *testing.T) {
+	withChannelModelPricing(t, `{"lane-test-model":{"7":{"completion_ratio":2}}}`)
+	info := &relaycommon.RelayInfo{OriginModelName: "lane-test-model"}
+
+	price := hosttypes.PriceData{ModelRatio: 0.9, CompletionRatio: 0.5, CacheRatio: 0.1}
+	applyChannelPricing(channelPricingContext(t, 7), info, "lane-test-model", &price)
+
+	assert.Equal(t, 0.9, price.ModelRatio, "an unset lane keeps the global price")
+	assert.Equal(t, 2.0, price.CompletionRatio)
+	assert.Equal(t, 0.1, price.CacheRatio, "an unset lane keeps the global price")
+}
+
+// Zero is a real price meaning free, which is exactly why the stored lanes are
+// pointers rather than a zero-means-unset float.
+func TestApplyChannelPricingTreatsZeroAsFreeNotUnset(t *testing.T) {
+	withChannelModelPricing(t, `{"lane-test-model":{"7":{"model_ratio":0,"cache_ratio":0}}}`)
+	info := &relaycommon.RelayInfo{OriginModelName: "lane-test-model"}
+
+	price := hosttypes.PriceData{ModelRatio: 0.9, CompletionRatio: 0.5, CacheRatio: 0.1}
+	applyChannelPricing(channelPricingContext(t, 7), info, "lane-test-model", &price)
+
+	assert.Zero(t, price.ModelRatio)
+	assert.Equal(t, 0.5, price.CompletionRatio)
+	assert.Zero(t, price.CacheRatio)
+}
+
+func TestApplyChannelPricingFallsBackToGlobal(t *testing.T) {
+	withChannelModelPricing(t, `{"lane-test-model":{"7":{"model_ratio":3}}}`)
+	info := &relaycommon.RelayInfo{OriginModelName: "lane-test-model"}
+
+	cases := map[string]struct {
+		channelId int
+		model     string
+	}{
+		"another channel":  {channelId: 8, model: "lane-test-model"},
+		"another model":    {channelId: 7, model: "other-model"},
+		"no channel known": {channelId: 0, model: "lane-test-model"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			price := hosttypes.PriceData{ModelRatio: 0.9, CompletionRatio: 0.5, CacheRatio: 0.1}
+			applyChannelPricing(channelPricingContext(t, tc.channelId), info, tc.model, &price)
+			assert.Equal(t, 0.9, price.ModelRatio)
+		})
+	}
+}
+
+// A stored value that would turn a charge into a credit must be refused at save
+// time and ignored at request time, never applied.
+func TestChannelModelPricingRejectsUnsafeValues(t *testing.T) {
+	for name, jsonStr := range map[string]string{
+		"negative":          `{"m":{"7":{"model_ratio":-1}}}`,
+		"above the ceiling": `{"m":{"7":{"model_ratio":10001}}}`,
+		"empty model name":  `{"":{"7":{"model_ratio":2}}}`,
+		"invalid channel":   `{"m":{"0":{"model_ratio":2}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, ratio_setting.ValidateChannelModelPricingJSONString(jsonStr))
+			require.Error(t, ratio_setting.UpdateChannelModelPricingByJSONString(jsonStr))
+		})
+	}
+
+	// A value that slipped in before the bound existed must not reach quota math.
+	withChannelModelPricing(t, `{}`)
+	assert.Equal(t, 0.9, ratio_setting.ResolveRatio(ptrFloat(-1), 0.9))
+	assert.Equal(t, 0.9, ratio_setting.ResolveRatio(ptrFloat(math.NaN()), 0.9))
+	assert.Equal(t, 0.9, ratio_setting.ResolveRatio(nil, 0.9))
+	assert.Equal(t, 2.0, ratio_setting.ResolveRatio(ptrFloat(2), 0.9))
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+
+// A retry onto another channel must settle at that channel's prices, and
+// overrides must not compound across attempts.
+func TestRefreshPricingForSelectedChannelReresolvesLanes(t *testing.T) {
+	withChannelModelPricing(t, `{"refresh-test-model":{"9":{"model_ratio":4}}}`)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"refresh-test-model":1}`))
+	t.Cleanup(func() { _ = ratio_setting.UpdateModelRatioByJSONString(`{}`) })
+
+	info := &relaycommon.RelayInfo{OriginModelName: "refresh-test-model", UsingGroup: "default"}
+	info.PriceData.ModelRatio = 999
+
+	RefreshPricingForSelectedChannel(channelPricingContext(t, 9), info)
+	assert.Equal(t, 4.0, info.PriceData.ModelRatio)
+
+	// Running twice must not stack the override on top of itself.
+	RefreshPricingForSelectedChannel(channelPricingContext(t, 9), info)
+	assert.Equal(t, 4.0, info.PriceData.ModelRatio)
+
+	// Moving to a channel without an override returns to the global price.
+	RefreshPricingForSelectedChannel(channelPricingContext(t, 10), info)
+	assert.Equal(t, 1.0, info.PriceData.ModelRatio)
+}
+
+// Retained inactive lanes on another channel must not affect affordability.
+func TestChannelReservationIgnoresOtherChannelsInactivePrices(t *testing.T) {
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios)) })
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"current-channel-estimate":1}`))
+	withChannelModelPricing(t, `{"current-channel-estimate":{
+		"1":{"billing_mode":"per_request","model_price":0.1,"model_ratio":10000},
+		"2":{"billing_mode":"tiered_expr","billing_expr":"p","model_ratio":9999},
+		"3":{"billing_mode":"per_token","model_ratio":8000}
+	}}`)
+	info := &relaycommon.RelayInfo{OriginModelName: "current-channel-estimate", UserGroup: "default", UsingGroup: "default"}
+	price, err := ModelPriceHelper(channelPricingContext(t, 9), info, 1000, &types.TokenCountMeta{MaxTokens: 100})
+	require.NoError(t, err)
+	assert.Equal(t, 1100, price.QuotaToPreConsume)
+	assert.Equal(t, 1.0, price.ModelRatio)
+}
+
+// Pricing is resolved once, before the retry loop, but a retry can land on a
+// channel that prices the model in the other shape. Settlement dispatches on
+// the snapshot, so the snapshot has to follow the channel.
+func TestRefreshPricingFollowsTheChannelAcrossBillingModes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const modelName = "mixed-mode-model"
+	const exprChannel = 5101
+	const ratioChannel = 5102
+	const channelExpr = `tier("channel", p * 7)`
+
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"mixed-mode-model":1}`))
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios)) })
+
+	saved := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error {
+		saved[key] = value
+		return nil
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(saved))
+		_ = ratio_setting.UpdateChannelModelPricingByJSONString("{}")
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode": `{"` + modelName + `":"ratio"}`,
+		"billing_setting.billing_expr": `{}`,
+	}))
+	require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(
+		`{"`+modelName+`":{"`+strconv.Itoa(exprChannel)+`":{"billing_mode":"tiered_expr","billing_expr":"`+
+			`tier(\"channel\", p * 7)"},"`+strconv.Itoa(ratioChannel)+`":{"billing_mode":"ratio","model_ratio":2}}}`))
+
+	newInfo := func(snapshot *billingexpr.BillingSnapshot) *relaycommon.RelayInfo {
+		return &relaycommon.RelayInfo{
+			OriginModelName:       modelName,
+			UserGroup:             "default",
+			UsingGroup:            "default",
+			RequestHeaders:        map[string]string{"Content-Type": "application/json"},
+			BillingRequestInput:   &billingexpr.RequestInput{Headers: map[string]string{}, Body: []byte(`{}`)},
+			TieredBillingSnapshot: snapshot,
+		}
+	}
+	contextForChannel := func(channelId int) *gin.Context {
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		ctx.Set("group", "default")
+		common.SetContextKey(ctx, constant.ContextKeyChannelId, channelId)
+		return ctx
+	}
+	snapshotFor := func(expr string) *billingexpr.BillingSnapshot {
+		return &billingexpr.BillingSnapshot{
+			BillingMode:               "tiered_expr",
+			ModelName:                 modelName,
+			ExprString:                expr,
+			GroupRatio:                1,
+			EstimatedPromptTokens:     100,
+			EstimatedCompletionTokens: 50,
+			QuotaPerUnit:              common.QuotaPerUnit,
+		}
+	}
+
+	t.Run("a retry onto a ratio channel drops the expression", func(t *testing.T) {
+		// Left in place it would bill this channel with the price of the one
+		// that just failed.
+		info := newInfo(snapshotFor(channelExpr))
+		RefreshPricingForSelectedChannel(contextForChannel(ratioChannel), info)
+		assert.Nil(t, info.TieredBillingSnapshot)
+		assert.EqualValues(t, 2, info.PriceData.ModelRatio)
+	})
+
+	t.Run("a retry onto an expression channel adopts its expression", func(t *testing.T) {
+		info := newInfo(nil)
+		RefreshPricingForSelectedChannel(contextForChannel(exprChannel), info)
+		require.NotNil(t, info.TieredBillingSnapshot)
+		assert.Equal(t, channelExpr, info.TieredBillingSnapshot.ExprString)
+		assert.Equal(t, "channel", info.TieredBillingSnapshot.EstimatedTier)
+	})
+
+	t.Run("staying on the same expression keeps the original estimate", func(t *testing.T) {
+		// Rebuilding here would discard the tokens the first attempt priced.
+		existing := snapshotFor(channelExpr)
+		existing.EstimatedQuotaAfterGroup = 4242
+		info := newInfo(existing)
+		RefreshPricingForSelectedChannel(contextForChannel(exprChannel), info)
+		require.NotNil(t, info.TieredBillingSnapshot)
+		assert.EqualValues(t, 4242, info.TieredBillingSnapshot.EstimatedQuotaAfterGroup)
+	})
+
+	t.Run("a channel with no override follows the model", func(t *testing.T) {
+		info := newInfo(snapshotFor(channelExpr))
+		RefreshPricingForSelectedChannel(contextForChannel(5199), info)
+		assert.Nil(t, info.TieredBillingSnapshot, "the model is ratio-billed globally")
+	})
+}
+
+// The same model can have three pricing shapes simultaneously. Preserve the
+// existing legacy ratio meaning while explicit choices take precedence.
+func TestChannelPricingExplicitShapesAndAllLanes(t *testing.T) {
+	const modelName = "channel-complete-pricing"
+	originalPrices := ratio_setting.ModelPrice2JSONString()
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(originalPrices))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"channel-complete-pricing":3}`))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"channel-complete-pricing":1}`))
+	withChannelModelPricing(t, `{"channel-complete-pricing":{
+		"1":{"billing_mode":"ratio","model_ratio":2},
+		"2":{"billing_mode":"per_token","model_ratio":2,"completion_ratio":3,"cache_ratio":0,"create_cache_ratio":4,"image_ratio":5,"audio_ratio":6,"audio_completion_ratio":7},
+		"3":{"billing_mode":"per_request","model_price":0},
+		"4":{"billing_mode":"per_request"},
+		"5":{"billing_mode":"tiered_expr","billing_expr":"tier(\"channel\", p * 2 + c * 8)"}
+	}}`)
+	for _, test := range []struct {
+		name       string
+		channel    int
+		fixed      bool
+		price      float64
+		expression bool
+	}{
+		{"legacy fixed precedence", 1, true, 3, false},
+		{"explicit token precedence", 2, false, -1, false},
+		{"free fixed channel", 3, true, 0, false},
+		{"fixed inheritance", 4, true, 3, false},
+		{"expression over fixed global", 5, false, 0, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{OriginModelName: modelName, UserGroup: "default", UsingGroup: "default"}
+			price, err := ModelPriceHelper(channelPricingContext(t, test.channel), info, 1000, &types.TokenCountMeta{MaxTokens: 100})
+			require.NoError(t, err)
+			assert.Equal(t, test.fixed, price.UsePrice)
+			assert.Equal(t, test.price, price.ModelPrice)
+			assert.Equal(t, test.expression, info.TieredBillingSnapshot != nil)
+			if test.channel == 2 {
+				assert.Equal(t, 2.0, price.ModelRatio)
+				assert.Equal(t, 3.0, price.CompletionRatio)
+				assert.Zero(t, price.CacheRatio)
+				assert.Equal(t, 4.0, price.CacheCreationRatio)
+				assert.Equal(t, 4.0, price.CacheCreation5mRatio)
+				assert.InDelta(t, 6.4, price.CacheCreation1hRatio, 0.00001)
+				assert.Equal(t, 5.0, price.ImageRatio)
+				assert.Equal(t, 6.0, price.AudioRatio)
+				assert.Equal(t, 7.0, price.AudioCompletionRatio)
+				assert.True(t, price.AudioPricingEnabled)
+				// 1,000 input at the worst input lane (6.4) + 100
+				// output audio at 6*7, all scaled by model ratio 2.
+				assert.GreaterOrEqual(t, price.QuotaToPreConsume, 21200)
+			}
+		})
+	}
+}
+
+type channelPricingReservation struct {
+	quota int
+	err   error
+}
+
+func (b *channelPricingReservation) Settle(int) error         { return nil }
+func (b *channelPricingReservation) Refund(*gin.Context)      {}
+func (b *channelPricingReservation) NeedsRefund() bool        { return false }
+func (b *channelPricingReservation) GetPreConsumedQuota() int { return b.quota }
+func (b *channelPricingReservation) Reserve(target int) error {
+	if b.err != nil {
+		return b.err
+	}
+	if target > b.quota {
+		b.quota = target
+	}
+	return nil
+}
+
+func TestChannelPricingRetryRebuildsModesAndReservesBeforeSending(t *testing.T) {
+	withChannelModelPricing(t, `{"retry-complete-pricing":{
+		"1":{"billing_mode":"per_request","model_price":0.1},
+		"2":{"billing_mode":"per_token","model_ratio":2,"create_cache_ratio":3,"audio_ratio":4},
+		"3":{"billing_mode":"tiered_expr","billing_expr":"param(\"service_tier\") == \"fast\" ? tier(\"fast\", p * 9 + c * 20) : tier(\"normal\", p)"},
+		"4":{"billing_mode":"per_request","model_price":0},
+		"5":{"billing_mode":"per_request","model_price":1}
+	}}`)
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "retry-complete-pricing", UserGroup: "default", UsingGroup: "default",
+		BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"service_tier":"fast"}`)},
+	}
+	_, err := ModelPriceHelper(channelPricingContext(t, 1), info, 100, &types.TokenCountMeta{MaxTokens: 50, ImagePriceRatio: 2, BillingRatios: map[string]float64{"n": 3}})
+	require.NoError(t, err)
+	assert.InDelta(t, 0.2, info.PriceData.ModelPrice, 0.000001)
+	reservation := &channelPricingReservation{quota: info.PriceData.QuotaToPreConsume}
+	info.Billing = reservation
+	for _, channel := range []int{2, 3, 1, 4} {
+		require.NoError(t, RefreshPricingForSelectedChannel(channelPricingContext(t, channel), info))
+		previousReservation := reservation.quota
+		require.Nil(t, service.PrepareBillingForSelectedChannel(nil, info))
+		assert.GreaterOrEqual(t, reservation.quota, previousReservation)
+		assert.Equal(t, reservation.quota, info.FinalPreConsumedQuota)
+		switch channel {
+		case 2:
+			assert.False(t, info.PriceData.UsePrice)
+			assert.Nil(t, info.TieredBillingSnapshot)
+			assert.Equal(t, 3.0, info.PriceData.CacheCreationRatio)
+			assert.Equal(t, 4.0, info.PriceData.AudioRatio)
+		case 3:
+			require.NotNil(t, info.TieredBillingSnapshot)
+			assert.Equal(t, "fast", info.TieredBillingSnapshot.EstimatedTier)
+			assert.Equal(t, 50, info.TieredBillingSnapshot.EstimatedCompletionTokens)
+			ok, quota, _ := service.TryTieredSettle(info, billingexpr.TokenParams{P: 100, C: 50, Len: 100})
+			assert.True(t, ok)
+			assert.Equal(t, 950, quota)
+		case 1:
+			assert.True(t, info.PriceData.UsePrice)
+			assert.Nil(t, info.TieredBillingSnapshot)
+			assert.InDelta(t, 0.2, info.PriceData.ModelPrice, 0.000001, "image multiplier is applied once after every channel change")
+			assert.Equal(t, 3.0, info.PriceData.OtherRatioMultiplier())
+		case 4:
+			assert.True(t, info.PriceData.UsePrice)
+			assert.Zero(t, info.PriceData.ModelPrice)
+			assert.Zero(t, info.PriceData.QuotaToPreConsume)
+		}
+	}
+	reservation.err = errors.New("insufficient quota")
+	require.NoError(t, RefreshPricingForSelectedChannel(channelPricingContext(t, 5), info))
+	assert.NotNil(t, service.PrepareBillingForSelectedChannel(nil, info), "an unfunded retry must stop before upstream execution")
+}
+
+func TestChannelPricingMissingFixedPriceAndBadRuntimeExpressionFail(t *testing.T) {
+	withChannelModelPricing(t, `{"unpriced-channel-model":{
+		"1":{"billing_mode":"per_request"},
+		"2":{"billing_mode":"tiered_expr","billing_expr":"param(\"bad\") == true ? -1 : 1"},
+		"3":{"billing_mode":"per_token","model_ratio":10000,"audio_ratio":10000,"audio_completion_ratio":10000}
+	}}`)
+	for _, channel := range []int{1, 2, 3} {
+		info := &relaycommon.RelayInfo{OriginModelName: "unpriced-channel-model", UserGroup: "default", UsingGroup: "default", BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"bad":true}`)}}
+		_, err := ModelPriceHelper(channelPricingContext(t, channel), info, 1000, &types.TokenCountMeta{MaxTokens: 1000})
+		require.Error(t, err, "missing, negative or overflowing channel charges cannot be forwarded")
+	}
+}
+
+func TestTaskChannelPricingFixedAndTokenChoices(t *testing.T) {
+	withChannelModelPricing(t, `{"task-channel-price":{"1":{"billing_mode":"per_request","model_price":0},"2":{"billing_mode":"per_token","model_ratio":2}}}`)
+	for _, channel := range []int{1, 2} {
+		info := &relaycommon.RelayInfo{OriginModelName: "task-channel-price", UserGroup: "default", UsingGroup: "default"}
+		price, err := ModelPriceHelperPerCall(channelPricingContext(t, channel), info, info.OriginModelName)
+		require.NoError(t, err)
+		if channel == 1 {
+			assert.True(t, price.UsePrice)
+			assert.Zero(t, price.ModelPrice)
+			assert.Zero(t, price.Quota)
+		} else {
+			assert.False(t, price.UsePrice)
+			assert.Equal(t, 2.0, price.ModelRatio)
+			assert.Equal(t, int(common.QuotaPerUnit), price.Quota)
+		}
+	}
 }

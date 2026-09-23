@@ -331,6 +331,8 @@ function TagWeightCell({ channel }: { channel: TagRow }) {
  */
 const MAX_INLINE_BALANCE_CHARS = 8
 const SENSITIVE_MASK = '••••'
+/** Per-key balances listed in the tooltip before it collapses into a "+N more" line. */
+const MAX_TOOLTIP_KEY_BALANCES = 20
 
 /**
  * Balance cell component with click to update
@@ -341,7 +343,14 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const layout = useContext(ChannelRowActionsLayoutContext)
   const { sensitiveVisible, setCurrentRow, setOpen } = useChannels()
   const isTagRow = isTagAggregateRow(channel)
-  const balance = channel.balance || 0
+  const balanceQueryDisabled =
+    channel.type !== 57 &&
+    parseChannelSettings(channel.setting)?.balance_query_disabled === true
+  const monitor = channel.balance_monitor
+  const balance = monitor ? (monitor.balance ?? 0) : channel.balance || 0
+  const balanceUnknown = monitor
+    ? monitor.balance == null
+    : !channel.balance_updated_time
   const usedQuota = channel.used_quota || 0
   const [isUpdating, setIsUpdating] = useState(false)
   const [rawBalanceResponse, setRawBalanceResponse] = useState<string | null>(
@@ -371,9 +380,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       showSymbol: layout !== 'card',
     })
   )
-  const remainingFull = withSuffix(
-    formatCurrencyFromUSD(balance, balanceFormatOptions)
-  )
+  const remainingFull = balanceUnknown
+    ? t('Not queried')
+    : withSuffix(formatCurrencyFromUSD(balance, balanceFormatOptions))
   const usedDisplay =
     usedFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
@@ -385,7 +394,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
         )
       : usedFull
   const remainingDisplay =
-    remainingFull.length > MAX_INLINE_BALANCE_CHARS
+    !balanceUnknown && remainingFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
           formatCurrencyFromUSD(balance, {
             compact: true,
@@ -441,7 +450,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       setOpen('inference-status')
       return
     }
-    if (isUpdating) {
+    if (isUpdating || balanceQueryDisabled) {
       return
     }
 
@@ -464,7 +473,19 @@ export function BalanceCell({ channel }: { channel: Channel }) {
 
     try {
       const response = await updateChannelBalance(channel.id)
-      if (response.success && response.balance !== undefined) {
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ['channel-monitoring', channel.id],
+      })
+      if (response.partial) {
+        toast.warning(
+          t(
+            'Some accounts could not be queried. The total retains the last complete balance.'
+          )
+        )
+      } else if (response.success && response.balance != null) {
         toast.success(
           t('Balance updated: {{balance}}', {
             balance: formatCurrencyFromUSD(response.balance, {
@@ -481,7 +502,13 @@ export function BalanceCell({ channel }: { channel: Channel }) {
         setCurrentRow(channel)
         setRawBalanceResponse(response.raw_response)
       } else {
-        handleServerError(response, t('Failed to update balance'))
+        toast.error(
+          response.message === 'channel balance query is disabled'
+            ? t(
+                'Balance queries are disabled. Previously recorded balances are retained.'
+              )
+            : response.message || t('Failed to update balance')
+        )
       }
     } catch (error: unknown) {
       handleServerError(error, t('Failed to update balance'))
@@ -523,14 +550,52 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     />
   )
 
+  const keyBalanceRows =
+    isMultiKeyChannel(channel) && !monitor?.configuration_changed
+      ? (monitor?.key_balances ?? []).map((key) => {
+          let label = SENSITIVE_MASK
+          if (sensitiveVisible) {
+            label =
+              key.balance == null
+                ? t('Query failed')
+                : withSuffix(
+                    formatCurrencyFromUSD(key.balance, balanceFormatOptions)
+                  )
+          }
+          return { index: key.index, label }
+        })
+      : []
+  let balanceStatus: string | null = null
+  if (monitor?.configuration_changed) {
+    balanceStatus = t(
+      'Channel accounts changed. Refresh balances to see the current accounts.'
+    )
+  } else if (monitor?.partial) balanceStatus = t('Partial result')
+  else if (monitor && !monitor.success) balanceStatus = t('Query failed')
+  if (balanceStatus && channel.type !== 57) remainingBadgeVariant = 'warning'
+
   return (
     <TooltipProvider>
-      <div className='-ml-1.5 flex items-center gap-1'>
+      <div className='-ml-1.5 flex flex-wrap items-center gap-1'>
         <Tooltip>
           <TooltipTrigger
             render={
               <StatusBadge
                 label={sensitiveVisible ? usedDisplay : SENSITIVE_MASK}
+                role='button'
+                tabIndex={0}
+                aria-label={t('Channel monitoring')}
+                onClick={() => {
+                  setCurrentRow(channel)
+                  setOpen('channel-monitoring')
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setCurrentRow(channel)
+                    setOpen('channel-monitoring')
+                  }
+                }}
                 variant='neutral'
                 size='sm'
                 copyable={false}
@@ -557,17 +622,89 @@ export function BalanceCell({ channel }: { channel: Channel }) {
                   {remainingBadge}
                 </Button>
               ) : (
-                remainingBadge
+                <StatusBadge
+                  label={remainingBadgeLabel}
+                  variant={remainingBadgeVariant}
+                  size='sm'
+                  copyable={false}
+                  showDot={false}
+                  className={
+                    balanceQueryDisabled ? 'cursor-help' : 'cursor-pointer'
+                  }
+                  role='button'
+                  tabIndex={0}
+                  aria-disabled={balanceQueryDisabled || isUpdating}
+                  aria-label={t('Update balance')}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      void handleClickUpdate()
+                    }
+                  }}
+                  onClick={handleClickUpdate}
+                />
               )
             }
           />
-          <TooltipContent>
-            <p>{remainingTooltipLabel}</p>
-            {channel.type !== 57 && !isInferenceChannel && (
-              <p>{t('Click to update balance')}</p>
-            )}
+          <TooltipContent className='max-w-xs'>
+            {/* Stacked in one flex child: TooltipContent lays its children out
+                in a row, which would put the per-key list beside the total. */}
+            <div className='space-y-1'>
+              <p>{remainingTooltipLabel}</p>
+              {balanceStatus && <p>{balanceStatus}</p>}
+              {monitor?.partial && sensitiveVisible && (
+                <p>
+                  {t('Queried subtotal: {{balance}}', {
+                    balance: formatCurrencyFromUSD(
+                      monitor.known_balance,
+                      balanceFormatOptions
+                    ),
+                  })}
+                </p>
+              )}
+              {keyBalanceRows.length > 0 && (
+                <div
+                  className='space-y-0.5 border-t border-current/20 pt-1'
+                  data-testid='multi-key-balances'
+                >
+                  {keyBalanceRows
+                    .slice(0, MAX_TOOLTIP_KEY_BALANCES)
+                    .map((row) => (
+                      <div
+                        key={row.index}
+                        className='flex items-center justify-between gap-3'
+                      >
+                        <span>{`#${row.index + 1}`}</span>
+                        <span>{row.label}</span>
+                      </div>
+                    ))}
+                  {keyBalanceRows.length > MAX_TOOLTIP_KEY_BALANCES && (
+                    <div>
+                      {t('+{{count}} more', {
+                        count: keyBalanceRows.length - MAX_TOOLTIP_KEY_BALANCES,
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+              {balanceQueryDisabled && (
+                <p>
+                  {t(
+                    'Balance queries are disabled. Previously recorded balances are retained.'
+                  )}
+                </p>
+              )}
+              {channel.type !== 57 && !balanceQueryDisabled && (
+                <p>{t('Click to update balance')}</p>
+              )}
+            </div>
           </TooltipContent>
         </Tooltip>
+        {balanceQueryDisabled && (
+          <span className='text-muted-foreground basis-full pl-1.5 text-[10px]'>
+            {t('Balance queries disabled')}
+          </span>
+        )}
       </div>
 
       <CodexUsageDialog

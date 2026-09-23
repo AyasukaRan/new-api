@@ -28,7 +28,7 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createRef } from 'react'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, assert, beforeEach, expect, it, vi } from 'vitest'
 
 import { evaluateBillingExpression } from '@/features/pricing/lib/billing-expression/runtime'
 import { tryParseTaskVisualConfig } from '@/features/pricing/lib/task-expr'
@@ -46,7 +46,9 @@ import {
   useSystemConfigStore,
 } from '@/stores/system-config-store'
 
+import contract from '../../../../../pkg/billingexpr/testdata/frontend_simulation.json'
 import { previewModelPricing } from '../api'
+import { pricingFromDraft, pricingRow } from '../pricing'
 
 const clients: QueryClient[] = []
 
@@ -594,6 +596,52 @@ it('preserves a legacy per-request draft when conversion is unsupported', async 
   const draft = await commit(editor.ref)
   expect(draft).toMatchObject({ billingMode: 'per-request', price: '0' })
   expect(draft?.billingExpr).toBeUndefined()
+})
+
+it('preserves audio and cache prices when the shared conversion contract requires a manual expression', async () => {
+  const fixture = contract.find((entry) => entry.conversionUnsupportedReason)
+  assert(fixture?.conversion)
+  const request = fixture.conversion
+  const reason = fixture.conversionUnsupportedReason
+  assert(reason)
+  const preview = vi.spyOn(api, 'post').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data: url.endsWith('/convert')
+        ? { unsupported_reason: reason }
+        : {
+            effective: {
+              ...request.pricing,
+              CreateCacheRatio: 1.25,
+              ImageRatio: 1,
+              'billing_setting.billing_mode': 'ratio',
+            },
+            cache_write_mode: 'none',
+            billing_details: {
+              audio_input_price: 4,
+              audio_output_price: 4,
+              audio_text_branches: true,
+            },
+          },
+    },
+  }))
+  const editor = renderEditor(pricingRow(request.model_name, request.pricing))
+  await userEvent
+    .setup()
+    .click(screen.getByRole('button', { name: 'Convert to expression' }))
+  expect(await screen.findByRole('status')).toHaveTextContent(reason)
+  const pricing = { ...request.pricing, 'billing_setting.billing_mode': 'ratio' }
+  expect(preview).toHaveBeenCalledWith('/api/option/model_pricing/convert', {
+    model_name: request.model_name,
+    pricing,
+  })
+  expect(
+    screen.queryByRole('alertdialog', { name: 'Preview pricing conversion' })
+  ).not.toBeInTheDocument()
+  const draft = await commit(editor.ref)
+  assert(draft)
+  expect(pricingFromDraft(draft)).toEqual(pricing)
+  expect(draft.billingExpr).toBeUndefined()
 })
 
 it('defaults to USD, remembers a currency choice and restores it when reopened', async () => {

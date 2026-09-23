@@ -46,6 +46,14 @@ type ScheduledSystemTaskHandler interface {
 	NewPayload() any
 }
 
+// ActivityScheduledSystemTaskHandler can determine its deadline from activity
+// instead of a fixed interval after the previous task. Active tasks still share
+// the existing database lease and uniqueness constraint.
+type ActivityScheduledSystemTaskHandler interface {
+	ScheduledSystemTaskHandler
+	ShouldSchedule(now time.Time, latest *model.SystemTask) (bool, error)
+}
+
 var (
 	systemTaskHandlersMu sync.RWMutex
 	systemTaskHandlers   = map[string]SystemTaskHandler{}
@@ -284,9 +292,18 @@ func runSystemTaskScheduler() {
 			if latest.Status == model.SystemTaskStatusPending || latest.Status == model.SystemTaskStatusRunning {
 				continue // an active row already exists
 			}
-			if now-latest.UpdatedAt < int64(scheduled.Interval().Seconds()) {
-				continue // not due yet
+		}
+		if activity, ok := scheduled.(ActivityScheduledSystemTaskHandler); ok {
+			due, err := activity.ShouldSchedule(time.Unix(now, 0), latest)
+			if err != nil {
+				logger.LogWarn(context.Background(), fmt.Sprintf("system task activity schedule failed: type=%s err=%v", scheduled.Type(), err))
+				continue
 			}
+			if !due {
+				continue
+			}
+		} else if latest != nil && now-latest.UpdatedAt < int64(scheduled.Interval().Seconds()) {
+			continue // not due yet
 		}
 		if _, err := model.CreateSystemTask(scheduled.Type(), scheduled.NewPayload(), nil); err != nil {
 			activeTask, activeErr := model.GetActiveSystemTask(scheduled.Type())

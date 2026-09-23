@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -56,7 +57,8 @@ type Channel struct {
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
 
 	// cache info
-	Keys []string `json:"-" gorm:"-"`
+	Keys           []string               `json:"-" gorm:"-"`
+	BalanceMonitor *ChannelBalanceMonitor `json:"balance_monitor,omitempty" gorm:"-"`
 }
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
@@ -203,9 +205,24 @@ func (channel *Channel) GetKeys() []string {
 	return keys
 }
 
+const ErrorCodeChannelBalanceUnavailable types.ErrorCode = "insufficient_channel_balance"
+
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+	return channel.nextEnabledKey(nil)
+}
+
+// GetNextRelayKey applies monitored balances only to real upstream requests.
+// Administrative queries and probes keep using GetNextEnabledKey.
+func (channel *Channel) GetNextRelayKey(batchRequest ...bool) (string, int, *types.NewAPIError) {
+	return channel.nextEnabledKey(channelNegativeBalanceKeysForRelay(channel, len(batchRequest) > 0 && batchRequest[0]))
+}
+
+func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
+		if negativeKeys[0] {
+			return "", 0, types.NewError(errors.New("channel has no credential with available balance"), ErrorCodeChannelBalanceUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+		}
 		return channel.Key, 0, nil
 	}
 
@@ -235,7 +252,7 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	// Collect indexes of enabled keys
 	enabledIdx := make([]int, 0, len(keys))
 	for i := range keys {
-		if getStatus(i) == common.ChannelStatusEnabled {
+		if getStatus(i) == common.ChannelStatusEnabled && !negativeKeys[i] {
 			enabledIdx = append(enabledIdx, i)
 		}
 	}
@@ -243,6 +260,9 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	// properly handle a channel with no available keys (e.g. mark channel disabled).
 	// Returning the first key here caused requests to keep using an already-disabled key.
 	if len(enabledIdx) == 0 {
+		if len(negativeKeys) > 0 {
+			return "", 0, types.NewError(errors.New("channel has no credential with available balance"), ErrorCodeChannelBalanceUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+		}
 		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
 	}
 
@@ -275,7 +295,7 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		}
 		for i := range keys {
 			idx := (start + i) % len(keys)
-			if getStatus(idx) == common.ChannelStatusEnabled {
+			if getStatus(idx) == common.ChannelStatusEnabled && !negativeKeys[idx] {
 				// update polling index for next call (point to the next position)
 				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
 				return keys[idx], idx, nil
@@ -529,6 +549,23 @@ func (channel *Channel) GetBaseURL() string {
 		url = constant.GetChannelBaseURL(channel.Type)
 	}
 	return url
+}
+
+// GetBatchEndpoint reports where this channel's batch traffic goes and what it
+// presents there.
+//
+// The resolution mirrors GetBaseURL: an operator's explicit address wins, then
+// the provider's built-in batch host, then the channel's own relay address for
+// the providers that serve batch from it. So enabling batch on a known provider
+// needs nothing but the switch, and a self-hosted or proxied deployment can
+// still say where to reach it.
+func (channel *Channel) GetBatchEndpoint(key string) (string, string) {
+	baseURL := constant.GetChannelBatchBaseURL(channel.Type)
+	if baseURL == "" {
+		baseURL = channel.GetBaseURL()
+	}
+	setting := channel.GetSetting()
+	return setting.BatchCredentials(baseURL, key)
 }
 
 func (channel *Channel) GetModelMapping() string {
@@ -1000,6 +1037,15 @@ func (channel *Channel) ValidateSettings() error {
 		return fmt.Errorf("invalid channel proxy: %w", err)
 	}
 	if err := channelParams.ValidateHTTPTransport(); err != nil {
+		return err
+	}
+	if err := channelParams.ValidateBalanceQuery(); err != nil {
+		return err
+	}
+	if !constant.IsValidBalanceQueryType(channelParams.BalanceQueryType) {
+		return fmt.Errorf("invalid balance_query_type: %s", channelParams.BalanceQueryType)
+	}
+	if err := channelParams.ValidateBatch(); err != nil {
 		return err
 	}
 	channelOtherSettings := &dto.ChannelOtherSettings{}

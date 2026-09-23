@@ -218,10 +218,12 @@ func TestGetUserModelsFiltersByRequestedGroup(t *testing.T) {
 func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 	originalAutoGroups := setting.AutoGroups2JsonString()
 	originalUsableGroups := setting.UserUsableGroups2JSONString()
+	originalRatios := ratio_setting.GroupRatio2JSONString()
 	originalSpecialGroups := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.ReadAll()
 	t.Cleanup(func() {
 		require.NoError(t, setting.UpdateAutoGroupsByJsonString(originalAutoGroups))
 		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(originalUsableGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(originalRatios))
 		specialGroups := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup
 		specialGroups.Clear()
 		specialGroups.AddAll(originalSpecialGroups)
@@ -229,6 +231,7 @@ func TestGetUserModelsExpandsAutoGroupsInConfiguredOrder(t *testing.T) {
 
 	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["vip","default","unavailable"]`))
 	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"auto":"自动分组","default":"默认分组","unavailable":"不可用分组"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"vip":1,"unavailable":1}`))
 	specialGroups := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup
 	specialGroups.Clear()
 	specialGroups.Set("default", map[string]string{

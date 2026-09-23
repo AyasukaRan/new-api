@@ -58,13 +58,15 @@ func GetSubscriptionSelf(c *gin.Context) {
 	// Get all subscriptions (including expired)
 	allSubscriptions, err := model.GetAllUserSubscriptions(userId)
 	if err != nil {
-		allSubscriptions = []model.SubscriptionSummary{}
+		common.ApiErrorMsg(c, "订阅信息暂时无法加载，请稍后重试")
+		return
 	}
 
 	// Get active subscriptions for backward compatibility
 	activeSubscriptions, err := model.GetAllActiveUserSubscriptions(userId)
 	if err != nil {
-		activeSubscriptions = []model.SubscriptionSummary{}
+		common.ApiErrorMsg(c, "订阅信息暂时无法加载，请稍后重试")
+		return
 	}
 
 	common.ApiSuccess(c, gin.H{
@@ -401,10 +403,7 @@ type AdminResetSubscriptionRequest struct {
 }
 
 func resolveAdvanceResetTime(value *bool) bool {
-	if value == nil {
-		return true
-	}
-	return *value
+	return value != nil && *value
 }
 
 func recordSubscriptionResetUserLogs(c *gin.Context, result *model.SubscriptionResetResult, adminInfo *model.AuditAdminInfo) {

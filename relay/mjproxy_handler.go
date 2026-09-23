@@ -202,7 +202,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	}
 	modelName := service.CovertMjpActionToModelName(constant.MjActionSwapFace)
 
-	priceData, err := helper.ModelPriceHelperPerCall(c, info)
+	priceData, err := helper.ModelPriceHelperPerCall(c, info, info.OriginModelName)
 	if err != nil {
 		return &dto.MidjourneyResponse{
 			Code:        4,
@@ -521,7 +521,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 
 	modelName := service.CovertMjpActionToModelName(midjRequest.Action)
 
-	priceData, err := helper.ModelPriceHelperPerCall(c, relayInfo)
+	priceData, err := helper.ModelPriceHelperPerCall(c, relayInfo, relayInfo.OriginModelName)
 	if err != nil {
 		return &dto.MidjourneyResponse{
 			Code:        4,

@@ -205,8 +205,6 @@ export function UptimeTrendChart(props: {
     const rawData = props.series.map((point) => ({
       date: formatDayLabel(point.date),
       uptime: toUptimeChartValue(point.uptime_pct),
-      incidents: point.incidents,
-      outage: point.outage_minutes,
     }))
     const data =
       rawData.length === 1
@@ -243,16 +241,8 @@ export function UptimeTrendChart(props: {
           },
           content: [
             {
-              key: t('Uptime'),
+              key: t('Availability'),
               value: (d: { uptime: number }) => `${d.uptime.toFixed(2)}%`,
-            },
-            {
-              key: t('Incidents'),
-              value: (d: { incidents: number }) => `${d.incidents}`,
-            },
-            {
-              key: t('Outage'),
-              value: (d: { outage: number }) => `${d.outage} ${t('minutes')}`,
             },
           ],
         },

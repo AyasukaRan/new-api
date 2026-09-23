@@ -30,12 +30,14 @@ import {
 import {
   LOG_TYPES,
   DISPLAYABLE_LOG_TYPES,
+  LOG_TYPE_ENUM,
   TIMING_LOG_TYPES,
 } from '../constants'
 import type {
   GetLogsParams,
   GetLogsResponse,
   FetchLogsConfig,
+  LogSource,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
 } from '../types'
@@ -53,9 +55,12 @@ export function isDisplayableLogType(type: number): boolean {
   return (DISPLAYABLE_LOG_TYPES as readonly number[]).includes(type)
 }
 
-/**
- * Check if log type shows timing info
- */
+/** Check whether a log contains consumption or test cost details. */
+export function isConsumeLogType(type: number): boolean {
+  return type === LOG_TYPE_ENUM.CONSUME || type === LOG_TYPE_ENUM.TEST_CONSUME
+}
+
+/** Check if log type shows timing info. */
 export function isTimingLogType(type: number): boolean {
   return (TIMING_LOG_TYPES as readonly number[]).includes(type)
 }
@@ -63,8 +68,12 @@ export function isTimingLogType(type: number): boolean {
 /**
  * Get log type configuration by type number
  */
-export function getLogTypeConfig(type: number) {
-  return LOG_TYPES.find((t) => t.value === type) || LOG_TYPES[0]
+export function getLogTypeConfig(type: number, source: LogSource = 'usage') {
+  const displayType =
+    source === 'test' && isConsumeLogType(type)
+      ? LOG_TYPE_ENUM.TEST_CONSUME
+      : type
+  return LOG_TYPES.find((t) => t.value === displayType) || LOG_TYPES[0]
 }
 
 /**
@@ -155,6 +164,7 @@ export function buildBaseParams(config: {
  * Build API params from search params and column filters (for common logs)
  */
 export function buildApiParams(config: {
+  source?: LogSource
   page: number
   pageSize: number
   searchParams: Record<string, unknown>
@@ -181,6 +191,7 @@ export function buildApiParams(config: {
 
   // Build base params from search params
   const params: GetLogsParams = {
+    ...(isAdmin && config.source === 'test' ? { source: 'test' } : {}),
     p: page,
     page_size: pageSize,
     ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
@@ -248,6 +259,7 @@ export async function fetchLogsByCategory(
 
   if (logCategory === 'common') {
     const params = buildApiParams({
+      source: config.source,
       page,
       pageSize,
       searchParams,

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
+import { UserSubscriptionsDialog } from '@/features/subscriptions/components/dialogs/user-subscriptions-dialog'
 
 import { UsersDeleteDialog } from './components/users-delete-dialog'
 import { UsersMutateDrawer } from './components/users-mutate-drawer'
@@ -28,7 +29,7 @@ import { UsersTable } from './components/users-table'
 
 function UsersContent() {
   const { t } = useTranslation()
-  const { open, setOpen, currentRow } = useUsers()
+  const { open, setOpen, currentRow, triggerRefresh } = useUsers()
 
   return (
     <>
@@ -48,6 +49,13 @@ function UsersContent() {
         currentRow={open === 'update' ? currentRow || undefined : undefined}
       />
       <UsersDeleteDialog />
+      <UserSubscriptionsDialog
+        key={currentRow?.id}
+        open={open === 'subscriptions'}
+        onOpenChange={(isOpen) => !isOpen && setOpen(null)}
+        user={currentRow}
+        onSuccess={triggerRefresh}
+      />
     </>
   )
 }

@@ -27,6 +27,7 @@ import type {
   GetLogStatsResponse,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
+  RequestTraceResponse,
   TaskArtifactsResponse,
   UserInfo,
 } from './types'
@@ -124,4 +125,36 @@ export async function getTaskArtifacts(taskId: string) {
     taskArtifactRequestConfig
   )
   return parseTaskArtifactsResponse(response.data)
+}
+
+export async function getRequestTrace(traceId: string, signal?: AbortSignal) {
+  const response = await api.get<RequestTraceResponse>('/api/log/trace', {
+    params: { trace_id: traceId },
+    signal,
+    disableDuplicate: true,
+  })
+  const legs = response.data.data?.legs
+  if (response.data.success !== true || !Array.isArray(legs)) {
+    throw new Error('Failed to load the request trace')
+  }
+  return legs
+}
+
+/**
+ * Fetches a binary trace payload as a blob rather than pointing an <audio> or
+ * <img> at the endpoint directly, so the request carries the same credentials
+ * as every other call instead of relying on the browser's cookie behaviour.
+ */
+export async function getRequestTraceObject(
+  traceId: string,
+  seq: number,
+  signal?: AbortSignal
+) {
+  const response = await api.get<Blob>('/api/log/trace/object', {
+    params: { trace_id: traceId, seq },
+    responseType: 'blob',
+    signal,
+    disableDuplicate: true,
+  })
+  return response.data
 }

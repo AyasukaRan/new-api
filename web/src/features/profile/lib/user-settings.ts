@@ -43,7 +43,8 @@ export function normalizeUserSettings(
     gotify_priority: parsed.gotify_priority ?? 5,
     accept_unset_model_ratio_model:
       parsed.accept_unset_model_ratio_model || false,
-    record_ip_log: parsed.record_ip_log || false,
+    // 默认记录 IP：字段缺失代表用户从未动过这个开关，只有显式 false 才是关闭
+    record_ip_log: parsed.record_ip_log ?? true,
     upstream_model_update_notify_enabled:
       parsed.upstream_model_update_notify_enabled || false,
   }

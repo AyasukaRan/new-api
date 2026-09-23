@@ -1,6 +1,7 @@
 package perfmetrics
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -18,23 +19,30 @@ func flushLoop() {
 		if !setting.Enabled {
 			continue
 		}
-		flushCompletedBuckets()
+		if err := Flush(); err != nil {
+			common.SysError("failed to flush performance metrics: " + err.Error())
+		}
 		cleanupExpiredMetrics(setting.RetentionDays)
 	}
 }
 
-func flushCompletedBuckets() {
-	currentBucket := bucketStart(time.Now().Unix())
+// Flush persists both aggregate and channel observations, including the current
+// bucket. Failed writes remain buffered so a later flush can retry them.
+func Flush() error {
+	return errors.Join(flushAggregateMetrics(), FlushChannelMetrics())
+}
+
+func flushAggregateMetrics() error {
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
+	var firstErr error
 	hotBuckets.Range(func(key, value any) bool {
 		k := key.(bucketKey)
-		if k.bucketTs >= currentBucket {
-			return true
-		}
 
 		bucket := value.(*atomicBucket)
 		drained := bucket.drain()
 		if drained.requestCount == 0 {
-			deleteOldEmptyBucket(k, key)
+			hotBuckets.Delete(key)
 			return true
 		}
 
@@ -52,19 +60,16 @@ func flushCompletedBuckets() {
 		})
 		if err != nil {
 			bucket.addCounters(drained)
-			common.SysError(fmt.Sprintf("failed to flush perf metric bucket model=%s group=%s bucket=%d: %s", k.model, k.group, k.bucketTs, err.Error()))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("failed to flush perf metric bucket model=%s group=%s bucket=%d: %w", k.model, k.group, k.bucketTs, err)
+			}
 			return true
 		}
 
-		deleteOldEmptyBucket(k, key)
+		hotBuckets.Delete(key)
 		return true
 	})
-}
-
-func deleteOldEmptyBucket(k bucketKey, rawKey any) {
-	if k.bucketTs < bucketStart(time.Now().Add(-24*time.Hour).Unix()) {
-		hotBuckets.Delete(rawKey)
-	}
+	return firstErr
 }
 
 func cleanupExpiredMetrics(retentionDays int) {
@@ -74,6 +79,9 @@ func cleanupExpiredMetrics(retentionDays int) {
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
 	if err := model.DeletePerfMetricsBefore(cutoff); err != nil {
 		common.SysError("failed to cleanup expired perf metrics: " + err.Error())
+	}
+	if err := model.DeleteChannelPerfMetricsBefore(cutoff); err != nil {
+		common.SysError("failed to cleanup expired channel perf metrics: " + err.Error())
 	}
 }
 

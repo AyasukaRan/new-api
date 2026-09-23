@@ -32,10 +32,15 @@ import {
 } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { sideDrawerContentClassName } from '@/components/drawer-layout'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Combobox } from '@/components/ui/combobox'
 import {
   Field,
   FieldDescription,
@@ -112,6 +117,7 @@ import { formatPricingNumber } from './pricing-format'
 import { TaskPluginPricingEditor } from './task-plugin-pricing-editor'
 import { TaskUsagePricingEditor } from './task-usage-pricing-editor'
 import { TieredPricingEditor } from './tiered-pricing-editor'
+import { useModelChannelPricing } from './use-model-channel-pricing'
 
 export type { ModelRatioData } from './model-pricing-core'
 
@@ -124,6 +130,11 @@ type ModelPricingSheetProps = {
   usageSchema?: BillingUsageSchema
   pluginVariants?: ModelPricingPluginVariant[]
   onDirtyChange?: (dirty: boolean) => void
+  globalEffectiveData?: ModelRatioData | null
+  globalEffectiveDataLoading?: boolean
+  globalEffectiveDataError?: string
+  onReloadGlobalEffectiveData?: () => void | Promise<unknown>
+  onScopeChange?: (channelId: string | null) => void
 }
 
 type ModelPricingEditorPanelProps = Omit<
@@ -154,6 +165,7 @@ export const ModelPricingSheet = forwardRef<
     usageSchema,
     pluginVariants,
     onDirtyChange,
+    ...scopeProps
   },
   ref
 ) {
@@ -173,13 +185,14 @@ export const ModelPricingSheet = forwardRef<
         </SheetHeader>
         <ModelPricingEditorPanel
           ref={ref}
+          {...scopeProps}
           editData={editData}
           usageSchema={usageSchema}
           pluginVariants={pluginVariants}
           onDirtyChange={onDirtyChange}
           onSave={onSave}
           isSaving={isSaving}
-          className='h-full rounded-none border-0'
+          className='h-full rounded-none border-0 [&>[data-slot=model-pricing-header]]:pr-12'
         />
       </SheetContent>
     </Sheet>
@@ -189,15 +202,287 @@ export const ModelPricingSheet = forwardRef<
 export const ModelPricingEditorPanel = forwardRef<
   ModelPricingEditorPanelHandle,
   ModelPricingEditorPanelProps
->(function ModelPricingEditorPanel(
+>(function ModelPricingEditorPanel(props, ref) {
+  return (
+    <ModelPricingScopeEditor
+      key={props.editData?.name ?? 'new-model'}
+      {...props}
+      ref={ref}
+    />
+  )
+})
+
+const ModelPricingScopeEditor = forwardRef<
+  ModelPricingEditorPanelHandle,
+  ModelPricingEditorPanelProps
+>(function ModelPricingScopeEditor(props, ref) {
+  const { t } = useTranslation()
+  const [scope, setScope] = useState('global')
+  const [dirty, setDirty] = useState(false)
+  const [fieldsRevision, setFieldsRevision] = useState(0)
+  const [pendingChange, setPendingChange] = useState<
+    { type: 'scope'; value: string } | { type: 'reset' } | null
+  >(null)
+  const fieldsRef = useRef<ModelPricingEditorPanelHandle>(null)
+  const channels = useModelChannelPricing(props.editData?.name)
+  const getEditorData = channels.getEditorData
+  const onDirtyChange = props.onDirtyChange
+  const onScopeChange = props.onScopeChange
+  const isGlobal = scope === 'global'
+  const isSaving = Boolean(props.isSaving || channels.isSaving)
+  const effectivePricing =
+    props.globalEffectiveData === undefined
+      ? props.editData
+      : props.globalEffectiveData
+  const effectiveError =
+    !isGlobal &&
+    (props.globalEffectiveDataError ||
+      (!props.globalEffectiveDataLoading && !effectivePricing
+        ? t('Failed to load model pricing')
+        : ''))
+  const scopedData = useMemo(() => {
+    if (isGlobal) return props.editData
+    if (!effectivePricing) return null
+    return getEditorData(scope, effectivePricing)
+  }, [isGlobal, scope, props.editData, effectivePricing, getEditorData])
+  const scopeOptions = useMemo(
+    () => [{ value: 'global', label: t('Global') }, ...channels.channelOptions],
+    [channels.channelOptions, t]
+  )
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
+
+  useEffect(() => {
+    onScopeChange?.(isGlobal ? null : scope)
+    return () => onScopeChange?.(null)
+  }, [isGlobal, scope, onScopeChange])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      commitDraft: async () => {
+        if (!isGlobal) {
+          toast.error(
+            t('Select Global before copying or saving global model prices.')
+          )
+          return null
+        }
+        return (await fieldsRef.current?.commitDraft()) ?? null
+      },
+    }),
+    [isGlobal, t]
+  )
+
+  const saveChannel = async () => {
+    const draft = await fieldsRef.current?.commitDraft()
+    if (!draft) return
+    if (await channels.save(scope, draft, scopedData ?? undefined)) {
+      setFieldsRevision((revision) => revision + 1)
+      setDirty(false)
+    }
+  }
+
+  const reloadChannel = async () => {
+    const success = await channels.reload()
+    if (success) {
+      setFieldsRevision((revision) => revision + 1)
+      setDirty(false)
+    }
+    if (effectiveError) await props.onReloadGlobalEffectiveData?.()
+  }
+
+  let pricingContent = (
+    <ModelPricingFields
+      key={`${scope}:${fieldsRevision}`}
+      ref={fieldsRef}
+      editData={scopedData}
+      usageSchema={props.usageSchema}
+      pluginVariants={isGlobal ? props.pluginVariants : undefined}
+      embedded={props.embedded}
+      scrollHeader={props.scrollHeader}
+      onDirtyChange={setDirty}
+      onSave={isGlobal ? props.onSave : saveChannel}
+      isSaving={isSaving}
+      saveDisabled={
+        !isGlobal &&
+        Boolean(
+          channels.loadError ||
+          channels.conflict ||
+          (channels.hasOverride(scope) && !dirty)
+        )
+      }
+      saveLabel={isGlobal ? 'Save model prices' : 'Save channel pricing'}
+      inheritDisabledLanes={!isGlobal}
+    />
+  )
+  if (!isGlobal && (channels.isLoading || props.globalEffectiveDataLoading)) {
+    pricingContent = <LoadingState />
+  } else if (effectiveError) {
+    pricingContent = (
+      <ErrorState
+        description={effectiveError}
+        onRetry={() => void reloadChannel()}
+      />
+    )
+  }
+
+  return (
+    <div
+      className={cn(
+        'bg-background flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border',
+        props.className
+      )}
+    >
+      <div data-slot='model-pricing-header' className='space-y-3 border-b p-4'>
+        {!props.embedded && (
+          <h3 className='text-base font-medium'>
+            {props.editData ? t('Edit model pricing') : t('Add model pricing')}
+          </h3>
+        )}
+        {props.editData?.name && (
+          <div className='space-y-2'>
+            <Field>
+              <FieldLabel>{t('Pricing scope')}</FieldLabel>
+              <Combobox
+                options={scopeOptions}
+                openOnFocus={false}
+                value={scope}
+                disabled={isSaving}
+                aria-label={t('Pricing scope')}
+                searchPlaceholder={t('Search channels')}
+                emptyText={t('No channels found')}
+                onValueChange={(value) => {
+                  if (!value || value === scope) return
+                  if (dirty) setPendingChange({ type: 'scope', value })
+                  else setScope(value)
+                }}
+              />
+            </Field>
+            {!isGlobal && (
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <p className='text-muted-foreground text-xs'>
+                  {channels.hasOverride(scope)
+                    ? t(
+                        'Prices apply only to this model on the selected channel.'
+                      )
+                    : t(
+                        'Using global pricing. Save to customize this channel.'
+                      )}
+                </p>
+                {channels.hasOverride(scope) && (
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    disabled={isSaving}
+                    onClick={() => setPendingChange({ type: 'reset' })}
+                  >
+                    {t('Use global pricing')}
+                  </Button>
+                )}
+              </div>
+            )}
+            {(channels.loadError ||
+              (!isGlobal && (channels.saveError || channels.conflict))) && (
+              <Alert variant='destructive'>
+                <AlertDescription className='space-y-2'>
+                  <p>
+                    {channels.loadError ||
+                      channels.saveError ||
+                      t(
+                        'Channel pricing changed elsewhere. Reload before saving to avoid overwriting it.'
+                      )}
+                  </p>
+                  <Button
+                    type='button'
+                    size='sm'
+                    variant='outline'
+                    disabled={isSaving}
+                    onClick={() => {
+                      if (dirty) {
+                        setPendingChange({ type: 'scope', value: scope })
+                      } else {
+                        void reloadChannel()
+                      }
+                    }}
+                  >
+                    {t('Reload channel pricing')}
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
+      </div>
+      {pricingContent}
+      <ConfirmDialog
+        open={pendingChange !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingChange(null)
+        }}
+        title={
+          pendingChange?.type === 'reset'
+            ? t('Use global pricing?')
+            : t('Discard unsaved changes?')
+        }
+        desc={
+          pendingChange?.type === 'reset'
+            ? t(
+                'Remove this channel pricing override and use the global model price?'
+              )
+            : t('Your changes have not been saved.')
+        }
+        confirmText={
+          pendingChange?.type === 'reset'
+            ? t('Use global pricing')
+            : t('Discard changes')
+        }
+        isLoading={channels.isSaving}
+        handleConfirm={() => {
+          if (pendingChange?.type === 'scope') {
+            if (pendingChange.value === scope) void reloadChannel()
+            else {
+              setScope(pendingChange.value)
+              setDirty(false)
+            }
+            setPendingChange(null)
+          } else if (pendingChange?.type === 'reset') {
+            void channels.reset(scope).then((success) => {
+              if (success) {
+                setFieldsRevision((revision) => revision + 1)
+                setDirty(false)
+              }
+              setPendingChange(null)
+            })
+          }
+        }}
+      />
+    </div>
+  )
+})
+
+type ModelPricingFieldsProps = ModelPricingEditorPanelProps & {
+  saveLabel: string
+  saveDisabled?: boolean
+  inheritDisabledLanes?: boolean
+}
+
+const ModelPricingFields = forwardRef<
+  ModelPricingEditorPanelHandle,
+  ModelPricingFieldsProps
+>(function ModelPricingFields(
   {
     editData,
-    className,
     onSave,
     isSaving,
     usageSchema,
-    pluginVariants,
     onDirtyChange,
+    saveLabel,
+    saveDisabled,
+    inheritDisabledLanes,
+    pluginVariants,
     embedded = false,
     scrollHeader,
   },
@@ -278,7 +563,11 @@ export const ModelPricingEditorPanel = forwardRef<
   })
   const watchedValues = form.watch()
   let previewRequest = ''
-  if (pricingMode === 'per-token' && watchedValues.name.trim()) {
+  if (
+    !inheritDisabledLanes &&
+    pricingMode === 'per-token' &&
+    watchedValues.name.trim()
+  ) {
     try {
       previewRequest = JSON.stringify({
         model_name: watchedValues.name.trim(),
@@ -553,7 +842,11 @@ export const ModelPricingEditorPanel = forwardRef<
       prices: lanePrices,
       enabled: laneEnabled,
     }
-    if (pricingMode === 'per-token' && effectivePreview) {
+    if (
+      !inheritDisabledLanes &&
+      pricingMode === 'per-token' &&
+      effectivePreview
+    ) {
       previewLanes = createInitialLaneState(
         pricingRow(watchedValues.name, effectivePreview.effective)
       )
@@ -582,6 +875,7 @@ export const ModelPricingEditorPanel = forwardRef<
     watchedValues,
     currency,
     effectivePreview,
+    inheritDisabledLanes,
   ])
 
   const warnings = useMemo(() => {
@@ -714,6 +1008,7 @@ export const ModelPricingEditorPanel = forwardRef<
 
   const convertPricing = async () => {
     if (
+      inheritDisabledLanes ||
       conversion.isPending ||
       conversionPreview ||
       billingExpr.trim() ||
@@ -832,24 +1127,7 @@ export const ModelPricingEditorPanel = forwardRef<
   const showActions = Boolean(onSave)
 
   return (
-    <div
-      className={cn(
-        'bg-background flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border',
-        className
-      )}
-    >
-      {!embedded && (
-        <div className='border-b p-4'>
-          <div className='flex flex-wrap items-start justify-between gap-3'>
-            <div className='min-w-0'>
-              <h3 className='truncate text-base font-medium'>
-                {isEditMode ? t('Edit model pricing') : t('Add model pricing')}
-              </h3>
-            </div>
-          </div>
-        </div>
-      )}
-
+    <div className='flex min-h-0 min-w-0 flex-1 flex-col'>
       <Form {...form}>
         <form
           ref={formElementRef}
@@ -858,6 +1136,7 @@ export const ModelPricingEditorPanel = forwardRef<
           autoComplete='off'
         >
           <div
+            inert={isSaving}
             role='region'
             aria-label={
               isEditMode ? t('Edit model pricing') : t('Add model pricing')
@@ -941,7 +1220,7 @@ export const ModelPricingEditorPanel = forwardRef<
                       </TabsTrigger>
                     </TabsList>
 
-                    {pricingMode !== 'tiered_expr' && (
+                    {!inheritDisabledLanes && pricingMode !== 'tiered_expr' && (
                       <Alert className='border-amber-500/40 bg-amber-500/10 p-4 text-amber-900 dark:text-amber-100'>
                         <AlertTriangle aria-hidden='true' className='size-5' />
                         <AlertDescription className='space-y-3 text-sm text-inherit'>
@@ -976,13 +1255,14 @@ export const ModelPricingEditorPanel = forwardRef<
                         </AlertDescription>
                       </Alert>
                     )}
-                    {(pricingMode !== 'tiered_expr' || wasConverted) && (
-                      <p className='text-muted-foreground text-xs'>
-                        {t(
-                          'After conversion, expression reservation and rounding rules apply. Effective unit prices are preserved; individual rounded charges may differ.'
-                        )}
-                      </p>
-                    )}
+                    {!inheritDisabledLanes &&
+                      (pricingMode !== 'tiered_expr' || wasConverted) && (
+                        <p className='text-muted-foreground text-xs'>
+                          {t(
+                            'After conversion, expression reservation and rounding rules apply. Effective unit prices are preserved; individual rounded charges may differ.'
+                          )}
+                        </p>
+                      )}
 
                     <TabsContent
                       value='per-token'
@@ -1071,6 +1351,13 @@ export const ModelPricingEditorPanel = forwardRef<
                               compact={embedded}
                               title={t(lane.titleKey)}
                               description={t(lane.descriptionKey)}
+                              disabledDescription={
+                                inheritDisabledLanes
+                                  ? t(
+                                      'Disabled lanes inherit the global multiplier. Enter 0 for free usage.'
+                                    )
+                                  : undefined
+                              }
                               placeholder={lane.placeholder}
                               value={lanePrices[lane.key]}
                               enabled={laneEnabled[lane.key]}
@@ -1152,17 +1439,21 @@ export const ModelPricingEditorPanel = forwardRef<
                   <div className='text-sm font-medium'>{t('Preview')}</div>
                 </div>
                 <div className='divide-y'>
-                  {pricingMode === 'per-token' && !effectivePreview && (
-                    <p
-                      className='text-muted-foreground px-3 py-2 text-xs'
-                      role='status'
-                    >
-                      {pricePreview.isError
-                        ? t('Failed to load model pricing')
-                        : t('Loading...')}
-                    </p>
-                  )}
-                  {(pricingMode !== 'per-token' || effectivePreview) &&
+                  {!inheritDisabledLanes &&
+                    pricingMode === 'per-token' &&
+                    !effectivePreview && (
+                      <p
+                        className='text-muted-foreground px-3 py-2 text-xs'
+                        role='status'
+                      >
+                        {pricePreview.isError
+                          ? t('Failed to load model pricing')
+                          : t('Loading...')}
+                      </p>
+                    )}
+                  {(inheritDisabledLanes ||
+                    pricingMode !== 'per-token' ||
+                    effectivePreview) &&
                     previewRows.map((row) => (
                       <div key={row.key} className='grid gap-1 px-3 py-2.5'>
                         <span className='text-muted-foreground text-xs'>
@@ -1176,7 +1467,12 @@ export const ModelPricingEditorPanel = forwardRef<
                               : 'truncate'
                           )}
                         >
-                          {row.value}
+                          {inheritDisabledLanes &&
+                          pricingMode === 'per-token' &&
+                          row.key !== 'inputPrice' &&
+                          row.value === t('Empty')
+                            ? t('Inherits global multiplier')
+                            : row.value}
                         </span>
                       </div>
                     ))}
@@ -1191,11 +1487,11 @@ export const ModelPricingEditorPanel = forwardRef<
                   <Button
                     type='button'
                     onClick={onSave}
-                    disabled={isSaving}
+                    disabled={isSaving || saveDisabled}
                     className='w-full sm:w-auto'
                   >
                     <Save data-icon='inline-start' />
-                    {isSaving ? t('Saving...') : t('Save model prices')}
+                    {isSaving ? t('Saving...') : t(saveLabel)}
                   </Button>
                 )}
               </div>

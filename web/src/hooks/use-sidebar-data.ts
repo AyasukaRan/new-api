@@ -99,6 +99,12 @@ export function useSidebarData(): SidebarData {
             icon: ClipboardList,
           },
           {
+            title: t('Test Logs'),
+            url: '/usage-logs/test',
+            icon: FlaskConical,
+            requiredRole: ROLE.ADMIN,
+          },
+          {
             title: t('Task Logs'),
             url: '/usage-logs/task',
             activeUrls: ['/usage-logs/drawing'],

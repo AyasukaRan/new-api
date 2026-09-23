@@ -76,6 +76,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ws          *websocket.Conn
 	)
 
+	// Registered before every other defer so it runs last, after the error
+	// response below has been written. Realtime is excluded: it hijacks the
+	// connection, so nothing of the exchange reaches the response writer.
+	if relayFormat != types.RelayFormatOpenAIRealtime {
+		if service.BeginRequestTrace(c, string(relayFormat)) != "" {
+			defer service.FinishRequestTrace(c)
+		}
+	}
+
 	if relayFormat == types.RelayFormatOpenAIRealtime {
 		var err error
 		ws, err = upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -123,6 +132,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
 	}
+	finishMetadata := service.BeginRequestMetadata(c, relayInfo)
+	defer finishMetadata()
 
 	defer func() {
 		recovered := recover()
@@ -154,6 +165,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	var observation *bool
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.StreamStatus = nil
@@ -167,7 +179,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
-		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
+		if billingErr := service.PrepareBillingForSelectedChannel(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
 		}
@@ -184,6 +196,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		relayInfo.ChannelAttemptStartTime = time.Now()
+		finishActivity := perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, channel.Id)
+		service.ResetRequestToolObservation(c)
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
 			newAPIError = relay.WssHelper(c, relayInfo)
@@ -194,6 +209,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		default:
 			newAPIError = relayHandler(c, relayInfo)
 		}
+		observation = perfmetrics.RelayObservation(c.Request.Context(), relayInfo, newAPIError)
+		finishActivity(observation)
+		if observation != nil {
+			perfmetrics.RecordChannelAttempt(relayInfo, channel.Id, *observation)
+		}
+		statusCode, errorMessage := 0, ""
+		if newAPIError != nil {
+			statusCode, errorMessage = newAPIError.StatusCode, newAPIError.Error()
+		} else if observation != nil && !*observation && relayInfo.StreamStatus != nil {
+			errorMessage = relayInfo.StreamStatus.Summary()
+		}
+		perfmetrics.RecordChannelKeyResult(relayInfo, channel, observation, statusCode, errorMessage)
 
 		if newAPIError == nil {
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
@@ -261,6 +288,12 @@ var upgrader = websocket.Upgrader{
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if info.ChannelMeta == nil {
+		// Capture the selected channel configuration before the request starts,
+		// so a later admin edit cannot relabel its key observation.
+		if channel, err := model.CacheGetChannel(c.GetInt("channel_id")); err == nil && channel != nil {
+			service.RequestPolicy(c).BeginAttempt(channel, info.UsingGroup)
+			return channel, nil
+		}
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -275,21 +308,33 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		service.RequestPolicy(c).BeginAttempt(channel, info.UsingGroup)
 		return channel, nil
 	}
-	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
-	if err != nil {
-		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
-	}
-	if channel == nil {
-		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+	var channel *model.Channel
+	for selection := 0; ; selection++ {
+		var selectGroup string
+		var err error
+		channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(retryParam)
+		if err != nil {
+			return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		if channel == nil {
+			return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
+		if newAPIError == nil {
+			break
+		}
+		_, pinned, _ := service.GetChannelConstraints(c).ResolvedPin()
+		if newAPIError.GetErrorCode() != model.ErrorCodeChannelBalanceUnavailable || pinned || selection > 0 {
+			return nil, newAPIError
+		}
 	}
 
-	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
-
-	service.RequestPolicy(c).BeginAttempt(channel, selectGroup)
-	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
-	if newAPIError != nil {
-		return nil, newAPIError
+	// Re-price after the context describes the newly selected channel, not the
+	// one that just failed.
+	if err := helper.RefreshPricingForSelectedChannel(c, info); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
 	}
+	service.RequestPolicy(c).BeginAttempt(channel, info.UsingGroup)
 	return channel, nil
 }
 
@@ -316,6 +361,10 @@ func RelayMidjourney(c *gin.Context) {
 	}
 
 	var mjErr *taskdto.MidjourneyResponse
+	monitorChannelID := c.GetInt("channel_id")
+	monitorChannel, _ := model.CacheGetChannel(monitorChannelID)
+	relayInfo.ChannelAttemptStartTime = time.Now()
+	var finishActivity func(*bool)
 	switch relayInfo.RelayMode {
 	case relayconstant.RelayModeMidjourneyNotify:
 		mjErr = relay.RelayMidjourneyNotify(c)
@@ -324,9 +373,27 @@ func RelayMidjourney(c *gin.Context) {
 	case relayconstant.RelayModeMidjourneyTaskImageSeed:
 		mjErr = relay.RelayMidjourneyTaskImageSeed(c)
 	case relayconstant.RelayModeSwapFace:
+		finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, monitorChannelID)
 		mjErr = relay.RelaySwapFace(c, relayInfo)
 	default:
+		finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, monitorChannelID)
 		mjErr = relay.RelayMidjourneySubmit(c, relayInfo)
+	}
+	if finishActivity != nil {
+		var observation *bool
+		if c.Request.Context().Err() == nil {
+			observation = common.GetPointer(mjErr == nil)
+		}
+		finishActivity(observation)
+		if observation != nil {
+			perfmetrics.RecordChannelAttempt(relayInfo, relayInfo.GetChannelID(), *observation)
+			perfmetrics.RecordChannelRelayResult(relayInfo, *observation)
+		}
+		statusCode, errorMessage := 0, ""
+		if mjErr != nil {
+			statusCode, errorMessage = http.StatusBadRequest, mjErr.Description+" "+mjErr.Result
+		}
+		perfmetrics.RecordChannelKeyResult(relayInfo, monitorChannel, observation, statusCode, errorMessage)
 	}
 	//err = relayMidjourneySubmit(c, relayMode)
 	log.Println(mjErr)
@@ -476,6 +543,7 @@ func executeTaskSubmissionWith(
 	diagnostics.start(relayInfo)
 	var result *relay.TaskSubmitResult
 	var taskErr *taskdto.TaskError
+	var observation *bool
 	durable := false
 	stage := "start"
 	defer func() {
@@ -541,7 +609,22 @@ func executeTaskSubmissionWith(
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		stage = "submit"
+		relayInfo.ChannelAttemptStartTime = time.Now()
+		finishActivity := perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, channel.Id)
 		result, taskErr = submit(c, relayInfo)
+		observation = nil
+		if c.Request.Context().Err() == nil {
+			observation = common.GetPointer(taskErr == nil && result != nil)
+		}
+		finishActivity(observation)
+		if observation != nil {
+			perfmetrics.RecordChannelAttempt(relayInfo, channel.Id, *observation)
+		}
+		statusCode, errorMessage := 0, ""
+		if taskErr != nil {
+			statusCode, errorMessage = taskErr.StatusCode, taskErr.Message
+		}
+		perfmetrics.RecordChannelKeyResult(relayInfo, channel, observation, statusCode, errorMessage)
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
@@ -570,6 +653,9 @@ func executeTaskSubmissionWith(
 			break
 		}
 	}
+	if observation != nil {
+		perfmetrics.RecordChannelRelayResult(relayInfo, *observation)
+	}
 
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {
@@ -597,11 +683,13 @@ func executeTaskSubmissionWith(
 	if relayInfo.Billing != nil {
 		stage = "reserve"
 		diagnostics.reserve("reserve_start", result.Quota)
-		if reserveErr := relayInfo.Billing.Reserve(result.Quota); reserveErr != nil {
-			common.SysError("reserve adjusted task billing error: " + reserveErr.Error())
-			taskErr = service.TaskErrorWrapperLocal(errors.New("insufficient quota for adjusted task cost"), string(types.ErrorCodeInsufficientUserQuota), http.StatusForbidden)
-			diagnostics.failed("reserve", "insufficient_quota", taskErr, false)
-			return nil, taskErr
+		if result.Quota > relayInfo.Billing.GetPreConsumedQuota() {
+			if reserveErr := relayInfo.Billing.Reserve(result.Quota); reserveErr != nil {
+				common.SysError("reserve adjusted task billing error: " + reserveErr.Error())
+				taskErr = service.TaskErrorWrapperLocal(errors.New("insufficient quota for adjusted task cost"), string(types.ErrorCodeInsufficientUserQuota), http.StatusForbidden)
+				diagnostics.failed("reserve", "insufficient_quota", taskErr, false)
+				return nil, taskErr
+			}
 		}
 		diagnostics.reserve("reserve_complete", result.Quota)
 	}

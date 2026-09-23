@@ -7,6 +7,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
 	sharedgemini "github.com/QuantumNous/new-api/relaykit/relayconvert/internal/shared/gemini"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
+	kitreasoning "github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -826,4 +827,195 @@ func inputContentText(t *testing.T, item map[string]any) string {
 	text, ok := part["text"].(string)
 	require.True(t, ok)
 	return text
+}
+
+func TestReasoningChatHistoryResponsesRoundTrip(t *testing.T) {
+	first, second, empty, ignored := "First thought\n", "Second thought", "", "must not replace explicit empty"
+	firstCalls := mustRawMessage(t, []dto.ToolCallRequest{
+		{ID: "call_1", Type: "function", Function: dto.FunctionRequest{Name: "lookup", Arguments: `{}`}},
+		{ID: "call_2", Type: "function", Function: dto.FunctionRequest{Name: "lookup", Arguments: `{}`}},
+	})
+	secondCalls := mustRawMessage(t, []dto.ToolCallRequest{
+		{ID: "call_3", Type: "function", Function: dto.FunctionRequest{Name: "lookup", Arguments: `{}`}},
+	})
+	original := &dto.GeneralOpenAIRequest{Model: "deepseek-v4-flash", Messages: []dto.Message{
+		{Role: "user", Content: "look up", ReasoningContent: &ignored},
+		{Role: "assistant", Content: "Checking", ReasoningContent: &first, ToolCalls: firstCalls},
+		{Role: "tool", ToolCallId: "call_1", Content: "one", ReasoningContent: &ignored},
+		{Role: "tool", ToolCallId: "call_2", Content: "two"},
+		{Role: "assistant", Reasoning: &second, ToolCalls: secondCalls},
+		{Role: "tool", ToolCallId: "call_3", Content: "three"},
+		{Role: "assistant", Content: "Done", ReasoningContent: &empty, Reasoning: &ignored},
+		{Role: "assistant", Content: "An adjacent answer", ReasoningContent: &second},
+		{Role: "user", Content: "again"},
+		{Role: "assistant", Content: "No thinking supplied"},
+		{Role: "assistant", Content: "Thinking resumes", ReasoningContent: &first},
+	}}
+	responses, err := ChatCompletionsRequestToResponsesRequest(original)
+	require.NoError(t, err)
+	var input []map[string]any
+	require.NoError(t, kitutil.Unmarshal(responses.Input, &input))
+	// DeepSeek's Responses input accepts full reasoning_text content, not
+	// summary_text, so a local round trip through a lenient parser is insufficient.
+	for _, item := range input {
+		if item["type"] != "reasoning" {
+			continue
+		}
+		parts, ok := item["content"].([]any)
+		require.True(t, ok)
+		require.Len(t, parts, 1)
+		part, ok := parts[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "reasoning_text", part["type"])
+		assert.Empty(t, item["summary"])
+		assert.NotContains(t, item, "encrypted_content")
+	}
+	got, err := ResponsesRequestToChatCompletionsRequest(responses)
+	require.NoError(t, err)
+	require.Len(t, got.Messages, len(original.Messages))
+	for i, want := range original.Messages {
+		assert.Equal(t, want.Role, got.Messages[i].Role)
+		assert.Equal(t, want.StringContent(), got.Messages[i].StringContent())
+		assert.Equal(t, want.ToolCallId, got.Messages[i].ToolCallId)
+		assert.Equal(t, want.ParseToolCalls(), got.Messages[i].ParseToolCalls())
+		if want.Role == "assistant" && (want.ReasoningContent != nil || want.Reasoning != nil) {
+			require.NotNil(t, got.Messages[i].ReasoningContent)
+			assert.Equal(t, want.GetReasoningContent(), *got.Messages[i].ReasoningContent)
+		} else {
+			assert.Nil(t, got.Messages[i].ReasoningContent)
+		}
+	}
+}
+
+func TestReasoningResponsesOutputReplaysAfterToolResult(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "buffered", true: "streamed"}[stream], func(t *testing.T) {
+			thought, text, finish := "Inspect the weather", "Checking now", "tool_calls"
+			var response *dto.OpenAIResponsesResponse
+			if stream {
+				state := NewChatToResponsesStreamState("resp_test", "deepseek-v4-flash")
+				_, err := ChatCompletionsStreamChunkToResponsesEvents(&dto.ChatCompletionsStreamResponse{
+					Choices: []dto.ChatCompletionsStreamResponseChoice{{
+						Delta: dto.ChatCompletionsStreamResponseChoiceDelta{
+							Role: "assistant", ReasoningContent: &thought, Content: &text,
+							ToolCalls: []dto.ToolCallResponse{{ID: "call_1", Type: "function", Function: dto.FunctionResponse{Name: "weather", Arguments: `{}`}}},
+						},
+						FinishReason: &finish,
+					}},
+				}, state)
+				require.NoError(t, err)
+				for _, event := range FinalizeChatCompletionsStreamToResponses(state) {
+					if event.Type == "response.completed" {
+						response = event.Payload.Response
+					}
+				}
+				require.NotNil(t, response)
+			} else {
+				message := dto.Message{Role: "assistant", Content: text, ReasoningContent: &thought}
+				message.SetToolCalls([]dto.ToolCallRequest{{ID: "call_1", Type: "function", Function: dto.FunctionRequest{Name: "weather", Arguments: `{}`}}})
+				var err error
+				response, _, err = ChatCompletionsResponseToResponsesResponse(&dto.OpenAITextResponse{
+					Model: "deepseek-v4-flash", Choices: []dto.OpenAITextResponseChoice{{Message: message, FinishReason: finish}},
+				}, "resp_test")
+				require.NoError(t, err)
+			}
+			var input []map[string]any
+			require.NoError(t, kitutil.Unmarshal(mustRawMessage(t, response.Output), &input))
+			input = append(input, map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "sunny"})
+			got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{Model: "deepseek-v4-flash", Input: mustRawMessage(t, input)})
+			require.NoError(t, err)
+			require.Len(t, got.Messages, 2)
+			assert.Equal(t, "assistant", got.Messages[0].Role)
+			assert.Equal(t, thought, got.Messages[0].GetReasoningContent())
+			assert.Equal(t, text, got.Messages[0].StringContent())
+			require.Len(t, got.Messages[0].ParseToolCalls(), 1)
+			assert.Equal(t, "call_1", got.Messages[0].ParseToolCalls()[0].ID)
+			assert.Equal(t, "tool", got.Messages[1].Role)
+			assert.Nil(t, got.Messages[1].ReasoningContent)
+		})
+	}
+}
+
+func TestReasoningResponsesInputPlaintextAndOpaqueBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		item      map[string]any
+		want      *string
+		wantError string
+	}{
+		{name: "empty summary is present", item: map[string]any{"summary": []map[string]any{{"type": "summary_text", "text": ""}}}, want: kitutil.GetPointer("")},
+		{name: "plaintext parts concatenate", item: map[string]any{"summary": []map[string]any{{"type": "summary_text", "text": "one\n"}, {"type": "summary_text", "text": "two"}}}, want: kitutil.GetPointer("one\ntwo")},
+		{name: "content precedes summary", item: map[string]any{"content": []map[string]any{{"type": "reasoning_text", "text": "Full text"}}, "summary": []map[string]any{{"type": "summary_text", "text": "Summary"}}, "encrypted_content": "opaque"}, want: kitutil.GetPointer("Full text")},
+		{name: "missing plaintext stays absent", item: map[string]any{"summary": []any{}, "signature": "opaque"}},
+		{name: "encrypted only rejected", item: map[string]any{"summary": []any{}, "encrypted_content": "opaque"}, wantError: "encrypted-only reasoning"},
+		{name: "non-string plaintext rejected", item: map[string]any{"summary": []map[string]any{{"type": "summary_text", "text": 123}}}, wantError: "reasoning text must be a string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.item["type"] = "reasoning"
+			got, err := ResponsesRequestToChatCompletionsRequest(&dto.OpenAIResponsesRequest{Model: "deepseek-v4-flash", Input: mustRawMessage(t, []map[string]any{
+				{"role": "user", "content": "hello"}, tc.item,
+				{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": `{}`},
+				{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+				{"type": "function_call", "call_id": "call_2", "name": "lookup", "arguments": `{}`},
+				{"role": "user", "content": "new turn"},
+				{"type": "function_call", "call_id": "call_3", "name": "lookup", "arguments": `{}`},
+			})})
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				assert.True(t, kitreasoning.IsClientError(err))
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, got.Messages, 6)
+			assert.Equal(t, tc.want, got.Messages[1].ReasoningContent)
+			assert.Nil(t, got.Messages[3].ReasoningContent, "tool result starts a new assistant continuation")
+			assert.Nil(t, got.Messages[5].ReasoningContent, "user message starts a new turn")
+		})
+	}
+}
+
+func TestReasoningClaudeOutputReplaysAfterToolResult(t *testing.T) {
+	thought := "Inspect the weather"
+	message := dto.Message{Role: "assistant", Content: "Checking now", ReasoningContent: &thought}
+	message.SetToolCalls([]dto.ToolCallRequest{{ID: "call_1", Type: "function", Function: dto.FunctionRequest{Name: "weather", Arguments: `{}`}}})
+	response := ResponseOpenAI2Claude(&dto.OpenAITextResponse{
+		Model: "deepseek-v4-flash", Choices: []dto.OpenAITextResponseChoice{{Message: message, FinishReason: "tool_calls"}},
+	}, nil)
+	got, err := ClaudeMessagesRequestToOpenAIChat(dto.ClaudeRequest{Model: "deepseek-v4-flash", Messages: []dto.ClaudeMessage{
+		{Role: "assistant", Content: response.Content},
+		{Role: "user", Content: []dto.ClaudeMediaMessage{{Type: "tool_result", ToolUseId: "call_1", Content: "sunny"}}},
+	}}, nil)
+	require.NoError(t, err)
+	require.Len(t, got.Messages, 2)
+	assert.Equal(t, thought, got.Messages[0].GetReasoningContent())
+	require.Len(t, got.Messages[0].ParseContent(), 1)
+	assert.Equal(t, "Checking now", got.Messages[0].ParseContent()[0].Text)
+	require.Len(t, got.Messages[0].ParseToolCalls(), 1)
+	assert.Equal(t, "call_1", got.Messages[0].ParseToolCalls()[0].ID)
+	assert.Equal(t, "tool", got.Messages[1].Role)
+	assert.Nil(t, got.Messages[1].ReasoningContent)
+
+	for _, tc := range []struct {
+		name   string
+		blocks []dto.ClaudeMediaMessage
+		want   *string
+	}{
+		{name: "empty thinking remains present", blocks: []dto.ClaudeMediaMessage{{Type: "thinking", Thinking: kitutil.GetPointer("")}}, want: kitutil.GetPointer("")},
+		{name: "multiple thinking blocks", blocks: []dto.ClaudeMediaMessage{{Type: "thinking", Thinking: kitutil.GetPointer("one\n")}, {Type: "thinking", Thinking: kitutil.GetPointer("two")}}, want: kitutil.GetPointer("one\ntwo")},
+		{name: "opaque fields are not plaintext", blocks: []dto.ClaudeMediaMessage{{Type: "thinking", Signature: "opaque"}, {Type: "redacted_thinking", Data: "opaque"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blocks := append(tc.blocks, dto.ClaudeMediaMessage{Type: "text", Text: kitutil.GetPointer("Answer")})
+			got, err := ClaudeMessagesRequestToOpenAIChat(dto.ClaudeRequest{Model: "deepseek-v4-flash", Messages: []dto.ClaudeMessage{
+				{Role: "assistant", Content: blocks},
+				{Role: "user", Content: []dto.ClaudeMediaMessage{{Type: "thinking", Thinking: &thought}, {Type: "text", Text: kitutil.GetPointer("Next")}}},
+				{Role: "assistant", Content: "No thinking supplied"},
+			}}, nil)
+			require.NoError(t, err)
+			require.Len(t, got.Messages, 3)
+			assert.Equal(t, tc.want, got.Messages[0].ReasoningContent)
+			assert.Nil(t, got.Messages[1].ReasoningContent)
+			assert.Nil(t, got.Messages[2].ReasoningContent)
+		})
+	}
 }

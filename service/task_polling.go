@@ -478,7 +478,8 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	if ch.GetBaseURL() != "" {
 		baseURL = ch.GetBaseURL()
 	}
-	proxy := ch.GetSetting().Proxy
+	channelSetting := ch.GetSetting()
+	proxy := channelSetting.Proxy
 
 	task := taskM[taskId]
 	if task == nil {
@@ -486,10 +487,18 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		return fmt.Errorf("task %s not found", taskId)
 	}
 	key := ch.Key
+	// Chat is not a task, so every task on a batch-enabled channel is a batch:
+	// poll it where it was submitted rather than at the channel's relay host.
+	if channelSetting.BatchEnabled {
+		baseURL, key = ch.GetBatchEndpoint(key)
+	}
 
 	privateData := task.PrivateData
 	if privateData.Key != "" {
 		key = privateData.Key
+	}
+	if privateData.BaseUrl != "" {
+		baseURL = privateData.BaseUrl
 	}
 	snap := task.Snapshot()
 	resp, err := adaptor.FetchTask(baseURL, key, task, proxy)

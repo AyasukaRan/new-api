@@ -66,6 +66,7 @@ export function ModelPricingPanel(props: {
   const save = useSaveModelPricing()
   const [entry, setEntry] = useState<ModelPricingEntry | null>(null)
   const [resetOpen, setResetOpen] = useState(false)
+  const [channelScope, setChannelScope] = useState<string | null>(null)
   const editor = useRef<ModelPricingEditorPanelHandle>(null)
   const editData = useMemo(() => {
     if (!entry) return null
@@ -77,6 +78,10 @@ export function ModelPricingPanel(props: {
     }
     return pricingRow(entry.model_name, values)
   }, [entry])
+  const globalEffectiveData = useMemo(
+    () => (entry ? pricingRow(entry.model_name, entry.effective) : null),
+    [entry]
+  )
 
   useEffect(() => {
     const loaded = query.data?.entries.find(
@@ -88,7 +93,7 @@ export function ModelPricingPanel(props: {
   }, [query.data, entry, props.modelName])
 
   const persist = async (reset = false) => {
-    if (!entry) return
+    if (!entry || channelScope !== null) return
     try {
       const draft = reset ? null : await editor.current?.commitDraft()
       if (!reset && !draft) return
@@ -163,6 +168,8 @@ export function ModelPricingPanel(props: {
         embedded
         ref={editor}
         editData={editData}
+        globalEffectiveData={globalEffectiveData}
+        onScopeChange={setChannelScope}
         usageSchema={entry.usage_schema}
         pluginVariants={entry.plugin_variants}
         onDirtyChange={props.onDirtyChange}
@@ -170,85 +177,87 @@ export function ModelPricingPanel(props: {
         isSaving={save.isPending}
         className='rounded-none border-0'
         scrollHeader={
-          <>
-            <div className='flex flex-wrap items-center justify-between gap-2'>
-              <div className='min-w-0 flex-1 break-words'>
-                <p className='text-muted-foreground text-xs'>
-                  {Object.keys(entry.configured).length
-                    ? t('Stored configuration with effective defaults')
-                    : t('Using built-in or default pricing')}
-                </p>
-              </div>
-              <Button
-                variant='outline'
-                size='sm'
-                onClick={() => setResetOpen(true)}
-                disabled={save.isPending}
-              >
-                {t('Restore default pricing')}
-              </Button>
-            </div>
-            <section
-              aria-label={t('Current Billing')}
-              className='space-y-3 border-b pb-3'
-            >
-              <h3 className='text-muted-foreground text-xs'>
-                {t('Current Billing')}
-              </h3>
-              <div className='max-w-xs'>
-                <ModelPriceCell
-                  model={effectivePricing}
-                  options={{ tokenUnit: 'M' }}
-                  showExpression={false}
-                />
-              </div>
-              {isDynamicPricingModel(effectivePricing) ? (
-                <DynamicPricingBreakdown
-                  compact
-                  billingExpr={effectivePricing.billing_expr}
-                  usageSchema={entry.usage_schema}
-                />
-              ) : (
-                effectivePricing.quota_type === 0 &&
-                Number.isFinite(effectivePricing.model_ratio) && (
-                  <dl className='grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3'>
-                    {details.map((row) => (
-                      <div key={row.key}>
-                        <dt className='text-muted-foreground'>{row.label}</dt>
-                        <dd className='mt-1 font-mono tabular-nums'>
-                          {row.value}
-                          {row.unit !== 'none' && ' / 1M'}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                )
-              )}
-            </section>
-            {save.isError && (
-              <div>
-                <p role='alert' className='text-destructive mb-2 text-sm'>
-                  {save.error?.message}
-                </p>
+          channelScope === null ? (
+            <>
+              <div className='flex flex-wrap items-center justify-between gap-2'>
+                <div className='min-w-0 flex-1 break-words'>
+                  <p className='text-muted-foreground text-xs'>
+                    {Object.keys(entry.configured).length
+                      ? t('Stored configuration with effective defaults')
+                      : t('Using built-in or default pricing')}
+                  </p>
+                </div>
                 <Button
                   variant='outline'
                   size='sm'
-                  onClick={async () => {
-                    const refreshed = await query.refetch()
-                    const loaded = refreshed.data?.entries.find(
-                      (item) => item.model_name === props.modelName
-                    )
-                    if (loaded) {
-                      setEntry(loaded)
-                      save.reset()
-                    }
-                  }}
+                  onClick={() => setResetOpen(true)}
+                  disabled={save.isPending}
                 >
-                  {t('Reload pricing')}
+                  {t('Restore default pricing')}
                 </Button>
               </div>
-            )}
-          </>
+              <section
+                aria-label={t('Current Billing')}
+                className='space-y-3 border-b pb-3'
+              >
+                <h3 className='text-muted-foreground text-xs'>
+                  {t('Current Billing')}
+                </h3>
+                <div className='max-w-xs'>
+                  <ModelPriceCell
+                    model={effectivePricing}
+                    options={{ tokenUnit: 'M' }}
+                    showExpression={false}
+                  />
+                </div>
+                {isDynamicPricingModel(effectivePricing) ? (
+                  <DynamicPricingBreakdown
+                    compact
+                    billingExpr={effectivePricing.billing_expr}
+                    usageSchema={entry.usage_schema}
+                  />
+                ) : (
+                  effectivePricing.quota_type === 0 &&
+                  Number.isFinite(effectivePricing.model_ratio) && (
+                    <dl className='grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3'>
+                      {details.map((row) => (
+                        <div key={row.key}>
+                          <dt className='text-muted-foreground'>{row.label}</dt>
+                          <dd className='mt-1 font-mono tabular-nums'>
+                            {row.value}
+                            {row.unit !== 'none' && ' / 1M'}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )
+                )}
+              </section>
+              {save.isError && (
+                <div>
+                  <p role='alert' className='text-destructive mb-2 text-sm'>
+                    {save.error?.message}
+                  </p>
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    onClick={async () => {
+                      const refreshed = await query.refetch()
+                      const loaded = refreshed.data?.entries.find(
+                        (item) => item.model_name === props.modelName
+                      )
+                      if (loaded) {
+                        setEntry(loaded)
+                        save.reset()
+                      }
+                    }}
+                  >
+                    {t('Reload pricing')}
+                  </Button>
+                </div>
+              )}
+            </>
+          ) : undefined
         }
       />
       <ConfirmDialog

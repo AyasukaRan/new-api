@@ -31,6 +31,7 @@ import type { UsageLog } from './data/schema'
  * Log category for different log types
  */
 export type LogCategory = 'common' | 'drawing' | 'task'
+export type LogSource = 'usage' | 'test'
 
 // ============================================================================
 // Filter Types
@@ -144,6 +145,16 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    // Verbatim relay request payload, captured only while
+    // LogRequestBodyEnabled is on. Admin-only (nested under admin_info).
+    request_body?: string
+    // Original byte size, present only when request_body was truncated.
+    request_body_truncated?: number
+    // Key of the full four-leg exchange stored outside the log row, present
+    // only while RequestTraceEnabled is on. Admin-only.
+    trace_id?: string
+    // Per-channel price multiplier folded into the public group_ratio.
+    channel_ratio?: number
     // Reject / intercept reason (admin only)
     reject_reason?: string
     task_plugin?: TaskPluginInfo
@@ -220,6 +231,9 @@ export interface LogOtherData {
   request_rules?: RequestRuleTrace[]
   usage_facts?: Record<string, string | number>
   reasoning_effort?: string
+  client_tool?: string
+  invoked_tools?: string[]
+  tool_observation?: 'complete' | 'partial'
   image?: boolean
   image_ratio?: number
   image_output?: number
@@ -394,6 +408,7 @@ export interface TaskArtifactsResponse {
 // ============================================================================
 
 export interface GetLogsParams {
+  source?: LogSource
   p?: number
   page_size?: number
   type?: number
@@ -420,6 +435,7 @@ export interface GetLogsResponse {
 }
 
 export interface GetLogStatsParams {
+  source?: LogSource
   type?: number
   username?: string
   token_name?: string
@@ -472,6 +488,7 @@ export interface GetTaskLogsParams {
  * Configuration for fetching logs by category
  */
 export interface FetchLogsConfig {
+  source?: LogSource
   logCategory: LogCategory
   isAdmin: boolean
   page: number
@@ -496,4 +513,59 @@ export interface UserInfo {
   aff_count?: number
   aff_quota?: number
   remark?: string
+}
+
+// ============================================================================
+// Request Trace Types
+// ============================================================================
+
+/** The four legs of a relayed exchange, in the order they happen. */
+export type RequestTraceDirection =
+  | 'client_request'
+  | 'upstream_request'
+  | 'upstream_response'
+  | 'client_response'
+
+export interface RequestTraceToolCall {
+  id?: string
+  name: string
+  arguments?: string
+}
+
+/** The assistant turn the backend recovered from a captured response. */
+export interface RequestTraceRendered {
+  reasoning?: string
+  content?: string
+  tool_calls?: RequestTraceToolCall[]
+  finish_reason?: string
+  stream: boolean
+}
+
+export interface RequestTraceLeg {
+  seq: number
+  attempt: number
+  direction: RequestTraceDirection
+  channel_id: number
+  format: string
+  method: string
+  url: string
+  status: number
+  headers: Record<string, string[]> | null
+  body: string
+  /** Payload size before truncation, so the viewer can say what was dropped. */
+  body_size: number
+  truncated: boolean
+  /** A binary payload held in object storage, fetched separately. */
+  has_object: boolean
+  content_type?: string
+  rendered?: RequestTraceRendered
+}
+
+export interface RequestTraceResponse {
+  success: boolean
+  message: string
+  data?: {
+    trace_id: string
+    legs: RequestTraceLeg[]
+  }
 }

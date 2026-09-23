@@ -16,6 +16,14 @@ export default defineConfig(({ envMode }) => {
     'http://localhost:3000'
 
   const isProd = envMode === 'production'
+  // Sub-path deployment prefix (e.g. /new-api). Empty = served from the domain
+  // root, which is the default and leaves the output byte-identical. Frozen into
+  // the bundle at build time, so changing it requires a rebuild.
+  const basePath = (
+    process.env.VITE_BASE_PATH ||
+    env.rawPublicVars.VITE_BASE_PATH ||
+    ''
+  ).replace(/\/+$/, '')
   const devProxy = Object.fromEntries(
     (['/api', '/v1', '/mj', '/pg'] as const).map((key) => [
       key,
@@ -56,6 +64,9 @@ export default defineConfig(({ envMode }) => {
       entry: {
         index: './src/main.tsx',
       },
+      define: {
+        'import.meta.env.VITE_BASE_PATH': JSON.stringify(basePath),
+      },
     },
     resolve: {
       alias: {
@@ -71,6 +82,10 @@ export default defineConfig(({ envMode }) => {
       proxy: devProxy,
     },
     output: {
+      // Pairs with src/lib/base-path.ts: emitted assets and the rspack runtime
+      // publicPath get the sub-path prefix so the browser requests them from
+      // /<prefix>/static/... instead of the domain root.
+      assetPrefix: basePath ? `${basePath}/` : '/',
       // Production optimizations
       minify: isProd,
       target: 'web',

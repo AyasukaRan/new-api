@@ -233,7 +233,7 @@ func InitLogDB() (err error) {
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
 		if common.IsMasterNode {
-			return MigrateAuditLogs()
+			return migrateLogSideTables()
 		}
 		return
 	}
@@ -352,6 +352,7 @@ func migrateDB() error {
 		&QuotaData{},
 		&Task{},
 		&TaskPlugin{},
+		&RelayFile{},
 		&Model{},
 		&Vendor{},
 		&PrefillGroup{},
@@ -365,6 +366,10 @@ func migrateDB() error {
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
+		&ChannelPerfMetric{},
+		&ChannelModelActivity{},
+		&ChannelKeyObservation{},
+		&ChannelBalanceSample{},
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
@@ -392,8 +397,19 @@ func migrateDB() error {
 	return nil
 }
 
-func migrateLOGDB() error {
+// migrateLogSideTables creates the tables that sit beside `logs` in the log
+// database. It is separate from migrateLOGDB because InitLogDB returns before
+// reaching that function when LOG_SQL_DSN is unset, and these tables must exist
+// in that default deployment too.
+func migrateLogSideTables() error {
 	if err := MigrateAuditLogs(); err != nil {
+		return err
+	}
+	return MigrateRequestTraces()
+}
+
+func migrateLOGDB() error {
+	if err := migrateLogSideTables(); err != nil {
 		return err
 	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {

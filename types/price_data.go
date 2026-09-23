@@ -25,11 +25,15 @@ type PriceData struct {
 	ImageRatio           float64
 	AudioRatio           float64
 	AudioCompletionRatio float64
-	otherRatios          map[string]float64
-	UsePrice             bool
-	Quota                int // 按次计费的最终额度（MJ / Task）
-	QuotaToPreConsume    int // 按量计费的预消耗额度
-	GroupRatioInfo       GroupRatioInfo
+	// Preserve whether audio lanes were explicitly configured; zero is a real
+	// price, so testing the numeric ratio cannot distinguish it from inheritance.
+	AudioPricingEnabled bool
+	ChannelPricing      bool
+	otherRatios         map[string]float64
+	UsePrice            bool
+	Quota               int // 按次计费的最终额度（MJ / Task）
+	QuotaToPreConsume   int // 按量计费的预消耗额度
+	GroupRatioInfo      GroupRatioInfo
 }
 
 func (p *PriceData) AddOtherRatio(key string, ratio float64) {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"maps"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/performance_setting"
@@ -51,6 +53,10 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
+	common.OptionMap["LogRequestBodyEnabled"] = strconv.FormatBool(common.LogRequestBodyEnabled)
+	common.OptionMap["RequestTraceEnabled"] = strconv.FormatBool(common.RequestTraceEnabled)
+	common.OptionMap["RequestTraceRetentionDays"] = strconv.Itoa(common.RequestTraceRetentionDays)
+	common.OptionMap["RequestTraceMaxBytes"] = strconv.Itoa(common.RequestTraceMaxBytes)
 	common.OptionMap["DisplayInCurrencyEnabled"] = strconv.FormatBool(common.DisplayInCurrencyEnabled)
 	common.OptionMap["DisplayTokenStatEnabled"] = strconv.FormatBool(common.DisplayTokenStatEnabled)
 	common.OptionMap["DrawingEnabled"] = strconv.FormatBool(common.DrawingEnabled)
@@ -143,6 +149,7 @@ func InitOptionMap() {
 	common.OptionMap["QuotaForNewUser"] = strconv.Itoa(common.QuotaForNewUser)
 	common.OptionMap["QuotaForInviter"] = strconv.Itoa(common.QuotaForInviter)
 	common.OptionMap["QuotaForInvitee"] = strconv.Itoa(common.QuotaForInvitee)
+	common.OptionMap["DefaultSubscriptionPlanId"] = strconv.Itoa(common.DefaultSubscriptionPlanId)
 	common.OptionMap["QuotaRemindThreshold"] = strconv.Itoa(common.QuotaRemindThreshold)
 	common.OptionMap["PreConsumedQuota"] = strconv.Itoa(common.PreConsumedQuota)
 	common.OptionMap["ModelRequestRateLimitCount"] = strconv.Itoa(setting.ModelRequestRateLimitCount)
@@ -155,6 +162,7 @@ func InitOptionMap() {
 	common.OptionMap["CreateCacheRatio"] = ratio_setting.CreateCacheRatio2JSONString()
 	common.OptionMap["GroupRatio"] = ratio_setting.GroupRatio2JSONString()
 	common.OptionMap["GroupGroupRatio"] = ratio_setting.GroupGroupRatio2JSONString()
+	common.OptionMap["ChannelModelPricing"] = ratio_setting.ChannelModelPricing2JSONString()
 	common.OptionMap["UserUsableGroups"] = setting.UserUsableGroups2JSONString()
 	common.OptionMap["CompletionRatio"] = ratio_setting.CompletionRatio2JSONString()
 	common.OptionMap["ImageRatio"] = ratio_setting.ImageRatio2JSONString()
@@ -234,8 +242,43 @@ func validateOptionValue(key string, value string) error {
 	if key == operation_setting.ChannelTestConcurrencyOptionKey {
 		return operation_setting.ValidateChannelTestConcurrency(value)
 	}
+	if key == operation_setting.AutoUpdateBalanceMinutesOptionKey {
+		return operation_setting.ValidateAutoUpdateBalanceMinutes(value)
+	}
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
+	}
+	if key == "ChannelModelPricing" {
+		if err := ratio_setting.ValidateChannelModelPricingJSONString(value); err != nil {
+			return err
+		}
+		generation := jsplugin.DefaultRegistry.Generation()
+		return billing_setting.ValidateChannelBillingExpressionsWithSchema(value, func(name string) (map[string]jsplugin.UsageFieldSchema, bool) {
+			target, resolved := ResolveTaskModelAlias(generation, name)
+			if !resolved {
+				return nil, false
+			}
+			plugin, found := generation.Get(target.PluginKey)
+			if !found {
+				return nil, false
+			}
+			return plugin.Meta.UsageSchema, true
+		})
+	}
+	// Both bounds protect the log database rather than the caller: a retention
+	// of zero would purge traces as fast as they are written, and an unbounded
+	// payload cap would push single rows past MySQL's max_allowed_packet.
+	if key == "RequestTraceRetentionDays" {
+		days, err := strconv.Atoi(value)
+		if err != nil || days < 1 || days > 365 {
+			return errors.New("请求追踪保留天数必须在 1 到 365 之间")
+		}
+	}
+	if key == "RequestTraceMaxBytes" {
+		maxBytes, err := strconv.Atoi(value)
+		if err != nil || maxBytes < 4096 || maxBytes > 32<<20 {
+			return errors.New("单条追踪负载上限必须在 4KB 到 32MB 之间")
+		}
 	}
 	return nil
 }
@@ -397,6 +440,10 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticEnableChannelEnabled = boolValue
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
+		case "LogRequestBodyEnabled":
+			common.LogRequestBodyEnabled = boolValue
+		case "RequestTraceEnabled":
+			common.RequestTraceEnabled = boolValue
 		case "DisplayInCurrencyEnabled":
 			// 兼容旧字段：同步到新配置 general_setting.quota_display_type（运行时生效）
 			// true -> USD, false -> TOKENS
@@ -469,6 +516,10 @@ func updateOptionMap(key string, value string) (err error) {
 	case "SMTPPort":
 		intValue, _ := strconv.Atoi(value)
 		common.SMTPPort = intValue
+	case "RequestTraceRetentionDays":
+		common.RequestTraceRetentionDays, _ = strconv.Atoi(value)
+	case "RequestTraceMaxBytes":
+		common.RequestTraceMaxBytes, _ = strconv.Atoi(value)
 	case "SMTPAccount":
 		common.SMTPAccount = value
 	case "SMTPFrom":
@@ -601,6 +652,8 @@ func updateOptionMap(key string, value string) (err error) {
 		common.TurnstileSecretKey = value
 	case "QuotaForNewUser":
 		common.QuotaForNewUser, _ = strconv.Atoi(value)
+	case "DefaultSubscriptionPlanId":
+		common.DefaultSubscriptionPlanId, _ = strconv.Atoi(value)
 	case "QuotaForInviter":
 		common.QuotaForInviter, _ = strconv.Atoi(value)
 	case "QuotaForInvitee":
@@ -629,6 +682,8 @@ func updateOptionMap(key string, value string) (err error) {
 		err = ratio_setting.UpdateGroupRatioByJSONString(value)
 	case "GroupGroupRatio":
 		err = ratio_setting.UpdateGroupGroupRatioByJSONString(value)
+	case "ChannelModelPricing":
+		err = ratio_setting.UpdateChannelModelPricingByJSONString(value)
 	case "UserUsableGroups":
 		err = setting.UpdateUserUsableGroupsByJSONString(value)
 	case "CompletionRatio":

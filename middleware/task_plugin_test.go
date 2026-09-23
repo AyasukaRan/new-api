@@ -1700,6 +1700,46 @@ func insertTaskPluginRouteTask(t *testing.T, task *model.Task) {
 	require.NoError(t, model.DB.Create(task).Error)
 }
 
+// A file upload has no plugin route to pin it, so it names the plugin that
+// serves its model itself. Naming without pinning silently rejects every
+// channel: the identity filter admits a vendor channel only through the
+// channel types of the plugin pinned in context.
+func TestBatchFileUploadReachesTheVendorChannelServingItsModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	require.NoError(t, writer.WriteField("purpose", "batch"))
+	part, err := writer.CreateFormFile("file", "batch.jsonl")
+	require.NoError(t, err)
+	_, err = part.Write([]byte(`{"custom_id":"1","body":{"model":"4.0Ultra","messages":[]}}`))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/files", bytes.NewReader(payload.Bytes()))
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = request
+
+	PrepareRelayFileUpload()(c)
+	require.False(t, c.IsAborted(), "the upload was rejected before channel selection")
+	assert.Equal(t, "4.0Ultra", c.GetString("resolved_task_model"))
+	assert.Equal(t, "iflytek-batch", c.GetString("expected_task_plugin_key"))
+
+	// Distribute adds this filter from the key the middleware resolved.
+	service.AppendTaskPluginIdentityFilter(c, c.GetString("expected_task_plugin_key"))
+	filters := service.GetChannelConstraints(c).Filters
+
+	batchEnabled := `{"batch_enabled":true}`
+	vendor := &model.Channel{Id: 920001, Type: constant.ChannelTypeIFlytekMaaS, Setting: &batchEnabled}
+	ok, kind := model.ChannelSatisfiesFilters(vendor, "4.0Ultra", filters)
+	assert.True(t, ok, "vendor channel rejected by %s", kind)
+
+	unrelated := &model.Channel{Id: 920002, Type: constant.ChannelTypeOpenAI, Setting: &batchEnabled}
+	ok, _ = model.ChannelSatisfiesFilters(unrelated, "4.0Ultra", filters)
+	assert.False(t, ok, "a channel of an unrelated vendor must not serve this plugin's batch")
+}
+
 func TestPrepareTaskPluginEndpointFiltersEachSharedCandidate(t *testing.T) {
 	for _, tc := range []struct {
 		name, alpha, beta string

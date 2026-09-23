@@ -33,18 +33,9 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { handleServerError } from '@/lib/handle-server-error'
 import { parseHttpStatusCodeRules } from '@/lib/http-status-code-rules'
 
 import {
@@ -59,21 +50,8 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useResetForm } from '../hooks/use-reset-form'
 import { safeNumberFieldProps } from '../utils/numeric-field'
-import type { HealthSettings } from './defaults'
 import { useSavePolicy } from './use-save-policy'
 
-const numericString = z.string().refine((value) => {
-  const trimmed = value.trim()
-  if (!trimmed) return true
-  return !Number.isNaN(Number(trimmed)) && Number(trimmed) >= 0
-}, 'Enter a non-negative number or leave empty')
-
-const channelTestModes = [
-  'scheduled_all',
-  'auto_ban_only',
-  'passive_recovery',
-] as const
-type ChannelTestMode = (typeof channelTestModes)[number]
 const MAX_CHANNEL_TEST_CONCURRENCY = 32
 
 const createChannelHealthSchema = (
@@ -81,12 +59,15 @@ const createChannelHealthSchema = (
 ) =>
   z
     .object({
-      ChannelDisableThreshold: numericString,
       AutomaticDisableChannelEnabled: z.boolean(),
-      AutomaticEnableChannelEnabled: z.boolean(),
       AutomaticDisableKeywords: z.string(),
       AutomaticDisableStatusCodes: z.string(),
       monitor_setting: z.object({
+        auto_update_balance_enabled: z.boolean(),
+        auto_update_balance_minutes: z.coerce
+          .number()
+          .min(1, t('Interval must be at least 1 minute'))
+          .max(10080, t('Balance interval must not exceed 7 days')),
         auto_test_channel_enabled: z.boolean(),
         auto_test_channel_minutes: z.coerce
           .number()
@@ -100,7 +81,6 @@ const createChannelHealthSchema = (
             MAX_CHANNEL_TEST_CONCURRENCY,
             t('Channel test concurrency must be between 1 and 32')
           ),
-        channel_test_mode: z.enum(channelTestModes),
       }),
     })
     .superRefine((values, ctx) => {
@@ -123,7 +103,16 @@ type ChannelHealthFormValues = z.output<ChannelHealthSchema>
 type ChannelHealthFormInput = z.input<ChannelHealthSchema>
 
 type ChannelHealthSectionProps = {
-  defaultValues: HealthSettings
+  defaultValues: {
+    AutomaticDisableChannelEnabled: boolean
+    AutomaticDisableKeywords: string
+    AutomaticDisableStatusCodes: string
+    'monitor_setting.auto_update_balance_enabled': boolean
+    'monitor_setting.auto_update_balance_minutes': number
+    'monitor_setting.auto_test_channel_enabled': boolean
+    'monitor_setting.auto_test_channel_minutes': number
+    'monitor_setting.channel_test_concurrency': number
+  }
 }
 
 function normalizeLineEndings(value: string) {
@@ -131,89 +120,80 @@ function normalizeLineEndings(value: string) {
 }
 
 type NormalizedChannelHealthValues = {
-  ChannelDisableThreshold: string
   AutomaticDisableChannelEnabled: boolean
-  AutomaticEnableChannelEnabled: boolean
   AutomaticDisableKeywords: string
   AutomaticDisableStatusCodes: string
+  'monitor_setting.auto_update_balance_enabled': boolean
+  'monitor_setting.auto_update_balance_minutes': number
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
   'monitor_setting.channel_test_concurrency': number
-  'monitor_setting.channel_test_mode': ChannelTestMode
-}
-
-function normalizeChannelTestMode(value?: string): ChannelTestMode {
-  if (value === 'auto_ban_only' || value === 'passive_recovery') {
-    return value
-  }
-  return 'scheduled_all'
 }
 
 const buildFormDefaults = (
   defaults: ChannelHealthSectionProps['defaultValues']
 ): ChannelHealthFormInput => ({
-  ChannelDisableThreshold: defaults.ChannelDisableThreshold ?? '',
   AutomaticDisableChannelEnabled: defaults.AutomaticDisableChannelEnabled,
-  AutomaticEnableChannelEnabled: defaults.AutomaticEnableChannelEnabled,
   AutomaticDisableKeywords: normalizeLineEndings(
     defaults.AutomaticDisableKeywords ?? ''
   ),
   AutomaticDisableStatusCodes: defaults.AutomaticDisableStatusCodes ?? '',
   monitor_setting: {
+    auto_update_balance_enabled:
+      defaults['monitor_setting.auto_update_balance_enabled'] ?? false,
+    auto_update_balance_minutes:
+      defaults['monitor_setting.auto_update_balance_minutes'] ?? 60,
     auto_test_channel_enabled:
       defaults['monitor_setting.auto_test_channel_enabled'],
     auto_test_channel_minutes:
       defaults['monitor_setting.auto_test_channel_minutes'],
     channel_test_concurrency:
       defaults['monitor_setting.channel_test_concurrency'],
-    channel_test_mode: normalizeChannelTestMode(
-      defaults['monitor_setting.channel_test_mode']
-    ),
   },
 })
 
 const normalizeDefaults = (
   defaults: ChannelHealthSectionProps['defaultValues']
 ): NormalizedChannelHealthValues => ({
-  ChannelDisableThreshold: (defaults.ChannelDisableThreshold ?? '').trim(),
   AutomaticDisableChannelEnabled: defaults.AutomaticDisableChannelEnabled,
-  AutomaticEnableChannelEnabled: defaults.AutomaticEnableChannelEnabled,
   AutomaticDisableKeywords: normalizeLineEndings(
     defaults.AutomaticDisableKeywords ?? ''
   ),
   AutomaticDisableStatusCodes: parseHttpStatusCodeRules(
     defaults.AutomaticDisableStatusCodes ?? ''
   ).normalized,
+  'monitor_setting.auto_update_balance_enabled':
+    defaults['monitor_setting.auto_update_balance_enabled'] ?? false,
+  'monitor_setting.auto_update_balance_minutes':
+    defaults['monitor_setting.auto_update_balance_minutes'] ?? 60,
   'monitor_setting.auto_test_channel_enabled':
     defaults['monitor_setting.auto_test_channel_enabled'],
   'monitor_setting.auto_test_channel_minutes':
     defaults['monitor_setting.auto_test_channel_minutes'],
   'monitor_setting.channel_test_concurrency':
     defaults['monitor_setting.channel_test_concurrency'],
-  'monitor_setting.channel_test_mode': normalizeChannelTestMode(
-    defaults['monitor_setting.channel_test_mode']
-  ),
 })
 
 const normalizeFormValues = (
   values: ChannelHealthFormValues
 ): NormalizedChannelHealthValues => ({
-  ChannelDisableThreshold: values.ChannelDisableThreshold.trim(),
   AutomaticDisableChannelEnabled: values.AutomaticDisableChannelEnabled,
-  AutomaticEnableChannelEnabled: values.AutomaticEnableChannelEnabled,
   AutomaticDisableKeywords: normalizeLineEndings(
     values.AutomaticDisableKeywords
   ),
   AutomaticDisableStatusCodes: parseHttpStatusCodeRules(
     values.AutomaticDisableStatusCodes
   ).normalized,
+  'monitor_setting.auto_update_balance_enabled':
+    values.monitor_setting.auto_update_balance_enabled,
+  'monitor_setting.auto_update_balance_minutes':
+    values.monitor_setting.auto_update_balance_minutes,
   'monitor_setting.auto_test_channel_enabled':
     values.monitor_setting.auto_test_channel_enabled,
   'monitor_setting.auto_test_channel_minutes':
     values.monitor_setting.auto_test_channel_minutes,
   'monitor_setting.channel_test_concurrency':
     values.monitor_setting.channel_test_concurrency,
-  'monitor_setting.channel_test_mode': values.monitor_setting.channel_test_mode,
 })
 
 export function ChannelHealthSection({
@@ -246,24 +226,6 @@ export function ChannelHealthSection({
   }, [defaultValues])
 
   const autoDisableStatusCodes = form.watch('AutomaticDisableStatusCodes')
-  const channelTestMode = form.watch('monitor_setting.channel_test_mode')
-  let channelTestModeDescription: string
-  switch (channelTestMode) {
-    case 'auto_ban_only':
-      channelTestModeDescription = t(
-        'Periodically checks only channels with auto-disable enabled, excluding manually disabled channels.'
-      )
-      break
-    case 'passive_recovery':
-      channelTestModeDescription = t(
-        'Does not check healthy channels. It only rechecks auto-disabled channels and restores them after they recover.'
-      )
-      break
-    default:
-      channelTestModeDescription = t(
-        'Periodically checks all channels except manually disabled ones to detect failures and recover channels automatically.'
-      )
-  }
   const autoDisableParsed = useMemo(
     () => parseHttpStatusCodeRules(autoDisableStatusCodes),
     [autoDisableStatusCodes]
@@ -285,40 +247,19 @@ export function ChannelHealthSection({
         Object.fromEntries(updates.map((key) => [key, String(normalized[key])]))
       )
       baselineRef.current = normalized
-    } catch (error) {
-      handleServerError(error)
+    } catch {
+      // Keep the edited values when the policy update fails.
     }
   }
 
   return (
     <SettingsSection title={t('Channel health')}>
-      <div className='text-muted-foreground space-y-1 text-sm'>
-        <p>{t('Source: global settings. Changes take effect after saving.')}</p>
-        <p>
-          {form.watch('AutomaticDisableChannelEnabled')
-            ? t(
-                'Channels must also enable Auto Ban before automatic disabling can take effect.'
-              )
-            : t(
-                'With these settings, automatic disabling is off for all channels.'
-              )}
-        </p>
-        {form.watch('AutomaticEnableChannelEnabled') &&
-          !form.watch('monitor_setting.auto_test_channel_enabled') && (
-            <p>
-              {t(
-                'Scheduled recovery is off. Bulk channel tests can still re-enable automatically disabled channels.'
-              )}
-            </p>
-          )}
-      </div>
       <Form {...form}>
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
             onSave={form.handleSubmit(onSubmit)}
             isSaving={form.formState.isSubmitting}
           />
-
           <div className='flex min-w-0 flex-col gap-4'>
             <h4 className='text-sm font-medium'>
               {t('Channel health checks')}
@@ -334,7 +275,7 @@ export function ChannelHealthSection({
                         <FormLabel>{t('Scheduled channel tests')}</FormLabel>
                         <FormDescription>
                           {t(
-                            'Run background checks using the selected test mode'
+                            'Test idle models on each channel, excluding manually disabled channels. Results update monitoring only.'
                           )}
                         </FormDescription>
                       </SettingsSwitchContent>
@@ -347,73 +288,18 @@ export function ChannelHealthSection({
                     </SettingsSwitchItem>
                   )}
                 />
-
                 <SettingsControlChildren
                   role='group'
                   aria-label={t('Scheduled test options')}
-                  className='grid gap-x-5 gap-y-4 lg:grid-cols-2'
                 >
-                  <FormField
-                    control={form.control}
-                    name='monitor_setting.channel_test_mode'
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>{t('Channel test mode')}</FormLabel>
-                        <Select
-                          items={[
-                            {
-                              value: 'scheduled_all',
-                              label: t('Actively check all channels'),
-                            },
-                            {
-                              value: 'auto_ban_only',
-                              label: t(
-                                'Actively check auto-disable-enabled channels'
-                              ),
-                            },
-                            {
-                              value: 'passive_recovery',
-                              label: t('Check channels awaiting recovery only'),
-                            },
-                          ]}
-                          value={field.value}
-                          onValueChange={field.onChange}
-                        >
-                          <FormControl>
-                            <SelectTrigger className='w-full'>
-                              <SelectValue />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent alignItemWithTrigger={false}>
-                            <SelectGroup>
-                              <SelectItem value='scheduled_all'>
-                                {t('Actively check all channels')}
-                              </SelectItem>
-                              <SelectItem value='auto_ban_only'>
-                                {t(
-                                  'Actively check auto-disable-enabled channels'
-                                )}
-                              </SelectItem>
-                              <SelectItem value='passive_recovery'>
-                                {t('Check channels awaiting recovery only')}
-                              </SelectItem>
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                        <FormDescription>
-                          {channelTestModeDescription}
-                        </FormDescription>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
                   <FormField
                     control={form.control}
                     name='monitor_setting.auto_test_channel_minutes'
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t('Test interval (minutes)')}</FormLabel>
+                        <FormLabel>
+                          {t('Idle test interval (minutes)')}
+                        </FormLabel>
                         <FormControl>
                           <Input
                             type='number'
@@ -423,11 +309,9 @@ export function ChannelHealthSection({
                           />
                         </FormControl>
                         <FormDescription>
-                          {channelTestMode === 'passive_recovery'
-                            ? t(
-                                'How frequently the system checks auto-disabled channels for recovery'
-                              )
-                            : t('Time between scheduled channel checks')}
+                          {t(
+                            'Successful and failed real calls restart the timer for that channel and model only. Automatic tests wait for the full idle interval; manual tests run immediately.'
+                          )}
                         </FormDescription>
                         <FormMessage />
                       </FormItem>
@@ -435,7 +319,6 @@ export function ChannelHealthSection({
                   />
                 </SettingsControlChildren>
               </SettingsControlGroup>
-
               <FormField
                 control={form.control}
                 name='monitor_setting.channel_test_concurrency'
@@ -460,17 +343,24 @@ export function ChannelHealthSection({
                   </FormItem>
                 )}
               />
-
+            </SettingsFormGrid>
+          </div>
+          <Separator />
+          <div className='flex min-w-0 flex-col gap-4'>
+            <h4 className='text-sm font-medium'>{t('Balance monitoring')}</h4>
+            <SettingsFormGrid>
               <FormField
                 control={form.control}
-                name='AutomaticEnableChannelEnabled'
+                name='monitor_setting.auto_update_balance_enabled'
                 render={({ field }) => (
                   <SettingsSwitchItem>
                     <SettingsSwitchContent>
-                      <FormLabel>{t('Re-enable on success')}</FormLabel>
+                      <FormLabel>
+                        {t('Automatically refresh balances')}
+                      </FormLabel>
                       <FormDescription>
                         {t(
-                          'Successful scheduled or bulk checks can restore automatically disabled channels. Manually disabled channels stay disabled.'
+                          'Refresh accounts only for channels with balance queries enabled, and retain balance and usage history. Channel status is unchanged.'
                         )}
                       </FormDescription>
                     </SettingsSwitchContent>
@@ -483,11 +373,35 @@ export function ChannelHealthSection({
                   </SettingsSwitchItem>
                 )}
               />
+              <FormField
+                control={form.control}
+                name='monitor_setting.auto_update_balance_minutes'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {t('Balance refresh interval (minutes)')}
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={1}
+                        max={10080}
+                        step={1}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Only providers with a balance API can report an account balance.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
             </SettingsFormGrid>
           </div>
-
           <Separator />
-
           <div className='flex min-w-0 flex-col gap-4'>
             <h4 className='text-sm font-medium'>{t('Auto-disable rules')}</h4>
             <SettingsFormGrid>
@@ -500,7 +414,7 @@ export function ChannelHealthSection({
                       <FormLabel>{t('Disable on failure')}</FormLabel>
                       <FormDescription>
                         {t(
-                          'Apply disable rules to upstream request errors and scheduled or bulk health checks'
+                          'Automatically disable channels when relay requests match the failure rules'
                         )}
                       </FormDescription>
                     </SettingsSwitchContent>
@@ -513,34 +427,6 @@ export function ChannelHealthSection({
                   </SettingsSwitchItem>
                 )}
               />
-
-              <FormField
-                control={form.control}
-                name='ChannelDisableThreshold'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>
-                      {t('Health check timeout threshold (seconds)')}
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        min={0}
-                        step={1}
-                        value={field.value}
-                        onChange={(event) => field.onChange(event.target.value)}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'Scheduled or bulk health checks can disable a channel when this duration is exceeded, if both global and channel auto-disable are enabled.'
-                      )}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
               <FormField
                 control={form.control}
                 name='AutomaticDisableStatusCodes'
@@ -570,7 +456,6 @@ export function ChannelHealthSection({
                   </FormItem>
                 )}
               />
-
               <FormField
                 control={form.control}
                 name='AutomaticDisableKeywords'

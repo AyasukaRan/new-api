@@ -230,6 +230,31 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	started := time.Now()
 	var info *relaycommon.RelayInfo
 	billingPrepared := false
+	var attemptChannel *appmodel.Channel
+	var finishActivity func(*bool)
+	var observation *bool
+	finishAttempt := func(attemptErr *types.NewAPIError) {
+		if finishActivity == nil {
+			return
+		}
+		observation = perfmetrics.RelayObservation(c.Request.Context(), info, attemptErr)
+		finishActivity(observation)
+		finishActivity = nil
+		if observation != nil {
+			perfmetrics.RecordChannelAttempt(info, info.GetChannelID(), *observation)
+		}
+		statusCode, message := 0, ""
+		if attemptErr == nil && info.StreamStatus != nil {
+			_ = errors.As(info.StreamStatus.EndError, &attemptErr)
+			if observation != nil && !*observation {
+				message = info.StreamStatus.Summary()
+			}
+		}
+		if attemptErr != nil {
+			statusCode, message = attemptErr.StatusCode, attemptErr.Error()
+		}
+		perfmetrics.RecordChannelKeyResult(info, attemptChannel, observation, statusCode, message)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			apiErr = types.NewError(fmt.Errorf("responses websocket call panic: %v", recovered), types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -238,6 +263,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if info == nil && modelName != "" {
 			info = &relaycommon.RelayInfo{OriginModelName: modelName, UsingGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), StartTime: started}
 		}
+		finishAttempt(apiErr)
 		perfmetrics.RecordRelayResult(c.Request.Context(), info, apiErr)
 		// Settlement already marks the request policy successful, and nothing
 		// reads a termination decision after this point on the WebSocket path,
@@ -263,8 +289,11 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
 			return apiErr
 		}
+		attemptChannel, _ = appmodel.CacheGetChannel(s.lockedChannelID)
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
+		info.ClientWs = s.client
 		info.IsStream = true
+		defer service.BeginRequestMetadata(c, info)()
 		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
 		if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
 			return apiErr
@@ -275,6 +304,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if apiErr != nil {
 			return apiErr
 		}
+		info.ChannelAttemptStartTime = time.Now()
+		finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), info, s.lockedChannelID)
 		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
 			state.closeAfter = true
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -290,19 +321,24 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			service.AppendUsedChannel(c, channel.Id)
 			if info == nil {
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
+				info.ClientWs = s.client
 				info.IsStream = true
+				defer service.BeginRequestMetadata(c, info)()
 				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
 				if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
 					return apiErr
 				}
 				billingPrepared = true
 			} else {
-				info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
-				if apiErr = service.PrepareTieredBillingForSelectedGroup(c, info); apiErr != nil {
+				if err := helper.RefreshPricingForSelectedChannel(c, info); err != nil {
+					return types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithSkipRetry())
+				}
+				if apiErr = service.PrepareBillingForSelectedChannel(c, info); apiErr != nil {
 					return apiErr
 				}
 			}
 			info.RetryIndex = retry.GetRetry()
+			service.ResetRequestToolObservation(c)
 			policy.BeginAttempt(channel, info.UsingGroup)
 			var payload []byte
 			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
@@ -311,11 +347,15 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
+			attemptChannel = channel
+			info.ChannelAttemptStartTime = time.Now()
+			finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), info, channel.Id)
 			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 				info.LastError = apiErr
+				finishAttempt(apiErr)
 				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
 				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
 				service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
@@ -360,6 +400,31 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	info.StreamStatus.RequireTerminal()
 	common.SetContextKey(c, appconstant.ContextKeyResponseStreamStatus, info.StreamStatus)
+	completed := false
+	defer func() {
+		if apiErr != nil {
+			return
+		}
+		usage := accumulator.Finish()
+		hasUsage := usage.PromptTokens > 0 || usage.CompletionTokens > 0
+		if info.ResponsesUsageInfo != nil {
+			for _, tool := range info.ResponsesUsageInfo.BuiltInTools {
+				if tool != nil && tool.CallCount > 0 {
+					hasUsage = true
+					break
+				}
+			}
+		}
+		// A successful zero-token response still earns its fixed fee. An
+		// interrupted or failed request must have delivered billable work.
+		if !completed && !hasUsage {
+			if info.Billing != nil {
+				info.Billing.Refund(c)
+			}
+			return
+		}
+		ConsumeResponsesQuota(c, info, usage)
+	}()
 	timeout := time.Duration(appconstant.StreamingTimeout) * time.Second
 	if timeout <= 0 {
 		timeout = 300 * time.Second
@@ -377,7 +442,6 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			if incoming.err != nil {
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, incoming.err)
 				state.closeAfter = true
-				ConsumeResponsesQuota(c, info, accumulator.Finish())
 				return nil
 			}
 			info.SetFirstResponseTime()
@@ -428,7 +492,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 						s.lastResponseID = responseID
 						state.terminal, state.closeAfter = &incoming, ambiguous
-						ConsumeResponsesQuota(c, info, accumulator.Finish())
+						service.ObserveRequestMetadataEvent(c, incoming.body)
 						return nil
 					}
 					if rejection.Error == nil {
@@ -454,14 +518,31 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				}
 				accumulator.Observe(&event.ResponsesStreamResponse)
 			}
+			service.ObserveRequestMetadataEvent(c, incoming.body)
 			switch event.Type {
 			case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
 				if event.Response != nil {
 					s.lastResponseID = event.Response.ID
 				}
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				switch event.Type {
+				case "response.failed":
+					failure := &types.OpenAIError{Type: "server_error", Message: "upstream response failed"}
+					if event.Response != nil && event.Response.GetOpenAIError() != nil {
+						failure = event.Response.GetOpenAIError()
+					}
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, types.WithOpenAIError(*failure, http.StatusOK))
+				case "response.cancelled", "response.canceled":
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, context.Canceled)
+				default:
+					if event.Type == "response.incomplete" && event.Response != nil && event.Response.IncompleteDetails != nil && event.Response.IncompleteDetails.Reason == "content_filter" {
+						failure := types.OpenAIError{Type: "content_filter", Code: "content_filter", Message: "upstream content filter stopped the response"}
+						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, types.WithOpenAIError(failure, http.StatusOK))
+					} else {
+						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+					}
+				}
 				state.terminal = &incoming
-				ConsumeResponsesQuota(c, info, accumulator.Finish())
+				completed = info.StreamStatus.ResponseOutcome() == string(relaycommon.ResponseOutcomeCompleted)
 				return nil
 			}
 			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
@@ -490,11 +571,9 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		case <-idle.C:
 			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, context.DeadlineExceeded)
 			state.closeAfter = true
-			ConsumeResponsesQuota(c, info, accumulator.Finish())
 			return nil
 		case <-s.ctx.Done():
 			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, s.ctx.Err())
-			ConsumeResponsesQuota(c, info, accumulator.Finish())
 			return nil
 		}
 	}
@@ -545,6 +624,9 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	}
 	if !keyEnabled {
 		return types.NewErrorWithStatusCode(errors.New("the upstream connection credential is no longer enabled"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	if !channel.HasRelayKeyBalance(s.lockedKeyIndex) {
+		return types.NewErrorWithStatusCode(errors.New("the upstream connection credential has insufficient balance; reconnect required"), appmodel.ErrorCodeChannelBalanceUnavailable, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
 	// Changes that alter the physical upstream connection require a new
 	// handshake. Request-level settings can be refreshed without rotating keys.

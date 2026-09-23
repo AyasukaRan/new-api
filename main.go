@@ -121,14 +121,6 @@ func main() {
 	// 数据看板
 	go model.UpdateQuotaData()
 
-	if os.Getenv("CHANNEL_UPDATE_FREQUENCY") != "" {
-		frequency, err := strconv.Atoi(os.Getenv("CHANNEL_UPDATE_FREQUENCY"))
-		if err != nil {
-			common.FatalLog("failed to parse CHANNEL_UPDATE_FREQUENCY: " + err.Error())
-		}
-		go controller.AutomaticallyUpdateChannels(frequency)
-	}
-
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()
 
@@ -237,6 +229,9 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
+	}
+	if err := perfmetrics.Flush(); err != nil {
+		common.SysError("failed to persist performance metrics during shutdown: " + err.Error())
 	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
@@ -376,6 +371,7 @@ func InitResources() error {
 	}
 
 	service.StartAuthArtifactCleanup()
+	service.StartRequestTraceCleanup()
 
 	return nil
 }

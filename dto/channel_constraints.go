@@ -4,11 +4,15 @@ type ChannelPinSource string
 
 const (
 	PinSourceToken      ChannelPinSource = "token"       // Rank 0, highest
+	PinSourceRelayFile  ChannelPinSource = "relay_file"  // Rank 5
 	PinSourceOriginTask ChannelPinSource = "origin_task" // Rank 10
 )
 
 const (
-	PinRankToken      = 0
+	PinRankToken = 0
+	// A file's bytes exist on one channel only, so this pin outranks an origin
+	// task: sending the id anywhere else cannot succeed.
+	PinRankRelayFile  = 5
 	PinRankOriginTask = 10
 )
 
@@ -38,6 +42,12 @@ type ChannelFilterKind string
 const (
 	FilterRequestPath        ChannelFilterKind = "request_path"
 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
+	FilterChannelBalance     ChannelFilterKind = "channel_balance"
+	// FilterBatchCapable narrows selection to channels an operator has opted
+	// into batch inference. It is added only by the batch and file paths: every
+	// other request must keep reaching channels that serve chat and nothing
+	// else.
+	FilterBatchCapable       ChannelFilterKind = "batch_capable"
 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
 )
 
@@ -66,6 +76,20 @@ func (cc *ChannelConstraints) AddFilter(f ChannelFilter) {
 		return
 	}
 	cc.Filters = append(cc.Filters, f)
+}
+
+// HasFilter reports whether a filter of this kind was applied, which is how a
+// later stage learns what kind of request it is serving.
+func (cc *ChannelConstraints) HasFilter(kind ChannelFilterKind) bool {
+	if cc == nil {
+		return false
+	}
+	for _, filter := range cc.Filters {
+		if filter.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolvedPin returns the winning pin after priority resolution.

@@ -12,10 +12,17 @@ type UserSetting struct {
 	GotifyPriority                   int     `json:"gotify_priority"`                                // GotifyPriority Gotify消息优先级
 	UpstreamModelUpdateNotifyEnabled bool    `json:"upstream_model_update_notify_enabled,omitempty"` // 是否接收上游模型更新定时检测通知（仅管理员）
 	AcceptUnsetRatioModel            bool    `json:"accept_unset_model_ratio_model,omitempty"`       // AcceptUnsetRatioModel 是否接受未设置价格的模型
-	RecordIpLog                      bool    `json:"record_ip_log,omitempty"`                        // 是否记录请求和错误日志IP
+	RecordIpLog                      *bool   `json:"record_ip_log,omitempty"`                        // 是否记录请求和错误日志IP，未设置时默认记录
 	SidebarModules                   string  `json:"sidebar_modules,omitempty"`                      // SidebarModules 左侧边栏模块配置
 	BillingPreference                string  `json:"billing_preference,omitempty"`                   // BillingPreference 扣费策略（订阅/钱包）
 	Language                         string  `json:"language,omitempty"`                             // Language 用户语言偏好 (zh, en)
+}
+
+// ShouldRecordIp 判断日志是否保留客户端 IP。默认记录：只有明确关闭的账号才不记录。
+// 该字段用指针，是为了把「从未打开过这个开关」和「主动关掉」区分开——用 bool
+// 的话两者都是 false，无法在保持默认开启的同时让用户真的关掉它。
+func (s UserSetting) ShouldRecordIp() bool {
+	return s.RecordIpLog == nil || *s.RecordIpLog
 }
 
 var (

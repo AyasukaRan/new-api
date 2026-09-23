@@ -605,13 +605,16 @@ func RevokeUserSession(userID int, sid, reason string) (bool, error) {
 // RevokeUserSessionByRefreshHash is used when logout is authenticated only by
 // the HttpOnly refresh cookie. Possession of a SID alone is insufficient. The
 // immediately previous digest is accepted only inside the refresh race window.
-func RevokeUserSessionByRefreshHash(sid, presentedHash, reason string) (bool, error) {
+// A matching, unexpired revoked session is also returned so an interrupted
+// federated logout can be retried without reactivating the local session.
+func RevokeUserSessionByRefreshHash(sid, presentedHash, reason string) (*UserSession, error) {
 	if sid == "" || presentedHash == "" {
-		return false, ErrUserSessionInvalid
+		return nil, ErrUserSessionInvalid
 	}
 	now := time.Now().Unix()
 	var session UserSession
 	var revoked bool
+	var authenticated bool
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		if err := lockForUpdate(tx).Where("sid = ?", sid).First(&session).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -619,13 +622,20 @@ func RevokeUserSessionByRefreshHash(sid, presentedHash, reason string) (bool, er
 			}
 			return err
 		}
-		if session.Status != UserSessionStatusActive || session.RevokedAt != 0 || session.ExpiresAt <= now {
+		if session.ExpiresAt <= now {
 			return nil
 		}
 		validCurrent := hmac.Equal([]byte(session.RefreshHash), []byte(presentedHash))
 		validPrevious := session.PreviousRefreshHash != "" && now <= session.PreviousValidUntil &&
 			hmac.Equal([]byte(session.PreviousRefreshHash), []byte(presentedHash))
 		if !validCurrent && !validPrevious {
+			return nil
+		}
+		if session.Status == UserSessionStatusRevoked {
+			authenticated = true
+			return nil
+		}
+		if session.Status != UserSessionStatusActive || session.RevokedAt != 0 {
 			return nil
 		}
 		if err := writeUserSessionDenyFence(&session, UserSessionStatusRevoking, now, reason); err != nil {
@@ -641,6 +651,7 @@ func RevokeUserSessionByRefreshHash(sid, presentedHash, reason string) (bool, er
 		}
 		revoked = result.RowsAffected == 1
 		if revoked {
+			authenticated = true
 			session.Status = UserSessionStatusRevoked
 			session.RevokedAt = now
 			session.RevokedReason = reason
@@ -648,14 +659,17 @@ func RevokeUserSessionByRefreshHash(sid, presentedHash, reason string) (bool, er
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if revoked {
 		if err := writeUserSessionCache(session.cacheEntry(), time.Time{}); err != nil {
 			common.SysLog("failed to finalize refresh-authenticated session revoke tombstone: " + err.Error())
 		}
 	}
-	return revoked, nil
+	if !authenticated {
+		return nil, nil
+	}
+	return &session, nil
 }
 
 // AdvanceUserSessionAuthVersion preserves one browser session across a

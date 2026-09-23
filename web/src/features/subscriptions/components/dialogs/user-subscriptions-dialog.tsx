@@ -16,8 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Ban, Plus, RotateCcw, Trash2 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -31,6 +32,7 @@ import {
   sideDrawerFormClassName,
   sideDrawerHeaderClassName,
 } from '@/components/drawer-layout'
+import { ErrorState } from '@/components/error-state'
 import { StatusBadge } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
 import { Button } from '@/components/ui/button'
@@ -47,9 +49,9 @@ import {
   SheetTitle,
   SheetDescription,
 } from '@/components/ui/sheet'
-import { Switch } from '@/components/ui/switch'
 import { formatQuota } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import {
   getAdminPlans,
@@ -60,7 +62,7 @@ import {
   resetUserSubscriptionsByPlan,
 } from '../../api'
 import { formatTimestamp } from '../../lib'
-import type { PlanRecord, UserSubscriptionRecord } from '../../types'
+import type { UserSubscriptionRecord } from '../../types'
 
 interface Props {
   open: boolean
@@ -106,13 +108,10 @@ function SubscriptionStatusBadge(props: {
 
 export function UserSubscriptionsDialog(props: Props) {
   const { t } = useTranslation()
-  const [loading, setLoading] = useState(false)
+  const userId = props.user?.id
+  const headingRef = useRef<HTMLHeadingElement>(null)
   const [creating, setCreating] = useState(false)
-  const [plans, setPlans] = useState<PlanRecord[]>([])
-  const [subs, setSubs] = useState<UserSubscriptionRecord[]>([])
   const [selectedPlanId, setSelectedPlanId] = useState<string>('')
-  const [resetting, setResetting] = useState(false)
-  const [advanceResetTime, setAdvanceResetTime] = useState(true)
   const [resetAction, setResetAction] = useState<{
     planId: number
     planTitle: string
@@ -122,45 +121,39 @@ export function UserSubscriptionsDialog(props: Props) {
     subId: number
   } | null>(null)
 
+  const plansQuery = useQuery({
+    queryKey: ['subscription-admin-plans'],
+    enabled: props.open && !!props.user?.id,
+    queryFn: async () => {
+      const result = await getAdminPlans()
+      return requireServerSuccess(result).data || []
+    },
+  })
+  const subscriptionsQuery = useQuery({
+    queryKey: ['user-subscriptions', props.user?.id],
+    enabled: props.open && !!props.user?.id,
+    refetchInterval: props.open ? 60_000 : false,
+    queryFn: async () => {
+      if (!userId) throw new Error(t('Loading failed'))
+      const result = await getUserSubscriptions(userId)
+      return requireServerSuccess(result).data || []
+    },
+  })
   const planTitleMap = useMemo(() => {
     const map = new Map<number, string>()
-    plans.forEach((p) => {
+    plansQuery.data?.forEach((p) => {
       if (p.plan.id) map.set(p.plan.id, p.plan.title || `#${p.plan.id}`)
     })
     return map
-  }, [plans])
-
-  const loadData = useCallback(async () => {
-    if (!props.user?.id) return
-    setLoading(true)
-    try {
-      const [plansRes, subsRes] = await Promise.all([
-        getAdminPlans(),
-        getUserSubscriptions(props.user.id),
-      ])
-      if (plansRes.success) {
-        setPlans(plansRes.data || [])
-      } else {
-        handleServerError(plansRes)
-      }
-      if (subsRes.success) {
-        setSubs(subsRes.data || [])
-      } else {
-        handleServerError(subsRes)
-      }
-    } catch (error) {
-      handleServerError(error, t('Loading failed'))
-    } finally {
-      setLoading(false)
-    }
-  }, [props.user?.id, t])
+  }, [plansQuery.data])
+  const loading = plansQuery.isLoading || subscriptionsQuery.isLoading
+  const loadError = plansQuery.isError || subscriptionsQuery.isError
 
   useEffect(() => {
-    if (props.open && props.user?.id) {
-      setSelectedPlanId('')
-      loadData()
-    }
-  }, [props.open, props.user?.id, loadData])
+    setSelectedPlanId('')
+    setResetAction(null)
+    setConfirmAction(null)
+  }, [props.open, props.user?.id])
 
   const handleCreate = async () => {
     if (!props.user?.id || !selectedPlanId) {
@@ -175,7 +168,7 @@ export function UserSubscriptionsDialog(props: Props) {
       if (res.success) {
         toast.success(res.data?.message || t('Added successfully'))
         setSelectedPlanId('')
-        await loadData()
+        await subscriptionsQuery.refetch()
         props.onSuccess?.()
       } else {
         handleServerError(res)
@@ -194,7 +187,7 @@ export function UserSubscriptionsDialog(props: Props) {
         const res = await invalidateUserSubscription(confirmAction.subId)
         if (res.success) {
           toast.success(res.data?.message || t('Has been invalidated'))
-          await loadData()
+          await subscriptionsQuery.refetch()
           props.onSuccess?.()
         } else {
           handleServerError(res)
@@ -203,7 +196,7 @@ export function UserSubscriptionsDialog(props: Props) {
         const res = await deleteUserSubscription(confirmAction.subId)
         if (res.success) {
           toast.success(t('Deleted'))
-          await loadData()
+          await subscriptionsQuery.refetch()
           props.onSuccess?.()
         } else {
           handleServerError(res)
@@ -216,39 +209,48 @@ export function UserSubscriptionsDialog(props: Props) {
     }
   }
 
-  const handleResetConfirm = async () => {
-    if (!props.user?.id || !resetAction) return
-    setResetting(true)
-    try {
-      const res = await resetUserSubscriptionsByPlan(props.user.id, {
-        plan_id: resetAction.planId,
-        advance_reset_time: advanceResetTime,
+  const resetMutation = useMutation({
+    mutationFn: async (action: { userId: number; planId: number }) => {
+      const res = await resetUserSubscriptionsByPlan(action.userId, {
+        plan_id: action.planId,
+        advance_reset_time: false,
       })
-      if (res.success) {
-        toast.success(
-          t('Reset {{count}} active subscriptions', {
-            count: res.data?.reset_count || 0,
-          })
-        )
-        await loadData()
-        props.onSuccess?.()
-      } else {
-        handleServerError(res)
-      }
-    } catch (error) {
-      handleServerError(error, t('Operation failed'))
-    } finally {
-      setResetting(false)
+      return requireServerSuccess(res).data
+    },
+    onSuccess: async (result) => {
+      toast.success(
+        t('Reset {{count}} active subscriptions', {
+          count: result?.reset_count || 0,
+        })
+      )
       setResetAction(null)
-    }
+      props.onSuccess?.()
+      await subscriptionsQuery.refetch()
+    },
+    onError: (error) => handleServerError(error, t('Operation failed')),
+  })
+
+  const handleResetConfirm = () => {
+    if (!props.user?.id || !resetAction || resetMutation.isPending) return
+    resetMutation.mutate({ userId: props.user.id, planId: resetAction.planId })
   }
 
   return (
     <>
-      <Sheet open={props.open} onOpenChange={props.onOpenChange}>
-        <SheetContent className={sideDrawerContentClassName('sm:max-w-2xl')}>
+      <Sheet
+        open={props.open}
+        onOpenChange={(open) => {
+          if (!resetMutation.isPending) props.onOpenChange(open)
+        }}
+      >
+        <SheetContent
+          className={sideDrawerContentClassName('sm:max-w-4xl')}
+          initialFocus={headingRef}
+        >
           <SheetHeader className={sideDrawerHeaderClassName()}>
-            <SheetTitle>{t('User Subscription Management')}</SheetTitle>
+            <SheetTitle ref={headingRef} tabIndex={-1}>
+              {t('User Subscription Management')}
+            </SheetTitle>
             <SheetDescription>
               {props.user?.username || '-'} (ID: {props.user?.id || '-'})
             </SheetDescription>
@@ -257,7 +259,7 @@ export function UserSubscriptionsDialog(props: Props) {
           <div className={sideDrawerFormClassName()}>
             <div className='flex gap-2'>
               <Combobox
-                options={plans.map((p) => ({
+                options={(plansQuery.data || []).map((p) => ({
                   value: String(p.plan.id),
                   label: `${p.plan.title} ($${Number(p.plan.price_amount || 0).toFixed(2)})`,
                 }))}
@@ -268,147 +270,184 @@ export function UserSubscriptionsDialog(props: Props) {
               />
               <Button
                 onClick={handleCreate}
-                disabled={creating || !selectedPlanId}
+                disabled={
+                  creating ||
+                  !selectedPlanId ||
+                  loading ||
+                  loadError ||
+                  resetMutation.isPending
+                }
               >
                 <Plus className='mr-1 h-4 w-4' />
                 {t('Add subscription')}
               </Button>
             </div>
 
-            <StaticDataTable
-              data={loading ? [] : subs}
-              getRowKey={(record) => record.subscription.id}
-              emptyClassName={loading ? 'py-8' : 'text-muted-foreground py-8'}
-              emptyContent={
-                loading ? t('Loading...') : t('No subscription records')
-              }
-              columns={[
-                {
-                  id: 'id',
-                  header: t('ID'),
-                  cell: (record) => <TableId value={record.subscription.id} />,
-                },
-                {
-                  id: 'plan',
-                  header: t('Plan'),
-                  cell: (record) => {
-                    const sub = record.subscription
-
-                    return (
-                      <div>
-                        <div className='font-medium'>
-                          {planTitleMap.get(sub.plan_id) || `#${sub.plan_id}`}
-                        </div>
-                        <div className='text-muted-foreground text-sm'>
-                          {t('Source')}: {sub.source || '-'}
-                        </div>
-                      </div>
-                    )
+            {loadError ? (
+              <ErrorState
+                title={t('Loading failed')}
+                onRetry={() => {
+                  void plansQuery.refetch()
+                  void subscriptionsQuery.refetch()
+                }}
+              />
+            ) : (
+              <StaticDataTable
+                data={loading ? [] : subscriptionsQuery.data || []}
+                getRowKey={(record) => record.subscription.id}
+                emptyClassName={loading ? 'py-8' : 'text-muted-foreground py-8'}
+                emptyContent={
+                  loading ? t('Loading...') : t('No subscription records')
+                }
+                columns={[
+                  {
+                    id: 'id',
+                    header: t('ID'),
+                    cell: (record) => (
+                      <TableId value={record.subscription.id} />
+                    ),
                   },
-                },
-                {
-                  id: 'status',
-                  header: t('Status'),
-                  cell: (record) => (
-                    <SubscriptionStatusBadge sub={record.subscription} t={t} />
-                  ),
-                },
-                {
-                  id: 'validity',
-                  header: t('Validity'),
-                  cell: (record) => {
-                    const sub = record.subscription
+                  {
+                    id: 'plan',
+                    header: t('Plan'),
+                    cell: (record) => {
+                      const sub = record.subscription
 
-                    return (
-                      <div className='text-sm'>
+                      return (
                         <div>
-                          {t('Start')}: {formatTimestamp(sub.start_time)}
+                          <div className='font-medium'>
+                            {planTitleMap.get(sub.plan_id) || `#${sub.plan_id}`}
+                          </div>
+                          <div className='text-muted-foreground text-sm'>
+                            {t('Source')}: {sub.source || '-'}
+                          </div>
                         </div>
-                        <div>
-                          {t('End')}: {formatTimestamp(sub.end_time)}
-                        </div>
-                      </div>
-                    )
+                      )
+                    },
                   },
-                },
-                {
-                  id: 'quota',
-                  header: t('Total Quota'),
-                  cell: (record) => {
-                    const sub = record.subscription
-                    const total = Number(sub.amount_total || 0)
-                    const used = Number(sub.amount_used || 0)
-                    return total > 0
-                      ? `${formatQuota(used)}/${formatQuota(total)}`
-                      : t('Unlimited')
+                  {
+                    id: 'status',
+                    header: t('Status'),
+                    cell: (record) => (
+                      <SubscriptionStatusBadge
+                        sub={record.subscription}
+                        t={t}
+                      />
+                    ),
                   },
-                },
-                {
-                  id: 'actions',
-                  header: t('Actions'),
-                  className: 'text-right',
-                  cellClassName: 'text-right',
-                  cell: (record) => {
-                    const sub = record.subscription
-                    const now = Date.now() / 1000
-                    const isExpired =
-                      (sub.end_time || 0) > 0 && sub.end_time < now
-                    const isActive = sub.status === 'active' && !isExpired
+                  {
+                    id: 'validity',
+                    header: t('Validity'),
+                    cell: (record) => {
+                      const sub = record.subscription
 
-                    return (
-                      <DataTableRowActionMenu ariaLabel={t('Actions')}>
-                        <DropdownMenuItem
-                          disabled={!isActive}
-                          onClick={() => {
-                            setAdvanceResetTime(true)
-                            setResetAction({
-                              planId: sub.plan_id,
-                              planTitle:
-                                planTitleMap.get(sub.plan_id) ||
-                                `#${sub.plan_id}`,
-                            })
-                          }}
-                        >
-                          {t('Reset quota')}
-                          <DropdownMenuShortcut>
-                            <RotateCcw size={16} />
-                          </DropdownMenuShortcut>
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          disabled={!isActive}
-                          onClick={() =>
-                            setConfirmAction({
-                              type: 'invalidate',
-                              subId: sub.id,
-                            })
-                          }
-                        >
-                          {t('Invalidate')}
-                          <DropdownMenuShortcut>
-                            <Ban size={16} />
-                          </DropdownMenuShortcut>
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant='destructive'
-                          onClick={() =>
-                            setConfirmAction({
-                              type: 'delete',
-                              subId: sub.id,
-                            })
-                          }
-                        >
-                          {t('Delete')}
-                          <DropdownMenuShortcut>
-                            <Trash2 size={16} />
-                          </DropdownMenuShortcut>
-                        </DropdownMenuItem>
-                      </DataTableRowActionMenu>
-                    )
+                      return (
+                        <div className='text-sm'>
+                          <div>
+                            {t('Start')}: {formatTimestamp(sub.start_time)}
+                          </div>
+                          <div>
+                            {t('End')}: {formatTimestamp(sub.end_time)}
+                          </div>
+                        </div>
+                      )
+                    },
                   },
-                },
-              ]}
-            />
+                  {
+                    id: 'quota',
+                    header: t('Subscription usage'),
+                    cell: (record) => {
+                      const sub = record.subscription
+                      const total = Number(sub.amount_total || 0)
+                      const used = Number(sub.amount_used || 0)
+                      return (
+                        <div className='space-y-1 text-sm'>
+                          <div className='font-medium tabular-nums'>
+                            {formatQuota(used)} /{' '}
+                            {total > 0 ? formatQuota(total) : t('Unlimited')}
+                          </div>
+                          <div className='text-muted-foreground text-xs'>
+                            {sub.next_reset_time ? (
+                              <>
+                                <div>{t('Next reset')}</div>
+                                <div className='tabular-nums'>
+                                  {formatTimestamp(sub.next_reset_time)}
+                                </div>
+                              </>
+                            ) : (
+                              t('No automatic reset')
+                            )}
+                          </div>
+                        </div>
+                      )
+                    },
+                  },
+                  {
+                    id: 'actions',
+                    header: t('Actions'),
+                    className: 'text-right',
+                    cellClassName: 'text-right',
+                    cell: (record) => {
+                      const sub = record.subscription
+                      const now = Date.now() / 1000
+                      const isExpired =
+                        (sub.end_time || 0) > 0 && sub.end_time < now
+                      const isActive = sub.status === 'active' && !isExpired
+
+                      return (
+                        <DataTableRowActionMenu ariaLabel={t('Actions')}>
+                          <DropdownMenuItem
+                            disabled={!isActive || resetMutation.isPending}
+                            onClick={() => {
+                              setResetAction({
+                                planId: sub.plan_id,
+                                planTitle:
+                                  planTitleMap.get(sub.plan_id) ||
+                                  `#${sub.plan_id}`,
+                              })
+                            }}
+                          >
+                            {t('Reset usage')}
+                            <DropdownMenuShortcut>
+                              <RotateCcw size={16} />
+                            </DropdownMenuShortcut>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={!isActive || resetMutation.isPending}
+                            onClick={() =>
+                              setConfirmAction({
+                                type: 'invalidate',
+                                subId: sub.id,
+                              })
+                            }
+                          >
+                            {t('Invalidate')}
+                            <DropdownMenuShortcut>
+                              <Ban size={16} />
+                            </DropdownMenuShortcut>
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant='destructive'
+                            onClick={() =>
+                              setConfirmAction({
+                                type: 'delete',
+                                subId: sub.id,
+                              })
+                            }
+                          >
+                            {t('Delete')}
+                            <DropdownMenuShortcut>
+                              <Trash2 size={16} />
+                            </DropdownMenuShortcut>
+                          </DropdownMenuItem>
+                        </DataTableRowActionMenu>
+                      )
+                    },
+                  },
+                ]}
+              />
+            )}
           </div>
         </SheetContent>
       </Sheet>
@@ -439,23 +478,20 @@ export function UserSubscriptionsDialog(props: Props) {
       {resetAction && (
         <ConfirmDialog
           open
-          onOpenChange={(v) => !v && setResetAction(null)}
-          title={t('Reset subscription quota')}
+          onOpenChange={(v) =>
+            !v && !resetMutation.isPending && setResetAction(null)
+          }
+          title={t('Reset subscription usage')}
           desc={t('Reset active {{plan}} subscriptions for this user?', {
             plan: resetAction.planTitle,
           })}
-          confirmText={t('Reset quota')}
+          confirmText={t('Reset usage')}
           handleConfirm={handleResetConfirm}
-          isLoading={resetting}
+          isLoading={resetMutation.isPending}
         >
-          <label className='flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm'>
-            <span>{t('Advance next reset time')}</span>
-            <Switch
-              checked={advanceResetTime}
-              onCheckedChange={(checked) => setAdvanceResetTime(!!checked)}
-              aria-label={t('Advance next reset time')}
-            />
-          </label>
+          <p className='text-muted-foreground text-sm'>
+            {t('Only usage is cleared. Scheduled reset times stay unchanged.')}
+          </p>
         </ConfirmDialog>
       )}
     </>

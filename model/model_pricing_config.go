@@ -207,6 +207,10 @@ func effectiveModelPricing(values map[string]map[string]any, name string) Pricin
 		configuredCompletion = &ratio
 	}
 	result["CompletionRatio"] = ratio_setting.ResolveCompletionRatio(name, configuredCompletion).Ratio
+	// The supplied snapshot (or replaced draft) is authoritative. Reading the
+	// process-wide ratio maps here would restore deleted prices during preview.
+	// In particular, a fallback audio multiplier of 1 does not configure an
+	// audio lane: its absence determines which legacy settlement path applies.
 	for key, fallback := range map[string]float64{
 		"CacheRatio":       ratio_setting.DefaultCacheRatio,
 		"CreateCacheRatio": ratio_setting.DefaultCreateCacheRatio,

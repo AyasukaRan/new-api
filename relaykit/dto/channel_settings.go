@@ -25,6 +25,90 @@ type ChannelSettings struct {
 	// HTTP2ConnectionShards spreads HTTP/2 traffic across N independent transports
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
+	// BalanceQueryDisabled stops manual and scheduled balance checks while
+	// preserving the last recorded balance. Existing configurations allow checks.
+	BalanceQueryDisabled bool `json:"balance_query_disabled,omitempty"`
+	// BalanceQueryType names the provider whose balance endpoint this channel
+	// should be queried with, for gateways that speak one provider's relay
+	// protocol while exposing another's billing API — an OpenAI-compatible
+	// proxy configured as a Gemini channel, for instance. Empty means the
+	// channel's own type decides, which is the behaviour without this setting.
+	BalanceQueryType string `json:"balance_query_type,omitempty"`
+	// BalanceQueryBaseURL sends the balance request somewhere other than the
+	// channel's relay base URL. Only the query styles that are addressed by
+	// base URL use it; a provider with a fixed billing host ignores it.
+	BalanceQueryBaseURL string `json:"balance_query_base_url,omitempty"`
+	// BatchEnabled opts this channel into serving batch inference alongside its
+	// ordinary relay traffic. A vendor's batch API is a separate product from
+	// its chat API — the same account may hold one entitlement and not the
+	// other — so a channel that serves chat must not be handed a batch job
+	// until an operator says it can run one.
+	BatchEnabled bool `json:"batch_enabled,omitempty"`
+	// BatchBaseURL and BatchKey override where batch requests go and what they
+	// present. Either may be empty, in which case the caller's resolved default
+	// applies — the provider's built-in batch host, or the channel's own
+	// address for a provider that serves batch from it.
+	BatchBaseURL string `json:"batch_base_url,omitempty"`
+	BatchKey     string `json:"batch_key,omitempty"`
+}
+
+// ValidateBatch checks the save-time shape of the batch inference override.
+func (s *ChannelSettings) ValidateBatch() error {
+	if s == nil {
+		return nil
+	}
+	s.BatchBaseURL = strings.TrimRight(strings.TrimSpace(s.BatchBaseURL), "/")
+	s.BatchKey = strings.TrimSpace(s.BatchKey)
+	if s.BatchBaseURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(s.BatchBaseURL)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("invalid batch_base_url: %s", s.BatchBaseURL)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("batch_base_url must use http or https")
+	}
+	return nil
+}
+
+// BatchCredentials applies the operator's overrides on top of an already
+// resolved default, so a channel on a known provider needs nothing beyond the
+// switch. Callers in the host module pass Channel.GetBatchEndpoint's default.
+func (s *ChannelSettings) BatchCredentials(baseURL string, key string) (string, string) {
+	if s == nil {
+		return baseURL, key
+	}
+	if override := strings.TrimRight(strings.TrimSpace(s.BatchBaseURL), "/"); override != "" {
+		baseURL = override
+	}
+	if override := strings.TrimSpace(s.BatchKey); override != "" {
+		key = override
+	}
+	return baseURL, key
+}
+
+// ValidateBalanceQuery checks the save-time shape of the balance override. The
+// query type is not checked against the supported list here: that list lives
+// with the channel constants in the host module, which this package must not
+// import.
+func (s *ChannelSettings) ValidateBalanceQuery() error {
+	if s == nil {
+		return nil
+	}
+	s.BalanceQueryType = strings.TrimSpace(s.BalanceQueryType)
+	s.BalanceQueryBaseURL = strings.TrimRight(strings.TrimSpace(s.BalanceQueryBaseURL), "/")
+	if s.BalanceQueryBaseURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(s.BalanceQueryBaseURL)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("invalid balance_query_base_url: %s", s.BalanceQueryBaseURL)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("balance_query_base_url must use http or https")
+	}
+	return nil
 }
 
 const (

@@ -1,12 +1,14 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -139,4 +141,114 @@ func TestPricingSyncCompleteSourcesAndArrayFormats(t *testing.T) {
 	assert.Equal(t, float64(4), response.Data.Prices["sync-token"].Upstreams["Expressions(1)"]["completion_ratio"])
 	assert.Equal(t, float64(0), response.Data.Prices["sync-token"].Upstreams["Expressions(1)"]["cache_ratio"])
 	assert.Equal(t, float64(0), response.Data.Prices["sync-free"].Upstreams["Legacy(2)"]["model_ratio"])
+}
+
+func withUSDExchangeRate(t *testing.T, rate float64) {
+	t.Helper()
+	original := operation_setting.USDExchangeRate
+	t.Cleanup(func() { operation_setting.USDExchangeRate = original })
+	operation_setting.USDExchangeRate = rate
+}
+
+// A verbatim slice of the iFlytek console catalogue, including the shapes that
+// have to be handled: a normal model, one with no cache price, and a free one.
+const iflytekCatalogueFixture = `{"code":0,"data":{"page":1,"size":1000,"total":3,"rows":[
+ {"serviceId":"xopdeepseekv4pro","name":"DeepSeek-V4-Pro","pretrainedModel":"DeepSeek-V4-Pro",
+  "price":{"inferencePrice":{"inTokensPrice":12,"outTokensPrice":24,"cacheTokensPrice":1,"inTokensUnit":"元/百万tokens"}}},
+ {"serviceId":"xopqwen35397b","name":"Qwen3.5-397B",
+  "price":{"inferencePrice":{"inTokensPrice":1.2,"outTokensPrice":7.2,"inTokensUnit":"元/百万tokens"}}},
+ {"serviceId":"xoppaddleocrv16","name":"PaddleOCR",
+  "price":{"inferencePrice":{"inTokensPrice":0,"outTokensPrice":0,"inTokensUnit":"元/百万tokens"}}}
+]}}`
+
+// The ratio unit is $2 per 1M tokens, so at parity a CNY-per-million price
+// halves. These expectations were cross-checked against prices an operator had
+// already entered by hand for the same models.
+func TestConvertIFlytekMaaSToRatioData(t *testing.T) {
+	withUSDExchangeRate(t, 1)
+
+	converted, err := convertIFlytekMaaSToRatioData(strings.NewReader(iflytekCatalogueFixture))
+	require.NoError(t, err)
+
+	modelRatio := converted["model_ratio"].(map[string]any)
+	assert.Equal(t, 6.0, modelRatio["xopdeepseekv4pro"])
+	assert.Equal(t, 0.6, modelRatio["xopqwen35397b"])
+	assert.Equal(t, 0.0, modelRatio["xoppaddleocrv16"], "a free model keeps a zero ratio")
+
+	completionRatio := converted["completion_ratio"].(map[string]any)
+	assert.Equal(t, 2.0, completionRatio["xopdeepseekv4pro"])
+	assert.Equal(t, 6.0, completionRatio["xopqwen35397b"])
+	assert.NotContains(t, completionRatio, "xoppaddleocrv16",
+		"lane ratios are ratios of the input price and are meaningless when it is zero")
+
+	cacheRatio := converted["cache_ratio"].(map[string]any)
+	assert.InDelta(t, 1.0/12.0, cacheRatio["xopdeepseekv4pro"], 1e-6)
+	assert.NotContains(t, cacheRatio, "xopqwen35397b", "a model with no cache price keeps the global cache ratio")
+}
+
+// An operator running the quota unit at parity with CNY has set the exchange
+// rate to 1; one running it as real USD has not. Imported prices must follow
+// that setting instead of a hardcoded rate.
+func TestConvertIFlytekMaaSHonoursExchangeRate(t *testing.T) {
+	withUSDExchangeRate(t, 7.3)
+
+	converted, err := convertIFlytekMaaSToRatioData(strings.NewReader(iflytekCatalogueFixture))
+	require.NoError(t, err)
+
+	modelRatio := converted["model_ratio"].(map[string]any)
+	assert.InDelta(t, 12.0/7.3/2, modelRatio["xopdeepseekv4pro"], 1e-6)
+	assert.Equal(t, 2.0, converted["completion_ratio"].(map[string]any)["xopdeepseekv4pro"],
+		"lane ratios are price ratios and must not move with the exchange rate")
+}
+
+// The console envelope is {code,data:{rows}}, which has no Success field. If it
+// ever reached the generic new-api decoder it would report an empty source as a
+// successful fetch of nothing, so the endpoint sniff has to catch it first.
+func TestIFlytekMaaSEndpointSniff(t *testing.T) {
+	assert.True(t, isIFlytekMaaSEndpoint("https://in.iflyaicloud.com"+iflytekEndpoint))
+	assert.True(t, isIFlytekMaaSEndpoint("https://in.iflyaicloud.com"+iflytekPath+"/"))
+	assert.False(t, isIFlytekMaaSEndpoint("https://in.iflyaicloud.com/api/v1/other"))
+	assert.False(t, isIFlytekMaaSEndpoint("https://evil.example.com"+iflytekPath))
+	assert.False(t, isIFlytekMaaSEndpoint("://not a url"))
+}
+
+func TestConvertIFlytekMaaSRejectsUnusableCatalogue(t *testing.T) {
+	withUSDExchangeRate(t, 1)
+
+	_, err := convertIFlytekMaaSToRatioData(strings.NewReader(`{"code":0,"data":{"rows":[]}}`))
+	require.Error(t, err)
+
+	// Rows without a serviceId are display-only entries, not callable models.
+	_, err = convertIFlytekMaaSToRatioData(strings.NewReader(
+		`{"data":{"rows":[{"serviceId":"","price":{"inferencePrice":{"inTokensPrice":1}}}]}}`))
+	require.Error(t, err)
+}
+
+// A scope keeps a sync to the models a channel actually serves, and lands each
+// price under the client-facing name that billing looks up — not the upstream
+// name a provider catalogue is keyed by.
+func TestModelScopeFiltersAndRenamesToBillingNames(t *testing.T) {
+	scope := &modelScope{
+		allowed:  map[string]struct{}{"xopdeepseekv4pro": {}, "xopglm53": {}},
+		toClient: map[string]string{"deepseek-v4-pro": "xopdeepseekv4pro"},
+	}
+
+	scoped := scope.apply(map[string]any{
+		"model_ratio": map[string]any{
+			"deepseek-v4-pro": 6.0,
+			"xopglm53":        1.5,
+			"kimi-k2":         2.0,
+		},
+		"completion_ratio": map[string]any{"deepseek-v4-pro": 2.0},
+	})
+
+	assert.Equal(t, map[string]any{"xopdeepseekv4pro": 6.0, "xopglm53": 1.5}, scoped["model_ratio"])
+	assert.Equal(t, map[string]any{"xopdeepseekv4pro": 2.0}, scoped["completion_ratio"])
+
+	// A catalogue carrying both spellings must not depend on map iteration
+	// order: the name the channel exposes wins over the renamed upstream entry.
+	both := scope.apply(map[string]any{
+		"model_ratio": map[string]any{"deepseek-v4-pro": 6.0, "xopdeepseekv4pro": 4.5},
+	})
+	assert.Equal(t, map[string]any{"xopdeepseekv4pro": 4.5}, both["model_ratio"])
 }

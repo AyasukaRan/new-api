@@ -1,6 +1,7 @@
 package service
 
 import (
+	"math"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -13,6 +14,40 @@ import (
 
 // TieredResultWrapper wraps billingexpr.TieredResult for use at the service layer.
 type TieredResultWrapper = billingexpr.TieredResult
+
+// separatelyPricedInputModalities gives cache precedence over its audio/image
+// subsets. With no subtype breakdown, their combined billed volume is bounded
+// by the remaining uncached input; the missing intersection is never invented.
+// Claude input counts already exclude cache and must bypass this normalization.
+func separatelyPricedInputModalities(usage *dto.Usage, usedVars map[string]bool, imageCache float64) (image, audio float64) {
+	prompt := math.Max(0, float64(usage.PromptTokens))
+	image = math.Max(0, float64(usage.PromptTokensDetails.ImageTokens)-imageCache)
+	audio = math.Max(0, float64(usage.PromptTokensDetails.AudioTokens))
+	cache := imageCache
+	if usedVars["cr"] {
+		cache = math.Max(0, float64(usage.PromptTokensDetails.CachedTokens))
+		if details := usage.PromptTokensDetails.CachedTokensDetails; details != nil {
+			if details.AudioTokens != nil {
+				audio -= math.Min(audio, math.Min(cache, math.Max(0, float64(*details.AudioTokens))))
+			}
+			if !usedVars["img_cr"] && details.ImageTokens != nil {
+				image -= math.Min(image, math.Min(cache, math.Max(0, float64(*details.ImageTokens))))
+			}
+		}
+	}
+	if usedVars["cc"] || usedVars["cc1h"] {
+		cache += float64(usage.PromptTokensDetails.CacheCreationTokensTotal())
+	}
+	available := math.Max(0, prompt-cache)
+	if usedVars["ai"] {
+		audio = math.Min(audio, available)
+		available -= audio
+	}
+	if usedVars["img"] {
+		image = math.Min(image, available)
+	}
+	return image, audio
+}
 
 // BuildTieredTokenParams constructs billingexpr.TokenParams from a dto.Usage,
 // normalizing P and C so they mean "tokens not separately priced by the
@@ -86,6 +121,7 @@ func BuildTieredTokenParams(usage *dto.Usage, isClaudeUsageSemantic bool, usedVa
 			p += cr
 		}
 	} else {
+		img, ai = separatelyPricedInputModalities(usage, usedVars, imgCR)
 		if usedVars["cr"] {
 			p -= cr
 		}

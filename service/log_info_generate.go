@@ -72,6 +72,11 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		return
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
+	// The trace itself lives in its own table; the log row carries only the key
+	// that finds it, so the log list stays small.
+	if traceId := RequestTraceId(ctx); traceId != "" {
+		other.SetAdmin("trace_id", traceId)
+	}
 	if relayInfo != nil {
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
 			other.SetAdmin("billing_model", billingModel)
@@ -109,9 +114,7 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other.SetPublic("model_price", modelPrice)
 	other.SetPublic("user_group_ratio", userGroupRatio)
 	other.SetPublic("frt", float64(relayInfo.FirstResponseTime.UnixMilli()-relayInfo.StartTime.UnixMilli()))
-	if relayInfo.ReasoningEffort != "" {
-		other.SetPublic("reasoning_effort", relayInfo.ReasoningEffort)
-	}
+	AppendRequestMetadata(ctx, relayInfo, other)
 	if relayInfo.IsModelMapped {
 		other.SetPublic("is_model_mapped", true)
 		other.SetPublic("upstream_model_name", relayInfo.UpstreamModelName)
@@ -275,6 +278,13 @@ func appendFinalRequestFormat(relayInfo *relaycommon.RelayInfo, other *model.Log
 
 func GenerateWssOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage, modelRatio, groupRatio, completionRatio, audioRatio, audioCompletionRatio, modelPrice, userGroupRatio float64) *model.LogOther {
 	info := GenerateTextOtherInfo(ctx, relayInfo, modelRatio, groupRatio, completionRatio, 0, 0.0, modelPrice, userGroupRatio)
+	if relayInfo.PriceData.ChannelPricing {
+		info.SetPublic("cache_tokens", usage.InputTokenDetails.CachedTokens)
+		info.SetPublic("cache_ratio", relayInfo.PriceData.CacheRatio)
+		if usage.InputTokenDetails.CachedTokensDetails != nil {
+			info.SetPublic("cached_tokens_details", usage.InputTokenDetails.CachedTokensDetails)
+		}
+	}
 	info.SetPublic("ws", true)
 	info.SetPublic("audio_input", usage.InputTokenDetails.AudioTokens)
 	info.SetPublic("audio_output", usage.OutputTokenDetails.AudioTokens)

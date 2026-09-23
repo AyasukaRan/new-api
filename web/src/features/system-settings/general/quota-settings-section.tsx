@@ -52,6 +52,7 @@ import { useUpdateOption } from '../hooks/use-update-option'
 
 const quotaSchema = z.object({
   QuotaForNewUser: z.coerce.number().min(0),
+  DefaultSubscriptionPlanId: z.coerce.number().min(0),
   PreConsumedQuota: z.coerce.number().min(0),
   QuotaForInviter: z.coerce.number().min(0),
   QuotaForInvitee: z.coerce.number().min(0),
@@ -151,6 +152,32 @@ export function QuotaSettingsSection({
                       {
                         formattedQuota: formatQuotaInputValue(field.value),
                       }
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='DefaultSubscriptionPlanId'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Default Subscription Plan ID')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      value={field.value ?? ''}
+                      onChange={handleNumberChange(field.onChange)}
+                      name={field.name}
+                      onBlur={field.onBlur}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Subscription plan automatically granted to every new user on registration. 0 disables it.'
                     )}
                   </FormDescription>
                   <FormMessage />

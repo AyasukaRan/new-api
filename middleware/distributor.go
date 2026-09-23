@@ -122,7 +122,34 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		for selection := 0; channel != nil; selection++ {
+			if channel != nil {
+				if ok, kind := model.ChannelSatisfiesFilters(channel, modelRequest.Model, constraints.Filters); !ok && kind != taskdto.FilterChannelBalance {
+					if kind == taskdto.FilterTaskPluginIdentity {
+						logTaskPluginChannelDecision(c, channel, modelRequest.Model, "channel_rejected", "identity_mismatch")
+					}
+					abortWithOpenAiMessage(c, http.StatusServiceUnavailable, noAvailableChannelMessage(c, common.GetContextKeyString(c, constant.ContextKeyUsingGroup), modelRequest.Model), types.ErrorCodeModelNotFound)
+					return
+				}
+			}
+			setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+			if setupErr == nil {
+				break
+			}
+			_, pinned, _ := constraints.ResolvedPin()
+			if setupErr.GetErrorCode() == model.ErrorCodeChannelBalanceUnavailable && !pinned && selection == 0 {
+				usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+				replacement, _, selectErr := service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
+					Ctx: c, ModelName: modelRequest.Model, TokenGroup: usingGroup, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0),
+				})
+				if selectErr == nil && replacement != nil {
+					channel = replacement
+					continue
+				}
+			}
+			abortWithOpenAiMessage(c, setupErr.StatusCode, setupErr.Error(), setupErr.GetErrorCode())
+			return
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
@@ -385,6 +412,12 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			modelRequest.Model = midjourneyModel
 		}
 		c.Set("relay_mode", relayMode)
+	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/files") {
+		// Only the upload picks a channel, and it does so from the model its
+		// own middleware already resolved. Every other file operation is pinned
+		// to the channel that holds the bytes (see PrepareRelayFile).
+		shouldSelectChannel = false
+		modelRequest.Model = c.GetString(relayFileModelContextKey)
 	} else if strings.Contains(c.Request.URL.Path, "/v1/videos/") && strings.HasSuffix(c.Request.URL.Path, "/remix") {
 		relayMode := relayconstant.RelayModeVideoSubmit
 		c.Set("relay_mode", relayMode)
@@ -540,7 +573,7 @@ func getTaskOriginModelName(c *gin.Context) string {
 	return ""
 }
 
-func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string, channelTest ...bool) *types.NewAPIError {
 	c.Set("original_model", modelName) // for retry
 	expectedPlugin := c.GetString("expected_task_plugin_key")
 	if channel == nil {
@@ -604,7 +637,14 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	var key string
+	var index int
+	var newAPIError *types.NewAPIError
+	if len(channelTest) > 0 && channelTest[0] {
+		key, index, newAPIError = channel.GetNextEnabledKey()
+	} else {
+		key, index, newAPIError = channel.GetNextRelayKey(service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable))
+	}
 	if newAPIError != nil {
 		return newAPIError
 	}
@@ -616,8 +656,16 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
 	}
 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+	baseURL := channel.GetBaseURL()
+	// A batch request may have to leave for a different host with a different
+	// credential than the channel's chat traffic. Substituting here means every
+	// later stage — the file relay, the plugin's submit hook — reads the batch
+	// endpoint from the same two context keys as everything else.
+	if service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
+		baseURL, key = channel.GetBatchEndpoint(key)
+	}
 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
-	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, baseURL)
 
 	common.SetContextKey(c, constant.ContextKeySystemPromptOverride, false)
 

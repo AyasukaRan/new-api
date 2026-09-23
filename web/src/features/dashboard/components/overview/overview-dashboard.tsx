@@ -42,6 +42,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
+import { currentBaseUrl } from '@/lib/base-path'
 import {
   CardStaggerContainer,
   CardStaggerItem,
@@ -141,8 +142,7 @@ function saveSetupGuideExpanded(expanded: boolean): void {
 }
 
 function getCurrentOrigin(): string {
-  if (typeof window === 'undefined') return ''
-  return window.location.origin
+  return currentBaseUrl()
 }
 
 function normalizeEndpoint(sourceUrl?: string): string {

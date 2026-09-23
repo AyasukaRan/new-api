@@ -334,6 +334,31 @@ func Register(c *gin.Context) {
 	return
 }
 
+type userListItem struct {
+	*model.User
+	Subscriptions []model.UserSubscriptionUsage `json:"subscriptions"`
+}
+
+func buildUserListItems(users []*model.User) ([]userListItem, error) {
+	userIDs := make([]int, 0, len(users))
+	for _, user := range users {
+		userIDs = append(userIDs, user.Id)
+	}
+	subscriptions, err := model.GetActiveSubscriptionUsageByUserIDs(userIDs)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]userListItem, 0, len(users))
+	for _, user := range users {
+		usage := subscriptions[user.Id]
+		if usage == nil {
+			usage = []model.UserSubscriptionUsage{}
+		}
+		items = append(items, userListItem{User: user, Subscriptions: usage})
+	}
+	return items, nil
+}
+
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
@@ -342,9 +367,14 @@ func GetAllUsers(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	items, err := buildUserListItems(users)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(users)
+	pageInfo.SetItems(items)
 
 	common.ApiSuccess(c, pageInfo)
 	return
@@ -372,9 +402,14 @@ func SearchUsers(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	items, err := buildUserListItems(users)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(users)
+	pageInfo.SetItems(items)
 	common.ApiSuccess(c, pageInfo)
 	return
 }
@@ -1279,7 +1314,7 @@ type UpdateUserSettingRequest struct {
 	GotifyPriority                   int     `json:"gotify_priority,omitempty"`
 	UpstreamModelUpdateNotifyEnabled *bool   `json:"upstream_model_update_notify_enabled,omitempty"`
 	AcceptUnsetModelRatioModel       bool    `json:"accept_unset_model_ratio_model"`
-	RecordIpLog                      bool    `json:"record_ip_log"`
+	RecordIpLog                      *bool   `json:"record_ip_log,omitempty"`
 }
 
 func UpdateUserSetting(c *gin.Context) {
@@ -1374,6 +1409,11 @@ func UpdateUserSetting(c *gin.Context) {
 	if user.Role >= common.RoleAdminUser && req.UpstreamModelUpdateNotifyEnabled != nil {
 		upstreamModelUpdateNotifyEnabled = *req.UpstreamModelUpdateNotifyEnabled
 	}
+	// 未提交该字段的客户端保持原样，而不是被当成关闭
+	recordIpLog := existingSettings.RecordIpLog
+	if req.RecordIpLog != nil {
+		recordIpLog = req.RecordIpLog
+	}
 
 	// 构建设置
 	settings := dto.UserSetting{
@@ -1381,7 +1421,7 @@ func UpdateUserSetting(c *gin.Context) {
 		QuotaWarningThreshold:            req.QuotaWarningThreshold,
 		UpstreamModelUpdateNotifyEnabled: upstreamModelUpdateNotifyEnabled,
 		AcceptUnsetRatioModel:            req.AcceptUnsetModelRatioModel,
-		RecordIpLog:                      req.RecordIpLog,
+		RecordIpLog:                      recordIpLog,
 	}
 
 	// 如果是webhook类型,添加webhook相关设置

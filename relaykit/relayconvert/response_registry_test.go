@@ -1,10 +1,13 @@
 package relayconvert
 
 import (
+	"github.com/samber/lo"
+	"math"
 	"testing"
 
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/convmeta"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -567,6 +570,7 @@ func TestResponseUsageMatrixChatAndResponsesDetails(t *testing.T) {
 		TotalTokens:      20,
 		PromptTokensDetails: dto.InputTokenDetails{
 			CachedTokens:         3,
+			CachedTokensDetails:  &dto.CachedTokenDetails{TextTokens: lo.ToPtr(1), AudioTokens: lo.ToPtr(1), ImageTokens: lo.ToPtr(1)},
 			CachedCreationTokens: 2,
 			CacheWriteTokens:     6,
 			TextTokens:           4,
@@ -587,6 +591,8 @@ func TestResponseUsageMatrixChatAndResponsesDetails(t *testing.T) {
 	assert.Equal(t, 20, result.Usage.TotalTokens)
 	require.NotNil(t, result.Usage.InputTokensDetails)
 	assert.Equal(t, 3, result.Usage.InputTokensDetails.CachedTokens)
+	assert.Equal(t, chat.Usage.PromptTokensDetails.CachedTokensDetails, result.Usage.InputTokensDetails.CachedTokensDetails)
+	assert.NotSame(t, chat.Usage.PromptTokensDetails.CachedTokensDetails, result.Usage.InputTokensDetails.CachedTokensDetails)
 	assert.Equal(t, 2, result.Usage.InputTokensDetails.CachedCreationTokens)
 	assert.Equal(t, 6, result.Usage.InputTokensDetails.CacheWriteTokens)
 	assert.Equal(t, 4, result.Usage.InputTokensDetails.TextTokens)
@@ -609,6 +615,7 @@ func TestResponseUsageMatrixChatAndResponsesDetails(t *testing.T) {
 			TotalTokens:  21,
 			InputTokensDetails: &dto.InputTokenDetails{
 				CachedTokens:         4,
+				CachedTokensDetails:  &dto.CachedTokenDetails{TextTokens: lo.ToPtr(1), AudioTokens: lo.ToPtr(2), ImageTokens: lo.ToPtr(1)},
 				CachedCreationTokens: 1,
 				CacheWriteTokens:     7,
 				TextTokens:           5,
@@ -629,6 +636,8 @@ func TestResponseUsageMatrixChatAndResponsesDetails(t *testing.T) {
 	assert.Equal(t, 8, result.Usage.CompletionTokens)
 	assert.Equal(t, 21, result.Usage.TotalTokens)
 	assert.Equal(t, 4, result.Usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, responses.Usage.InputTokensDetails.CachedTokensDetails, result.Usage.PromptTokensDetails.CachedTokensDetails)
+	assert.NotSame(t, responses.Usage.InputTokensDetails.CachedTokensDetails, result.Usage.PromptTokensDetails.CachedTokensDetails)
 	assert.Equal(t, 1, result.Usage.PromptTokensDetails.CachedCreationTokens)
 	assert.Equal(t, 7, result.Usage.PromptTokensDetails.CacheWriteTokens)
 	assert.Equal(t, 5, result.Usage.PromptTokensDetails.TextTokens)
@@ -638,6 +647,75 @@ func TestResponseUsageMatrixChatAndResponsesDetails(t *testing.T) {
 	assert.Equal(t, 4, result.Usage.CompletionTokenDetails.TextTokens)
 	assert.Equal(t, 1, result.Usage.CompletionTokenDetails.AudioTokens)
 	assert.Equal(t, 3, result.Usage.CompletionTokenDetails.ImageTokens)
+}
+
+func TestCachedTokenDetailsSurviveUsageSnapshotsAndUnknownEvents(t *testing.T) {
+	var event dto.RealtimeUsage
+	require.NoError(t, kitutil.Unmarshal([]byte(`{"input_tokens":10,"input_token_details":{"cached_tokens":6,"cached_tokens_details":{"text_tokens":1,"audio_tokens":3,"image_tokens":2}}}`), &event))
+	want := &dto.CachedTokenDetails{TextTokens: lo.ToPtr(1), AudioTokens: lo.ToPtr(3), ImageTokens: lo.ToPtr(2)}
+	assert.Equal(t, want, event.InputTokenDetails.CachedTokensDetails)
+	encoded, err := kitutil.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"cached_tokens_details"`)
+	legacy, err := kitutil.Marshal(dto.InputTokenDetails{CachedTokens: 6})
+	require.NoError(t, err)
+	assert.NotContains(t, string(legacy), "cached_tokens_details", "missing breakdown stays unknown")
+
+	usage := &dto.Usage{InputTokens: 10, InputTokensDetails: &event.InputTokenDetails}
+	snapshot := dto.NewOpenAIResponsesBillingUsage(usage)
+	canonical, ok := snapshot.CanonicalUsage()
+	require.True(t, ok)
+	assert.Equal(t, want, canonical.PromptTokensDetails.CachedTokensDetails)
+	*event.InputTokenDetails.CachedTokensDetails.AudioTokens = 99
+	assert.Equal(t, 3, *snapshot.OpenAIUsage.InputTokensDetails.CachedTokensDetails.AudioTokens)
+	*canonical.PromptTokensDetails.CachedTokensDetails.AudioTokens = 88
+	assert.Equal(t, 3, *snapshot.OpenAIUsage.InputTokensDetails.CachedTokensDetails.AudioTokens, "canonical reads must not change the billing snapshot")
+
+	current := &dto.Usage{PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 6, CachedTokensDetails: want}}
+	dto.MergeUsageNonZero(current, &dto.Usage{PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 6}})
+	assert.Equal(t, want, current.PromptTokensDetails.CachedTokensDetails, "a partial chunk may omit unchanged breakdowns")
+	dto.MergeUsageNonZero(current, &dto.Usage{PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 7}})
+	assert.Nil(t, current.PromptTokensDetails.CachedTokensDetails, "changed totals invalidate an older breakdown")
+	dto.MergeUsageNonZero(current, &dto.Usage{PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 7, CachedTokensDetails: &dto.CachedTokenDetails{TextTokens: lo.ToPtr(7), AudioTokens: lo.ToPtr(0)}}})
+	assert.Zero(t, *current.PromptTokensDetails.CachedTokensDetails.AudioTokens, "whole-object replacement retains explicit zero")
+	dto.MergeUsageNonZero(current, &dto.Usage{PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 8, CachedTokensDetails: &dto.CachedTokenDetails{ImageTokens: lo.ToPtr(0)}}})
+	assert.Nil(t, current.PromptTokensDetails.CachedTokensDetails.TextTokens, "changed totals cannot inherit an omitted cached modality")
+	assert.Zero(t, *current.PromptTokensDetails.CachedTokensDetails.ImageTokens, "the new snapshot retains explicit zero")
+
+	for _, unknownFirst := range []bool{false, true} {
+		known := dto.InputTokenDetails{CachedTokens: 6, CachedTokensDetails: want}
+		var total dto.InputTokenDetails
+		if unknownFirst {
+			total.Add(dto.InputTokenDetails{CachedTokens: 2})
+		}
+		total.Add(known)
+		total.Add(known)
+		if !unknownFirst {
+			assert.Equal(t, &dto.CachedTokenDetails{TextTokens: lo.ToPtr(2), AudioTokens: lo.ToPtr(6), ImageTokens: lo.ToPtr(4)}, total.CachedTokensDetails)
+			total.Add(dto.InputTokenDetails{CachedTokens: 2})
+		}
+		total.Add(known)
+		assert.Equal(t, 20, total.CachedTokens)
+		assert.Nil(t, total.CachedTokensDetails, "one unknown cached event keeps the aggregate unknown")
+		assert.Equal(t, want, known.CachedTokensDetails, "aggregation must not mutate the source event")
+	}
+}
+
+func TestCachedTokenDetailsAccumulationDoesNotWrapOrSubtract(t *testing.T) {
+	maximum := dto.InputTokenDetails{
+		CachedTokens: math.MaxInt, CachedCreationTokens: math.MaxInt, CacheWriteTokens: math.MaxInt,
+		TextTokens: math.MaxInt, AudioTokens: math.MaxInt, ImageTokens: math.MaxInt,
+		CachedTokensDetails: &dto.CachedTokenDetails{TextTokens: lo.ToPtr(math.MaxInt), AudioTokens: lo.ToPtr(math.MaxInt), ImageTokens: lo.ToPtr(math.MaxInt)},
+	}
+	total := maximum.Clone()
+	for _, count := range []int{1, -1} {
+		total.Add(dto.InputTokenDetails{
+			CachedTokens: count, CachedCreationTokens: count, CacheWriteTokens: count,
+			TextTokens: count, AudioTokens: count, ImageTokens: count,
+			CachedTokensDetails: &dto.CachedTokenDetails{TextTokens: lo.ToPtr(count), AudioTokens: lo.ToPtr(count), ImageTokens: lo.ToPtr(count)},
+		})
+		assert.Equal(t, maximum, total, "large accumulated usage stays positive and negative input cannot reduce billing counters")
+	}
 }
 
 func textRegistryChatResponse() *dto.OpenAITextResponse {

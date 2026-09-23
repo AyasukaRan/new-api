@@ -11,6 +11,9 @@ type UpstreamRequest struct {
 	ChannelIDs []int64       `json:"channel_ids"`
 	Upstreams  []UpstreamDTO `json:"upstreams"`
 	Timeout    int           `json:"timeout"`
+	// ScopeChannelIDs restricts the sync to the models these channels are
+	// configured to serve. Empty means every model the price sources publish.
+	ScopeChannelIDs []int64 `json:"scope_channel_ids"`
 }
 
 // TestResult 上游测试连通性结果

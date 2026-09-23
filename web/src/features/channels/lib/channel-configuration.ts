@@ -84,6 +84,12 @@ const CONFIGURATION_BLOCKS = {
       'proxy',
       'http_protocol',
       'http2_connection_shards',
+      'balance_query_disabled',
+      'balance_query_type',
+      'balance_query_base_url',
+      'batch_enabled',
+      'batch_base_url',
+      'batch_key',
       'disable_task_polling_sleep',
     ],
   },
@@ -172,6 +178,12 @@ export function getChannelConfigurationState(
           (values.type === 14 && values.claude_beta_query)))
     ),
     extraSettings: Boolean(
+      values.balance_query_disabled ||
+      values.balance_query_type?.trim() ||
+      values.balance_query_base_url?.trim() ||
+      values.batch_enabled ||
+      values.batch_base_url?.trim() ||
+      values.batch_key?.trim() ||
       values.proxy?.trim() ||
       (values.http_protocol && values.http_protocol !== 'auto') ||
       (values.http2_connection_shards ?? 1) > 1 ||

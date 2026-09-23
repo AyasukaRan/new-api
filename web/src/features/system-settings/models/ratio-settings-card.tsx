@@ -467,6 +467,7 @@ export function RatioSettingsCard({
       3: 'grid-cols-3',
       4: 'grid-cols-4',
       5: 'grid-cols-5',
+      6: 'grid-cols-6',
     }[visibleTabs.length] ?? 'grid-cols-4'
   const defaultTab = visibleTabs[0] ?? 'models'
 

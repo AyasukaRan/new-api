@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { SystemStatus } from '@/features/auth/types'
 
+import { withBasePath } from '@/lib/base-path'
+
 // ============================================================================
 // OAuth URL Builders
 // ============================================================================
@@ -51,7 +53,7 @@ export function buildDiscordOAuthUrl(clientId: string, state: string): string {
   url.searchParams.set('client_id', clientId)
   url.searchParams.set(
     'redirect_uri',
-    `${window.location.origin}/oauth/discord`
+    `${window.location.origin}${withBasePath('/oauth/discord')}`
   )
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'identify+openid')
@@ -69,7 +71,10 @@ export function buildOIDCOAuthUrl(
 ): string {
   const url = new URL(authUrl)
   url.searchParams.set('client_id', clientId)
-  url.searchParams.set('redirect_uri', `${window.location.origin}/oauth/oidc`)
+  url.searchParams.set(
+    'redirect_uri',
+    `${window.location.origin}${withBasePath('/oauth/oidc')}`
+  )
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('scope', 'openid profile email')
   url.searchParams.set('state', state)
@@ -122,7 +127,7 @@ export function buildOAuthAuthorizationUrl(
         url.searchParams.set('client_id', custom.client_id)
         url.searchParams.set(
           'redirect_uri',
-          `${window.location.origin}/oauth/${provider}`
+          `${window.location.origin}${withBasePath(`/oauth/${provider}`)}`
         )
         url.searchParams.set('response_type', 'code')
         url.searchParams.set('state', state)

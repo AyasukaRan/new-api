@@ -128,18 +128,20 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 			oldType, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
 			common.SQLitePath, common.IsMasterNode, common.RedisEnabled = filepath.Join(t.TempDir(), "perf.db"), false, false
 			hotBuckets.Clear()
+			channelBuckets.Clear()
 			t.Cleanup(func() {
 				model.DB, common.SQLitePath, common.IsMasterNode, common.RedisEnabled = oldDB, oldPath, oldMaster, oldRedis
 				common.SetDatabaseTypes(oldType, oldLogType)
 				hotBuckets.Clear()
+				channelBuckets.Clear()
 			})
 			require.NoError(t, model.InitDB())
 			db := model.DB
 			sqlDB, err := db.DB()
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
-			require.NoError(t, db.Migrator().DropTable(&model.PerfMetric{}))
-			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}))
+			require.NoError(t, db.Migrator().DropTable(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.Channel{}))
+			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.Channel{}))
 
 			now := time.Now()
 			start, _ := queryWindow(now, 24)
@@ -184,8 +186,8 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 			assert.NotContains(t, string(encoded), "request_count")
 			assert.NotContains(t, string(encoded), "success_count")
 
-			flushCompletedBuckets()
-			flushCompletedBuckets()
+			require.NoError(t, Flush())
+			require.NoError(t, Flush())
 			after, err := Query(QueryParams{Model: "test-model", Hours: 24, AllowedGroups: groups})
 			require.NoError(t, err)
 			assert.Equal(t, before.Summary, after.Summary)

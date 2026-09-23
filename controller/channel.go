@@ -256,6 +256,10 @@ func GetAllChannels(c *gin.Context) {
 		}
 	}
 
+	if err := model.PopulateChannelBalanceMonitors(channelData); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	for _, datum := range channelData {
 		clearChannelInfo(datum)
 	}
@@ -463,6 +467,10 @@ func SearchChannels(c *gin.Context) {
 
 	pagedData := channelData[startIdx:endIdx]
 
+	if err := model.PopulateChannelBalanceMonitors(pagedData); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	for _, datum := range pagedData {
 		clearChannelInfo(datum)
 	}

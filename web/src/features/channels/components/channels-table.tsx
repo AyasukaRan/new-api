@@ -292,6 +292,7 @@ export function ChannelsTable() {
       }
     },
     placeholderData: (previousData) => previousData,
+    refetchInterval: 60_000,
   })
 
   // Apply tag aggregation if tag mode is enabled

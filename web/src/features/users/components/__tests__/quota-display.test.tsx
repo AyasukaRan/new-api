@@ -66,6 +66,14 @@ await i18n.init({
 })
 
 function QuotaTable(props: { remaining: number; used: number }) {
+  return (
+    <UsersProvider>
+      <QuotaTableContent {...props} />
+    </UsersProvider>
+  )
+}
+
+function QuotaTableContent(props: { remaining: number; used: number }) {
   const columns = useUsersColumns().filter((column) =>
     ['quota', 'used_quota'].includes(
       column.id ?? ('accessorKey' in column ? String(column.accessorKey) : '')
@@ -184,7 +192,9 @@ it.each([0, 500000])(
       </I18nextProvider>
     )
     if (used === 0) {
-      expect(screen.getAllByRole('cell')[0]).toHaveTextContent(/^No Quota$/)
+      expect(
+        screen.getByRole('button', { name: 'No Quota' })
+      ).toHaveTextContent('No Quota')
       expect(screen.queryByText('Used amount')).not.toBeInTheDocument()
       await userEvent.click(screen.getByRole('button', { name: 'No Quota' }))
       const detail = await screen.findByRole('dialog', { name: 'Quota ($)' })

@@ -77,6 +77,11 @@ export interface Login2FAResponse {
   data?: AuthBundle
 }
 
+export type LogoutResponse = ApiResponse<{
+  revoked_sid?: string
+  cookie_cleared?: boolean
+}>
+
 export interface ApiResponse<T = unknown> {
   success: boolean
   message: string

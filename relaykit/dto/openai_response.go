@@ -3,6 +3,7 @@ package dto
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
@@ -305,6 +306,54 @@ func (d InputTokenDetails) Clone() InputTokenDetails {
 		d.CachedTokensDetails = &cached
 	}
 	return d
+}
+
+// Add accumulates independent usage events. A cached event without a modality
+// breakdown makes the aggregate breakdown unknown, even if later events have it.
+// Counters saturate instead of wrapping; negative upstream counts never subtract.
+func (d *InputTokenDetails) Add(incoming InputTokenDetails) {
+	if (d.CachedTokens > 0 && d.CachedTokensDetails == nil) ||
+		(incoming.CachedTokens > 0 && incoming.CachedTokensDetails == nil) {
+		d.CachedTokensDetails = nil
+	} else if incoming.CachedTokensDetails != nil {
+		if d.CachedTokensDetails == nil {
+			d.CachedTokensDetails = &CachedTokenDetails{}
+		}
+		d.CachedTokensDetails.TextTokens = addCachedModalityCount(d.CachedTokensDetails.TextTokens, incoming.CachedTokensDetails.TextTokens, d.CachedTokens, incoming.CachedTokens)
+		d.CachedTokensDetails.AudioTokens = addCachedModalityCount(d.CachedTokensDetails.AudioTokens, incoming.CachedTokensDetails.AudioTokens, d.CachedTokens, incoming.CachedTokens)
+		d.CachedTokensDetails.ImageTokens = addCachedModalityCount(d.CachedTokensDetails.ImageTokens, incoming.CachedTokensDetails.ImageTokens, d.CachedTokens, incoming.CachedTokens)
+	}
+	d.CachedTokens = addInputTokenCount(d.CachedTokens, incoming.CachedTokens)
+	d.CachedCreationTokens = addInputTokenCount(d.CachedCreationTokens, incoming.CachedCreationTokens)
+	d.CacheWriteTokens = addInputTokenCount(d.CacheWriteTokens, incoming.CacheWriteTokens)
+	d.TextTokens = addInputTokenCount(d.TextTokens, incoming.TextTokens)
+	d.AudioTokens = addInputTokenCount(d.AudioTokens, incoming.AudioTokens)
+	d.ImageTokens = addInputTokenCount(d.ImageTokens, incoming.ImageTokens)
+}
+
+// Missing modality counts on a cached event make that aggregate unknown.
+func addCachedModalityCount(current, incoming *int, currentCached, incomingCached int) *int {
+	if current == nil && currentCached > 0 || incoming == nil && incomingCached > 0 || current == nil && incoming == nil {
+		return nil
+	}
+	var left, right int
+	if current != nil {
+		left = *current
+	}
+	if incoming != nil {
+		right = *incoming
+	}
+	total := addInputTokenCount(left, right)
+	return &total
+}
+
+func addInputTokenCount(current, incoming int) int {
+	current = max(0, current)
+	incoming = max(0, incoming)
+	if incoming > math.MaxInt-current {
+		return math.MaxInt
+	}
+	return current + incoming
 }
 
 // CacheCreationTokensTotal returns the cache-write token count regardless of

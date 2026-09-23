@@ -18,6 +18,11 @@ For commercial licensing, please contact support@quantumnous.com
 */
 /// <reference types="@rsbuild/core/types" />
 
+interface ImportMetaEnv {
+  /** Sub-path deployment prefix, injected by rsbuild.config.ts at build time. */
+  readonly VITE_BASE_PATH?: string
+}
+
 declare module '@visactor/react-vchart' {
   export const VChart: React.ComponentType<Record<string, unknown>>
 }

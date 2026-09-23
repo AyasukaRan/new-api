@@ -120,6 +120,7 @@ func productionPluginRouteHandlers(generation *jsplugin.RoutingGeneration, bindi
 		middleware.SystemPerformanceCheck(),
 		middleware.ModelRequestRateLimit(),
 		middleware.PrepareTaskPluginRoute(),
+		middleware.PrepareRelayFileReference(),
 		middleware.Distribute(),
 		controller.RelayTask,
 	}

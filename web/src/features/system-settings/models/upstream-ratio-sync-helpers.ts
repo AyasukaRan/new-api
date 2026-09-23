@@ -25,6 +25,8 @@ import type { PricingSyncValues } from '../types'
 import {
   OFFICIAL_CHANNEL_ID,
   OFFICIAL_CHANNEL_NAME,
+  IFLYTEK_PRESET_ID,
+  IFLYTEK_PRESET_NAME,
   MODELS_DEV_PRESET_ID,
   MODELS_DEV_PRESET_NAME,
 } from './constants'
@@ -48,6 +50,12 @@ export function getUpstreamDisplayName(
     sourceName === `${MODELS_DEV_PRESET_NAME}(${MODELS_DEV_PRESET_ID})`
   ) {
     return t('models.dev pricing preset')
+  }
+  if (
+    sourceName === IFLYTEK_PRESET_NAME ||
+    sourceName === `${IFLYTEK_PRESET_NAME}(${IFLYTEK_PRESET_ID})`
+  ) {
+    return t('iFlytek MaaS pricing preset')
   }
   return sourceName
 }

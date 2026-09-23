@@ -64,7 +64,7 @@ func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
 	require.NoError(t, model.InitDB())
 	database = model.DB
 	model.LOG_DB = database
-	require.NoError(t, database.AutoMigrate(&model.Model{}, &model.Vendor{}, &model.Channel{}, &model.Ability{}, &model.Option{}, &model.User{}, &model.AuditLog{}))
+	require.NoError(t, database.AutoMigrate(&model.Model{}, &model.Vendor{}, &model.Channel{}, &model.Ability{}, &model.Option{}, &model.User{}, &model.AuditLog{}, &model.ChannelKeyObservation{}))
 	for _, value := range restoreRatios {
 		require.NoError(t, value.restore("{}"))
 	}
@@ -122,8 +122,9 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 			contract, err := os.ReadFile("../pkg/billingexpr/testdata/frontend_simulation.json")
 			require.NoError(t, err)
 			var fixtures []struct {
-				Name, Expression string
-				Conversion       *struct {
+				Name, Expression            string
+				ConversionUnsupportedReason string
+				Conversion                  *struct {
 					ModelName string              `json:"model_name"`
 					Pricing   model.PricingValues `json:"pricing"`
 				}
@@ -140,12 +141,21 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 					}
 					modelManagementRequest(t, PreviewModelPricingConversion, http.MethodPost, "/api/option/model_pricing/convert", fixture.Conversion, &response)
 					require.True(t, response.Success)
-					assert.Equal(t, fixture.Expression, response.Data.Expression)
+					assert.Equal(t, fixture.ConversionUnsupportedReason, response.Data.UnsupportedReason)
+					if fixture.ConversionUnsupportedReason != "" {
+						assert.Empty(t, response.Data.Expression, "a manually configured expression must not be presented as an equivalent automatic conversion")
+					} else {
+						assert.Equal(t, fixture.Expression, response.Data.Expression)
+					}
 				})
 			}
 			// The preview must resolve the draft, even when the running process
 			// still has a different saved output multiplier for that model.
 			require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"conversion-defaults":99}`))
+			require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(`{"conversion-defaults":0.25}`))
+			require.NoError(t, ratio_setting.UpdateImageRatioByJSONString(`{"conversion-defaults":2}`))
+			require.NoError(t, ratio_setting.UpdateAudioRatioByJSONString(`{"conversion-defaults":3}`))
+			require.NoError(t, ratio_setting.UpdateAudioCompletionRatioByJSONString(`{"conversion-defaults":4}`))
 			for _, tc := range []struct {
 				name               string
 				draft              model.PricingValues
@@ -156,12 +166,13 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 				{"conversion-free-cache", model.PricingValues{"ModelRatio": 0.0, "CacheRatio": 0.0}, `tier("base", p * 0 + c * 0 + cr * 0)`, ""},
 				{"claude-3-7-sonnet-20250219", model.PricingValues{"ModelRatio": float64(1.5), "CacheRatio": float64(0.1), "CreateCacheRatio": float64(1.25)}, `tier("base", p * 3 + c * 15 + cr * 0.3 + cc * 3.75 + cc1h * 6)`, ""},
 				{"conversion-image-default", model.PricingValues{"ModelRatio": float64(2), "ImageRatio": float64(1)}, `tier("base", p * 4 + c * 4)`, ""},
-				{"conversion-image-free", model.PricingValues{"ModelRatio": float64(2), "ImageRatio": float64(0)}, `tier("base", p * 4 + c * 4 + cr * 4 + img * 0)`, ""},
+				{"conversion-image-free", model.PricingValues{"ModelRatio": float64(2), "ImageRatio": float64(0)}, "", "Overlapping cache and media pricing must be converted manually."},
+				{"conversion-input-free-media", model.PricingValues{"ModelRatio": 0.0, "CacheRatio": 0.1, "ImageRatio": 2.0}, `tier("base", p * 0 + c * 0 + cr * 0 + img * 0)`, ""},
 				{"deepseek-chat", model.PricingValues{"ModelRatio": float64(0.135), "CacheRatio": float64(0.25)}, `tier("base", p * 0.27 + c * 0.27 + cr * 0.0675)`, ""},
 				{"gpt-4o-custom", model.PricingValues{"ModelRatio": float64(2)}, `tier("base", p * 4 + c * 16)`, ""},
 				{"gemini-2.5-pro-custom", model.PricingValues{"ModelRatio": float64(2)}, `tier("base", p * 4 + c * 32)`, ""},
 				{"vendor/claude-sonnet-4", model.PricingValues{"ModelRatio": float64(2), "CompletionRatio": float64(0)}, `tier("base", p * 4 + c * 0 + cr * 4 + cc * 5 + cc1h * 8)`, ""},
-				{"conversion-custom", model.PricingValues{"ModelRatio": float64(2), "CompletionRatio": float64(3), "CacheRatio": float64(0), "CreateCacheRatio": float64(1.5), "ImageRatio": float64(2)}, `tier("base", p * 4 + c * 12 + cr * 0 + cc * 6 + img * 8)`, ""},
+				{"conversion-custom", model.PricingValues{"ModelRatio": float64(2), "CompletionRatio": float64(3), "CacheRatio": float64(0), "CreateCacheRatio": float64(1.5), "ImageRatio": float64(2)}, "", "Overlapping cache and media pricing must be converted manually."},
 				{"deepseek-reasoner", model.PricingValues{"ModelRatio": 0.275, "CacheRatio": 0.25}, `tier("base", p * 0.55 + c * 0.55 + cr * 0.1375)`, ""},
 				{"gpt-5.6-sol", model.PricingValues{"ModelRatio": float64(2), "CompletionRatio": float64(2)}, `tier("base", p * 4 + c * 8)`, ""},
 				{"gpt-5.5", model.PricingValues{"ModelRatio": float64(2), "CompletionRatio": float64(2)}, `tier("base", p * 4 + c * 8)`, ""},
@@ -332,15 +343,24 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 					t.Run(tc.field, func(t *testing.T) {
 						converted, err := model.PreviewModelPricingConversion("overlapping-cache", model.PricingValues{"ModelRatio": 30.0, "CompletionRatio": 2.0, "CacheRatio": 1.0, tc.field: tc.ratio})
 						require.NoError(t, err)
-						assert.Equal(t, `tier("base", p * 60 + c * 120 + cr * 60 + `+tc.term+`)`, converted.Expression)
 						usage := dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: tc.details}
-						params := service.BuildTieredTokenParams(&usage, false, billingexpr.UsedVars(converted.Expression))
-						cost, _, err := billingexpr.RunExpr(converted.Expression, params)
-						require.NoError(t, err)
-						assert.Equal(t, tc.cost, cost, "preserve the existing overlapping-category charge")
+						if tc.field == "ImageRatio" {
+							// Cached image input is normalized away by existing expressions,
+							// while legacy ratios charge all 500 image tokens. An automatic
+							// conversion cannot promise to retain the legacy 108000 cost.
+							assert.Empty(t, converted.Expression)
+							assert.Equal(t, "Overlapping cache and media pricing must be converted manually.", converted.UnsupportedReason)
+						} else {
+							require.Empty(t, converted.UnsupportedReason)
+							assert.Equal(t, `tier("base", p * 60 + c * 120 + cr * 60 + `+tc.term+`)`, converted.Expression)
+							params := service.BuildTieredTokenParams(&usage, false, billingexpr.UsedVars(converted.Expression))
+							cost, _, err := billingexpr.RunExpr(converted.Expression, params)
+							require.NoError(t, err)
+							assert.Equal(t, tc.cost, cost, "preserve the existing overlapping-category charge")
+						}
 						unpriced := `tier("base", p * 60 + c * 120 + ` + tc.term + `)`
-						params = service.BuildTieredTokenParams(&usage, false, billingexpr.UsedVars(unpriced))
-						cost, _, err = billingexpr.RunExpr(unpriced, params)
+						params := service.BuildTieredTokenParams(&usage, false, billingexpr.UsedVars(unpriced))
+						cost, _, err := billingexpr.RunExpr(unpriced, params)
 						require.NoError(t, err)
 						assert.Equal(t, tc.unpricedCacheCost, cost, "existing expressions without cr retain their OpenAI normalization")
 					})
@@ -376,18 +396,26 @@ func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 					pricing model.PricingValues
 					usage   dto.Usage
 					want    float64
+					blocked bool
 				}{
-					{"gemini-2.5-flash", model.PricingValues{"ModelRatio": 0.15, "CompletionRatio": 2.0, "CacheRatio": 0.1}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 100, AudioTokens: 200}}, 473},
-					{"gemini-2.5-flash-zero", model.PricingValues{"ModelRatio": 0.0}, dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{AudioTokens: 200}}, 200},
-					{"media-audio", model.PricingValues{"ModelRatio": 1.0, "CompletionRatio": 3.0, "AudioRatio": 2.0, "AudioCompletionRatio": 4.0}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{TextTokens: 800, AudioTokens: 200}, CompletionTokenDetails: dto.OutputTokenDetails{TextTokens: 50, AudioTokens: 50}}, 3500},
-					{"media-free-audio", model.PricingValues{"ModelRatio": 1.0, "AudioRatio": 0.0}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{AudioTokens: 200}, CompletionTokenDetails: dto.OutputTokenDetails{AudioTokens: 100}}, 1600},
-					{"media-audio-cache", model.PricingValues{"ModelRatio": 1.0, "CompletionRatio": 3.0, "AudioRatio": 2.0, "CacheRatio": 0.1}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 400, AudioTokens: 200}, CompletionTokenDetails: dto.OutputTokenDetails{AudioTokens: 50}}, 2900},
-					{"media-text-cache", model.PricingValues{"ModelRatio": 1.0, "CompletionRatio": 3.0, "AudioRatio": 2.0, "CacheRatio": 0.1}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 400}}, 1880},
-					{"gemini-2.5-flash-overlap", model.PricingValues{"ModelRatio": 1.0}, dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 800, AudioTokens: 500}}, 2100},
+					{"gemini-2.5-flash", model.PricingValues{"ModelRatio": 0.15, "CompletionRatio": 2.0, "CacheRatio": 0.1}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 100, AudioTokens: 200}}, 473, true},
+					{"gemini-2.5-flash-zero", model.PricingValues{"ModelRatio": 0.0}, dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{AudioTokens: 200}}, 200, false},
+					{"gemini-2.5-flash-free-cache", model.PricingValues{"ModelRatio": 0.0, "CacheRatio": 0.0}, dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 800, AudioTokens: 500}}, 500, true},
+					{"media-audio", model.PricingValues{"ModelRatio": 1.0, "CompletionRatio": 3.0, "AudioRatio": 2.0, "AudioCompletionRatio": 4.0}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{TextTokens: 800, AudioTokens: 200}, CompletionTokenDetails: dto.OutputTokenDetails{TextTokens: 50, AudioTokens: 50}}, 3500, false},
+					{"media-free-audio", model.PricingValues{"ModelRatio": 1.0, "AudioRatio": 0.0}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{AudioTokens: 200}, CompletionTokenDetails: dto.OutputTokenDetails{AudioTokens: 100}}, 1600, false},
+					{"media-audio-cache", model.PricingValues{"ModelRatio": 1.0, "CompletionRatio": 3.0, "AudioRatio": 2.0, "CacheRatio": 0.1}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 400, AudioTokens: 200}, CompletionTokenDetails: dto.OutputTokenDetails{AudioTokens: 50}}, 2900, true},
+					{"media-audio-cache-write", model.PricingValues{"ModelRatio": 1.0, "AudioRatio": 2.0, "CreateCacheRatio": 1.25}, dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{CacheWriteTokens: 800, AudioTokens: 500}}, 3000, true},
+					{"media-text-cache", model.PricingValues{"ModelRatio": 1.0, "CompletionRatio": 3.0, "AudioRatio": 2.0, "CacheRatio": 0.1}, dto.Usage{PromptTokens: 1000, CompletionTokens: 100, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 400}}, 1880, true},
+					{"gemini-2.5-flash-overlap", model.PricingValues{"ModelRatio": 1.0}, dto.Usage{PromptTokens: 1000, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 800, AudioTokens: 500}}, 2100, true},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						converted, err := model.PreviewModelPricingConversion(tc.name, tc.pricing)
 						require.NoError(t, err)
+						if tc.blocked {
+							assert.Empty(t, converted.Expression)
+							assert.Equal(t, "Overlapping cache and media pricing must be converted manually.", converted.UnsupportedReason)
+							return
+						}
 						require.Empty(t, converted.UnsupportedReason)
 						require.NotNil(t, converted.BillingDetails.AudioInputPrice)
 						params := service.BuildTieredTokenParams(&tc.usage, false, billingexpr.UsedVars(converted.Expression))

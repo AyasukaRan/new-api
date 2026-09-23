@@ -1438,6 +1438,39 @@ export function parseBatchResult(){return [];}
 	assert.Equal(t, false, captured["hasRequestBody"])
 }
 
+// A batch does not run at its channel's relay address, so fetching its result
+// file from there returns someone else's 404. The endpoint recorded at submit
+// is what the content request has to use.
+func TestTaskAdaptorFetchesContentFromTheEndpointRecordedAtSubmit(t *testing.T) {
+	source := strings.Replace(mockPlugin, `export function listArtifacts() { return []; }
+export function buildContentRequest() { throw new Error("artifact_not_found"); }`, `export function listArtifacts() { return [{key:"video",type:"video"}]; }
+export function buildContentRequest(ctx) { return {url:ctx.baseUrl+"/v1/files/out/content",method:"GET",headers:{Authorization:"Bearer "+ctx.apiKey}}; }
+`, 1)
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	adaptor.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+		ChannelBaseUrl: "https://relay.example",
+		ApiKey:         "relay-key",
+	}})
+
+	task := &model.Task{TaskID: "task", Data: []byte(`{}`)}
+	task.PrivateData.BaseUrl = "https://batch.example"
+	task.PrivateData.Key = "batch-key"
+	descriptor, err := adaptor.BuildContentRequest(task, "video",
+		channel.TaskArtifactClientRequest{Method: http.MethodGet})
+	require.NoError(t, err)
+	assert.Equal(t, "https://batch.example/v1/files/out/content", descriptor.URL)
+	assert.Equal(t, "Bearer batch-key", descriptor.Headers["Authorization"])
+
+	plain := &model.Task{TaskID: "task", Data: []byte(`{}`)}
+	descriptor, err = adaptor.BuildContentRequest(plain, "video",
+		channel.TaskArtifactClientRequest{Method: http.MethodGet})
+	require.NoError(t, err)
+	assert.Equal(t, "https://relay.example/v1/files/out/content", descriptor.URL)
+	assert.Equal(t, "Bearer relay-key", descriptor.Headers["Authorization"])
+}
+
 func TestTaskAdaptorUsageProfilesFollowExecutionModel(t *testing.T) {
 	const source = `
 export const meta = {

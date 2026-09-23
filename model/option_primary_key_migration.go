@@ -82,25 +82,22 @@ WHERE constraint_meta.conrelid = to_regclass('options')
 func withOptionPrimaryKeyLock(db *gorm.DB, fn func(*gorm.DB) error) error {
 	switch db.Dialector.Name() {
 	case "mysql":
-		sqlDB, err := db.DB()
-		if err != nil {
-			return fmt.Errorf("lock options table: %w", err)
-		}
-		ctx := context.Background()
-		conn, err := sqlDB.Conn(ctx)
-		if err != nil {
-			return fmt.Errorf("lock options table: %w", err)
-		}
-		defer conn.Close()
-		var acquired int
-		if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 60)", optionPrimaryKeyLockName).Scan(&acquired); err != nil {
-			return fmt.Errorf("lock options table: %w", err)
-		}
-		if acquired != 1 {
-			return fmt.Errorf("lock options table: timeout")
-		}
-		defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", optionPrimaryKeyLockName)
-		return fn(db)
+		// Advisory locks are connection-scoped. Reuse that connection for the
+		// migration too, including when the pool has only one connection.
+		return db.Connection(func(locked *gorm.DB) error {
+			// Each operation needs a fresh statement while retaining ConnPool;
+			// otherwise Table/Raw scopes leak into subsequent migration queries.
+			locked = locked.Session(&gorm.Session{NewDB: true})
+			var acquired int
+			if err := locked.Raw("SELECT GET_LOCK(?, 60)", optionPrimaryKeyLockName).Scan(&acquired).Error; err != nil {
+				return fmt.Errorf("lock options table: %w", err)
+			}
+			if acquired != 1 {
+				return fmt.Errorf("lock options table: timeout")
+			}
+			defer locked.WithContext(context.WithoutCancel(locked.Statement.Context)).Exec("SELECT RELEASE_LOCK(?)", optionPrimaryKeyLockName)
+			return fn(locked)
+		})
 	case "postgres":
 		return db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", optionPrimaryKeyLockID).Error; err != nil {

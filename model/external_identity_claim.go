@@ -10,7 +10,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const ExternalIdentityProviderTelegram = "telegram"
+const (
+	ExternalIdentityProviderTelegram = "telegram"
+	ExternalIdentityProviderGitHub   = "github"
+)
 
 var ErrExternalIdentityAlreadyClaimed = errors.New("external identity is already claimed")
 
@@ -74,6 +77,34 @@ func ReleaseExternalIdentityWithTx(tx *gorm.DB, provider string, userId int) err
 	}
 	return tx.Where("provider = ? AND user_id = ?", provider, userId).
 		Delete(&ExternalIdentityClaim{}).Error
+}
+
+// SetGitHubBindingWithTx gives registration, explicit binding and legacy
+// migration the same durable ownership guard, including concurrent users.
+func SetGitHubBindingWithTx(tx *gorm.DB, userID int, subject string) error {
+	if userID <= 0 || subject == "" {
+		return ErrAccountBindingChanged
+	}
+	var user User
+	if err := lockForUpdate(tx).Select("id").First(&user, userID).Error; err != nil {
+		return err
+	}
+	// Existing bindings predate the claim table; deleted accounts retain their
+	// identities until hard deletion, just as the provider login lookup does.
+	var count int64
+	if err := tx.Unscoped().Model(&User{}).Where("github_id = ? AND id <> ?", subject, userID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 0 {
+		return ErrExternalIdentityAlreadyClaimed
+	}
+	if err := ReleaseExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, userID); err != nil {
+		return err
+	}
+	if err := ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, subject, userID); err != nil {
+		return err
+	}
+	return tx.Model(&User{}).Where("id = ?", userID).Update("github_id", subject).Error
 }
 
 func GetUserByTelegramID(telegramID string) (*User, error) {

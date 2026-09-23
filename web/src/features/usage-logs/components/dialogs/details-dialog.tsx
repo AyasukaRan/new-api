@@ -38,6 +38,7 @@ For commercial licensing, please contact support@quantumnous.com
 import {
   Copy,
   Check,
+  FileJson,
   Route,
   Settings2,
   AlertTriangle,
@@ -78,7 +79,6 @@ import {
   isViolationFeeLog,
   getFirstResponseTimeColor,
   getResponseTimeColor,
-  getReasoningEffortVariant,
   renderAuditContent,
 } from '../../lib/format'
 import { buildQuotaAuditOperation } from '../../lib/quota-audit-operation'
@@ -86,11 +86,19 @@ import {
   getLogTypeConfig,
   isPerCallBilling,
   isTimingLogType,
+  isDisplayableLogType,
+  isConsumeLogType,
 } from '../../lib/utils'
-import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
+import {
+  USAGE_BILLING_PATH,
+  type LogOtherData,
+  type LogSource,
+} from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
+import { RequestMetadataTags } from '../request-metadata-tags'
 import { DetailRow, DetailSection } from './log-detail-layout'
+import { RequestTraceSection } from './request-trace-section'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
 // to its i18n label key for display in the audit details.
@@ -234,6 +242,16 @@ function BillingBreakdown(props: {
     rows.push({
       label: isUserGR ? t('User Exclusive Ratio') : t('Group Ratio'),
       value: `${formatRatio(effectiveGR)}x`,
+    })
+  }
+
+  // The serving channel's markup is already folded into the ratio above; this
+  // row is the decomposition, and the backend only emits it for admins.
+  const channelRatio = other.admin_info?.channel_ratio
+  if (isAdmin && channelRatio != null && Number.isFinite(channelRatio)) {
+    rows.push({
+      label: t('Channel Ratio (included above)'),
+      value: `${formatRatio(channelRatio)}x`,
     })
   }
 
@@ -467,6 +485,7 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
 }
 
 interface DetailsDialogProps {
+  source?: LogSource
   log: UsageLog
   isAdmin: boolean
   isRoot: boolean
@@ -478,11 +497,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const other = parseLogOther(props.log.other)
-  const typeConfig = getLogTypeConfig(props.log.type)
+  const typeConfig = getLogTypeConfig(props.log.type, props.source)
 
   const isViolation = isViolationFeeLog(other)
   const isRefund = props.log.type === 6
-  const isConsume = props.log.type === 2
+  const isConsume = isConsumeLogType(props.log.type)
   const isTopup = props.log.type === 1
   const isManage = props.log.type === 3
   const isSubscription = other?.billing_source === 'subscription'
@@ -616,9 +635,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const useChannel = other?.admin_info?.use_channel
   const channelChain =
     useChannel && useChannel.length > 0 ? useChannel.join(' → ') : undefined
-  const reasoningEffortVariant = getReasoningEffortVariant(
-    other?.reasoning_effort
-  )
 
   return (
     <Dialog
@@ -648,6 +664,17 @@ export function DetailsDialog(props: DetailsDialogProps) {
       bodyClassName='pr-2 sm:pr-4'
     >
       <div className='w-full max-w-full min-w-0 space-y-2.5 overflow-x-hidden py-1 sm:space-y-3'>
+        <RequestMetadataTags metadata={other} expanded />
+
+        {/* Full request/response exchange (admin only) */}
+        {props.isAdmin && adminInfo?.trace_id && (
+          <RequestTraceSection
+            traceId={adminInfo.trace_id}
+            enabled={props.open}
+            metadata={other}
+          />
+        )}
+
         {/* Overview section - key identifiers */}
         <div className='min-w-0 space-y-1'>
           {props.log.request_id && (
@@ -829,6 +856,41 @@ export function DetailsDialog(props: DetailsDialogProps) {
               value={other.admin_info.quota_saturation.op}
               mono
             />
+          </DetailSection>
+        )}
+
+        {/* Captured request payload (admin only) */}
+        {props.isAdmin && adminInfo?.request_body && (
+          <DetailSection
+            icon={<FileJson className='size-3.5' aria-hidden='true' />}
+            label={t('Request Content')}
+          >
+            <div className='bg-muted/50 relative rounded-md border p-3'>
+              <Button
+                variant='ghost'
+                size='sm'
+                className='absolute top-2 right-2 h-8 w-8 p-0'
+                onClick={() => copyToClipboard(adminInfo.request_body ?? '')}
+                title={t('Copy to clipboard')}
+              >
+                {copiedText === adminInfo.request_body ? (
+                  <Check className='size-4 text-green-600' />
+                ) : (
+                  <Copy className='size-4' />
+                )}
+              </Button>
+              <pre className='max-h-72 overflow-auto pr-10 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap'>
+                {adminInfo.request_body}
+              </pre>
+            </div>
+            {adminInfo.request_body_truncated != null && (
+              <p className='text-muted-foreground mt-2 text-xs'>
+                {t(
+                  'Truncated for storage. The original request was {{bytes}} bytes.',
+                  { bytes: adminInfo.request_body_truncated }
+                )}
+              </p>
+            )}
           </DetailSection>
         )}
 
@@ -1098,21 +1160,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {/* Reasoning effort */}
-        {other?.reasoning_effort && (
-          <DetailRow
-            label={t('Reasoning Effort')}
-            value={
-              <StatusBadge
-                label={other.reasoning_effort}
-                variant={reasoningEffortVariant}
-                size='sm'
-                copyable={false}
-              />
-            }
-          />
-        )}
-
         {/* System prompt override */}
         {other?.is_system_prompt_overwritten && (
           <DetailRow
@@ -1152,7 +1199,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
           )}
 
         {/* Token breakdown (for consume/error types with token data) */}
-        {isDisplayableType(props.log.type) && other && (
+        {isDisplayableLogType(props.log.type) && other && (
           <TokenBreakdown log={props.log} other={other} />
         )}
 
@@ -1357,8 +1404,4 @@ export function DetailsDialog(props: DetailsDialogProps) {
       </div>
     </Dialog>
   )
-}
-
-function isDisplayableType(type: number): boolean {
-  return [0, 2, 5, 6].includes(type)
 }

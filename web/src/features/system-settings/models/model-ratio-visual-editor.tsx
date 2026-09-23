@@ -38,6 +38,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   DataTableBulkActions,
   DataTableToolbar,
@@ -51,6 +52,7 @@ import { useModelPricing } from '@/features/model-pricing/api'
 import {
   applyPricingDraft,
   pricingOptions,
+  pricingRow,
 } from '@/features/model-pricing/pricing'
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
 import { splitPluginBillingExprKey } from '@/features/pricing/lib/plugin-pricing'
@@ -104,10 +106,12 @@ type ModelRatioVisualEditorProps = {
   onChange: (field: string, value: string) => void
   onSave: () => void | Promise<void>
   isSaving: boolean
+  onScopeChange?: (channelId: string | null) => void
 }
 
 export type ModelRatioVisualEditorHandle = {
   commitOpenEditor: () => Promise<boolean>
+  requestEditorChange: (action: () => void) => void
 }
 
 const STORAGE_KEY = 'model-ratio-column-visibility'
@@ -145,6 +149,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
     onChange,
     onSave,
     isSaving,
+    onScopeChange,
   },
   ref
 ) {
@@ -153,10 +158,32 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const isMobile = useMediaQuery('(max-width: 767px)')
   const [sheetOpen, setSheetOpen] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
+  const [editorInSheet, setEditorInSheet] = useState(false)
   const [editData, setEditData] = useState<ModelRatioData | null>(null)
+  const [editorDirty, setEditorDirty] = useState(false)
+  const [pendingEditorAction, setPendingEditorAction] = useState<
+    (() => void) | null
+  >(null)
+  const requestEditorChange = useCallback(
+    (action: () => void) => {
+      if (editorDirty) setPendingEditorAction(() => action)
+      else action()
+    },
+    [editorDirty]
+  )
   const pricingConfig = useModelPricing(
     editData?.name ? [editData.name] : [],
     Boolean(editData?.name)
+  )
+  const effectiveEntry = pricingConfig.data?.entries.find(
+    (entry) => entry.model_name === editData?.name
+  )
+  const globalEffectiveData = useMemo(
+    () =>
+      effectiveEntry
+        ? pricingRow(effectiveEntry.model_name, effectiveEntry.effective)
+        : null,
+    [effectiveEntry]
   )
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
@@ -330,149 +357,164 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
   const handleEdit = useCallback(
     (model: ModelRow) => {
-      const editableModel = model.draft ?? model.saved ?? model
-      let editBillingMode: PricingMode = 'per-token'
-      if (editableModel.billingMode === 'tiered_expr') {
-        editBillingMode = 'tiered_expr'
-      } else if (editableModel.price && editableModel.price !== '') {
-        editBillingMode = 'per-request'
+      if (editorOpen && editData?.name === model.name) {
+        if (editorInSheet) setSheetOpen(true)
+        return
       }
-      setEditData({
-        name: editableModel.name,
-        price: editableModel.price,
-        ratio: editableModel.ratio,
-        cacheRatio: editableModel.cacheRatio,
-        createCacheRatio: editableModel.createCacheRatio,
-        completionRatio: editableModel.completionRatio,
-        imageRatio: editableModel.imageRatio,
-        audioRatio: editableModel.audioRatio,
-        audioCompletionRatio: editableModel.audioCompletionRatio,
-        billingMode: editBillingMode,
-        billingExpr: editableModel.billingExpr,
-        pluginBillingExpr: editableModel.pluginBillingExpr,
-        requestRuleExpr: editableModel.requestRuleExpr,
+      requestEditorChange(() => {
+        const editableModel = model.draft ?? model.saved ?? model
+        let editBillingMode: PricingMode = 'per-token'
+        if (editableModel.billingMode === 'tiered_expr') {
+          editBillingMode = 'tiered_expr'
+        } else if (editableModel.price && editableModel.price !== '') {
+          editBillingMode = 'per-request'
+        }
+        setEditData({
+          name: editableModel.name,
+          price: editableModel.price,
+          ratio: editableModel.ratio,
+          cacheRatio: editableModel.cacheRatio,
+          createCacheRatio: editableModel.createCacheRatio,
+          completionRatio: editableModel.completionRatio,
+          imageRatio: editableModel.imageRatio,
+          audioRatio: editableModel.audioRatio,
+          audioCompletionRatio: editableModel.audioCompletionRatio,
+          billingMode: editBillingMode,
+          billingExpr: editableModel.billingExpr,
+          pluginBillingExpr: editableModel.pluginBillingExpr,
+          requestRuleExpr: editableModel.requestRuleExpr,
+        })
+        setEditorOpen(true)
+        setEditorInSheet(isMobile)
+        setSheetOpen(isMobile)
       })
-      setEditorOpen(true)
-      if (isMobile) setSheetOpen(true)
     },
-    [isMobile]
+    [editData?.name, editorOpen, editorInSheet, isMobile, requestEditorChange]
   )
 
   const handleAdd = useCallback(() => {
-    setEditData(null)
-    setEditorOpen(true)
-    if (isMobile) setSheetOpen(true)
-  }, [isMobile])
+    requestEditorChange(() => {
+      setEditData(null)
+      setEditorOpen(true)
+      setEditorInSheet(isMobile)
+      setSheetOpen(isMobile)
+    })
+  }, [isMobile, requestEditorChange])
 
   const handleGlobalFilterChange = useCallback<OnChangeFn<string>>(
     (updater) => {
-      setGlobalFilter((previous) => {
-        const next = typeof updater === 'function' ? updater(previous) : updater
-        if (next !== previous) {
-          setEditData(null)
-          setEditorOpen(false)
-          setSheetOpen(false)
-        }
-        return next
+      const next =
+        typeof updater === 'function' ? updater(globalFilter) : updater
+      if (next === globalFilter) return
+      requestEditorChange(() => {
+        setGlobalFilter(next)
+        setEditData(null)
+        setEditorOpen(false)
+        setSheetOpen(false)
       })
     },
-    []
+    [globalFilter, requestEditorChange]
   )
 
   const handleDelete = useCallback(
     (name: string) => {
-      const priceMap = safeJsonParse<Record<string, number>>(modelPrice, {
-        fallback: {},
-        silent: true,
-      })
-      const ratioMap = safeJsonParse<Record<string, number>>(modelRatio, {
-        fallback: {},
-        silent: true,
-      })
-      const cacheMap = safeJsonParse<Record<string, number>>(cacheRatio, {
-        fallback: {},
-        silent: true,
-      })
-      const createCacheMap = safeJsonParse<Record<string, number>>(
-        createCacheRatio,
-        { fallback: {}, silent: true }
-      )
-      const completionMap = safeJsonParse<Record<string, number>>(
-        completionRatio,
-        { fallback: {}, silent: true }
-      )
-      const imageMap = safeJsonParse<Record<string, number>>(imageRatio, {
-        fallback: {},
-        silent: true,
-      })
-      const audioMap = safeJsonParse<Record<string, number>>(audioRatio, {
-        fallback: {},
-        silent: true,
-      })
-      const audioCompletionMap = safeJsonParse<Record<string, number>>(
-        audioCompletionRatio,
-        { fallback: {}, silent: true }
-      )
-      const billingModeMap = safeJsonParse<Record<string, string>>(
-        billingMode,
-        { fallback: {}, silent: true }
-      )
-      const billingExprMap = safeJsonParse<Record<string, string>>(
-        billingExpr,
-        { fallback: {}, silent: true }
-      )
+      const deletePricing = () => {
+        const priceMap = safeJsonParse<Record<string, number>>(modelPrice, {
+          fallback: {},
+          silent: true,
+        })
+        const ratioMap = safeJsonParse<Record<string, number>>(modelRatio, {
+          fallback: {},
+          silent: true,
+        })
+        const cacheMap = safeJsonParse<Record<string, number>>(cacheRatio, {
+          fallback: {},
+          silent: true,
+        })
+        const createCacheMap = safeJsonParse<Record<string, number>>(
+          createCacheRatio,
+          { fallback: {}, silent: true }
+        )
+        const completionMap = safeJsonParse<Record<string, number>>(
+          completionRatio,
+          { fallback: {}, silent: true }
+        )
+        const imageMap = safeJsonParse<Record<string, number>>(imageRatio, {
+          fallback: {},
+          silent: true,
+        })
+        const audioMap = safeJsonParse<Record<string, number>>(audioRatio, {
+          fallback: {},
+          silent: true,
+        })
+        const audioCompletionMap = safeJsonParse<Record<string, number>>(
+          audioCompletionRatio,
+          { fallback: {}, silent: true }
+        )
+        const billingModeMap = safeJsonParse<Record<string, string>>(
+          billingMode,
+          { fallback: {}, silent: true }
+        )
+        const billingExprMap = safeJsonParse<Record<string, string>>(
+          billingExpr,
+          { fallback: {}, silent: true }
+        )
 
-      delete priceMap[name]
-      delete ratioMap[name]
-      delete cacheMap[name]
-      delete createCacheMap[name]
-      delete completionMap[name]
-      delete imageMap[name]
-      delete audioMap[name]
-      delete audioCompletionMap[name]
-      delete billingModeMap[name]
-      delete billingExprMap[name]
-      const pluginExprMap = safeJsonParse<Record<string, string>>(
-        pluginBillingExpr,
-        { fallback: {} }
-      )
-      for (const variant of Object.keys(pluginExprMap)) {
-        if (splitPluginBillingExprKey(variant)?.[1] === name) {
-          delete pluginExprMap[variant]
+        delete priceMap[name]
+        delete ratioMap[name]
+        delete cacheMap[name]
+        delete createCacheMap[name]
+        delete completionMap[name]
+        delete imageMap[name]
+        delete audioMap[name]
+        delete audioCompletionMap[name]
+        delete billingModeMap[name]
+        delete billingExprMap[name]
+        const pluginExprMap = safeJsonParse<Record<string, string>>(
+          pluginBillingExpr,
+          { fallback: {} }
+        )
+        for (const variant of Object.keys(pluginExprMap)) {
+          if (splitPluginBillingExprKey(variant)?.[1] === name) {
+            delete pluginExprMap[variant]
+          }
+        }
+        onChange(
+          'billing_setting.plugin_billing_expr',
+          JSON.stringify(pluginExprMap)
+        )
+
+        onChange('ModelPrice', JSON.stringify(priceMap, null, 2))
+        onChange('ModelRatio', JSON.stringify(ratioMap, null, 2))
+        onChange('CacheRatio', JSON.stringify(cacheMap, null, 2))
+        onChange('CreateCacheRatio', JSON.stringify(createCacheMap, null, 2))
+        onChange('CompletionRatio', JSON.stringify(completionMap, null, 2))
+        onChange('ImageRatio', JSON.stringify(imageMap, null, 2))
+        onChange('AudioRatio', JSON.stringify(audioMap, null, 2))
+        onChange(
+          'AudioCompletionRatio',
+          JSON.stringify(audioCompletionMap, null, 2)
+        )
+        onChange(
+          'billing_setting.billing_mode',
+          JSON.stringify(billingModeMap, null, 2)
+        )
+        onChange(
+          'billing_setting.billing_expr',
+          JSON.stringify(billingExprMap, null, 2)
+        )
+
+        if (editData?.name === name) {
+          setEditData(null)
+          setEditorOpen(false)
+          setSheetOpen(false)
         }
       }
-      onChange(
-        'billing_setting.plugin_billing_expr',
-        JSON.stringify(pluginExprMap)
-      )
-
-      onChange('ModelPrice', JSON.stringify(priceMap, null, 2))
-      onChange('ModelRatio', JSON.stringify(ratioMap, null, 2))
-      onChange('CacheRatio', JSON.stringify(cacheMap, null, 2))
-      onChange('CreateCacheRatio', JSON.stringify(createCacheMap, null, 2))
-      onChange('CompletionRatio', JSON.stringify(completionMap, null, 2))
-      onChange('ImageRatio', JSON.stringify(imageMap, null, 2))
-      onChange('AudioRatio', JSON.stringify(audioMap, null, 2))
-      onChange(
-        'AudioCompletionRatio',
-        JSON.stringify(audioCompletionMap, null, 2)
-      )
-      onChange(
-        'billing_setting.billing_mode',
-        JSON.stringify(billingModeMap, null, 2)
-      )
-      onChange(
-        'billing_setting.billing_expr',
-        JSON.stringify(billingExprMap, null, 2)
-      )
-
-      if (editData?.name === name) {
-        setEditData(null)
-        setEditorOpen(false)
-        setSheetOpen(false)
-      }
+      if (editData?.name === name) requestEditorChange(deletePricing)
+      else deletePricing()
     },
     [
+      requestEditorChange,
       modelPrice,
       modelRatio,
       cacheRatio,
@@ -608,6 +650,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
+      requestEditorChange,
       commitOpenEditor: async () => {
         if (!editorOpen || !editorPanelRef.current) return true
         const data = await editorPanelRef.current.commitDraft()
@@ -617,7 +660,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         return true
       },
     }),
-    [editorOpen, persistPricingData]
+    [editorOpen, persistPricingData, requestEditorChange]
   )
 
   const hasRows = table.getRowModel().rows.length > 0
@@ -738,11 +781,23 @@ const ModelRatioVisualEditorComponent = forwardRef<
           {hasRows && <DataTablePagination table={table} />}
         </div>
 
-        <div className='hidden min-h-0 min-w-0 md:block'>
-          {editorOpen ? (
+        <div
+          className={
+            !editorInSheet && editorOpen
+              ? 'min-h-0 min-w-0'
+              : 'hidden min-h-0 min-w-0 md:block'
+          }
+        >
+          {!editorInSheet && editorOpen ? (
             <ModelPricingEditorPanel
               ref={editorPanelRef}
               editData={editData}
+              globalEffectiveData={globalEffectiveData}
+              globalEffectiveDataLoading={pricingConfig.isPending}
+              globalEffectiveDataError={pricingConfig.error?.message}
+              onReloadGlobalEffectiveData={() => void pricingConfig.refetch()}
+              onScopeChange={onScopeChange}
+              onDirtyChange={setEditorDirty}
               pluginVariants={
                 pricingConfig.data?.entries.find(
                   (entry) => entry.model_name === editData?.name
@@ -787,12 +842,42 @@ const ModelRatioVisualEditorComponent = forwardRef<
         </Button>
       </DataTableBulkActions>
 
-      {isMobile && (
+      <ConfirmDialog
+        open={pendingEditorAction !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingEditorAction(null)
+        }}
+        title={t('Discard unsaved changes?')}
+        desc={t('Your changes have not been saved.')}
+        confirmText={t('Discard changes')}
+        handleConfirm={() => {
+          pendingEditorAction?.()
+          setPendingEditorAction(null)
+          setEditorDirty(false)
+        }}
+      />
+
+      {editorInSheet && (
         <ModelPricingSheet
           ref={editorPanelRef}
           open={sheetOpen}
-          onOpenChange={setSheetOpen}
+          onOpenChange={(open) => {
+            if (open) setSheetOpen(true)
+            else {
+              requestEditorChange(() => {
+                setSheetOpen(false)
+                setEditorOpen(false)
+                setEditData(null)
+              })
+            }
+          }}
           editData={editData}
+          globalEffectiveData={globalEffectiveData}
+          globalEffectiveDataLoading={pricingConfig.isPending}
+          globalEffectiveDataError={pricingConfig.error?.message}
+          onReloadGlobalEffectiveData={() => void pricingConfig.refetch()}
+          onScopeChange={onScopeChange}
+          onDirtyChange={setEditorDirty}
           pluginVariants={
             pricingConfig.data?.entries.find(
               (entry) => entry.model_name === editData?.name
@@ -844,7 +929,8 @@ export const ModelRatioVisualEditor = memo(
       prevProps.filterMode === nextProps.filterMode &&
       prevProps.onChange === nextProps.onChange &&
       prevProps.onSave === nextProps.onSave &&
-      prevProps.isSaving === nextProps.isSaving
+      prevProps.isSaving === nextProps.isSaving &&
+      prevProps.onScopeChange === nextProps.onScopeChange
     )
   }
 )

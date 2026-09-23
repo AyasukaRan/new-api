@@ -54,6 +54,8 @@ import {
 import {
   DEFAULT_ENDPOINT,
   MODELS_DEV_PRESET_ENDPOINT,
+  IFLYTEK_PRESET_ENDPOINT,
+  IFLYTEK_PRESET_ID,
   MODELS_DEV_PRESET_ID,
   OFFICIAL_CHANNEL_ENDPOINT,
   OFFICIAL_CHANNEL_ID,
@@ -70,6 +72,7 @@ import { UpstreamRatioSyncTable } from './upstream-ratio-sync-table'
 
 function getDefaultEndpointForChannel(channel: UpstreamChannel): string {
   if (channel.id === MODELS_DEV_PRESET_ID) return MODELS_DEV_PRESET_ENDPOINT
+  if (channel.id === IFLYTEK_PRESET_ID) return IFLYTEK_PRESET_ENDPOINT
   if (channel.id === OFFICIAL_CHANNEL_ID) return OFFICIAL_CHANNEL_ENDPOINT
   if (channel.type === OPENROUTER_CHANNEL_TYPE) return OPENROUTER_ENDPOINT
   return DEFAULT_ENDPOINT
@@ -83,6 +86,7 @@ export function UpstreamRatioSync() {
   const [channelDialogOpen, setChannelDialogOpen] = useState(false)
   const [conflictDialogOpen, setConflictDialogOpen] = useState(false)
   const [selectedChannelIds, setSelectedChannelIds] = useState<number[]>([])
+  const [scopeChannelIds, setScopeChannelIds] = useState<number[]>([])
   const [channelEndpoints, setChannelEndpoints] = useState<
     Record<number, string>
   >({})
@@ -229,7 +233,11 @@ export function UpstreamRatioSync() {
     syncMutation.reset()
     try {
       setPricingBaseline(await getModelPricing())
-      fetchMutation.mutate({ upstreams, timeout: 10 })
+      fetchMutation.mutate({
+        upstreams,
+        timeout: 10,
+        scope_channel_ids: scopeChannelIds,
+      })
     } catch (error) {
       handleServerError(error, t('Failed to load model pricing'))
     } finally {
@@ -357,6 +365,8 @@ export function UpstreamRatioSync() {
         onSelectedChannelIdsChange={setSelectedChannelIds}
         channelEndpoints={channelEndpoints}
         onChannelEndpointsChange={setChannelEndpoints}
+        scopeChannelIds={scopeChannelIds}
+        onScopeChannelIdsChange={setScopeChannelIds}
         onConfirm={handleConfirmChannelSelection}
       />
       <ConflictConfirmDialog

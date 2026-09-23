@@ -90,8 +90,65 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err := applyDeepSeekV4OpenAIThinkingSuffix(info, request); err != nil {
 		return nil, err
 	}
+	completeDeepSeekThinkingHistory(info, request)
 
 	return request, nil
+}
+
+// DeepSeek requires reasoning_content on every assistant turn in a thinking
+// conversation with tools. Other providers may not have returned that field;
+// keep any existing reasoning and supply an explicit empty value only when
+// none was returned. Raw body passthrough deliberately bypasses this adaptor.
+func completeDeepSeekThinkingHistory(info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) {
+	if request.ReasoningEffort == "none" {
+		return
+	}
+	modelName := request.Model
+	if info != nil && info.ChannelMeta != nil && info.UpstreamModelName != "" {
+		modelName = info.UpstreamModelName
+	}
+	modelName = strings.ToLower(modelName)
+	thinkingEnabled := strings.HasPrefix(modelName, "deepseek-v4-") || modelName == "deepseek-flash" || modelName == "deepseek-pro" || modelName == "deepseek-reasoner"
+	if len(request.THINKING) > 0 {
+		var thinking struct {
+			Type string `json:"type"`
+		}
+		if err := common.Unmarshal(request.THINKING, &thinking); err != nil {
+			return
+		}
+		switch thinking.Type {
+		case "enabled":
+			thinkingEnabled = true
+		case "disabled":
+			thinkingEnabled = false
+		case "":
+			// A null or empty thinking object keeps the provider's default.
+		default:
+			return
+		}
+	}
+	if !thinkingEnabled {
+		return
+	}
+	hasTools := len(request.Tools) > 0
+	if !hasTools {
+		for i := range request.Messages {
+			message := &request.Messages[i]
+			if message.Role == "assistant" && len(message.ParseToolCalls()) > 0 {
+				hasTools = true
+				break
+			}
+		}
+	}
+	if !hasTools {
+		return
+	}
+	for i := range request.Messages {
+		message := &request.Messages[i]
+		if message.Role == "assistant" && message.ReasoningContent == nil {
+			message.ReasoningContent = common.GetPointer(message.GetReasoningContent())
+		}
+	}
 }
 
 func applyDeepSeekV4OpenAIThinkingSuffix(info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) error {

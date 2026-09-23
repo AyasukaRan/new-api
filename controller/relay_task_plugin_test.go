@@ -16,9 +16,11 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
+	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -32,8 +34,8 @@ import (
 
 type taskSubmissionTestBilling struct {
 	events     *[]string
-	settleErr  error
 	reserveErr error
+	settleErr  error
 	onSettle   func()
 	refunds    int
 }
@@ -141,6 +143,7 @@ func TestExecuteTaskSubmissionRefundsWhenInsertFails(t *testing.T) {
 
 	outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
 		return &relay.TaskSubmitResult{
+			Quota:          100,
 			UpstreamTaskID: "upstream_private",
 			Platform:       constant.TaskPlatform("plugin"),
 		}, nil
@@ -163,6 +166,7 @@ func TestExecuteTaskSubmissionSettlementFailureStaysDurableAndWritesNothing(t *t
 
 	outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
 		return &relay.TaskSubmitResult{
+			Quota:          100,
 			UpstreamTaskID: "upstream_private",
 			Platform:       constant.TaskPlatform("plugin"),
 		}, nil
@@ -341,6 +345,7 @@ func TestExecuteTaskSubmissionDisconnectAfterDurableInsertDoesNotRefund(t *testi
 
 	outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
 		return &relay.TaskSubmitResult{
+			Quota:          100,
 			UpstreamTaskID: "upstream_private",
 			Platform:       constant.TaskPlatform("plugin"),
 		}, nil
@@ -357,13 +362,119 @@ func TestExecuteTaskSubmissionDisconnectAfterDurableInsertDoesNotRefund(t *testi
 	assert.False(t, c.Writer.Written())
 }
 
+func TestExecuteTaskSubmissionReserveAdjustmentFailureRefundsBeforeInsert(t *testing.T) {
+	events := make([]string, 0, 2)
+	database := setupTaskSubmissionDatabase(t, true, &events)
+	billing := &taskSubmissionTestBilling{events: &events, reserveErr: errors.New("insufficient quota")}
+	c := taskSubmissionTestContext()
+	info := taskSubmissionRelayInfo(billing)
+
+	outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		return &relay.TaskSubmitResult{
+			Quota:          100,
+			UpstreamTaskID: "upstream_private",
+			Platform:       constant.TaskPlatform("plugin"),
+		}, nil
+	})
+
+	assert.Nil(t, outcome)
+	require.NotNil(t, taskErr)
+	assert.Equal(t, "insufficient_user_quota", taskErr.Code)
+	assert.Equal(t, []string{"reserve", "refund"}, events)
+	assert.Equal(t, 1, billing.refunds)
+	var count int64
+	require.NoError(t, database.Model(&model.Task{}).Count(&count).Error)
+	assert.Zero(t, count)
+	assert.False(t, c.Writer.Written())
+}
+
+func TestExecuteTaskSubmissionRecordsOneFinalMonitoringResult(t *testing.T) {
+	previousRetries := common.RetryTimes
+	common.RetryTimes = 1
+	t.Cleanup(func() { common.RetryTimes = previousRetries })
+	for _, scenario := range []struct {
+		name                      string
+		failures                  int
+		cancelBefore, cancelAfter bool
+		wantAttempts              int64
+		wantSuccess               bool
+	}{
+		{name: "success", wantAttempts: 1, wantSuccess: true},
+		{name: "retry-success", failures: 1, wantAttempts: 2, wantSuccess: true},
+		{name: "all-failed", failures: 2, wantAttempts: 2},
+		{name: "cancel-before", cancelBefore: true},
+		{name: "cancel-during", cancelAfter: true, wantAttempts: 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			db := modelManagementDB(t, "sqlite", "")
+			require.NoError(t, db.AutoMigrate(&model.Task{}, &model.Log{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}, &model.ChannelKeyObservation{}, &model.ChannelBalanceSample{}))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "true"}))
+			t.Cleanup(func() { require.NoError(t, perfmetrics.FlushChannelMetrics()) })
+			name := "task-monitor-" + scenario.name
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Models: name, Group: "default", Status: common.ChannelStatusEnabled, AutoBan: common.GetPointer(0)}
+			require.NoError(t, db.Create(channel).Error)
+			c := taskSubmissionTestContext()
+			ctx, cancel := context.WithCancel(c.Request.Context())
+			defer cancel()
+			c.Request = c.Request.WithContext(ctx)
+			if scenario.cancelBefore {
+				cancel()
+			}
+			info := taskSubmissionRelayInfo(nil)
+			info.OriginModelName, info.StartTime = name, time.Now()
+			info.LockedChannel = channel
+			info.ChannelMeta.ChannelId = channel.Id
+			info.ApiKey = channel.Key
+			attempts := int64(0)
+			_, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+				attempts++
+				if attempts <= int64(scenario.failures) {
+					return nil, service.TaskErrorWrapper(errors.New("fixture upstream unavailable"), "upstream_unavailable", http.StatusServiceUnavailable)
+				}
+				if scenario.cancelAfter {
+					cancel()
+				}
+				return &relay.TaskSubmitResult{UpstreamTaskID: "accepted", Platform: constant.TaskPlatform("plugin")}, nil
+			})
+			assert.Equal(t, scenario.wantAttempts, attempts)
+			if scenario.wantSuccess {
+				require.Nil(t, taskErr)
+			} else {
+				require.NotNil(t, taskErr)
+			}
+			require.NoError(t, perfmetrics.FlushChannelMetrics())
+			var rows []model.ChannelPerfMetric
+			require.NoError(t, db.Where("model_name = ? AND source IN ?", name, []string{perfmetrics.SourceRequest, perfmetrics.SourceRelayResult}).Find(&rows).Error)
+			if scenario.wantAttempts == 0 || scenario.cancelAfter {
+				assert.Empty(t, rows, "client cancellation must not produce a failed upstream observation")
+				return
+			}
+			require.Len(t, rows, 2)
+			for _, row := range rows {
+				if row.Source == perfmetrics.SourceRelayResult {
+					assert.EqualValues(t, 1, row.RequestCount, "retry attempts must produce one final model result")
+				} else {
+					assert.Equal(t, scenario.wantAttempts, row.RequestCount)
+				}
+				if scenario.wantSuccess {
+					assert.EqualValues(t, 1, row.SuccessCount)
+				} else {
+					assert.Zero(t, row.SuccessCount, "a cancelled submission cannot report success")
+				}
+			}
+		})
+	}
+}
+
 func setupTaskSubmissionDatabase(t *testing.T, migrate bool, events *[]string) *gorm.DB {
 	t.Helper()
 	previousDB := model.DB
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.Callback().Create().Before("gorm:create").Register("test:task-submit-order", func(*gorm.DB) {
-		*events = append(*events, "insert")
+	require.NoError(t, database.Callback().Create().Before("gorm:create").Register("test:task-submit-order", func(tx *gorm.DB) {
+		if tx.Statement.Table == "tasks" {
+			*events = append(*events, "insert")
+		}
 	}))
 	if migrate {
 		require.NoError(t, database.AutoMigrate(&model.Task{}))

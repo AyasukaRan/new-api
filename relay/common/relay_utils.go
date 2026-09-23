@@ -47,12 +47,23 @@ func SanitizeURLForLog(rawURL string) string {
 		return rawURL
 	}
 
+	changed := false
+	// url.URL.String() renders "user:password@" whenever the userinfo section is
+	// present, so a channel pointed at an upstream behind basic auth would put
+	// its password in every log line and audit record built from this URL. Keep
+	// the username, which is diagnostic, and drop the secret.
+	if parsedURL.User != nil {
+		if _, hasPassword := parsedURL.User.Password(); hasPassword {
+			parsedURL.User = url.User(parsedURL.User.Username())
+			changed = true
+		}
+	}
+
 	query := parsedURL.Query()
-	if len(query) == 0 {
+	if len(query) == 0 && !changed {
 		return rawURL
 	}
 
-	changed := false
 	for key := range query {
 		if isSensitiveURLQueryKey(key) {
 			query.Set(key, "***masked***")

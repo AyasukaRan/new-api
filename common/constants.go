@@ -93,6 +93,36 @@ var MemoryCacheEnabled bool
 
 var LogConsumeEnabled = true
 
+// LogRequestBodyEnabled stores each relay request's JSON payload on its usage
+// log, visible to admins only. Off by default: it makes logs carry whatever
+// users send, which is both a privacy decision and a storage cost.
+var LogRequestBodyEnabled = false
+
+// RequestTraceEnabled records the whole exchange behind a relay — the client's
+// request, the request new-api sent upstream, the upstream's response and what
+// was written back to the client, each with its headers — into a side table
+// that is fetched on demand. Off by default: one traced request can be
+// megabytes, and the payloads contain whatever users send.
+var RequestTraceEnabled = false
+
+// RequestTraceRetentionDays bounds how long traces are kept. They expire on
+// their own schedule rather than with the usage logs, because on SQL engines
+// log cleanup only runs when an administrator triggers it and a trace is orders
+// of magnitude larger than the log row it belongs to.
+var RequestTraceRetentionDays = 3
+
+// RequestTraceMaxObjectBytes caps a binary payload — an uploaded audio file, a
+// synthesized speech response, a generated image — that is offloaded to object
+// storage instead of a text column. Unlike a transcript, a media file is kept
+// whole or not at all, so the budget is held in memory until the exchange ends.
+// Zero disables the offload; it also has no effect without object storage.
+var RequestTraceMaxObjectBytes = 8 << 20
+
+// RequestTraceMaxBytes caps a single captured payload. An oversized payload
+// keeps its head and its tail with the middle elided, because a stream carries
+// the usage block and finish_reason at the very end.
+var RequestTraceMaxBytes = 1 << 20
+
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}
 
@@ -125,6 +155,10 @@ var TelegramBotName = ""
 var QuotaForNewUser = 0
 var QuotaForInviter = 0
 var QuotaForInvitee = 0
+
+// DefaultSubscriptionPlanId grants every newly registered user this
+// subscription plan; 0 disables the behaviour.
+var DefaultSubscriptionPlanId = 0
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false

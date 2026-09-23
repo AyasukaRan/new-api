@@ -21,6 +21,7 @@ import { useEffect, useCallback } from 'react'
 
 import { DEFAULT_LOGO } from '@/lib/constants'
 import { applyFaviconToDom } from '@/lib/dom-utils'
+import { getServerErrorMessage } from '@/lib/server-error-message'
 import { ensureStatus } from '@/lib/status-query'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -72,7 +73,10 @@ export function useSystemConfig(options: UseSystemConfigOptions = {}) {
       await ensureStatus(queryClient)
     } catch (error) {
       // eslint-disable-next-line no-console
-      console.error('Failed to load system config:', error)
+      console.error(
+        'Failed to load system config:',
+        getServerErrorMessage(error)
+      )
     } finally {
       setLoading(false)
     }

@@ -588,3 +588,39 @@ func TestSelfTaskMediaURLGuard(t *testing.T) {
 	assert.True(t, isTaskMediaFallbackLoop(remoteURL.String(), "task-1"))
 	assert.False(t, isTaskMediaFallbackLoop(remoteURL.String(), "task-2"))
 }
+
+// For a batch that completed with every request rejected, the error file naming
+// the per-line cause is the only account of what went wrong. Gating artifacts on
+// success alone made that file unreachable.
+func TestFailedPluginTaskStillExposesItsDiagnosticArtifacts(t *testing.T) {
+	task := setupGenericTaskTest(t)
+	task.Status = model.TaskStatusFailure
+	task.FailReason = "every request in the batch failed"
+	task.PrivateData.Execution = &model.TaskExecutionSnapshot{
+		TaskPlugin: &model.TaskPluginSnapshot{Key: "iflytek-batch"},
+	}
+	require.NoError(t, model.DB.Save(task).Error)
+
+	assert.True(t, taskArtifactsAreReadable(task))
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set("id", task.UserId)
+	c.Params = gin.Params{{Key: "key", Value: task.TaskID}, {Key: "artifact_key", Value: "errors"}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/tasks/"+task.TaskID+"/artifacts/errors/content", nil)
+
+	TaskArtifactContent(c)
+
+	// The plugin is not registered in this fixture, so the request cannot reach
+	// content — but it must no longer be turned away for the task's status.
+	assert.NotEqual(t, http.StatusConflict, recorder.Code)
+	assert.NotContains(t, recorder.Body.String(), "artifact_not_ready")
+}
+
+func TestUnfinishedTaskArtifactsAreStillWithheld(t *testing.T) {
+	task := setupGenericTaskTest(t)
+	task.Status = model.TaskStatusInProgress
+	require.NoError(t, model.DB.Save(task).Error)
+
+	assert.False(t, taskArtifactsAreReadable(task))
+}

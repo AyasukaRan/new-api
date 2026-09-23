@@ -66,13 +66,15 @@ import {
 import {
   isDisplayableLogType,
   isTimingLogType,
+  isConsumeLogType,
   getLogTypeConfig,
   isPerCallBilling,
 } from '../../lib/utils'
-import type { LogOtherData } from '../../types'
+import type { LogOtherData, LogSource } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCostDisplay } from '../log-cost-display'
 import { ModelBadge } from '../model-badge'
+import { RequestMetadataTags } from '../request-metadata-tags'
 import { TimingMetricsCell, StreamTpsCell } from '../timing-metrics-cell'
 import { useUsageLogsContext } from '../usage-logs-provider'
 
@@ -144,7 +146,7 @@ function buildTypeDetailSegments(
     return [{ text: t('Async task refund') }]
   }
 
-  if (log.type !== 2) return []
+  if (!isConsumeLogType(log.type)) return []
 
   const isViolation = isViolationFeeLog(other)
   if (isViolation) {
@@ -340,6 +342,7 @@ function buildTypeDetailSegments(
 export function useCommonLogsColumns(
   isAdmin: boolean,
   isRoot: boolean,
+  source: LogSource = 'usage',
   showBillingSource = false
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
@@ -350,7 +353,7 @@ export function useCommonLogsColumns(
       cell: ({ row }) => {
         const log = row.original
         const timestamp = row.getValue('created_at') as number
-        const config = getLogTypeConfig(log.type)
+        const config = getLogTypeConfig(log.type, source)
 
         return (
           <div className='flex min-w-0 flex-col gap-0.5'>
@@ -666,12 +669,13 @@ export function useCommonLogsColumns(
         const modelInfo = formatModelName(log)
 
         return (
-          <div className='flex w-fit flex-col gap-0.5'>
+          <div className='flex w-fit max-w-72 flex-col gap-0.5'>
             <ModelBadge
               modelName={modelInfo.name}
               actualModel={modelInfo.actualModel}
               responseModel={modelInfo.responseModel}
             />
+            <RequestMetadataTags metadata={parseLogOther(log.other)} />
           </div>
         )
       },
@@ -862,6 +866,7 @@ export function useCommonLogsColumns(
             </button>
             <DetailsDialog
               log={log}
+              source={source}
               isAdmin={isAdmin}
               isRoot={isRoot}
               open={dialogOpen}

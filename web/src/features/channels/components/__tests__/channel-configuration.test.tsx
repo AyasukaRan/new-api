@@ -18,9 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
-  createRouter,
-  createRootRoute,
   createMemoryHistory,
+  createRootRoute,
+  createRouter,
   RouterContextProvider,
 } from '@tanstack/react-router'
 import {
@@ -108,8 +108,8 @@ function ConfigurationHarness(props: {
     })
   )
   return (
-    <QueryClientProvider client={client}>
-      <RouterContextProvider router={router}>
+    <RouterContextProvider router={router}>
+      <QueryClientProvider client={client}>
         <ChannelsProvider>
           <button type='button' onClick={() => setOpen(true)}>
             Open channel
@@ -122,8 +122,8 @@ function ConfigurationHarness(props: {
             }
           />
         </ChannelsProvider>
-      </RouterContextProvider>
-    </QueryClientProvider>
+      </QueryClientProvider>
+    </RouterContextProvider>
   )
 }
 
@@ -2215,6 +2215,65 @@ test('closing an edited channel retains its left exit direction after the parent
       Reflect.deleteProperty(HTMLElement.prototype, 'getAnimations')
     }
   }
+})
+
+test('editing MaaS keeps its provider identity, batch credentials and disabled balance override in Other Settings', async () => {
+  const settings = {
+    batch_enabled: true,
+    batch_base_url: 'https://batch.example',
+    batch_key: 'batch-secret',
+    balance_query_disabled: true,
+    balance_query_type: 'openai',
+    balance_query_base_url: 'https://billing.example',
+  }
+  editingChannel = {
+    ...editingChannel,
+    type: 62,
+    setting: JSON.stringify(settings),
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  expect(
+    screen.getByRole('button', { name: 'Change provider' })
+  ).toHaveTextContent('iFlytek MaaS')
+  const tab = screen.getByRole('tab', { name: /Other Settings/ })
+  expect(tab).toHaveAccessibleName(/Configured/)
+  await user.click(tab)
+  expect(screen.getByRole('switch', { name: 'Batch Inference' })).toBeChecked()
+  expect(screen.getByRole('textbox', { name: 'Batch Address' })).toHaveValue(
+    settings.batch_base_url
+  )
+  expect(screen.getByLabelText('Batch Key')).toHaveValue(settings.batch_key)
+  expect(
+    screen.getByRole('switch', { name: 'Balance queries' })
+  ).not.toBeChecked()
+  expect(
+    screen.getByRole('textbox', { name: 'Balance Query Address' })
+  ).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1] as { type: number; setting: string }
+  expect(payload.type).toBe(62)
+  expect(JSON.parse(payload.setting)).toMatchObject(settings)
+})
+
+test('selecting vLLM after MaaS uses its distinct persisted provider number', async () => {
+  const user = userEvent.setup()
+  editingChannel = { ...editingChannel, type: 62 }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('button', { name: 'Change provider' }))
+  await user.click(screen.getByRole('option', { name: 'vLLM Built-in #64' }))
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0][1]).toMatchObject({ type: 64 })
 })
 
 test('the model list summarizes redirects, counts them on the routing tab, and jumps to the mapping editor', async () => {

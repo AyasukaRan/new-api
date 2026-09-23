@@ -27,6 +27,7 @@ import { ComboboxInput } from '@/components/ui/combobox-input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { getUserModels } from '@/lib/api'
+import { currentBaseUrl } from '@/lib/base-path'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 const APP_CONFIGS = {
@@ -64,7 +65,7 @@ function getServerAddress(): string {
   } catch {
     /* empty */
   }
-  return window.location.origin
+  return currentBaseUrl()
 }
 
 function buildCCSwitchURL(

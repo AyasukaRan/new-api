@@ -94,12 +94,33 @@ func validatePasskeyRPIDWithTx(tx *gorm.DB, rpID string) error {
 // including unrelated keys from UpdateOptionsBulk. Preview rolls back even the
 // initial default rows and never publishes a local configuration change.
 func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirmation string) (*PasskeyDomainChange, error) {
+	// Match the reload lock order. Mixed option batches must validate and
+	// publish request policy changes as part of the same successful save.
+	requestPolicyOptionMutex.Lock()
+	defer requestPolicyOptionMutex.Unlock()
 	passkeyOptionMutex.Lock()
 	defer passkeyOptionMutex.Unlock()
 	values = maps.Clone(values)
 	for key, value := range values {
 		if err := validateOptionValue(key, value); err != nil {
 			return nil, err
+		}
+	}
+	var policySnapshot *RequestPolicySnapshot
+	for key := range values {
+		if IsRequestPolicyOption(key) {
+			options := maps.Clone(CurrentRequestPolicy().Options)
+			for key, value := range values {
+				if IsRequestPolicyOption(key) {
+					options[key] = value
+				}
+			}
+			var err error
+			policySnapshot, err = BuildRequestPolicy(options)
+			if err != nil {
+				return nil, err
+			}
+			break
 		}
 	}
 	var change *PasskeyDomainChange
@@ -247,6 +268,9 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 				return change, err
 			}
 		}
+	}
+	if policySnapshot != nil {
+		requestPolicySnapshot.Store(policySnapshot)
 	}
 	return change, nil
 }

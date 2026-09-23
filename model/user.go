@@ -232,6 +232,17 @@ func UpdateUserBindColumn(userId int, column string, value string) error {
 	if !userBindColumns[column] {
 		return fmt.Errorf("invalid user bind column: %s", column)
 	}
+	if column == "github_id" {
+		return DB.Transaction(func(tx *gorm.DB) error {
+			if value == "" {
+				if err := tx.Model(&User{}).Where("id = ?", userId).Update(column, "").Error; err != nil {
+					return err
+				}
+				return ReleaseExternalIdentityWithTx(tx, ExternalIdentityProviderGitHub, userId)
+			}
+			return SetGitHubBindingWithTx(tx, userId, value)
+		})
+	}
 	return DB.Model(&User{}).Where("id = ?", userId).Update(column, value).Error
 }
 
@@ -698,7 +709,10 @@ func (user *User) Insert(inviterId int) error {
 				user.SetSetting(defaultSetting)
 			}
 
-			return tx.Create(user).Error
+			if err := tx.Create(user).Error; err != nil {
+				return err
+			}
+			return GrantDefaultSubscriptionTx(tx, user.Id)
 		})
 	}); err != nil {
 		return err
@@ -761,7 +775,10 @@ func (user *User) InsertWithTx(tx *gorm.DB, inviterId int) error {
 			user.SetSetting(defaultSetting)
 		}
 
-		return tx.Create(user).Error
+		if err := tx.Create(user).Error; err != nil {
+			return err
+		}
+		return GrantDefaultSubscriptionTx(tx, user.Id)
 	})
 }
 
@@ -938,8 +955,8 @@ func (user *User) ClearBinding(bindingType string) error {
 		if err := tx.Model(&User{}).Where("id = ?", user.Id).Update(column, "").Error; err != nil {
 			return err
 		}
-		if bindingType == ExternalIdentityProviderTelegram {
-			return ReleaseExternalIdentityWithTx(tx, ExternalIdentityProviderTelegram, user.Id)
+		if bindingType == ExternalIdentityProviderTelegram || bindingType == ExternalIdentityProviderGitHub {
+			return ReleaseExternalIdentityWithTx(tx, bindingType, user.Id)
 		}
 		return nil
 	}); err != nil {

@@ -313,19 +313,29 @@ describe('request policy settings', () => {
     expect(api.put).not.toHaveBeenCalled()
   })
 
-  it('turning scheduled checks off explains recovery without changing the recovery setting', async () => {
+  it('turning idle monitoring off saves only its switch without changing legacy channel state settings', async () => {
     await renderPolicies('/system-settings/request-policies/health')
     await userEvent.click(
       await screen.findByRole('switch', { name: 'Scheduled channel tests' })
     )
     expect(
       screen.getByText(
-        'Scheduled recovery is off. Bulk channel tests can still re-enable automatically disabled channels.'
+        'Test idle models on each channel, excluding manually disabled channels. Results update monitoring only.'
       )
     ).toBeVisible()
     expect(
-      screen.getByRole('switch', { name: 'Re-enable on success' })
-    ).toBeChecked()
+      screen.queryByRole('switch', { name: 'Re-enable on success' })
+    ).not.toBeInTheDocument()
+    expect(api.patch).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledExactlyOnceWith(
+        '/api/option/request_policy',
+        {
+          options: { 'monitor_setting.auto_test_channel_enabled': 'false' },
+        }
+      )
+    )
     expect(api.put).not.toHaveBeenCalled()
   })
 
@@ -351,7 +361,7 @@ describe('request policy settings', () => {
 
   it.each([
     ['/system-settings/models/channel-affinity', 'routing'],
-    ['/system-settings/models/routing-reliability', 'routing'],
+    ['/system-settings/models/routing-reliability', 'health'],
     ['/system-settings/security/sensitive-words', 'filtering'],
     ['/system-settings/operations/monitoring', 'health'],
     ['/system-settings/request-policies/', 'routing'],

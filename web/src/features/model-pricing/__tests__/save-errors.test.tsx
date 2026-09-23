@@ -82,6 +82,21 @@ it.each([200, 400])(
       }
       if (
         config.method === 'get' &&
+        ['/api/channel', '/api/option/'].includes(config.url ?? '')
+      ) {
+        return {
+          data: {
+            success: true,
+            data: config.url === '/api/channel' ? { items: [], total: 0 } : [],
+          },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config,
+        }
+      }
+      if (
+        config.method === 'get' &&
         config.url === '/api/option/model_pricing'
       ) {
         return {

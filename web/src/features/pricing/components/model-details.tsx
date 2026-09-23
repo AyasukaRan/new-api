@@ -36,8 +36,10 @@ import { useTranslation } from 'react-i18next'
 import { CopyButton } from '@/components/copy-button'
 import { StaticDataTable } from '@/components/data-table'
 import { sideDrawerContentClassName } from '@/components/drawer-layout'
+import { ErrorState } from '@/components/error-state'
 import { GroupBadge } from '@/components/group-badge'
 import { PublicLayout } from '@/components/layout'
+import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
 import {
   Sheet,
@@ -102,7 +104,12 @@ import type {
 import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
-import { ModelDetailsPerformance } from './model-details-performance'
+import {
+  ModelAvailabilityTimeline,
+  ModelChannelAvailability,
+  ModelDetailsPerformance,
+} from './model-details-performance'
+import { ModelCurrentAvailability } from './model-perf-badge'
 
 // ----------------------------------------------------------------------------
 // Local UI helpers
@@ -271,30 +278,66 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
     queryFn: async () =>
       requireServerSuccess(await getPerfMetrics(props.model.model_name, 24)),
     staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
   })
 
-  const summary = metricsQuery.data?.data.summary
-  const successRate = summary?.success_rate ?? Number.NaN
-  const avgTps = summary?.avg_tps ?? 0
-  const avgLatency = summary?.avg_latency_ms ?? 0
+  if (metricsQuery.isLoading) {
+    return <LoadingState size='sm' className='min-h-24' />
+  }
+  if (metricsQuery.isError || metricsQuery.data?.success === false) {
+    return (
+      <ErrorState
+        className='min-h-24'
+        onRetry={() => void metricsQuery.refetch()}
+      />
+    )
+  }
+
+  const availabilityRate =
+    metricsQuery.data?.data.availability_rate ?? Number.NaN
+  const avgTps =
+    metricsQuery.data?.data.summary?.avg_tps ??
+    metricsQuery.data?.data.avg_tps ??
+    0
+  const avgLatency =
+    metricsQuery.data?.data.summary?.avg_latency_ms ??
+    metricsQuery.data?.data.avg_latency_ms ??
+    0
 
   return (
-    <div className='bg-muted/20 grid overflow-hidden rounded-lg border sm:grid-cols-3 sm:divide-x'>
-      <OverviewMetric
-        icon={Timer}
-        label='TPS'
-        value={formatThroughput(avgTps)}
+    <div className='space-y-4'>
+      <ModelCurrentAvailability
+        available={metricsQuery.data?.data.current_available}
+        observedAt={metricsQuery.data?.data.current_observed_at}
       />
-      <OverviewMetric
-        icon={Timer}
-        label={t('Average latency')}
-        value={formatLatency(avgLatency)}
+      <div className='bg-muted/20 grid overflow-hidden rounded-lg border sm:grid-cols-3 sm:divide-x'>
+        <OverviewMetric
+          icon={Timer}
+          label='TPS'
+          value={formatThroughput(avgTps)}
+        />
+        <OverviewMetric
+          icon={Timer}
+          label={t('Average latency')}
+          value={formatLatency(avgLatency)}
+        />
+        <OverviewMetric
+          icon={HeartPulse}
+          label={t('Availability (last 24h)')}
+          value={
+            Number.isFinite(availabilityRate)
+              ? formatUptimePct(availabilityRate)
+              : t('Not monitored')
+          }
+          valueClassName={getSuccessRateTextClass(availabilityRate)}
+        />
+      </div>
+      <ModelAvailabilityTimeline
+        series={metricsQuery.data?.data.availability_series}
       />
-      <OverviewMetric
-        icon={HeartPulse}
-        label={t('Success rate')}
-        value={formatUptimePct(successRate)}
-        valueClassName={getSuccessRateTextClass(successRate)}
+      <ModelChannelAvailability
+        modelName={props.model.model_name}
+        channels={metricsQuery.data?.data.channels ?? []}
       />
     </div>
   )

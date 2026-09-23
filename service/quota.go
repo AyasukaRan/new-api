@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -35,6 +35,13 @@ type QuotaInfo struct {
 	ModelPrice    float64
 	ModelRatio    float64
 	GroupRatio    float64
+	// Lanes resolved at request time. They come from PriceData rather than
+	// being re-read from the global tables here, so a per-channel override
+	// prices the audio and realtime paths the same way it prices text.
+	CompletionRatio      float64
+	AudioRatio           float64
+	AudioCompletionRatio float64
+	ChannelPricing       bool
 }
 
 func hasCustomModelRatio(modelName string, currentRatio float64) bool {
@@ -55,9 +62,9 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 		return common.QuotaFromDecimalChecked(quota)
 	}
 
-	completionRatio := decimal.NewFromFloat(ratio_setting.GetCompletionRatio(info.ModelName))
-	audioRatio := decimal.NewFromFloat(ratio_setting.GetAudioRatio(info.ModelName))
-	audioCompletionRatio := decimal.NewFromFloat(ratio_setting.GetAudioCompletionRatio(info.ModelName))
+	completionRatio := decimal.NewFromFloat(info.CompletionRatio)
+	audioRatio := decimal.NewFromFloat(info.AudioRatio)
+	audioCompletionRatio := decimal.NewFromFloat(info.AudioCompletionRatio)
 
 	groupRatio := decimal.NewFromFloat(info.GroupRatio)
 	modelRatio := decimal.NewFromFloat(info.ModelRatio)
@@ -77,11 +84,18 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 	quota = quota.Mul(ratio)
 
 	// If ratio is not zero and quota is less than or equal to zero, set quota to 1
-	if !ratio.IsZero() && quota.LessThanOrEqual(decimal.Zero) {
+	if !ratio.IsZero() && quota.LessThanOrEqual(decimal.Zero) && !(info.ChannelPricing && quota.IsZero()) {
 		quota = decimal.NewFromInt(1)
 	}
 
 	return common.QuotaFromDecimalChecked(quota)
+}
+
+func realtimeBillingUsage(usage *dto.RealtimeUsage) *dto.Usage {
+	return &dto.Usage{
+		PromptTokens: usage.InputTokens, CompletionTokens: usage.OutputTokens, TotalTokens: usage.TotalTokens,
+		PromptTokensDetails: usage.InputTokenDetails, CompletionTokenDetails: usage.OutputTokenDetails,
+	}
 }
 
 func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) error {
@@ -98,44 +112,39 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 		return err
 	}
 
-	modelName := relayInfo.OriginModelName
-	textInputTokens := usage.InputTokenDetails.TextTokens
-	textOutTokens := usage.OutputTokenDetails.TextTokens
-	audioInputTokens := usage.InputTokenDetails.AudioTokens
-	audioOutTokens := usage.OutputTokenDetails.AudioTokens
-	groupRatio := ratio_setting.GetGroupRatio(relayInfo.UsingGroup)
-	modelRatio, _, _ := ratio_setting.GetModelRatio(modelName)
-
-	autoGroup, exists := common.GetContextKey(ctx, constant.ContextKeyAutoGroup)
-	if exists {
-		groupRatio = ratio_setting.GetGroupRatio(autoGroup.(string))
-		logger.LogDebug(ctx, "final group ratio: %f", groupRatio)
-		relayInfo.UsingGroup = autoGroup.(string)
-	}
-
-	actualGroupRatio := groupRatio
-	userGroupRatio, ok := ratio_setting.GetGroupGroupRatio(relayInfo.UserGroup, relayInfo.UsingGroup)
-	if ok {
-		actualGroupRatio = userGroupRatio
-	}
-
+	// Every ratio comes from PriceData, which ModelPriceHelper resolved for this
+	// request against the serving channel. Rebuilding them from the global
+	// tables here used to bill a realtime session mid-flight at a different
+	// price than PostWssConsumeQuota settles it at, and keyed the model ratio
+	// off OriginModelName while the rest of billing uses the billing name.
+	priceData := relayInfo.PriceData
 	quotaInfo := QuotaInfo{
 		InputDetails: TokenDetails{
-			TextTokens:  textInputTokens,
-			AudioTokens: audioInputTokens,
+			TextTokens:  usage.InputTokenDetails.TextTokens,
+			AudioTokens: usage.InputTokenDetails.AudioTokens,
 		},
 		OutputDetails: TokenDetails{
-			TextTokens:  textOutTokens,
-			AudioTokens: audioOutTokens,
+			TextTokens:  usage.OutputTokenDetails.TextTokens,
+			AudioTokens: usage.OutputTokenDetails.AudioTokens,
 		},
-		ModelName:  modelName,
-		UsePrice:   relayInfo.UsePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: actualGroupRatio,
+		ModelName:            relayInfo.GetBillingModelName(),
+		UsePrice:             relayInfo.UsePrice,
+		ModelRatio:           priceData.ModelRatio,
+		GroupRatio:           priceData.GroupRatioInfo.GroupRatio,
+		CompletionRatio:      priceData.CompletionRatio,
+		AudioRatio:           priceData.AudioRatio,
+		AudioCompletionRatio: priceData.AudioCompletionRatio,
+		ChannelPricing:       priceData.ChannelPricing,
 	}
 
-	quota, clamp := calculateAudioQuota(quotaInfo)
-	noteQuotaClamp(relayInfo, clamp)
+	var quota int
+	if priceData.ChannelPricing && relayInfo.TieredBillingSnapshot == nil {
+		quota = calculateTextQuotaSummary(ctx, relayInfo, realtimeBillingUsage(usage)).Quota
+	} else {
+		var clamp *common.QuotaClamp
+		quota, clamp = calculateAudioQuota(quotaInfo)
+		noteQuotaClamp(relayInfo, clamp)
+	}
 
 	if userQuota < quota {
 		return fmt.Errorf("user quota is not enough, user quota: %s, need quota: %s", logger.FormatQuota(userQuota), logger.FormatQuota(quota))
@@ -157,11 +166,12 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	usage *dto.RealtimeUsage, extraContent string) {
 
 	var tieredResult *billingexpr.TieredResult
-	tieredOk, tieredQuota, tieredRes := TryTieredSettle(relayInfo, billingexpr.TokenParams{
-		P:   float64(usage.InputTokens),
-		C:   float64(usage.OutputTokens),
-		Len: float64(usage.InputTokens),
-	})
+	var tieredUsedVars map[string]bool
+	if snap := relayInfo.TieredBillingSnapshot; snap != nil {
+		tieredUsedVars = billingexpr.UsedVars(snap.ExprString)
+	}
+	tokenUsage := realtimeBillingUsage(usage)
+	tieredOk, tieredQuota, tieredRes := TryTieredSettle(relayInfo, BuildTieredTokenParams(tokenUsage, false, tieredUsedVars))
 	if tieredOk {
 		tieredResult = tieredRes
 	}
@@ -174,9 +184,11 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	audioOutTokens := usage.OutputTokenDetails.AudioTokens
 
 	tokenName := ctx.GetString("token_name")
-	completionRatio := decimal.NewFromFloat(ratio_setting.GetCompletionRatio(modelName))
-	audioRatio := decimal.NewFromFloat(ratio_setting.GetAudioRatio(relayInfo.OriginModelName))
-	audioCompletionRatio := decimal.NewFromFloat(ratio_setting.GetAudioCompletionRatio(modelName))
+	// Read every lane from PriceData so the log below reports the ratios the
+	// request was actually priced with, including any per-channel override.
+	completionRatio := decimal.NewFromFloat(relayInfo.PriceData.CompletionRatio)
+	audioRatio := decimal.NewFromFloat(relayInfo.PriceData.AudioRatio)
+	audioCompletionRatio := decimal.NewFromFloat(relayInfo.PriceData.AudioCompletionRatio)
 
 	modelRatio := relayInfo.PriceData.ModelRatio
 	groupRatio := relayInfo.PriceData.GroupRatioInfo.GroupRatio
@@ -192,16 +204,26 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 			TextTokens:  textOutTokens,
 			AudioTokens: audioOutTokens,
 		},
-		ModelName:  modelName,
-		UsePrice:   usePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: groupRatio,
+		ModelName:            modelName,
+		UsePrice:             usePrice,
+		ModelPrice:           modelPrice,
+		ModelRatio:           modelRatio,
+		GroupRatio:           groupRatio,
+		CompletionRatio:      relayInfo.PriceData.CompletionRatio,
+		AudioRatio:           relayInfo.PriceData.AudioRatio,
+		AudioCompletionRatio: relayInfo.PriceData.AudioCompletionRatio,
+		ChannelPricing:       relayInfo.PriceData.ChannelPricing,
 	}
 
-	quota, clamp := calculateAudioQuota(quotaInfo)
-	noteQuotaClamp(relayInfo, clamp)
+	var quota int
 	if tieredOk {
 		quota = tieredQuota
+	} else if relayInfo.PriceData.ChannelPricing && !usePrice {
+		quota = calculateTextQuotaSummary(ctx, relayInfo, tokenUsage).Quota
+	} else {
+		var clamp *common.QuotaClamp
+		quota, clamp = calculateAudioQuota(quotaInfo)
+		noteQuotaClamp(relayInfo, clamp)
 	}
 
 	totalTokens := usage.TotalTokens
@@ -254,6 +276,7 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 		Group:            relayInfo.UsingGroup,
 		Other:            other,
 	})
+	perfmetrics.RecordChannelUsage(relayInfo, int64(usage.InputTokens), int64(usage.OutputTokens), int64(quota))
 }
 
 func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData) int {
@@ -286,6 +309,10 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 	if usage == nil {
 		usage = &dto.Usage{PromptTokens: relayInfo.GetEstimatePromptTokens(), TotalTokens: relayInfo.GetEstimatePromptTokens()}
 	}
+	if relayInfo.PriceData.ChannelPricing && !relayInfo.PriceData.UsePrice {
+		PostTextConsumeQuota(ctx, relayInfo, usage, []string{extraContent})
+		return
+	}
 
 	var tieredUsedVars map[string]bool
 	if snap := relayInfo.TieredBillingSnapshot; snap != nil {
@@ -307,9 +334,11 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 
 	tokenName := ctx.GetString("token_name")
 	billingModelName := relayInfo.GetBillingModelName()
-	completionRatio := decimal.NewFromFloat(ratio_setting.GetCompletionRatio(billingModelName))
-	audioRatio := decimal.NewFromFloat(ratio_setting.GetAudioRatio(billingModelName))
-	audioCompletionRatio := decimal.NewFromFloat(ratio_setting.GetAudioCompletionRatio(billingModelName))
+	// From PriceData, not the global tables: this is the same request the
+	// pre-consume priced, and a per-channel override must not evaporate here.
+	completionRatio := decimal.NewFromFloat(relayInfo.PriceData.CompletionRatio)
+	audioRatio := decimal.NewFromFloat(relayInfo.PriceData.AudioRatio)
+	audioCompletionRatio := decimal.NewFromFloat(relayInfo.PriceData.AudioCompletionRatio)
 
 	modelRatio := relayInfo.PriceData.ModelRatio
 	groupRatio := relayInfo.PriceData.GroupRatioInfo.GroupRatio
@@ -325,10 +354,15 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 			TextTokens:  textOutTokens,
 			AudioTokens: audioOutTokens,
 		},
-		ModelName:  billingModelName,
-		UsePrice:   usePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: groupRatio,
+		ModelName:            billingModelName,
+		UsePrice:             usePrice,
+		ModelPrice:           modelPrice,
+		ModelRatio:           modelRatio,
+		GroupRatio:           groupRatio,
+		CompletionRatio:      relayInfo.PriceData.CompletionRatio,
+		AudioRatio:           relayInfo.PriceData.AudioRatio,
+		AudioCompletionRatio: relayInfo.PriceData.AudioCompletionRatio,
+		ChannelPricing:       relayInfo.PriceData.ChannelPricing,
 	}
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
@@ -387,6 +421,7 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		Group:            relayInfo.UsingGroup,
 		Other:            other,
 	})
+	perfmetrics.RecordChannelUsage(relayInfo, int64(usage.PromptTokens), int64(usage.CompletionTokens), int64(quota))
 	relayInfo.PerformanceOutputTokens = int64(usage.CompletionTokens)
 }
 

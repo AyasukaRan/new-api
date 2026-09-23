@@ -42,6 +42,7 @@ import {
   FormControl,
   FormDescription,
   FormField,
+  FormItem,
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
@@ -82,15 +83,31 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import type { LogCleanupTask } from '../types'
+import { safeNumberFieldProps } from '../utils/numeric-field'
 
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
+  LogRequestBodyEnabled: z.boolean(),
+  RequestTraceEnabled: z.boolean(),
+  RequestTraceRetentionDays: z.number().int().min(1).max(365),
+  RequestTraceMaxBytes: z
+    .number()
+    .int()
+    .min(4096)
+    .max(32 * 1024 * 1024),
 })
 
 type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 
+// Primitives rather than a defaults object: the parent builds its props inline,
+// so an object prop would be a new identity every render and reset the form
+// under the operator mid-edit.
 type LogSettingsSectionProps = {
   defaultEnabled: boolean
+  defaultRequestBodyEnabled: boolean
+  defaultRequestTraceEnabled: boolean
+  defaultRequestTraceRetentionDays: number
+  defaultRequestTraceMaxBytes: number
 }
 
 type ServerLogInfo = {
@@ -144,17 +161,21 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
   return task?.status === 'pending' || task?.status === 'running'
 }
 
-export function LogSettingsSection({
-  defaultEnabled,
-}: LogSettingsSectionProps) {
+export function LogSettingsSection(props: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
-      LogConsumeEnabled: defaultEnabled,
+      LogConsumeEnabled: props.defaultEnabled,
+      LogRequestBodyEnabled: props.defaultRequestBodyEnabled,
+      RequestTraceEnabled: props.defaultRequestTraceEnabled,
+      RequestTraceRetentionDays: props.defaultRequestTraceRetentionDays,
+      RequestTraceMaxBytes: props.defaultRequestTraceMaxBytes,
     },
   })
+
+  const requestTraceEnabled = form.watch('RequestTraceEnabled')
 
   const [purgeDate, setPurgeDate] = useState<Date | undefined>(() =>
     getDateDaysAgo(30)
@@ -180,8 +201,21 @@ export function LogSettingsSection({
   }, [])
 
   useEffect(() => {
-    form.reset({ LogConsumeEnabled: defaultEnabled })
-  }, [defaultEnabled, form])
+    form.reset({
+      LogConsumeEnabled: props.defaultEnabled,
+      LogRequestBodyEnabled: props.defaultRequestBodyEnabled,
+      RequestTraceEnabled: props.defaultRequestTraceEnabled,
+      RequestTraceRetentionDays: props.defaultRequestTraceRetentionDays,
+      RequestTraceMaxBytes: props.defaultRequestTraceMaxBytes,
+    })
+  }, [
+    props.defaultEnabled,
+    props.defaultRequestBodyEnabled,
+    props.defaultRequestTraceEnabled,
+    props.defaultRequestTraceRetentionDays,
+    props.defaultRequestTraceMaxBytes,
+    form,
+  ])
 
   useEffect(() => {
     fetchServerLogInfo()
@@ -263,11 +297,39 @@ export function LogSettingsSection({
   }, [logCleanupActive, logCleanupTaskId, t])
 
   const onSubmit = async (values: LogSettingsFormValues) => {
-    if (values.LogConsumeEnabled === defaultEnabled) return
-    await updateOption.mutateAsync({
-      key: 'LogConsumeEnabled',
-      value: values.LogConsumeEnabled,
-    })
+    if (values.LogConsumeEnabled !== props.defaultEnabled) {
+      await updateOption.mutateAsync({
+        key: 'LogConsumeEnabled',
+        value: values.LogConsumeEnabled,
+      })
+    }
+    if (values.LogRequestBodyEnabled !== props.defaultRequestBodyEnabled) {
+      await updateOption.mutateAsync({
+        key: 'LogRequestBodyEnabled',
+        value: values.LogRequestBodyEnabled,
+      })
+    }
+    if (values.RequestTraceEnabled !== props.defaultRequestTraceEnabled) {
+      await updateOption.mutateAsync({
+        key: 'RequestTraceEnabled',
+        value: values.RequestTraceEnabled,
+      })
+    }
+    if (
+      values.RequestTraceRetentionDays !==
+      props.defaultRequestTraceRetentionDays
+    ) {
+      await updateOption.mutateAsync({
+        key: 'RequestTraceRetentionDays',
+        value: values.RequestTraceRetentionDays,
+      })
+    }
+    if (values.RequestTraceMaxBytes !== props.defaultRequestTraceMaxBytes) {
+      await updateOption.mutateAsync({
+        key: 'RequestTraceMaxBytes',
+        value: values.RequestTraceMaxBytes,
+      })
+    }
   }
 
   const handleRequestCleanLogs = () => {
@@ -372,6 +434,107 @@ export function LogSettingsSection({
               </SettingsSwitchItem>
             )}
           />
+
+          <FormField
+            control={form.control}
+            name='LogRequestBodyEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Record request content')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Store each request payload on its usage log so administrators can review what users sent. Logs then hold user content, and grow substantially.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+                <FormMessage />
+              </SettingsSwitchItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='RequestTraceEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Record the full request trace')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Capture the whole exchange behind each relay — the client request, what was forwarded upstream, the upstream reply and what was returned — with headers, credentials removed. Traces are stored separately and fetched on demand, but a single request can be megabytes.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+                <FormMessage />
+              </SettingsSwitchItem>
+            )}
+          />
+
+          <SettingsControlGroup className='grid gap-4 sm:grid-cols-2'>
+            <FormField
+              control={form.control}
+              name='RequestTraceRetentionDays'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Trace retention (days)')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={1}
+                      max={365}
+                      step={1}
+                      {...safeNumberFieldProps(field)}
+                      disabled={!requestTraceEnabled}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Traces expire on their own schedule, independent of the usage logs they belong to.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='RequestTraceMaxBytes'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Max bytes per captured payload')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={4096}
+                      max={32 * 1024 * 1024}
+                      step={1024}
+                      {...safeNumberFieldProps(field)}
+                      disabled={!requestTraceEnabled}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'A larger payload keeps its beginning and its end, with the middle elided.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </SettingsControlGroup>
 
           <SettingsControlGroup className='space-y-3'>
             <div>

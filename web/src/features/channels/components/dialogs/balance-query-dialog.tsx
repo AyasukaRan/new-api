@@ -17,8 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
-import { Loader2, RefreshCw, DollarSign } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Loader2, RefreshCw } from 'lucide-react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -29,14 +29,12 @@ import {
 import { Dialog } from '@/components/dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { IconBadge } from '@/components/ui/icon-badge'
-import { formatCurrencyFromUSD } from '@/lib/currency'
-import { formatTimestampToDate } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getCodexUsage, updateChannelBalance } from '../../api'
-import { channelsQueryKeys } from '../../lib'
+import { channelsQueryKeys, parseChannelSettings } from '../../lib'
+import { ChannelBalanceSummary } from '../channel-balance-summary'
 import { useChannels } from '../channels-provider'
 import {
   CodexUsageDialog,
@@ -54,98 +52,124 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
   const { currentRow, setCurrentRow } = useChannels()
   const queryClient = useQueryClient()
   const [isQuerying, setIsQuerying] = useState(false)
-  const [balance, setBalance] = useState<number | null>(null)
-  const [balanceUpdatedTime, setBalanceUpdatedTime] = useState<number | null>(
-    null
-  )
   const [rawResponse, setRawResponse] = useState<string | null>(
     props.initialRawResponse ?? null
   )
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
+  const requestGeneration = useRef(0)
 
   const isCodex = currentRow?.type === 57
+  const balanceQueryDisabled =
+    !isCodex &&
+    parseChannelSettings(currentRow?.setting)?.balance_query_disabled === true
 
   const handleQueryCodexUsage = async () => {
     const row = currentRow
-    if (!row) return
+    if (!row || !props.open) return
+    const generation = ++requestGeneration.current
     setIsQuerying(true)
     try {
       const res = await getCodexUsage(row.id)
+      if (generation !== requestGeneration.current) return
       if (!res.success) {
         throw createServerError(res, t('Failed to fetch usage'))
       }
       setCodexUsageResponse(res)
     } catch (error: unknown) {
+      if (generation !== requestGeneration.current) return
       handleServerError(error, t('Failed to fetch usage'))
     } finally {
-      setIsQuerying(false)
+      if (generation === requestGeneration.current) setIsQuerying(false)
     }
   }
 
-  useEffect(() => {
-    if (!isCodex) return
-    if (!props.open) return
-    handleQueryCodexUsage()
+  useLayoutEffect(() => {
+    // Each opening/channel gets its own request generation. A response from a
+    // closed dialog must never replace the shared selected channel or usage.
+    requestGeneration.current += 1
+    setIsQuerying(false)
+    setRawResponse(props.open ? (props.initialRawResponse ?? null) : null)
+    setCodexUsageResponse(null)
+    if (isCodex && props.open) void handleQueryCodexUsage()
+    return () => {
+      requestGeneration.current += 1
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.open, isCodex])
+  }, [props.open, currentRow?.id, isCodex, props.initialRawResponse])
 
   if (!currentRow) return null
 
   const handleQueryBalance = async () => {
+    if (!props.open || balanceQueryDisabled) return
+    const generation = ++requestGeneration.current
     setIsQuerying(true)
     try {
       const response = await updateChannelBalance(currentRow.id)
-      if (response.success && response.balance !== undefined) {
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKeys.lists(),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ['channel-monitoring', currentRow.id],
+      })
+      if (generation !== requestGeneration.current) return
+      if (response.balance_monitor) {
+        setCurrentRow({
+          ...currentRow,
+          balance_monitor: response.balance_monitor,
+          balance: response.balance_monitor.balance ?? currentRow.balance,
+          balance_updated_time: response.balance_monitor.balance_updated_time,
+        })
+      }
+      if (response.partial) {
+        toast.warning(
+          t(
+            'Some accounts could not be queried. The total retains the last complete balance.'
+          )
+        )
+        setRawResponse(null)
+      } else if (response.success && response.balance != null) {
         const newBalance = response.balance
-        const now = Math.floor(Date.now() / 1000)
+        const now =
+          response.balance_monitor?.balance_updated_time ??
+          currentRow.balance_updated_time
 
-        setBalance(newBalance)
-        setBalanceUpdatedTime(now)
         toast.success(t('Balance updated successfully'))
 
         // Update currentRow immediately with new balance and timestamp
         setCurrentRow({
           ...currentRow,
+          balance_monitor: response.balance_monitor,
           balance: newBalance,
           balance_updated_time: now,
         })
 
-        // Invalidate queries to refresh the table
-        await queryClient.invalidateQueries({
-          queryKey: channelsQueryKeys.lists(),
-        })
         setRawResponse(null)
       } else if (response.success && response.raw_response !== undefined) {
         setRawResponse(response.raw_response)
       } else {
-        handleServerError(response, t('Failed to query balance'))
+        toast.error(
+          response.message === 'channel balance query is disabled'
+            ? t(
+                'Balance queries are disabled. Previously recorded balances are retained.'
+              )
+            : response.message || t('Failed to query balance')
+        )
       }
     } catch (error: unknown) {
+      if (generation !== requestGeneration.current) return
       handleServerError(error, t('Failed to query balance'))
     } finally {
-      setIsQuerying(false)
+      if (generation === requestGeneration.current) setIsQuerying(false)
     }
   }
 
   const handleClose = () => {
-    setBalance(null)
-    setBalanceUpdatedTime(null)
+    requestGeneration.current += 1
+    setIsQuerying(false)
     setRawResponse(null)
     setCodexUsageResponse(null)
     props.onOpenChange(false)
-  }
-
-  const formatBalance = (bal: number) =>
-    formatCurrencyFromUSD(bal, {
-      digitsLarge: 2,
-      digitsSmall: 4,
-      abbreviate: false,
-    })
-
-  const formatDate = (timestamp: number) => {
-    if (!timestamp) return 'Never'
-    return formatTimestampToDate(timestamp)
   }
 
   if (isCodex) {
@@ -205,35 +229,30 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
             </CodeBlock>
           </>
         ) : (
-          <>
-            {/* Current Balance Display */}
-            <div className='bg-muted/50 rounded-lg border p-4'>
-              <div className='text-muted-foreground mb-2 flex items-center gap-2 text-sm'>
-                <IconBadge tone='success' size='xs'>
-                  <DollarSign />
-                </IconBadge>
-                <span>{t('Current Balance')}</span>
-              </div>
-              <div className='text-2xl font-bold'>
-                {balance !== null
-                  ? formatBalance(balance)
-                  : formatBalance(currentRow.balance)}
-              </div>
-              <div className='text-muted-foreground mt-2 text-xs'>
-                {t('Last updated:')}{' '}
-                {formatDate(
-                  balanceUpdatedTime ?? currentRow.balance_updated_time
-                )}
-              </div>
-            </div>
-          </>
+          <ChannelBalanceSummary
+            queryDisabled={balanceQueryDisabled}
+            monitor={
+              currentRow.balance_monitor ?? {
+                balance: currentRow.balance_updated_time
+                  ? currentRow.balance
+                  : null,
+                balance_updated_time: currentRow.balance_updated_time,
+                checked_at: currentRow.balance_updated_time,
+                known_balance: currentRow.balance,
+                partial: false,
+                success: true,
+                configuration_changed: false,
+                key_balances: [],
+              }
+            }
+          />
         )}
 
         {/* Balance Update Button */}
         <Button
           className='w-full'
           onClick={handleQueryBalance}
-          disabled={isQuerying}
+          disabled={isQuerying || balanceQueryDisabled}
         >
           {isQuerying && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
           {!isQuerying && <RefreshCw className='mr-2 h-4 w-4' />}

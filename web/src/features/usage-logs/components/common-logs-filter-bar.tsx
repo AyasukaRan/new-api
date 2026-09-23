@@ -123,7 +123,9 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
-  const { isAdminView: isAdmin } = useLogsViewScope()
+  const { isAdminView: isAdmin, logSource } = useLogsViewScope()
+  const isTest = logSource === 'test'
+  const section = isTest ? 'test' : 'common'
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
   const { data: adminGroups } = useQuery({
@@ -215,24 +217,24 @@ export function CommonLogsFilterBar<TData>(
       const filterParams = buildSearchParams(nextFilters, 'common')
       navigate({
         to: '/usage-logs/$section',
-        params: { section: 'common' },
+        params: { section },
         search: {
           ...filterParams,
-          type: [logType],
+          type: isTest ? undefined : [logType],
           page: 1,
         },
       })
       queryClient.invalidateQueries({ queryKey: ['logs'] })
       queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
     },
-    [filters, logType, navigate, queryClient]
+    [filters, isTest, logType, navigate, queryClient, section]
   )
 
   const handleReset = useCallback(() => {
     const { start, end } = getDefaultTimeRange()
     const resetFilters: CommonLogFilters = { startTime: start, endTime: end }
     const resetSearch = {
-      type: [LOG_TYPE_ALL_VALUE],
+      type: isTest ? undefined : [LOG_TYPE_ALL_VALUE],
       startTime: start.getTime(),
       endTime: end.getTime(),
     }
@@ -244,7 +246,7 @@ export function CommonLogsFilterBar<TData>(
 
     navigate({
       to: '/usage-logs/$section',
-      params: { section: 'common' },
+      params: { section },
       search: {
         page: 1,
         ...resetSearch,
@@ -252,7 +254,7 @@ export function CommonLogsFilterBar<TData>(
     })
     queryClient.invalidateQueries({ queryKey: ['logs'] })
     queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-  }, [navigate, queryClient])
+  }, [isTest, navigate, queryClient, section])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -494,7 +496,7 @@ export function CommonLogsFilterBar<TData>(
           {dateRangeFilter}
           {modelFilter}
           {groupFilter}
-          {typeFilter}
+          {!isTest && typeFilter}
         </>
       }
       advancedFilters={advancedFilters}
@@ -503,7 +505,7 @@ export function CommonLogsFilterBar<TData>(
         <>
           {modelFilter}
           {groupFilter}
-          {typeFilter}
+          {!isTest && typeFilter}
           {advancedFilters}
         </>
       }

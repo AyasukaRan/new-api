@@ -60,6 +60,7 @@ export const LOG_TYPE_ENUM = {
   ERROR: 5,
   REFUND: 6,
   LOGIN: 7,
+  TEST_CONSUME: 8,
 } as const
 
 /**
@@ -98,6 +99,7 @@ export const LOG_TYPES = [
   { value: 5, label: 'Error', color: 'red' },
   { value: 6, label: 'Refund', color: 'blue' },
   { value: 7, label: 'Login', color: 'teal' },
+  { value: 8, label: 'Model test', color: 'cyan' },
 ] as const
 
 /**
@@ -107,15 +109,16 @@ export const LOG_TYPES = [
  */
 export const LOG_TYPE_FILTERS = [
   { label: 'All Types', value: LOG_TYPE_ALL_VALUE, deprecated: false },
-  ...LOG_TYPES.filter((type) => type.value !== LOG_TYPE_ENUM.UNKNOWN).map(
-    (type) => ({
-      label: type.label,
-      value: String(type.value),
-      deprecated:
-        type.value === LOG_TYPE_ENUM.MANAGE ||
-        type.value === LOG_TYPE_ENUM.LOGIN,
-    })
-  ),
+  ...LOG_TYPES.filter(
+    (type) =>
+      type.value !== LOG_TYPE_ENUM.UNKNOWN &&
+      type.value !== LOG_TYPE_ENUM.TEST_CONSUME
+  ).map((type) => ({
+    label: type.label,
+    value: String(type.value),
+    deprecated:
+      type.value === LOG_TYPE_ENUM.MANAGE || type.value === LOG_TYPE_ENUM.LOGIN,
+  })),
 ] as const
 
 // ============================================================================
@@ -351,9 +354,9 @@ export const LOG_CATEGORY_LABELS: Record<LogCategory, string> = {
 /**
  * Log types that are displayable (have detailed info)
  */
-export const DISPLAYABLE_LOG_TYPES = [0, 2, 5, 6] as const
+export const DISPLAYABLE_LOG_TYPES = [0, 2, 5, 6, 8] as const
 
 /**
  * Log types that show timing info
  */
-export const TIMING_LOG_TYPES = [2, 5] as const
+export const TIMING_LOG_TYPES = [2, 5, 8] as const

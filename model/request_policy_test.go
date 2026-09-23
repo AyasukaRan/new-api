@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,9 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			require.NoError(t, err)
 			sqlDB.SetMaxOpenConns(1)
 			previousDB, previousType, previousSnapshot := DB, common.MainDatabaseType(), CurrentRequestPolicy()
+			previousPasskey, previousServer := *system_setting.GetPasskeySettings(), system_setting.ServerAddress
+			*system_setting.GetPasskeySettings() = system_setting.PasskeySettings{}
+			system_setting.ServerAddress = "https://policy.example.test"
 			common.OptionMapRWMutex.Lock()
 			previousOptions := maps.Clone(common.OptionMap)
 			common.OptionMap = maps.Clone(previousSnapshot.Options)
@@ -58,6 +62,7 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 					require.NoError(t, updateOptionMap(k, v))
 				}
 				requestPolicySnapshot.Store(previousSnapshot)
+				*system_setting.GetPasskeySettings(), system_setting.ServerAddress = previousPasskey, previousServer
 				common.OptionMapRWMutex.Lock()
 				common.OptionMap = previousOptions
 				common.OptionMapRWMutex.Unlock()
@@ -67,6 +72,7 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 				require.NoError(t, sqlDB.Close())
 			})
 			require.NoError(t, db.AutoMigrate(&Option{}))
+			require.NoError(t, db.AutoMigrate(&Option{}))
 			var version string
 			query := "SELECT version()"
 			if dialect == "sqlite" {
@@ -74,6 +80,29 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			}
 			require.NoError(t, db.Raw(query).Scan(&version).Error)
 			t.Logf("database version: %s", version)
+			// These keys predate request policies and must survive the upgrade.
+			require.NoError(t, db.Create(&[]Option{
+				{Key: "monitor_setting.auto_update_balance_enabled", Value: "true"},
+				{Key: operation_setting.AutoUpdateBalanceMinutesOptionKey, Value: "12.5"},
+				{Key: "monitor_setting.channel_test_mode", Value: "scheduled_all"},
+				{Key: "AutomaticEnableChannelEnabled", Value: "false"},
+			}).Error)
+			loadOptionsFromDatabase()
+			loadOptionsFromDatabase()
+			assert.Equal(t, "true", CurrentRequestPolicy().Options["monitor_setting.auto_update_balance_enabled"])
+			assert.Equal(t, "12.5", CurrentRequestPolicy().Options[operation_setting.AutoUpdateBalanceMinutesOptionKey])
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{
+				"monitor_setting.auto_update_balance_enabled":       "false",
+				operation_setting.AutoUpdateBalanceMinutesOptionKey: "1.5",
+			}))
+			assert.False(t, operation_setting.GetMonitorSetting().AutoUpdateBalanceEnabled)
+			assert.Equal(t, 1.5, operation_setting.GetMonitorSetting().AutoUpdateBalanceMinutes)
+			assert.Equal(t, "scheduled_all", CurrentRequestPolicy().Options["monitor_setting.channel_test_mode"])
+			assert.False(t, common.AutomaticEnableChannelEnabled, "monitoring changes do not enable channels")
+			for _, value := range []string{"0", "10081", "NaN", "+Inf", "bad"} {
+				assert.Error(t, UpdateRequestPolicyOptions(map[string]string{operation_setting.AutoUpdateBalanceMinutesOptionKey: value}))
+			}
+			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"monitor_setting.auto_update_balance_enabled": "bad"}))
 			rules := `[{"name":"session","model_regex":[".*"],"key_sources":[{"type":"request_header","key":"X-Session"}],"ttl_seconds":0,"skip_retry_on_failure":false,"include_using_group":false,"param_override_template":{"temperature":0},"future_field":{"enabled":false}}]`
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"RetryTimes": "2", "channel_affinity_setting.rules": rules}))
 			assert.Equal(t, 2, CurrentRequestPolicy().RetryTimes)
@@ -88,6 +117,12 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			loadOptionsFromDatabase()
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "legacy rule JSON survives reloads without dropping extension fields")
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.session_mode": "strict"}))
+			require.NoError(t, UpdateOptionsBulk(map[string]string{"ServerAddress": system_setting.ServerAddress, "RetryTimes": "3"}))
+			assert.Equal(t, 3, CurrentRequestPolicy().RetryTimes, "mixed passkey/policy writes publish the policy snapshot")
+			assert.Equal(t, 3, common.RetryTimes)
+			require.NoError(t, UpdateOptionsBulk(map[string]string{"ServerAddress": system_setting.ServerAddress, "RetryTimes": "2"}))
+			assert.Error(t, UpdateOptionsBulk(map[string]string{"ServerAddress": "https://invalid-batch.example.test", "RetryTimes": "-1"}))
+			assert.Equal(t, "https://policy.example.test", system_setting.ServerAddress, "invalid mixed writes change neither domain nor policy")
 			loadOptionsFromDatabase()
 			loadOptionsFromDatabase()
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode)

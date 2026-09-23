@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -82,15 +83,87 @@ type Log struct {
 
 // don't use iota, avoid change log type value
 const (
-	LogTypeUnknown = 0
-	LogTypeTopup   = 1
-	LogTypeConsume = 2
-	LogTypeManage  = 3
-	LogTypeSystem  = 4
-	LogTypeError   = 5
-	LogTypeRefund  = 6
-	LogTypeLogin   = 7
+	LogTypeUnknown     = 0
+	LogTypeTopup       = 1
+	LogTypeConsume     = 2
+	LogTypeManage      = 3
+	LogTypeSystem      = 4
+	LogTypeError       = 5
+	LogTypeRefund      = 6
+	LogTypeLogin       = 7
+	LogTypeTestConsume = 8
 )
+
+type LogSource string
+
+const (
+	LogSourceUsage LogSource = "usage"
+	LogSourceTest  LogSource = "test"
+)
+
+// Tests now have a server-assigned type. Older probes had no type of their own;
+// recognize their complete signature, never a user-controlled token name alone.
+func applyLogSourceFilter(tx *gorm.DB, sources ...LogSource) *gorm.DB {
+	const condition = "COALESCE(logs.type, 0) = ? OR (COALESCE(logs.type, 0) = ? AND COALESCE(logs.token_id, 0) = ? AND COALESCE(logs.token_name, '') = ? AND COALESCE(logs.content, '') = ?)"
+	if len(sources) > 0 && sources[0] == LogSourceTest {
+		return tx.Where("("+condition+")", LogTypeTestConsume, LogTypeConsume, 0, "模型测试", "模型测试")
+	}
+	return tx.Where("NOT ("+condition+")", LogTypeTestConsume, LogTypeConsume, 0, "模型测试", "模型测试")
+}
+
+// maxLoggedRequestBodyBytes caps a single captured request body. Bodies are
+// stored inline in logs.other, which GetAllLogs returns for every row of a
+// page, so an uncapped payload would make the admin log list unloadable.
+//
+// ponytail: oversized bodies are head-truncated rather than paged; add a
+// single-log detail endpoint if admins need the tail of long conversations.
+const maxLoggedRequestBodyBytes = 64 * 1024
+
+// attachRequestBody records the client's request payload under
+// other.admin_info.request_body when the operator has enabled capture.
+// admin_info is stripped from every non-admin projection by formatUserLogs, so
+// nesting is what makes the content admin-only.
+//
+// It only reads the body storage the relay already populated; it never calls
+// GetRequestBody, which would try to drain an http.Request body that is long
+// since consumed by the time a log is written.
+func attachRequestBody(c *gin.Context, other *LogOther) {
+	if !common.LogRequestBodyEnabled || other == nil || c == nil || c.Request == nil {
+		return
+	}
+	// Non-JSON bodies are uploads (audio, images, multipart forms); capturing
+	// them would put binary in the log and blow the cap for no audit value.
+	if !strings.HasPrefix(c.GetHeader("Content-Type"), "application/json") {
+		return
+	}
+	cached, exists := c.Get(common.KeyBodyStorage)
+	if !exists || cached == nil {
+		return
+	}
+	storage, ok := cached.(common.BodyStorage)
+	if !ok {
+		return
+	}
+	size := storage.Size()
+	if size <= 0 {
+		return
+	}
+	// An independent reader keeps the shared seek cursor untouched, and reading
+	// at most the cap avoids materializing a disk-backed body into the heap.
+	reader, err := storage.NewReader()
+	if err != nil {
+		return
+	}
+	defer reader.Close()
+	body, err := io.ReadAll(io.LimitReader(reader, maxLoggedRequestBodyBytes))
+	if err != nil || len(body) == 0 {
+		return
+	}
+	if size > int64(len(body)) {
+		other.SetAdmin("request_body_truncated", size)
+	}
+	other.SetAdmin("request_body", string(body))
+}
 
 func ensureLogRequestId(log *Log) {
 	if log != nil && log.RequestId == "" {
@@ -142,7 +215,7 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		order = clickHouseLogOrder("")
 	}
-	err = LOG_DB.Model(&Log{}).Where("token_id = ?", tokenId).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
+	err = applyLogSourceFilter(LOG_DB.Model(&Log{})).Where("token_id = ?", tokenId).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
 	formatUserLogs(logs, 0)
 	return logs, err
 }
@@ -281,13 +354,15 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
+	if other == nil && common.LogRequestBodyEnabled {
+		other = NewLogOther()
+	}
+	attachRequestBody(c, other)
 	otherStr := other.JSONString()
-	// 判断是否需要记录 IP
+	// 判断是否需要记录 IP：默认记录，读不到设置时按不记录处理
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
-		}
+		needRecordIp = settingMap.ShouldRecordIp()
 	}
 	log := &Log{
 		UserId:           userId,
@@ -334,6 +409,7 @@ type RecordConsumeLogParams struct {
 	IsStream         bool      `json:"is_stream"`
 	Group            string    `json:"group"`
 	Other            *LogOther `json:"other"`
+	IsChannelTest    bool      `json:"is_channel_test,omitempty"`
 }
 
 func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams) {
@@ -345,19 +421,25 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
+	logType := LogTypeConsume
+	if params.IsChannelTest {
+		logType = LogTypeTestConsume
+	}
+	if params.Other == nil && common.LogRequestBodyEnabled {
+		params.Other = NewLogOther()
+	}
+	attachRequestBody(c, params.Other)
 	otherStr := params.Other.JSONString()
-	// 判断是否需要记录 IP
+	// 判断是否需要记录 IP：默认记录，读不到设置时按不记录处理
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
-		}
+		needRecordIp = settingMap.ShouldRecordIp()
 	}
 	log := &Log{
 		UserId:           userId,
 		Username:         username,
 		CreatedAt:        createdAt,
-		Type:             LogTypeConsume,
+		Type:             logType,
 		Content:          params.Content,
 		PromptTokens:     params.PromptTokens,
 		CompletionTokens: params.CompletionTokens,
@@ -383,7 +465,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	if err != nil {
 		logger.LogError(c, "failed to record log: "+err.Error())
 	}
-	if common.DataExportEnabled {
+	if common.DataExportEnabled && !params.IsChannelTest {
 		LogQuotaData(QuotaDataLogParams{
 			UserID:    userId,
 			Username:  username,
@@ -461,12 +543,14 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	}
 }
 
-func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
-	var tx *gorm.DB
-	if logType == LogTypeUnknown {
-		tx = LOG_DB
-	} else {
-		tx = LOG_DB.Where("logs.type = ?", logType)
+func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, startIdx int, num int, channel int, group string, requestId string, upstreamRequestId string, sources ...LogSource) (logs []*Log, total int64, err error) {
+	tx := applyLogSourceFilter(LOG_DB, sources...)
+	if logType != LogTypeUnknown {
+		if len(sources) > 0 && sources[0] == LogSourceTest && (logType == LogTypeConsume || logType == LogTypeTestConsume) {
+			tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeTestConsume})
+		} else {
+			tx = tx.Where("logs.type = ?", logType)
+		}
 	}
 
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
@@ -558,11 +642,9 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 const logSearchCountLimit = 10000
 
 func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int64, modelName string, tokenName string, startIdx int, num int, group string, requestId string, upstreamRequestId string) (logs []*Log, total int64, err error) {
-	var tx *gorm.DB
-	if logType == LogTypeUnknown {
-		tx = LOG_DB.Where("logs.user_id = ?", userId)
-	} else {
-		tx = LOG_DB.Where("logs.user_id = ? and logs.type = ?", userId, logType)
+	tx := applyLogSourceFilter(LOG_DB).Where("logs.user_id = ?", userId)
+	if logType != LogTypeUnknown {
+		tx = tx.Where("logs.type = ?", logType)
 	}
 
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", modelName); err != nil {
@@ -611,11 +693,11 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
+func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, sources ...LogSource) (stat Stat, err error) {
+	tx := applyLogSourceFilter(LOG_DB.Table("logs"), sources...).Select("COALESCE(sum(quota), 0) quota")
 
 	// 为rpm和tpm创建单独的查询
-	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
+	rpmTpmQuery := applyLogSourceFilter(LOG_DB.Table("logs"), sources...).Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
 
 	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
 		return stat, err
@@ -648,8 +730,12 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
 	}
 
-	tx = tx.Where("type = ?", LogTypeConsume)
-	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
+	consumeTypes := []int{LogTypeConsume}
+	if len(sources) > 0 && sources[0] == LogSourceTest {
+		consumeTypes = append(consumeTypes, LogTypeTestConsume)
+	}
+	tx = tx.Where("type IN ?", consumeTypes)
+	rpmTpmQuery = rpmTpmQuery.Where("type IN ?", consumeTypes)
 
 	// 只统计最近60秒的rpm和tpm
 	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
@@ -674,7 +760,7 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 }
 
 func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string) (token int) {
-	tx := LOG_DB.Table("logs").Select("COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0)")
+	tx := applyLogSourceFilter(LOG_DB.Table("logs")).Select("COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0)")
 	if username != "" {
 		tx = tx.Where("username = ?", username)
 	}

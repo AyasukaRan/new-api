@@ -44,6 +44,7 @@ const route = getRouteApi('/_authenticated/usage-logs/$section')
 const TASK_LOG_SECTIONS = ['drawing', 'task'] as const
 
 const SECTION_META: Record<UsageLogsSectionId, { titleKey: string }> = {
+  test: { titleKey: 'Test Logs' },
   common: {
     titleKey: 'Common Logs',
   },
@@ -117,10 +118,10 @@ function UsageLogsContent() {
     [setViewScope]
   )
 
-  const pageMeta =
-    activeCategory === 'common' ? SECTION_META.common : SECTION_META.task
-  const showTaskSwitcher =
-    activeCategory !== 'common' && visibleSections.length > 1
+  const isTest = activeCategory === 'test'
+  const isTask = activeCategory === 'drawing' || activeCategory === 'task'
+  const pageMeta = isTask ? SECTION_META.task : SECTION_META[activeCategory]
+  const showTaskSwitcher = isTask && visibleSections.length > 1
 
   return (
     <>
@@ -152,7 +153,9 @@ function UsageLogsContent() {
               </Tabs>
             )}
             <div className='min-h-0 flex-1'>
-              <UsageLogsTable logCategory={activeCategory} />
+              <UsageLogsTable
+                logCategory={isTest ? 'common' : activeCategory}
+              />
             </div>
           </div>
         </SectionPageLayout.Content>
@@ -186,8 +189,10 @@ function UsageLogsContent() {
 }
 
 export function UsageLogs() {
+  const { section } = route.useParams()
+  const source = section === 'test' ? 'test' : 'usage'
   return (
-    <UsageLogsProvider>
+    <UsageLogsProvider key={source} source={source}>
       <UsageLogsContent />
     </UsageLogsProvider>
   )

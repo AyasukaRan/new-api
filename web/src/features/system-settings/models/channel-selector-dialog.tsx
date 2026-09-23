@@ -27,10 +27,12 @@ import {
   useDataTable,
 } from '@/components/data-table'
 import { Dialog } from '@/components/dialog'
+import { MultiSelect } from '@/components/multi-select'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -46,6 +48,7 @@ import {
   CHANNEL_STATUS_CONFIG,
   DEFAULT_ENDPOINT,
   ENDPOINT_OPTIONS,
+  IFLYTEK_PRESET_ID,
   MODELS_DEV_PRESET_ID,
   OFFICIAL_CHANNEL_ID,
 } from './constants'
@@ -59,6 +62,8 @@ type ChannelSelectorDialogProps = {
   onSelectedChannelIdsChange: (ids: number[]) => void
   channelEndpoints: Record<number, string>
   onChannelEndpointsChange: (endpoints: Record<number, string>) => void
+  scopeChannelIds: number[]
+  onScopeChannelIdsChange: (ids: number[]) => void
   onConfirm: (selectedIds: number[]) => void
 }
 
@@ -66,7 +71,9 @@ type ChannelSelectorDialogProps = {
 // negative IDs, so matching by ID alone is reliable and self-documenting.
 function isOfficialChannel(channel: UpstreamChannel): boolean {
   return (
-    channel.id === OFFICIAL_CHANNEL_ID || channel.id === MODELS_DEV_PRESET_ID
+    channel.id === OFFICIAL_CHANNEL_ID ||
+    channel.id === MODELS_DEV_PRESET_ID ||
+    channel.id === IFLYTEK_PRESET_ID
   )
 }
 
@@ -78,6 +85,8 @@ export function ChannelSelectorDialog({
   onSelectedChannelIdsChange,
   channelEndpoints,
   onChannelEndpointsChange,
+  scopeChannelIds,
+  onScopeChannelIdsChange,
   onConfirm,
 }: ChannelSelectorDialogProps) {
   const { t } = useTranslation()
@@ -300,6 +309,19 @@ export function ChannelSelectorDialog({
     })
   }, [filteredChannels])
 
+  // Only real channels carry a model list; the synthesized presets have none,
+  // so scoping to one would filter every model away.
+  const scopeOptions = useMemo(
+    () =>
+      channels
+        .filter((channel) => !isOfficialChannel(channel))
+        .map((channel) => ({
+          value: channel.id.toString(),
+          label: channel.name,
+        })),
+    [channels]
+  )
+
   const { table } = useDataTable({
     data: sortedChannels,
     columns,
@@ -338,6 +360,25 @@ export function ChannelSelectorDialog({
       }
     >
       <div className='flex h-full min-h-0 flex-col gap-4 overflow-hidden'>
+        <div className='flex shrink-0 flex-col gap-1.5'>
+          <Label htmlFor='ratio-sync-model-scope'>
+            {t('Only sync models configured on these channels')}
+          </Label>
+          <MultiSelect
+            id='ratio-sync-model-scope'
+            options={scopeOptions}
+            selected={scopeChannelIds.map((id) => id.toString())}
+            onChange={(values) =>
+              onScopeChannelIdsChange(
+                values.map(Number).filter(Number.isFinite)
+              )
+            }
+            placeholder={t('All models published by the price sources')}
+            emptyText={t('No channels found')}
+            maxVisibleChips={4}
+          />
+        </div>
+
         <div className='flex shrink-0 items-center gap-2'>
           <div className='relative flex-1'>
             <Search className='text-muted-foreground pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2' />

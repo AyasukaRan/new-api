@@ -10,12 +10,15 @@ type Store interface {
 type Sample struct {
 	Model        string
 	Group        string
+	ChannelID    int
 	LatencyMs    int64
 	TtftMs       int64
 	HasTtft      bool
 	Success      bool
 	OutputTokens int64
 	GenerationMs int64
+	InputTokens  int64
+	UsedQuota    int64
 }
 
 type QueryParams struct {
@@ -43,22 +46,31 @@ type BucketPoint struct {
 }
 
 type GroupResult struct {
-	Group        string        `json:"group"`
-	AvgTtftMs    int64         `json:"avg_ttft_ms"`
-	AvgLatencyMs int64         `json:"avg_latency_ms"`
-	SuccessRate  float64       `json:"success_rate"`
-	AvgTps       float64       `json:"avg_tps"`
-	Series       []BucketPoint `json:"series"`
+	Group              string             `json:"group"`
+	AvgTtftMs          int64              `json:"avg_ttft_ms"`
+	AvgLatencyMs       int64              `json:"avg_latency_ms"`
+	SuccessRate        float64            `json:"success_rate"`
+	AvgTps             float64            `json:"avg_tps"`
+	Series             []BucketPoint      `json:"series"`
+	AvailabilityRate   *float64           `json:"availability_rate,omitempty"`
+	AvailabilitySeries []SuccessRatePoint `json:"availability_series,omitempty"`
 }
 
 type QueryResult struct {
-	ModelName    string        `json:"model_name"`
-	SeriesSchema string        `json:"series_schema"`
-	Summary      *Summary      `json:"summary"`
-	Series       []BucketPoint `json:"series"`
-	WindowStart  int64         `json:"window_start"`
-	WindowEnd    int64         `json:"window_end"`
-	Groups       []GroupResult `json:"groups"`
+	CurrentAvailable   *bool              `json:"current_available,omitempty"`
+	CurrentObservedAt  int64              `json:"current_observed_at,omitempty"`
+	AvgLatencyMs       int64              `json:"avg_latency_ms"`
+	AvgTps             float64            `json:"avg_tps"`
+	ModelName          string             `json:"model_name"`
+	SeriesSchema       string             `json:"series_schema"`
+	Groups             []GroupResult      `json:"groups"`
+	Channels           []ChannelResult    `json:"channels"`
+	AvailabilityRate   *float64           `json:"availability_rate,omitempty"`
+	AvailabilitySeries []SuccessRatePoint `json:"availability_series,omitempty"`
+	Summary            *Summary           `json:"summary"`
+	Series             []BucketPoint      `json:"series"`
+	WindowStart        int64              `json:"window_start"`
+	WindowEnd          int64              `json:"window_end"`
 }
 
 type SuccessRatePoint struct {
@@ -67,12 +79,16 @@ type SuccessRatePoint struct {
 }
 
 type ModelSummary struct {
+	CurrentAvailable    *bool              `json:"current_available,omitempty"`
+	CurrentObservedAt   int64              `json:"current_observed_at,omitempty"`
 	ModelName           string             `json:"model_name"`
 	AvgLatencyMs        int64              `json:"avg_latency_ms"`
 	SuccessRate         float64            `json:"success_rate"`
 	AvgTps              float64            `json:"avg_tps"`
 	RecentSuccessSeries []SuccessRatePoint `json:"recent_success_series,omitempty"`
 	RequestCount        int64              `json:"-"`
+	AvailabilityRate    *float64           `json:"availability_rate,omitempty"`
+	AvailabilitySeries  []SuccessRatePoint `json:"availability_series,omitempty"`
 }
 
 type SummaryAllResult struct {
@@ -96,6 +112,8 @@ type counters struct {
 	ttftCount      int64
 	outputTokens   int64
 	generationMs   int64
+	inputTokens    int64
+	usedQuota      int64
 }
 
 type atomicBucket struct {
@@ -106,6 +124,8 @@ type atomicBucket struct {
 	ttftCount      atomic.Int64
 	outputTokens   atomic.Int64
 	generationMs   atomic.Int64
+	inputTokens    atomic.Int64
+	usedQuota      atomic.Int64
 }
 
 func (b *atomicBucket) add(sample Sample) {
@@ -124,6 +144,12 @@ func (b *atomicBucket) add(sample Sample) {
 		b.outputTokens.Add(sample.OutputTokens)
 		b.generationMs.Add(sample.GenerationMs)
 	}
+	if sample.InputTokens > 0 {
+		b.inputTokens.Add(sample.InputTokens)
+	}
+	if sample.UsedQuota > 0 {
+		b.usedQuota.Add(sample.UsedQuota)
+	}
 }
 
 func (b *atomicBucket) snapshot() counters {
@@ -135,6 +161,8 @@ func (b *atomicBucket) snapshot() counters {
 		ttftCount:      b.ttftCount.Load(),
 		outputTokens:   b.outputTokens.Load(),
 		generationMs:   b.generationMs.Load(),
+		inputTokens:    b.inputTokens.Load(),
+		usedQuota:      b.usedQuota.Load(),
 	}
 }
 
@@ -147,6 +175,8 @@ func (b *atomicBucket) drain() counters {
 		ttftCount:      b.ttftCount.Swap(0),
 		outputTokens:   b.outputTokens.Swap(0),
 		generationMs:   b.generationMs.Swap(0),
+		inputTokens:    b.inputTokens.Swap(0),
+		usedQuota:      b.usedQuota.Swap(0),
 	}
 }
 
@@ -172,4 +202,6 @@ func (b *atomicBucket) addCounters(c counters) {
 	if c.generationMs != 0 {
 		b.generationMs.Add(c.generationMs)
 	}
+	b.inputTokens.Add(c.inputTokens)
+	b.usedQuota.Add(c.usedQuota)
 }

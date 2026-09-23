@@ -207,6 +207,7 @@ import {
   nextTaskPluginBaseUrl,
 } from '../../lib/task-plugin-base-url'
 import type { Channel } from '../../types'
+import { ChannelBalanceSettings } from '../channel-balance-settings'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
@@ -300,6 +301,12 @@ const SENSITIVE_FORM_FIELDS = [
   'proxy',
   'http_protocol',
   'http2_connection_shards',
+  'balance_query_disabled',
+  'balance_query_type',
+  'balance_query_base_url',
+  'batch_enabled',
+  'batch_base_url',
+  'batch_key',
   'pass_through_body_enabled',
   'responses_websocket_enabled',
   'system_prompt',
@@ -1112,23 +1119,35 @@ export function ChannelMutateDrawer({
     }
   }, [form, isEditing, multiKeyMode, supportsMultiKeyAddMode])
 
-  // Validate base_url - warn if it ends with /v1
+  // Validate base_url - warn if it ends with a version segment.
+  //
+  // The upstream path is built by plain concatenation, so a base URL ending in
+  // a version produces .../v2/v1/chat/completions and 404s at request time.
+  // Advanced Custom is exempt: it maps each route's upstream path onto the base
+  // URL and keeps the base path, which is how a versioned host is served.
   useEffect(() => {
-    if (!currentBaseUrl || !currentBaseUrl.endsWith('/v1')) return
+    if (!currentBaseUrl || currentType === CHANNEL_TYPE_ADVANCED_CUSTOM) return
+    const versionSuffix = /\/v\d+$/.exec(currentBaseUrl)
+    if (!versionSuffix) return
 
     // Show warning toast
     const timer = setTimeout(() => {
       toast.warning(
-        t(
-          'Warning: Base URL should not end with /v1. New API will handle it automatically. This may cause request failures.'
-        ),
+        versionSuffix[0] === '/v1'
+          ? t(
+              'Warning: Base URL should not end with /v1. New API will handle it automatically. This may cause request failures.'
+            )
+          : t(
+              'Warning: Base URL ends with {{suffix}}, but /v1 is appended automatically. Use the Advanced Custom channel type to call a versioned endpoint like this.',
+              { suffix: versionSuffix[0] }
+            ),
         { duration: 5000 }
       )
     }, 500)
 
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentBaseUrl])
+  }, [currentBaseUrl, currentType])
 
   // Handle key deduplication
   const handleDeduplicateKeys = () => {
@@ -4650,6 +4669,84 @@ export function ChannelMutateDrawer({
                 {proxyFields}
                 {httpProtocolFields}
                 {httpShardsFields}
+                <ChannelBalanceSettings control={form.control} />
+
+                <FormField
+                  control={form.control}
+                  name='batch_enabled'
+                  render={({ field }) => (
+                    <FormItem className='flex items-center justify-between rounded-lg border px-4 py-3'>
+                      <div className='space-y-0.5'>
+                        <FormLabel>{t('Batch Inference')}</FormLabel>
+                        <FormDescription>
+                          {t(
+                            'Allow this channel to run batch jobs submitted to /v1/batches. Leave off for a channel that only serves ordinary requests.'
+                          )}
+                        </FormDescription>
+                      </div>
+                      <FormControl>
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
+
+                {form.watch('batch_enabled') && (
+                  <>
+                    <FormField
+                      control={form.control}
+                      name='batch_base_url'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Batch Address')}</FormLabel>
+                          <FormControl>
+                            <Input
+                              {...field}
+                              value={field.value || ''}
+                              placeholder='https://spark-api-open.xf-yun.com'
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t(
+                              "Leave empty to use the provider's built-in batch address. Set this only for a self-hosted or proxied deployment."
+                            )}
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name='batch_key'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Batch Key')}</FormLabel>
+                          <FormControl>
+                            <Input
+                              {...field}
+                              type='password'
+                              autoComplete='new-password'
+                              value={field.value || ''}
+                              placeholder={t(
+                                'Leave empty to use the channel key'
+                              )}
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t(
+                              'The credential the batch API accepts, when it is not the one this channel already uses.'
+                            )}
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </>
+                )}
               </fieldset>
             </div>
             {upstreamModelDetectionFields}

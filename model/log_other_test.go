@@ -1,8 +1,13 @@
 package model
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -81,4 +86,83 @@ func TestLogOtherJSONStringDoesNotMutateReceiver(t *testing.T) {
 
 	require.Equal(t, before, after)
 	require.Equal(t, first, second)
+}
+
+func newRequestBodyContext(t *testing.T, contentType string, body string) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ctx.Request.Header.Set("Content-Type", contentType)
+	storage, err := common.CreateBodyStorage([]byte(body))
+	require.NoError(t, err)
+	t.Cleanup(func() { storage.Close() })
+	ctx.Set(common.KeyBodyStorage, storage)
+	return ctx
+}
+
+func enableRequestBodyLogging(t *testing.T) {
+	t.Helper()
+	original := common.LogRequestBodyEnabled
+	t.Cleanup(func() { common.LogRequestBodyEnabled = original })
+	common.LogRequestBodyEnabled = true
+}
+
+// Admins asked to see what users send; nesting the payload under admin_info is
+// what keeps it out of every user-facing log projection.
+func TestAttachRequestBodyIsAdminOnly(t *testing.T) {
+	enableRequestBodyLogging(t)
+	payload := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+
+	other := NewLogOther()
+	attachRequestBody(newRequestBodyContext(t, "application/json", payload), other)
+
+	assert.Equal(t, payload, other.Snapshot()[logOtherAdminInfoKey].(map[string]any)["request_body"])
+	assert.NotContains(t, formatLogOtherJSON(other.JSONString(), logOtherVisibilityUser), "request_body")
+	assert.Contains(t, formatLogOtherJSON(other.JSONString(), logOtherVisibilityAdmin), "request_body")
+}
+
+func TestAttachRequestBodySkipsWhatItMustNotStore(t *testing.T) {
+	payload := `{"model":"gpt-4o"}`
+
+	t.Run("capture disabled", func(t *testing.T) {
+		other := NewLogOther()
+		attachRequestBody(newRequestBodyContext(t, "application/json", payload), other)
+		assert.Empty(t, other.Snapshot())
+	})
+
+	// Uploads would put binary in the log and blow the size cap for no audit value.
+	t.Run("non-json content type", func(t *testing.T) {
+		enableRequestBodyLogging(t)
+		other := NewLogOther()
+		attachRequestBody(newRequestBodyContext(t, "multipart/form-data; boundary=x", payload), other)
+		assert.Empty(t, other.Snapshot())
+	})
+
+	// The body storage is only present once the relay has read the request; a
+	// log written before that must not try to drain a consumed http.Request.
+	t.Run("no cached body storage", func(t *testing.T) {
+		enableRequestBodyLogging(t)
+		gin.SetMode(gin.TestMode)
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		other := NewLogOther()
+		attachRequestBody(ctx, other)
+		assert.Empty(t, other.Snapshot())
+	})
+}
+
+// Bodies live inline in logs.other, which the admin log list returns for every
+// row, so an oversized payload is head-truncated rather than stored whole.
+func TestAttachRequestBodyTruncatesOversizedPayload(t *testing.T) {
+	enableRequestBodyLogging(t)
+	payload := `{"p":"` + strings.Repeat("x", maxLoggedRequestBodyBytes) + `"}`
+
+	other := NewLogOther()
+	attachRequestBody(newRequestBodyContext(t, "application/json", payload), other)
+
+	adminInfo := other.Snapshot()[logOtherAdminInfoKey].(map[string]any)
+	assert.Len(t, adminInfo["request_body"], maxLoggedRequestBodyBytes)
+	assert.Equal(t, int64(len(payload)), adminInfo["request_body_truncated"])
 }

@@ -18,10 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, renderHook, waitFor } from '@testing-library/react'
+import { AxiosError, AxiosHeaders } from 'axios'
 import type { ReactNode } from 'react'
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { useStatus } from '@/hooks/use-status'
+import { useSystemConfig } from '@/hooks/use-system-config'
 import { api } from '@/lib/api'
 import {
   getModuleAccessForGuard,
@@ -262,4 +264,42 @@ describe('module guard status freshness', () => {
       })
     }
   )
+})
+
+test('system config failures log a safe message without request credentials', async () => {
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const queryClient = createQueryClient()
+  const config = {
+    headers: new AxiosHeaders({ Authorization: 'Bearer test-private-token' }),
+  }
+  apiClient.get = async () => {
+    throw new AxiosError(
+      'Request failed',
+      'ERR_BAD_RESPONSE',
+      config,
+      undefined,
+      {
+        data: { message: 'Status service unavailable' },
+        status: 503,
+        statusText: 'Unavailable',
+        headers: {},
+        config,
+      }
+    )
+  }
+  try {
+    renderHook(() => useSystemConfig({ autoLoad: true }), {
+      wrapper: wrapper(queryClient),
+    })
+    await waitFor(() => expect(logged).toHaveBeenCalled())
+    expect(logged).toHaveBeenCalledWith(
+      'Failed to load system config:',
+      'Status service unavailable'
+    )
+    expect(JSON.stringify(logged.mock.calls)).not.toContain(
+      'test-private-token'
+    )
+  } finally {
+    logged.mockRestore()
+  }
 })

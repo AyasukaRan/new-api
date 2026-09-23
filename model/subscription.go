@@ -296,6 +296,19 @@ type SubscriptionSummary struct {
 	Subscription *UserSubscription `json:"subscription"`
 }
 
+// UserSubscriptionUsage is the read-only subscription projection shown in user lists.
+type UserSubscriptionUsage struct {
+	Id            int    `json:"id"`
+	UserId        int    `json:"-"`
+	PlanId        int    `json:"plan_id"`
+	PlanTitle     string `json:"plan_title"`
+	AmountUsed    int64  `json:"amount_used"`
+	AmountTotal   int64  `json:"amount_total"`
+	LastResetTime int64  `json:"last_reset_time"`
+	NextResetTime int64  `json:"next_reset_time"`
+	EndTime       int64  `json:"end_time"`
+}
+
 type SubscriptionResetResult struct {
 	PlanId           int    `json:"plan_id"`
 	MatchedCount     int    `json:"matched_count"`
@@ -502,7 +515,7 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 			return nil, errors.New("已达到该套餐购买上限")
 		}
 	}
-	nowUnix := GetDBTimestamp()
+	nowUnix := GetDBTimestampTx(tx)
 	now := time.Unix(nowUnix, 0)
 	endUnix, err := calcPlanEndTime(now, plan)
 	if err != nil {
@@ -555,6 +568,37 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		return nil, err
 	}
 	return sub, nil
+}
+
+// GrantDefaultSubscriptionTx gives a freshly created user the configured
+// default plan inside the caller's transaction, so an account never exists
+// without the subscription it is supposed to start with.
+//
+// A plan that is missing or disabled is a configuration problem rather than a
+// reason to refuse the registration: the user is created without a
+// subscription and an administrator can bind one afterwards. Failures from the
+// insert itself are returned, because they leave the transaction unusable.
+func GrantDefaultSubscriptionTx(tx *gorm.DB, userId int) error {
+	planId := common.DefaultSubscriptionPlanId
+	if planId <= 0 {
+		return nil
+	}
+	var plan SubscriptionPlan
+	if err := tx.Where("id = ?", planId).First(&plan).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			common.SysError(fmt.Sprintf("默认订阅套餐 %d 不存在，用户 %d 未获得订阅", planId, userId))
+			return nil
+		}
+		return err
+	}
+	if !plan.Enabled {
+		common.SysError(fmt.Sprintf("默认订阅套餐 %d 已停用，用户 %d 未获得订阅", planId, userId))
+		return nil
+	}
+	if _, err := CreateUserSubscriptionFromPlanTx(tx, userId, &plan, "auto"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func refreshSubscriptionUserGroupCache(userId int, operation string) {
@@ -858,6 +902,28 @@ func GetAllActiveUserSubscriptions(userId int) ([]SubscriptionSummary, error) {
 		return nil, err
 	}
 	return buildSubscriptionSummaries(subs), nil
+}
+
+// GetActiveSubscriptionUsageByUserIDs loads one page of users' subscription usage in one query.
+func GetActiveSubscriptionUsageByUserIDs(userIDs []int) (map[int][]UserSubscriptionUsage, error) {
+	result := make(map[int][]UserSubscriptionUsage, len(userIDs))
+	if len(userIDs) == 0 {
+		return result, nil
+	}
+	var subscriptions []UserSubscriptionUsage
+	err := DB.Table("user_subscriptions AS subscriptions").
+		Select("subscriptions.id, subscriptions.user_id, subscriptions.plan_id, plans.title AS plan_title, subscriptions.amount_used, subscriptions.amount_total, subscriptions.last_reset_time, subscriptions.next_reset_time, subscriptions.end_time").
+		Joins("LEFT JOIN subscription_plans AS plans ON plans.id = subscriptions.plan_id").
+		Where("subscriptions.user_id IN ? AND subscriptions.status = ? AND subscriptions.end_time > ?", userIDs, "active", common.GetTimestamp()).
+		Order("subscriptions.end_time ASC, subscriptions.id ASC").
+		Scan(&subscriptions).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, subscription := range subscriptions {
+		result[subscription.UserId] = append(result[subscription.UserId], subscription)
+	}
+	return result, nil
 }
 
 // HasActiveUserSubscription returns whether the user has any active subscription.

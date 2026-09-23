@@ -184,6 +184,47 @@ func responsesRequestMessagesToChat(req *dto.OpenAIResponsesRequest) ([]dto.Mess
 func responsesInputItemToChatMessages(item map[string]any, messages []dto.Message) ([]dto.Message, error) {
 	itemType := strings.TrimSpace(kitutil.Interface2String(item["type"]))
 	switch itemType {
+	case "reasoning":
+		var reasoningText strings.Builder
+		plaintextPresent := false
+		// Prefer explicit reasoning text over a summary when both exist. An
+		// encrypted payload or provider signature is not portable plaintext.
+		for _, field := range []string{"content", "summary"} {
+			parts, _ := item[field].([]any)
+			for _, rawPart := range parts {
+				part, ok := rawPart.(map[string]any)
+				if !ok || (field == "summary" && part["type"] != "summary_text") ||
+					(field == "content" && part["type"] != "reasoning_text") {
+					continue
+				}
+				text, ok := part["text"].(string)
+				if !ok {
+					return nil, reasoning.AsClientError(errors.New("reasoning text must be a string"))
+				}
+				plaintextPresent = true
+				reasoningText.WriteString(text)
+			}
+			if plaintextPresent {
+				break
+			}
+		}
+		if !plaintextPresent {
+			if encrypted, ok := item["encrypted_content"].(string); ok && encrypted != "" {
+				return nil, reasoning.AsClientError(errors.New("responses to chat conversion does not support encrypted-only reasoning"))
+			}
+			return messages, nil
+		}
+		if len(messages) == 0 || messages[len(messages)-1].Role != "assistant" {
+			messages = append(messages, dto.Message{Role: "assistant"})
+		} else if last := &messages[len(messages)-1]; last.Content != nil || len(last.ToolCalls) > 0 {
+			// Another reasoning item after a completed assistant message starts
+			// another output, even if the history has adjacent assistant turns.
+			messages = append(messages, dto.Message{Role: "assistant"})
+		}
+		last := &messages[len(messages)-1]
+		text := last.GetReasoningContent() + reasoningText.String()
+		last.ReasoningContent = &text
+		return messages, nil
 	case responsesInputTypeFunctionCall:
 		toolCall, err := responsesFunctionCallItemToChatToolCall(item)
 		if err != nil {
@@ -209,6 +250,15 @@ func responsesInputItemToChatMessages(item map[string]any, messages []dto.Messag
 	content, err := responsesInputContentToChatContent(item["content"])
 	if err != nil {
 		return nil, err
+	}
+	if role == "assistant" && len(messages) > 0 {
+		last := &messages[len(messages)-1]
+		// A reasoning item and its following message/tool-call items describe
+		// one assistant output. Do not leave the reasoning on a separate turn.
+		if last.Role == "assistant" && last.ReasoningContent != nil && last.Content == nil {
+			last.Content = content
+			return messages, nil
+		}
 	}
 	return append(messages, dto.Message{Role: role, Content: content}), nil
 }

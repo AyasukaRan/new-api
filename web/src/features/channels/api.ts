@@ -28,6 +28,7 @@ import type {
   Channel,
   ChannelBalanceResponse,
   ChannelOpsResponse,
+  ChannelMonitoring,
   ChannelTestResponse,
   CopyChannelParams,
   CopyChannelResponse,
@@ -697,4 +698,15 @@ export async function getPrefillGroups(
 }> {
   const res = await api.get('/api/prefill_group', { params: { type } })
   return res.data
+}
+
+export async function getChannelMonitoring(
+  id: number,
+  hours = 24
+): Promise<ChannelMonitoring> {
+  const response = await api.get<{ success: boolean; data: ChannelMonitoring }>(
+    `/api/channel/monitoring/${id}`,
+    { params: { hours } }
+  )
+  return response.data.data
 }

@@ -21,13 +21,18 @@ import { toast } from 'sonner'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { api, type RefreshOutcome } from '@/lib/api'
-import type { AuthBundle } from '@/stores/auth-store'
+import { useAuthStore, type AuthBundle } from '@/stores/auth-store'
 
 import { executeLogout } from './api'
 import { useOAuthLogin } from './hooks/use-oauth-login'
 import { consumeOAuthLoginRedirect } from './lib/oauth-callback-mode'
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  useAuthStore.getState().auth.reset('idle')
+  window.sessionStorage.clear()
+})
 
 test.each([true, false])(
   'starts Telegram OAuth only when configuration is ready: %s',
@@ -137,7 +142,11 @@ describe('logout coordination', () => {
       request: async (expectedSID) => {
         requestedSIDs.push(expectedSID)
         if (requestedSIDs.length === 1) throw mismatchError()
-        return { success: true, message: '' }
+        return {
+          success: true,
+          message: '',
+          data: { revoked_sid: expectedSID, cookie_cleared: true },
+        }
       },
       refresh: async () => {
         sid = bundle.session.sid
@@ -145,7 +154,11 @@ describe('logout coordination', () => {
       },
     })
 
-    expect(result).toEqual({ success: true, message: '' })
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual({
+      revoked_sid: 'session-b',
+      cookie_cleared: true,
+    })
     expect(requestedSIDs).toEqual(['session-a', 'session-b'])
   })
 

@@ -93,6 +93,172 @@ func performManageUserRequest(t *testing.T, body string) *httptest.ResponseRecor
 	return recorder
 }
 
+func TestUserSubscriptionUsageAdminFlow(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			if dialect != "sqlite" && os.Getenv("TEST_"+strings.ToUpper(dialect)+"_DSN") == "" {
+				t.Skip("test database DSN is not configured")
+			}
+			t.Setenv("TEST_MANAGE_USER_DIALECT", dialect)
+			db := setupManageUserTestDB(t)
+			require.NoError(t, db.AutoMigrate(&model.SubscriptionPlan{}, &model.UserSubscription{}))
+			now := time.Now().Unix()
+			users := []model.User{
+				{Id: 7101, Username: "subscription-user", Password: "hidden-password", AffCode: "sub-quota", Quota: 9000, UsedQuota: 8000},
+				{Id: 7102, Username: "wallet-user", AffCode: "wallet-quota", Quota: 7000, UsedQuota: 6000},
+			}
+			require.NoError(t, db.Create(&users).Error)
+			plans := []model.SubscriptionPlan{
+				{Id: 7201, Title: "Daily", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1, QuotaResetPeriod: model.SubscriptionResetDaily},
+				{Id: 7202, Title: "Unlimited", DurationUnit: model.SubscriptionDurationMonth, DurationValue: 1, QuotaResetPeriod: model.SubscriptionResetNever},
+			}
+			require.NoError(t, db.Create(&plans).Error)
+			subscriptions := []model.UserSubscription{
+				{Id: 7301, UserId: 7101, PlanId: 7201, AmountTotal: 1000, AmountUsed: 400, Status: "active", StartTime: now - 90000, EndTime: now + 86400*30, LastResetTime: now - 90000, NextResetTime: now - 3600},
+				{Id: 7302, UserId: 7101, PlanId: 7201, AmountTotal: 2000, AmountUsed: 500, Status: "active", StartTime: now - 3600, EndTime: now + 86400*31, LastResetTime: now - 3600, NextResetTime: now + 3600},
+				{Id: 7303, UserId: 7101, PlanId: 7202, AmountTotal: 0, AmountUsed: 600, Status: "active", StartTime: now - 3600, EndTime: now + 86400*32},
+				{Id: 7304, UserId: 7101, PlanId: 7201, AmountTotal: 1000, AmountUsed: 700, Status: "active", EndTime: now - 3600},
+				{Id: 7305, UserId: 7101, PlanId: 7201, AmountTotal: 1000, AmountUsed: 800, Status: "cancelled", EndTime: now + 86400},
+				{Id: 7306, UserId: 7199, PlanId: 7201, AmountTotal: 1000, AmountUsed: 900, Status: "active", EndTime: now + 86400},
+			}
+			require.NoError(t, db.Create(&subscriptions).Error)
+			for _, scenario := range []struct {
+				name                          string
+				userID, failQuery, wantActive int
+			}{
+				{name: "self-active", userID: 7101, wantActive: 3},
+				{name: "self-no-subscription", userID: 7102},
+				{name: "self-history-unavailable", userID: 7101, failQuery: 1},
+				{name: "self-active-unavailable", userID: 7101, failQuery: 2},
+			} {
+				t.Run(scenario.name, func(t *testing.T) {
+					queries := 0
+					require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:self-subscription-read", func(tx *gorm.DB) {
+						if tx.Statement.Table == "user_subscriptions" {
+							queries++
+							if queries == scenario.failQuery {
+								tx.AddError(errors.New("private database failure details"))
+							}
+						}
+					}))
+					t.Cleanup(func() { require.NoError(t, db.Callback().Query().Remove("test:self-subscription-read")) })
+					recorder := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(recorder)
+					c.Request = httptest.NewRequest(http.MethodGet, "/api/subscription/self", nil)
+					c.Set("id", scenario.userID)
+					GetSubscriptionSelf(c)
+					var response struct {
+						Success bool `json:"success"`
+						Data    *struct {
+							Subscriptions []model.SubscriptionSummary `json:"subscriptions"`
+						} `json:"data"`
+					}
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+					assert.Equal(t, scenario.failQuery == 0, response.Success)
+					if scenario.failQuery > 0 {
+						assert.Nil(t, response.Data, "a query failure must not masquerade as no subscription")
+						assert.NotContains(t, recorder.Body.String(), "private database failure details")
+					} else {
+						require.NotNil(t, response.Data)
+						assert.Len(t, response.Data.Subscriptions, scenario.wantActive)
+					}
+				})
+			}
+			// Both list entry points return the same read-only snapshot, including an overdue reset.
+			for _, request := range []struct {
+				url     string
+				handler gin.HandlerFunc
+				count   int
+			}{
+				{"/api/user/?page_size=100", GetAllUsers, 2},
+				{"/api/user/search?keyword=subscription-user", SearchUsers, 1},
+				{"/api/user/search?keyword=absent-user", SearchUsers, 0},
+			} {
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodGet, request.url, nil)
+				request.handler(c)
+				var response struct {
+					Success bool `json:"success"`
+					Data    struct {
+						Items []userListItem `json:"items"`
+						Total int            `json:"total"`
+					} `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+				require.True(t, response.Success, recorder.Body.String())
+				assert.Equal(t, request.count, response.Data.Total)
+				require.Len(t, response.Data.Items, request.count)
+				assert.NotContains(t, recorder.Body.String(), "hidden-password")
+				for _, item := range response.Data.Items {
+					if item.Id == 7102 {
+						assert.NotNil(t, item.Subscriptions)
+						assert.Empty(t, item.Subscriptions)
+						continue
+					}
+					require.Equal(t, 7101, item.Id)
+					require.Len(t, item.Subscriptions, 3)
+					assert.Equal(t, model.UserSubscriptionUsage{
+						Id: 7301, PlanId: 7201, PlanTitle: "Daily", AmountUsed: 400, AmountTotal: 1000,
+						LastResetTime: now - 90000, NextResetTime: now - 3600, EndTime: now + 86400*30,
+					}, item.Subscriptions[0])
+					assert.Equal(t, 7302, item.Subscriptions[1].Id)
+					assert.Equal(t, "Unlimited", item.Subscriptions[2].PlanTitle)
+					assert.Zero(t, item.Subscriptions[2].AmountTotal)
+					assert.Zero(t, item.Subscriptions[2].NextResetTime)
+				}
+			}
+			var afterRead []model.UserSubscription
+			require.NoError(t, db.Order("id").Find(&afterRead).Error)
+			assert.Equal(t, subscriptions, afterRead, "listing must not trigger overdue automatic resets")
+
+			for _, parameter := range []string{"", `,"advance_reset_time":false`} {
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/api/subscription/admin/users/7101/subscriptions/reset", strings.NewReader(`{"plan_id":7201`+parameter+`}`))
+				c.Request.Header.Set("Content-Type", "application/json")
+				c.Params = gin.Params{{Key: "id", Value: "7101"}}
+				c.Set("id", 7999)
+				c.Set("role", common.RoleRootUser)
+				c.Set("username", "quota-operator")
+				AdminResetUserSubscriptionsByPlan(c)
+				var response struct {
+					Success bool                          `json:"success"`
+					Data    model.SubscriptionResetResult `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+				require.True(t, response.Success, recorder.Body.String())
+				assert.Equal(t, 2, response.Data.ResetCount)
+				assert.False(t, response.Data.AdvanceResetTime)
+				var saved []model.UserSubscription
+				require.NoError(t, db.Order("id").Find(&saved).Error)
+				for i, expected := range subscriptions {
+					if expected.Id == 7301 || expected.Id == 7302 {
+						expected.AmountUsed = 0
+					}
+					expected.UpdatedAt = saved[i].UpdatedAt
+					assert.Equal(t, expected, saved[i], "only matching active subscriptions' usage may change")
+				}
+				// A late refund remains bounded at zero; subsequent usage keeps the original schedule.
+				require.NoError(t, model.PostConsumeUserSubscriptionDelta(7301, -400))
+				var refunded model.UserSubscription
+				require.NoError(t, db.First(&refunded, 7301).Error)
+				assert.Zero(t, refunded.AmountUsed)
+				require.NoError(t, model.PostConsumeUserSubscriptionDelta(7301, 50))
+				require.NoError(t, db.First(&refunded, 7301).Error)
+				assert.EqualValues(t, 50, refunded.AmountUsed)
+				assert.Equal(t, subscriptions[0].LastResetTime, refunded.LastResetTime)
+				assert.Equal(t, subscriptions[0].NextResetTime, refunded.NextResetTime)
+			}
+			var savedUser model.User
+			require.NoError(t, db.First(&savedUser, 7101).Error)
+			assert.Equal(t, users[0].Quota, savedUser.Quota)
+			assert.Equal(t, users[0].UsedQuota, savedUser.UsedQuota)
+			assert.Equal(t, users[0].RequestCount, savedUser.RequestCount)
+		})
+	}
+}
+
 func TestManageUserDisableAdvancesAuthVersionOnceAndRevokesSession(t *testing.T) {
 	db := setupManageUserTestDB(t)
 	now := time.Now().Unix()

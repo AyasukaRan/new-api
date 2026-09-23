@@ -155,6 +155,16 @@ func ChatCompletionsRequestToResponsesRequest(ctx context.Context, req *dto.Gene
 			continue
 		}
 
+		if role == "assistant" && (msg.ReasoningContent != nil || msg.Reasoning != nil) {
+			inputItems = append(inputItems, map[string]any{
+				"type":    "reasoning",
+				"summary": []any{},
+				"content": []map[string]any{
+					{"type": "reasoning_text", "text": msg.GetReasoningContent()},
+				},
+			})
+		}
+
 		item := map[string]any{
 			"role": role,
 		}

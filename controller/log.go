@@ -11,6 +11,11 @@ import (
 )
 
 func GetAllLogs(c *gin.Context) {
+	source := model.LogSource(c.DefaultQuery("source", string(model.LogSourceUsage)))
+	if source != model.LogSourceUsage && source != model.LogSourceTest {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
+		return
+	}
 	pageInfo := common.GetPageQuery(c)
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -22,7 +27,7 @@ func GetAllLogs(c *gin.Context) {
 	group := c.Query("group")
 	requestId := c.Query("request_id")
 	upstreamRequestId := c.Query("upstream_request_id")
-	logs, total, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), channel, group, requestId, upstreamRequestId)
+	logs, total, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), channel, group, requestId, upstreamRequestId, source)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -101,6 +106,11 @@ func GetLogByKey(c *gin.Context) {
 }
 
 func GetLogsStat(c *gin.Context) {
+	source := model.LogSource(c.DefaultQuery("source", string(model.LogSourceUsage)))
+	if source != model.LogSourceUsage && source != model.LogSourceTest {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
+		return
+	}
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -109,7 +119,7 @@ func GetLogsStat(c *gin.Context) {
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
 	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, source)
 	if err != nil {
 		common.ApiError(c, err)
 		return

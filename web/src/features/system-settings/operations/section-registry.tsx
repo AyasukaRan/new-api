@@ -98,6 +98,10 @@ const OPERATIONS_SECTIONS = [
     build: (settings: OperationsSettings) => (
       <LogSettingsSection
         defaultEnabled={Boolean(settings.LogConsumeEnabled)}
+        defaultRequestBodyEnabled={Boolean(settings.LogRequestBodyEnabled)}
+        defaultRequestTraceEnabled={Boolean(settings.RequestTraceEnabled)}
+        defaultRequestTraceRetentionDays={settings.RequestTraceRetentionDays}
+        defaultRequestTraceMaxBytes={settings.RequestTraceMaxBytes}
       />
     ),
   },

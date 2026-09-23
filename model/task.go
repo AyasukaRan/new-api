@@ -109,7 +109,12 @@ func (m Properties) Value() (driver.Value, error) {
 }
 
 type TaskPrivateData struct {
-	Key            string `json:"key,omitempty"`
+	Key string `json:"key,omitempty"`
+	// BaseUrl records the host this task was submitted to, for the tasks that
+	// do not run at their channel's relay address — batch inference lives on
+	// its own host. Polling and artifact content both read it, so a task keeps
+	// talking to the endpoint that owns it.
+	BaseUrl        string `json:"base_url,omitempty"`
 	UpstreamTaskID string `json:"upstream_task_id,omitempty"` // 上游真实 task ID
 	ResultURL      string `json:"result_url,omitempty"`       // 任务成功后的结果 URL（视频地址等）
 	// Execution records safe, immutable request provenance. It lives next to
@@ -233,6 +238,13 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 		if relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeGemini ||
 			relayInfo.ChannelMeta.ChannelType == constant.ChannelTypeVertexAi {
 			privateData.Key = relayInfo.ChannelMeta.ApiKey
+		}
+		// A batch ran against the channel's batch endpoint rather than its
+		// relay one. Recording it here is what lets polling and artifact
+		// content reach the same host without each rebuilding the resolution.
+		if relayInfo.ChannelSetting.BatchEnabled {
+			privateData.Key = relayInfo.ChannelMeta.ApiKey
+			privateData.BaseUrl = relayInfo.ChannelMeta.ChannelBaseUrl
 		}
 		if relayInfo.UpstreamModelName != "" {
 			properties.UpstreamModelName = relayInfo.UpstreamModelName

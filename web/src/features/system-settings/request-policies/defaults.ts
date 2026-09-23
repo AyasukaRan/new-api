@@ -24,6 +24,8 @@ export type RetrySettings = {
   AutomaticRetryStatusCodes: string
 }
 export type HealthSettings = {
+  'monitor_setting.auto_update_balance_enabled': boolean
+  'monitor_setting.auto_update_balance_minutes': number
   ChannelDisableThreshold: string
   AutomaticDisableChannelEnabled: boolean
   AutomaticEnableChannelEnabled: boolean
@@ -47,6 +49,8 @@ export type RequestPolicySettings = RetrySettings &
   Pick<ChannelAffinitySettings, keyof ChannelAffinitySettings>
 
 export const defaultRequestPolicySettings: RequestPolicySettings = {
+  'monitor_setting.auto_update_balance_enabled': false,
+  'monitor_setting.auto_update_balance_minutes': 60,
   RetryTimes: 0,
   AutomaticRetryStatusCodes:
     '100-199,300-399,401-407,409-499,500-503,505-523,525-599',

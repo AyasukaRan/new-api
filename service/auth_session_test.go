@@ -336,7 +336,9 @@ func TestLoginSessionCreateRefreshAndRevoke(t *testing.T) {
 	_, cachedUser, err := ValidateLoginSession(identity)
 	require.NoError(t, err)
 	assert.Equal(t, user.Id, cachedUser.Id)
-	require.NoError(t, RevokeByRefreshToken(bundle.Session.SID+".wrong-refresh-secret", "", "logout"))
+	revoked, err := RevokeByRefreshToken(bundle.Session.SID+".wrong-refresh-secret", "", "logout")
+	require.NoError(t, err)
+	assert.Nil(t, revoked)
 	_, _, err = ValidateLoginSession(identity)
 	require.NoError(t, err, "a caller that only knows sid must not be able to revoke the session")
 
@@ -350,7 +352,9 @@ func TestLoginSessionCreateRefreshAndRevoke(t *testing.T) {
 	_, _, err = RefreshLoginSession(refreshed.RefreshToken, "different-session", "127.0.0.2", "test-agent-2")
 	assert.ErrorIs(t, err, ErrLoginSessionMismatch)
 
-	require.NoError(t, RevokeByRefreshToken(refreshed.RefreshToken, refreshed.Session.SID, "logout"))
+	revoked, err = RevokeByRefreshToken(refreshed.RefreshToken, refreshed.Session.SID, "logout")
+	require.NoError(t, err)
+	assert.NotNil(t, revoked)
 	_, _, err = ValidateLoginSession(identity)
 	assert.True(t, errors.Is(err, ErrLoginSessionRevoked))
 }
@@ -372,7 +376,9 @@ func TestIndependentRedisSessionRevokeConvergesAfterCacheTTL(t *testing.T) {
 	assert.NotEmpty(t, cachedLoginSessionKey(t, serverB), "node B must hold its own session cache entry")
 
 	common.RDB = clientA
-	require.NoError(t, RevokeByRefreshToken(bundle.RefreshToken, bundle.Session.SID, "logout"))
+	revoked, err := RevokeByRefreshToken(bundle.RefreshToken, bundle.Session.SID, "logout")
+	require.NoError(t, err)
+	assert.NotNil(t, revoked)
 
 	serverB.FastForward(3 * time.Second)
 	common.RDB = clientB

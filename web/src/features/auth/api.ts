@@ -33,6 +33,7 @@ import type { VerificationOperation } from './secure-verification/types'
 import type {
   LoginPayload,
   LoginResponse,
+  LogoutResponse,
   Login2FAResponse,
   TwoFAPayload,
   RegisterPayload,
@@ -93,14 +94,14 @@ export async function login2fa(payload: TwoFAPayload) {
 
 interface LogoutRuntime {
   getExpectedSID: () => string | undefined
-  request: (expectedSID?: string) => Promise<ApiResponse>
+  request: (expectedSID?: string) => Promise<LogoutResponse>
   refresh: () => Promise<RefreshOutcome>
 }
 
 export async function executeLogout(
   runtime: LogoutRuntime,
   allowMismatchRecovery = true
-): Promise<ApiResponse> {
+): Promise<LogoutResponse> {
   try {
     return await runtime.request(runtime.getExpectedSID())
   } catch (error: unknown) {
@@ -126,15 +127,19 @@ export async function executeLogout(
 }
 
 // User logout
-export async function logout(): Promise<ApiResponse> {
+export async function logout(): Promise<LogoutResponse> {
   return executeLogout({
     getExpectedSID: () => useAuthStore.getState().auth.session?.sid,
     request: async (sid) => {
-      const res = await api.post('/api/user/auth/logout', undefined, {
-        headers: sid ? { 'X-Auth-Session': sid } : undefined,
-        skipAuthRefresh: true,
-        skipErrorHandler: true,
-      })
+      const res = await api.post<LogoutResponse>(
+        '/api/user/auth/logout',
+        undefined,
+        {
+          headers: sid ? { 'X-Auth-Session': sid } : undefined,
+          skipAuthRefresh: true,
+          skipErrorHandler: true,
+        }
+      )
       return res.data
     },
     refresh: refreshAuthentication,

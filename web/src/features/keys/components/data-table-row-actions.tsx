@@ -34,6 +34,7 @@ import { toast } from 'sonner'
 
 import { DataTableRowActionMenu } from '@/components/data-table/core/row-action-menu'
 import { Button } from '@/components/ui/button'
+import { currentBaseUrl } from '@/lib/base-path'
 import {
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -69,7 +70,7 @@ function getServerAddress(): string {
   } catch {
     /* empty */
   }
-  return window.location.origin
+  return currentBaseUrl()
 }
 
 type DataTableRowActionsProps<TData> = {

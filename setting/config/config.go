@@ -38,6 +38,16 @@ func (cm *ConfigManager) Get(name string) any {
 	return cm.configs[name]
 }
 
+// Read accesses a registered config while holding its read lock. The callback
+// must copy needed values rather than retaining the mutable config pointer.
+func (cm *ConfigManager) Read(name string, read func(interface{})) {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	if value, ok := cm.configs[name]; ok {
+		read(value)
+	}
+}
+
 // LoadFromDB 从数据库加载配置
 func (cm *ConfigManager) LoadFromDB(options map[string]string) error {
 	cm.mutex.Lock()

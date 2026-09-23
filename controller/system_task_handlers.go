@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -19,6 +20,7 @@ import (
 // service.StartSystemTaskRunner.
 func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelTestHandler{})
+	service.RegisterSystemTaskHandler(channelBalanceHandler{})
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
@@ -36,23 +38,58 @@ func (channelTestHandler) Enabled() bool {
 }
 
 func (channelTestHandler) Interval() time.Duration {
-	minutes := operation_setting.GetMonitorSetting().AutoTestChannelMinutes
-	if minutes <= 0 {
-		minutes = 10
-	}
-	return time.Duration(minutes * float64(time.Minute))
+	return operation_setting.ChannelTestInterval()
 }
 
-func (channelTestHandler) NewPayload() any { return nil }
+func (channelTestHandler) NewPayload() any { return channelTestTaskPayload{Scheduled: true} }
 
-// channelTestTaskPayload controls one channel_test run. A nil/empty payload is a
-// scheduled run, which uses the configured monitor ChannelTestMode and does not
-// notify. A manual "test all channels" trigger sets Mode=scheduled_all and
-// Notify=true to reproduce the legacy manual behavior (test every channel and
-// notify root on completion).
+func (channelTestHandler) ShouldSchedule(now time.Time, latest *model.SystemTask) (bool, error) {
+	var channels []model.Channel
+	if err := model.DB.Select("id", "models", "test_time").Where("status <> ?", common.ChannelStatusManuallyDisabled).Find(&channels).Error; err != nil {
+		return false, err
+	}
+	ids := make([]int, 0, len(channels))
+	for _, channel := range channels {
+		if strings.Trim(channel.Models, " ,") != "" {
+			ids = append(ids, channel.Id)
+		}
+	}
+	if len(ids) == 0 {
+		return false, nil
+	}
+	interval := operation_setting.ChannelTestInterval()
+	// Even when every route is busy, retain one monitoring assessment each
+	// interval using completed real requests, without dispatching extra probes.
+	if latest == nil || now.Sub(time.Unix(latest.UpdatedAt, 0)) >= interval {
+		return true, nil
+	}
+	states, err := model.GetChannelModelActivities(ids)
+	if err != nil {
+		return false, err
+	}
+	byRoute := make(map[channelModelProbe]model.ChannelModelActivity, len(states))
+	for _, state := range states {
+		byRoute[channelModelProbe{state.ChannelID, state.ModelName}] = state
+	}
+	for _, channel := range channels {
+		for _, name := range channel.GetModels() {
+			name = strings.TrimSpace(name)
+			if name != "" && channelModelProbeDue(byRoute[channelModelProbe{channel.Id, name}], channel.TestTime, now, interval) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// channelTestTaskPayload controls one channel_test run. Mode is retained for
+// previously queued payloads; all runs now monitor every configured model on
+// eligible channels without changing channel status. Manual runs notify the
+// root user on completion, while scheduled runs remain silent.
 type channelTestTaskPayload struct {
-	Mode   string `json:"mode,omitempty"`
-	Notify bool   `json:"notify,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	Notify    bool   `json:"notify,omitempty"`
+	Scheduled bool   `json:"scheduled,omitempty"`
 }
 
 func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
@@ -61,9 +98,36 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
-	summary, err := runChannelTestTask(ctx, payload.Mode, payload.Notify, service.NewSystemTaskProgressReporter(task, runnerID))
+	// Before idle deadlines were introduced, periodic jobs had a nil payload;
+	// manual jobs already carried mode and notify. Preserve that distinction
+	// for tasks queued by the previous release.
+	scheduled := payload.Scheduled || (payload.Mode == "" && !payload.Notify)
+	summary, err := runChannelTestTask(ctx, payload.Mode, payload.Notify, service.NewSystemTaskProgressReporter(task, runnerID), scheduled)
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+type channelBalanceHandler struct{}
+
+func (channelBalanceHandler) Type() string { return model.SystemTaskTypeChannelBalance }
+
+func (channelBalanceHandler) Enabled() bool {
+	return operation_setting.GetMonitorSetting().AutoUpdateBalanceEnabled
+}
+
+func (channelBalanceHandler) Interval() time.Duration {
+	return time.Duration(operation_setting.GetMonitorSetting().AutoUpdateBalanceMinutes * float64(time.Minute))
+}
+
+func (channelBalanceHandler) NewPayload() any { return nil }
+
+func (channelBalanceHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := updateAllChannelsBalance(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
 		return
 	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)

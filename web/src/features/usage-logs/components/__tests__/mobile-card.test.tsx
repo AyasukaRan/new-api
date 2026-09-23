@@ -83,14 +83,16 @@ function Fixture(props: {
   )
 }
 
-function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
+function renderLogs(
+  props: Parameters<typeof Fixture>[0] & { source?: 'usage' | 'test' } = {}
+) {
   return render(
     <QueryClientProvider
       client={
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      <UsageLogsProvider>
+      <UsageLogsProvider source={props.source}>
         <Fixture {...props} />
       </UsageLogsProvider>
     </QueryClientProvider>
@@ -314,4 +316,10 @@ it('shows loading placeholders without displaying stale log fields', () => {
   expect(
     screen.queryByRole('button', { name: /^Model:/ })
   ).not.toBeInTheDocument()
+})
+
+it('labels historical successful requests as tests in the test records section', () => {
+  renderLogs({ source: 'test' })
+  expect(screen.getByText('Model test')).toBeVisible()
+  expect(screen.queryByText('Consume')).not.toBeInTheDocument()
 })

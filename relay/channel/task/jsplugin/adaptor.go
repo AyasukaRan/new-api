@@ -922,17 +922,26 @@ func (a *TaskAdaptor) BuildContentRequest(task *model.Task, artifactKey string, 
 	}
 	ctx["upstreamTaskId"] = task.GetUpstreamTaskID()
 	ctx["artifactKey"] = artifactKey
-	ctx["baseUrl"] = a.info.ChannelBaseUrl
+	// The endpoint recorded at submit wins: a task that did not run at its
+	// channel's relay address cannot have its content fetched from there.
+	baseURL, key := a.info.ChannelBaseUrl, a.info.ApiKey
+	if task.PrivateData.BaseUrl != "" {
+		baseURL = task.PrivateData.BaseUrl
+	}
+	if task.PrivateData.Key != "" {
+		key = task.PrivateData.Key
+	}
+	ctx["baseUrl"] = baseURL
 	ctx["clientRequest"] = jsonValue(clientRequest)
 	proxy := a.info.ChannelSetting.Proxy
-	auth, err := resolveAuth(a.plugin.Meta.Auth, a.info.ApiKey, proxy)
+	auth, err := resolveAuth(a.plugin.Meta.Auth, key, proxy)
 	if err != nil {
 		return nil, err
 	}
 	ctx["auth"] = auth
 	ctx["authHeader"] = auth["authHeader"]
 	if a.plugin.Meta.Auth.Type == "" || a.plugin.Meta.Auth.Type == "none" || a.plugin.Meta.Auth.Type == "api_key" {
-		ctx["apiKey"] = a.info.ApiKey
+		ctx["apiKey"] = key
 	}
 	value, err := a.plugin.Engine.Call(context.Background(), "buildContentRequest", ctx)
 	if err != nil {
@@ -963,7 +972,10 @@ func (a *TaskAdaptor) BuildContentRequest(task *model.Task, artifactKey string, 
 		if parseErr != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 			return nil, fmt.Errorf("credentialless artifact request URL must be absolute HTTP(S)")
 		}
-	} else if err = pluginruntime.ValidateRequestURL(descriptor.URL, a.info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts); err != nil {
+	} else if err = pluginruntime.ValidateRequestURL(descriptor.URL, baseURL, a.plugin.Meta.AllowedHosts); err != nil {
+		// Validated against the endpoint the task actually ran at, not the
+		// channel's relay address: a batch's result file lives on the batch
+		// host, which the relay address does not authorize.
 		return nil, err
 	}
 	var body []byte

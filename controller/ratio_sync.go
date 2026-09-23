@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/samber/lo"
 
@@ -29,20 +30,26 @@ import (
 )
 
 const (
-	defaultTimeoutSeconds       = 10
-	defaultEndpoint             = "/api/pricing"
-	maxConcurrentFetches        = 8
-	maxRatioConfigBytes         = 10 << 20 // 10MB
-	floatEpsilon                = 1e-9
-	officialRatioPresetID       = -100
-	officialRatioPresetName     = "官方倍率预设"
-	officialRatioPresetBaseURL  = "https://basellm.github.io"
-	modelsDevPresetID           = -101
-	modelsDevPresetName         = "models.dev 价格预设"
-	modelsDevPresetBaseURL      = "https://models.dev"
-	modelsDevHost               = "models.dev"
-	modelsDevPath               = "/api.json"
-	modelsDevInputCostRatioBase = 1000.0
+	defaultTimeoutSeconds      = 10
+	defaultEndpoint            = "/api/pricing"
+	maxConcurrentFetches       = 8
+	maxRatioConfigBytes        = 10 << 20 // 10MB
+	floatEpsilon               = 1e-9
+	officialRatioPresetID      = -100
+	officialRatioPresetName    = "官方倍率预设"
+	officialRatioPresetBaseURL = "https://basellm.github.io"
+	modelsDevPresetID          = -101
+	modelsDevPresetName        = "models.dev 价格预设"
+	modelsDevPresetBaseURL     = "https://models.dev"
+	modelsDevHost              = "models.dev"
+	iflytekPresetID            = -102
+	iflytekPresetName          = "讯飞星辰 MaaS 价格预设"
+	iflytekPresetBaseURL       = "https://in.iflyaicloud.com"
+	iflytekHost                = "in.iflyaicloud.com"
+	iflytekPath                = "/api/v1/gpt-finetune/model/base/list-v2"
+	iflytekEndpoint            = "/api/v1/gpt-finetune/model/base/list-v2?page=1&size=9999&sort=0"
+	modelsDevPath              = "/api.json"
+	usdPerMillionRatioBase     = 1000.0
 )
 
 func nearlyEqual(a, b float64) bool {
@@ -198,6 +205,84 @@ func effectivePricingSyncData(data map[string]any) map[string]any {
 	return result
 }
 
+// modelScope restricts a synchronization to the models a set of channels is
+// actually configured to serve.
+//
+// A channel's model list holds the names clients send, which is also the name
+// billing looks up, while a price source keys its catalogue by the name the
+// provider knows. `model_mapping` ({client: upstream}) bridges the two, so the
+// scope both filters and renames: an entry the source publishes under the
+// upstream name is kept under the client-facing name.
+type modelScope struct {
+	allowed  map[string]struct{}
+	toClient map[string]string
+}
+
+func buildModelScope(ctx context.Context, channelIds []int) (*modelScope, error) {
+	channels, err := model.GetChannelsByIds(channelIds)
+	if err != nil {
+		return nil, err
+	}
+	scope := &modelScope{allowed: make(map[string]struct{}), toClient: make(map[string]string)}
+	for _, channel := range channels {
+		mapping := make(map[string]string)
+		if raw := strings.TrimSpace(channel.GetModelMapping()); raw != "" && raw != "{}" {
+			if err := common.UnmarshalJsonStr(raw, &mapping); err != nil {
+				// An unparseable mapping only costs the rename, not the filter,
+				// so the scope stays usable instead of failing the whole sync.
+				logger.LogWarn(ctx, fmt.Sprintf("channel %d has an invalid model_mapping, syncing without name translation: %s", channel.Id, err.Error()))
+				mapping = nil
+			}
+		}
+		for _, name := range strings.Split(channel.Models, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			scope.allowed[name] = struct{}{}
+			if upstream := strings.TrimSpace(mapping[name]); upstream != "" && upstream != name {
+				scope.toClient[upstream] = name
+			}
+		}
+	}
+	return scope, nil
+}
+
+// apply drops every model outside the scope and renames the entries a source
+// publishes under an upstream name. A name the source already publishes
+// client-side wins over a rename onto it, so a catalogue that carries both
+// spellings does not depend on map iteration order.
+func (s *modelScope) apply(data map[string]any) map[string]any {
+	result := make(map[string]any, len(data))
+	for field, value := range data {
+		entries := valueMap(value)
+		if entries == nil {
+			result[field] = value
+			continue
+		}
+		kept := make(map[string]any, len(entries))
+		for name, entry := range entries {
+			if _, ok := s.allowed[name]; ok {
+				kept[name] = entry
+			}
+		}
+		for name, entry := range entries {
+			client, renamed := s.toClient[name]
+			if !renamed {
+				continue
+			}
+			if _, taken := kept[client]; taken {
+				continue
+			}
+			if _, ok := s.allowed[client]; ok {
+				kept[client] = entry
+			}
+		}
+		result[field] = kept
+	}
+	return result
+}
+
 func modelPricingSyncValues(data map[string]any, name string) map[string]any {
 	values := make(map[string]any)
 	for _, field := range pricingSyncFields {
@@ -260,6 +345,25 @@ func FetchUpstreamRatios(c *gin.Context) {
 		return
 	}
 
+	var scope *modelScope
+	if len(req.ScopeChannelIDs) > 0 {
+		scopeIds := make([]int, 0, len(req.ScopeChannelIDs))
+		for _, id64 := range req.ScopeChannelIDs {
+			scopeIds = append(scopeIds, int(id64))
+		}
+		var err error
+		scope, err = buildModelScope(c.Request.Context(), scopeIds)
+		if err != nil {
+			logger.LogError(c.Request.Context(), "failed to query scope channels: "+err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "查询限定渠道失败"})
+			return
+		}
+		if len(scope.allowed) == 0 {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "限定的渠道未配置任何模型"})
+			return
+		}
+	}
+
 	var wg sync.WaitGroup
 	ch := make(chan upstreamResult, len(upstreams))
 
@@ -311,6 +415,7 @@ func FetchUpstreamRatios(c *gin.Context) {
 				fullURL = chItem.BaseURL + endpoint
 			}
 			isModelsDev := isModelsDevAPIEndpoint(fullURL)
+			isIFlytek := isIFlytekMaaSEndpoint(fullURL)
 
 			uniqueName := chItem.Name
 			if chItem.ID != 0 {
@@ -400,6 +505,22 @@ func FetchUpstreamRatios(c *gin.Context) {
 				converted, err := convertModelsDevToRatioData(bytes.NewReader(bodyBytes))
 				if err != nil {
 					logger.LogWarn(c.Request.Context(), "models.dev parse failed from "+chItem.Name+": "+err.Error())
+					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
+					return
+				}
+				ch <- upstreamResult{Name: uniqueName, Data: converted}
+				return
+			}
+
+			// type5: iFlytek MaaS console catalogue -> CNY per-million prices to ratios.
+			// Must be dispatched before the generic {success,data} decode below:
+			// the iFlytek envelope is {code,data:{rows}}, whose Success field is
+			// absent and therefore false, which would report an empty source as
+			// a successful fetch of nothing.
+			if isIFlytek {
+				converted, err := convertIFlytekMaaSToRatioData(bytes.NewReader(bodyBytes))
+				if err != nil {
+					logger.LogWarn(c.Request.Context(), "iFlytek MaaS parse failed from "+chItem.Name+": "+err.Error())
 					ch <- upstreamResult{Name: uniqueName, Err: err.Error()}
 					return
 				}
@@ -590,10 +711,14 @@ func FetchUpstreamRatios(c *gin.Context) {
 				Name:   r.Name,
 				Status: "success",
 			})
+			data := effectivePricingSyncData(r.Data)
+			if scope != nil {
+				data = scope.apply(data)
+			}
 			successfulChannels = append(successfulChannels, struct {
 				name string
 				data map[string]any
-			}{name: r.Name, data: effectivePricingSyncData(r.Data)})
+			}{name: r.Name, data: data})
 		}
 	}
 
@@ -817,6 +942,103 @@ func buildDifferences(localData map[string]any, successfulChannels []struct {
 
 func roundRatioValue(value float64) float64 {
 	return math.Round(value*1e6) / 1e6
+}
+
+func isIFlytekMaaSEndpoint(rawURL string) bool {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(parsedURL.Hostname()) != iflytekHost {
+		return false
+	}
+	return strings.TrimSuffix(parsedURL.Path, "/") == iflytekPath
+}
+
+// iflytekMaaSResponse is the model catalogue served by the iFlytek console.
+// Prices are quoted per million tokens in CNY; only the fields that map onto a
+// new-api pricing lane are decoded.
+type iflytekMaaSResponse struct {
+	Data struct {
+		Rows []struct {
+			// ServiceId is the id the inference API accepts (e.g. xopglm53),
+			// which is what a channel's model list holds. Name and
+			// pretrainedModel are display strings and must not be used.
+			ServiceId string `json:"serviceId"`
+			Price     struct {
+				InferencePrice struct {
+					InTokensPrice    *float64 `json:"inTokensPrice"`
+					OutTokensPrice   *float64 `json:"outTokensPrice"`
+					CacheTokensPrice *float64 `json:"cacheTokensPrice"`
+				} `json:"inferencePrice"`
+			} `json:"price"`
+		} `json:"rows"`
+	} `json:"data"`
+}
+
+// cnyPerUSD is the rate used to turn the provider's CNY prices into the USD
+// unit new-api ratios are expressed in. It reads the deployment's configured
+// exchange rate rather than a hardcoded constant, because an operator who runs
+// their quota unit at parity with CNY has set it to 1 and must not have every
+// imported price silently divided by an exchange rate they do not use.
+func cnyPerUSD() float64 {
+	rate := operation_setting.USDExchangeRate
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate <= 0 {
+		return 1
+	}
+	return rate
+}
+
+// convertIFlytekMaaSToRatioData parses the iFlytek MaaS model catalogue and
+// converts its per-million-token CNY prices into the local ratio format.
+func convertIFlytekMaaSToRatioData(reader io.Reader) (map[string]any, error) {
+	var upstreamData iflytekMaaSResponse
+	if err := common.DecodeJson(reader, &upstreamData); err != nil {
+		return nil, fmt.Errorf("failed to decode iFlytek MaaS response: %w", err)
+	}
+	if len(upstreamData.Data.Rows) == 0 {
+		return nil, fmt.Errorf("empty iFlytek MaaS response")
+	}
+
+	rate := cnyPerUSD()
+	modelRatioMap := make(map[string]any)
+	completionRatioMap := make(map[string]any)
+	cacheRatioMap := make(map[string]any)
+
+	for _, row := range upstreamData.Data.Rows {
+		modelName := strings.TrimSpace(row.ServiceId)
+		price := row.Price.InferencePrice
+		if modelName == "" || price.InTokensPrice == nil || !isValidNonNegativeCost(*price.InTokensPrice) {
+			continue
+		}
+		inputPrice := *price.InTokensPrice
+		modelRatioMap[modelName] = roundRatioValue(inputPrice / rate * float64(ratio_setting.USD) / usdPerMillionRatioBase)
+		if inputPrice == 0 {
+			// A free model prices every lane at zero, and the output and cache
+			// lanes are ratios of the input price, so they have no meaning.
+			continue
+		}
+		if price.OutTokensPrice != nil && isValidNonNegativeCost(*price.OutTokensPrice) {
+			completionRatioMap[modelName] = roundRatioValue(*price.OutTokensPrice / inputPrice)
+		}
+		if price.CacheTokensPrice != nil && isValidNonNegativeCost(*price.CacheTokensPrice) {
+			cacheRatioMap[modelName] = roundRatioValue(*price.CacheTokensPrice / inputPrice)
+		}
+	}
+
+	if len(modelRatioMap) == 0 {
+		return nil, fmt.Errorf("no valid iFlytek MaaS pricing entries found")
+	}
+
+	converted := make(map[string]any)
+	converted["model_ratio"] = modelRatioMap
+	if len(completionRatioMap) > 0 {
+		converted["completion_ratio"] = completionRatioMap
+	}
+	if len(cacheRatioMap) > 0 {
+		converted["cache_ratio"] = cacheRatioMap
+	}
+	return converted, nil
 }
 
 func isModelsDevAPIEndpoint(rawURL string) bool {
@@ -1077,7 +1299,7 @@ func convertModelsDevToRatioData(reader io.Reader) (map[string]any, error) {
 			continue
 		}
 
-		modelRatio := candidate.Input * float64(ratio_setting.USD) / modelsDevInputCostRatioBase
+		modelRatio := candidate.Input * float64(ratio_setting.USD) / usdPerMillionRatioBase
 		modelRatioMap[modelName] = roundRatioValue(modelRatio)
 
 		if candidate.Output != nil {
@@ -1138,6 +1360,13 @@ func GetSyncableChannels(c *gin.Context) {
 		ID:      modelsDevPresetID,
 		Name:    modelsDevPresetName,
 		BaseURL: modelsDevPresetBaseURL,
+		Status:  1,
+	})
+
+	syncableChannels = append(syncableChannels, dto.SyncableChannel{
+		ID:      iflytekPresetID,
+		Name:    iflytekPresetName,
+		BaseURL: iflytekPresetBaseURL,
 		Status:  1,
 	})
 

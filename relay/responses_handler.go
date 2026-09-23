@@ -103,7 +103,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 // ConsumeResponsesQuota applies the same settlement dispatch to HTTP and
 // WebSocket Responses usage. Compact requests keep their separate repricing.
 func ConsumeResponsesQuota(c *gin.Context, info *relaycommon.RelayInfo, usage *dto.Usage) {
-	if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") {
+	if strings.HasPrefix(info.OriginModelName, "gpt-4o-audio") && !info.PriceData.ChannelPricing {
 		service.PostAudioConsumeQuota(c, info, usage, "")
 		return
 	}

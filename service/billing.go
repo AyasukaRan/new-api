@@ -42,6 +42,32 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 	return nil
 }
 
+// PrepareBillingForSelectedChannel reserves the selected channel's estimate
+// before sending upstream, including a retry from a free channel to a paid one.
+// Cheaper attempts retain the reservation until final settlement/refund.
+func PrepareBillingForSelectedChannel(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIError {
+	if info.QuotaClamp != nil || info.PriceData.QuotaToPreConsume < 0 {
+		return types.NewErrorWithStatusCode(fmt.Errorf("invalid channel pre-consume estimate"), types.ErrorCodeModelPriceError, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	if info.TieredBillingSnapshot != nil {
+		return PrepareTieredBillingForSelectedGroup(c, info)
+	}
+	if info.Billing == nil {
+		if info.PriceData.FreeModel {
+			return nil
+		}
+		return PreConsumeBilling(c, info.PriceData.QuotaToPreConsume, info)
+	}
+	info.PriceData.FreeModel = false
+	if info.PriceData.QuotaToPreConsume > info.Billing.GetPreConsumedQuota() {
+		if err := info.Billing.Reserve(info.PriceData.QuotaToPreConsume); err != nil {
+			return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+		}
+	}
+	info.FinalPreConsumedQuota = info.Billing.GetPreConsumedQuota()
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // SettleBilling — 后结算辅助函数
 // ---------------------------------------------------------------------------

@@ -160,13 +160,15 @@ describe('model cards', () => {
     const metrics = screen.getByLabelText(
       'Performance metrics for the last 24 hours'
     )
-    expect(within(metrics).getByText('—')).toBeVisible()
+    expect(
+      within(metrics).getByRole('status', { name: 'Current status' })
+    ).toHaveTextContent('Not monitored')
     expect(within(metrics).getByText('—s')).toBeVisible()
     expect(within(metrics).getByText('—t/s')).toBeVisible()
     expect(within(metrics).queryByText(/100/)).not.toBeInTheDocument()
     expect(
       within(metrics).getByRole('img', {
-        name: 'Recent success-rate samples; gray bars indicate missing data.',
+        name: 'Availability history; gray bars indicate missing data.',
       })
     ).toBeVisible()
     expect(screen.getByText('No description available.')).toBeVisible()
@@ -176,7 +178,7 @@ describe('model cards', () => {
   it('uses fixed spacing between hourly status bars', () => {
     render(<ModelCard model={pricingModel()} onClick={vi.fn()} />)
     const statusStrip = screen.getByRole('img', {
-      name: 'Recent success-rate samples; gray bars indicate missing data.',
+      name: 'Availability history; gray bars indicate missing data.',
     })
     expect(statusStrip).toHaveClass('gap-px')
     expect(statusStrip).not.toHaveClass('justify-between')
@@ -245,26 +247,189 @@ describe('model cards', () => {
   })
 
   it.each([
-    { success_rate: 0, expected: '0.00%' },
-    { success_rate: 99.8, expected: '99.80%' },
-    { success_rate: Number.NaN, expected: '—' },
+    {
+      availability_rate: 0,
+      current_available: true,
+      expected: '0.0%',
+      status: 'Currently available',
+      statusColor: 'text-success',
+    },
+    {
+      availability_rate: 99.8,
+      current_available: false,
+      expected: '99.8%',
+      status: 'Currently unavailable',
+      statusColor: 'text-destructive',
+    },
+    {
+      availability_rate: Number.NaN,
+      current_available: undefined,
+      expected: 'Not monitored',
+      status: 'Not monitored',
+      statusColor: 'text-muted-foreground',
+    },
   ])(
-    'shows $expected for the reported request success rate $success_rate',
-    ({ success_rate, expected }) => {
+    'shows $expected for the reported model availability $availability_rate',
+    ({
+      availability_rate,
+      current_available,
+      expected,
+      status,
+      statusColor,
+    }) => {
       render(
         <ModelCard
           model={pricingModel()}
           onClick={vi.fn()}
-          perf={{ avg_latency_ms: 1200, avg_tps: 42, success_rate }}
+          perf={{
+            avg_latency_ms: 1200,
+            avg_tps: 42,
+            success_rate: 50,
+            availability_rate,
+            current_available,
+          }}
         />
       )
       const metrics = screen.getByLabelText(
         'Performance metrics for the last 24 hours'
       )
-      expect(within(metrics).getByText(expected)).toBeVisible()
-      expect(within(metrics).getByText('Status')).toBeVisible()
+      const history = within(metrics).getByRole('group', {
+        name: 'Availability (last 24h)',
+      })
+      expect(within(history).getByText(expected)).toBeVisible()
+      const current = within(metrics).getByRole('status', {
+        name: 'Current status',
+      })
+      expect(current).toHaveTextContent(status)
+      expect(current).toHaveClass(statusColor)
+      expect(within(metrics).getByText('Availability (last 24h)')).toBeVisible()
       expect(within(metrics).getByText('1.20s')).toBeVisible()
       expect(within(metrics).getByText('42.0t/s')).toBeVisible()
+    }
+  )
+
+  it.each([
+    { observedAt: 1788782400, status: 'Waiting for update' },
+    { observedAt: 0, status: 'Not monitored' },
+    { observedAt: Number.NaN, status: 'Not monitored' },
+  ])(
+    'distinguishes stale observations from missing observations ($observedAt)',
+    ({ observedAt, status }) => {
+      render(
+        <ModelCard
+          model={pricingModel()}
+          onClick={vi.fn()}
+          perf={{
+            current_observed_at: observedAt,
+            avg_latency_ms: 0,
+            avg_tps: 0,
+            success_rate: 100,
+            availability_rate: 100,
+          }}
+        />
+      )
+      const current = screen.getByRole('status', { name: 'Current status' })
+      expect(current).toHaveTextContent(status)
+      expect(current).toHaveClass('text-muted-foreground')
+      expect(screen.getByText('100.0%')).toBeVisible()
+      if (observedAt > 0) {
+        expect(current).toHaveAttribute(
+          'title',
+          expect.stringContaining('Last observed:')
+        )
+      }
+    }
+  )
+
+  it('does not substitute a legacy request success rate for missing probe rounds', () => {
+    render(
+      <ModelCard
+        model={pricingModel()}
+        onClick={vi.fn()}
+        perf={{ avg_latency_ms: 1200, avg_tps: 42, success_rate: 100 }}
+      />
+    )
+    expect(
+      screen.getByRole('status', { name: 'Current status' })
+    ).toHaveTextContent('Not monitored')
+    expect(screen.queryByText('100.0%')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      name: 'historical records only',
+      availability: 82,
+      history: 82,
+      expected: '82.0%',
+    },
+    {
+      name: 'combined history and rounds',
+      availability: 84,
+      history: 50,
+      expected: '84.0%',
+    },
+    {
+      name: 'new rounds only',
+      availability: 100,
+      history: undefined,
+      expected: '100.0%',
+    },
+    {
+      name: 'no samples',
+      availability: undefined,
+      history: undefined,
+      expected: 'Not monitored',
+    },
+    {
+      name: 'zero availability with a different legacy rate',
+      availability: 0,
+      history: 84,
+      expected: '0.0%',
+    },
+  ])(
+    'shows one server-calculated availability indicator for $name',
+    (sample) => {
+      const ts = Math.floor(Date.now() / 1000 / 3600) * 3600
+      render(
+        <ModelCard
+          model={pricingModel()}
+          onClick={vi.fn()}
+          perf={{
+            avg_latency_ms: 1200,
+            avg_tps: 42,
+            success_rate: sample.history ?? 0,
+            availability_rate: sample.availability,
+            availability_series:
+              sample.availability === undefined
+                ? []
+                : [{ ts, success_rate: sample.availability }],
+            recent_success_series:
+              sample.history === undefined
+                ? []
+                : [{ ts, success_rate: sample.history }],
+          }}
+        />
+      )
+      const metrics = screen.getByLabelText(
+        'Performance metrics for the last 24 hours'
+      )
+      const availability = within(metrics).getByRole('group', {
+        name: 'Availability (last 24h)',
+      })
+      expect(within(availability).getByText(sample.expected)).toBeVisible()
+      expect(
+        within(metrics).queryByRole('group', {
+          name: 'Historical success rate',
+        })
+      ).not.toBeInTheDocument()
+      expect(within(metrics).getAllByRole('img')).toHaveLength(1)
+      const strip = within(availability).getByRole('img', {
+        name: 'Availability history; gray bars indicate missing data.',
+      })
+      expect(
+        strip.children[23].classList.contains('bg-muted-foreground/15')
+      ).toBe(sample.availability === undefined)
+      expect(screen.getByRole('button', { name: 'Details' })).toBeEnabled()
     }
   )
 
@@ -440,7 +605,7 @@ describe('model cards', () => {
       within(
         screen.getByLabelText('Performance metrics for the last 24 hours')
       ).getAllByText(/^—/)
-    ).toHaveLength(3)
+    ).toHaveLength(2)
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Details' }))
     expect(onModelClick).toHaveBeenCalledWith('example-model')
@@ -502,7 +667,7 @@ describe('model cards', () => {
           avg_tps: 42,
           success_rate: 100,
           window_start: currentHourStart - 23 * 3600,
-          recent_success_series: [
+          availability_series: [
             { ts: currentHourStart, success_rate: 100 },
             { ts: currentHourStart - 5 * 3600, success_rate: 80 },
           ],
@@ -512,7 +677,7 @@ describe('model cards', () => {
 
     const spans = [
       ...screen.getByRole('img', {
-        name: 'Recent success-rate samples; gray bars indicate missing data.',
+        name: 'Availability history; gray bars indicate missing data.',
       }).children,
     ]
     expect(spans).toHaveLength(24)
@@ -540,7 +705,7 @@ describe('model cards', () => {
           avg_tps: 42,
           success_rate: 100,
           window_start: currentHourStart - 23 * 3600,
-          recent_success_series: [
+          availability_series: [
             { ts: currentHourStart - 24 * 3600, success_rate: 100 },
           ],
         }}
@@ -549,7 +714,7 @@ describe('model cards', () => {
 
     const spans = [
       ...screen.getByRole('img', {
-        name: 'Recent success-rate samples; gray bars indicate missing data.',
+        name: 'Availability history; gray bars indicate missing data.',
       }).children,
     ]
     expect(spans).toHaveLength(24)
@@ -559,7 +724,7 @@ describe('model cards', () => {
     vi.useRealTimers()
   })
 
-  it('keeps all 24 slots gray when recent_success_series is undefined', () => {
+  it('keeps all 24 slots gray when availability_series is undefined', () => {
     render(
       <ModelCard
         model={pricingModel()}
@@ -570,7 +735,7 @@ describe('model cards', () => {
 
     const spans = [
       ...screen.getByRole('img', {
-        name: 'Recent success-rate samples; gray bars indicate missing data.',
+        name: 'Availability history; gray bars indicate missing data.',
       }).children,
     ]
     expect(spans).toHaveLength(24)
@@ -593,7 +758,7 @@ describe('model cards', () => {
           avg_tps: 42,
           success_rate: 80,
           window_start: currentHourStart - 47 * 3600,
-          recent_success_series: [
+          availability_series: [
             { ts: currentHourStart - 29 * 3600, success_rate: 80 },
           ],
         }}
@@ -602,7 +767,7 @@ describe('model cards', () => {
 
     const spans = [
       ...screen.getByRole('img', {
-        name: 'Recent success-rate samples; gray bars indicate missing data.',
+        name: 'Availability history; gray bars indicate missing data.',
       }).children,
     ]
     expect(spans).toHaveLength(24)

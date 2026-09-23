@@ -212,10 +212,13 @@ export async function getSelfSubscriptions(): Promise<
   return res.data
 }
 
-export async function getSelfSubscriptionFull(): Promise<
-  ApiResponse<SelfSubscriptionData>
-> {
-  const res = await api.get('/api/subscription/self')
+export async function getSelfSubscriptionFull(
+  signal?: AbortSignal
+): Promise<ApiResponse<SelfSubscriptionData>> {
+  const res = await api.get('/api/subscription/self', {
+    signal,
+    disableDuplicate: signal != null,
+  })
   return res.data
 }
 

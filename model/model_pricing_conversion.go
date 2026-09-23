@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -358,6 +359,18 @@ func PreviewModelPricingConversion(name string, draft PricingValues) (*ModelPric
 			// input total here because variables in the text-only branch still
 			// participate in AST-based token normalization.
 			expression = `(ai > 0 || ao > 0) ? tier("audio", max(len - ai, 0) * ` + base.String() + ` + c * ` + completion.String() + ` + ai * ` + decimal.NewFromFloat(*preview.BillingDetails.AudioInputPrice).String() + ` + ao * ` + decimal.NewFromFloat(*preview.BillingDetails.AudioOutputPrice).String() + `) : ` + expression
+		}
+		// Existing expressions give cache precedence over image/audio input.
+		// Legacy global ratios instead charge the original modality counts,
+		// whose overlap cannot be recovered from the normalized variables.
+		// AST normalization also includes variables from an inactive branch.
+		// Keep all-zero input prices convertible: no discarded count is billed.
+		vars := billingexpr.UsedVars(expression)
+		hasCache := vars["cr"] || vars["cc"] || vars["cc1h"]
+		hasMedia := vars["img"] || vars["ai"]
+		pricedInput := !base.IsZero() || preview.BillingDetails.AudioInputPrice != nil && *preview.BillingDetails.AudioInputPrice > 0
+		if hasCache && hasMedia && pricedInput {
+			return &ModelPricingConversion{UnsupportedReason: "Overlapping cache and media pricing must be converted manually."}, nil
 		}
 	}
 	if err := billing_setting.SmokeTestExpr(expression); err != nil {

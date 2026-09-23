@@ -564,7 +564,8 @@ function ChannelTestDialogContent({
               errorCode,
             }
             updateTestResult(model, finalResult)
-          }
+          },
+          queryClient
         )
       } catch (error: unknown) {
         finalResult = {
@@ -591,6 +592,7 @@ function ChannelTestDialogContent({
       endpointType,
       effectiveStreamTest,
       markModelTesting,
+      queryClient,
       refreshChannelLists,
       t,
       updateTestResult,

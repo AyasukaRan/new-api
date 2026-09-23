@@ -276,16 +276,15 @@ func RefreshLoginSession(rawRefreshToken, expectedSID, ip, userAgent string) (*A
 	return bundle, currentUser, nil
 }
 
-func RevokeByRefreshToken(rawRefreshToken, expectedSID, reason string) error {
+func RevokeByRefreshToken(rawRefreshToken, expectedSID, reason string) (*model.UserSession, error) {
 	sid, secret, ok := splitRefreshToken(rawRefreshToken)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	if expectedSID = strings.TrimSpace(expectedSID); expectedSID != "" && expectedSID != sid {
-		return ErrLoginSessionMismatch
+		return nil, ErrLoginSessionMismatch
 	}
-	_, err := model.RevokeUserSessionByRefreshHash(sid, hashRefreshSecret(secret), reason)
-	return err
+	return model.RevokeUserSessionByRefreshHash(sid, hashRefreshSecret(secret), reason)
 }
 
 func RefreshTokenSID(rawRefreshToken string) (string, bool) {

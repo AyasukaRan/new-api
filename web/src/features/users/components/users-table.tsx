@@ -166,6 +166,7 @@ export function UsersTable() {
       }
     },
     placeholderData: (previousData) => previousData,
+    refetchInterval: 60_000,
   })
 
   const users = data?.items || []

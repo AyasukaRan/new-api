@@ -216,3 +216,90 @@ func TestChannelSatisfiesFilters(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, dto.FilterRequestPath, kind)
 }
+
+// One vendor channel can serve both chat and batch, so the batch paths must be
+// able to tell which channels an operator actually opted in.
+func TestBatchCapableFilterRequiresAnExplicitOptIn(t *testing.T) {
+	optedIn := `{"batch_enabled":true}`
+	optedOut := `{"batch_enabled":false}`
+	dedicated := `{"task_plugin_key":"iflytek-batch"}`
+
+	cases := []struct {
+		name     string
+		channel  *Channel
+		expected bool
+	}{
+		{
+			name:     "a vendor channel that enabled batch is eligible",
+			channel:  &Channel{Id: 910001, Type: constant.ChannelTypeIFlytekMaaS, Setting: &optedIn},
+			expected: true,
+		},
+		{
+			name: "a vendor channel that only serves chat is not",
+			// Handing a batch to an account with no batch entitlement fails
+			// hours later, upstream, where nobody is watching.
+			channel:  &Channel{Id: 910002, Type: constant.ChannelTypeIFlytekMaaS, Setting: &optedOut},
+			expected: false,
+		},
+		{
+			name:     "a channel that never configured batch is not",
+			channel:  &Channel{Id: 910003, Type: constant.ChannelTypeIFlytekMaaS},
+			expected: false,
+		},
+		{
+			name: "a dedicated task-plugin channel needs no separate opt-in",
+			// It exists only to serve its plugin, so being selected for it is
+			// the whole point.
+			channel:  &Channel{Id: 910004, Type: constant.ChannelTypeTaskPlugin, Setting: &dedicated},
+			expected: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ok, kind := ChannelSatisfiesFilters(testCase.channel, "4.0Ultra",
+				[]dto.ChannelFilter{{Kind: dto.FilterBatchCapable}})
+			assert.Equal(t, testCase.expected, ok)
+			if !testCase.expected {
+				assert.Equal(t, dto.FilterBatchCapable, kind)
+			}
+		})
+	}
+
+	t.Run("ordinary requests still reach channels that only serve chat", func(t *testing.T) {
+		// The filter is added by the batch paths alone; adding it everywhere
+		// would hide every chat channel from every chat request.
+		ok, _ := ChannelSatisfiesFilters(&Channel{Id: 910005, Type: constant.ChannelTypeIFlytekMaaS},
+			"4.0Ultra", []dto.ChannelFilter{{Kind: dto.FilterRequestPath, RequestPath: "/v1/chat/completions"}})
+		assert.True(t, ok)
+	})
+}
+
+// Enabling batch on a known provider must not also require typing its address:
+// the built-in default is what makes the switch a switch.
+func TestBatchEndpointPrefersTheBuiltInAddress(t *testing.T) {
+	relayURL := "https://maas-api.cn-huabei-1.xf-yun.com"
+	enabled := `{"batch_enabled":true}`
+	overridden := `{"batch_enabled":true,"batch_base_url":"https://batch.internal","batch_key":"internal-key"}`
+
+	t.Run("a known provider resolves its own batch host", func(t *testing.T) {
+		channel := &Channel{Type: constant.ChannelTypeIFlytekMaaS, BaseURL: &relayURL, Setting: &enabled}
+		baseURL, key := channel.GetBatchEndpoint("chat-key")
+		assert.Equal(t, constant.GetChannelBatchBaseURL(constant.ChannelTypeIFlytekMaaS), baseURL)
+		assert.NotEqual(t, relayURL, baseURL)
+		assert.Equal(t, "chat-key", key)
+	})
+
+	t.Run("an operator address wins over the built-in one", func(t *testing.T) {
+		channel := &Channel{Type: constant.ChannelTypeIFlytekMaaS, BaseURL: &relayURL, Setting: &overridden}
+		baseURL, key := channel.GetBatchEndpoint("chat-key")
+		assert.Equal(t, "https://batch.internal", baseURL)
+		assert.Equal(t, "internal-key", key)
+	})
+
+	t.Run("a provider with no separate batch host uses the channel address", func(t *testing.T) {
+		openAIURL := "https://api.openai.com"
+		channel := &Channel{Type: constant.ChannelTypeOpenAI, BaseURL: &openAIURL, Setting: &enabled}
+		baseURL, _ := channel.GetBatchEndpoint("chat-key")
+		assert.Equal(t, openAIURL, baseURL)
+	})
+}

@@ -52,6 +52,22 @@ const SUPPORTED_PROXY_PROTOCOLS = new Set([
   'socks5h:',
 ])
 
+// The balance query address is an operator-supplied base URL, so only the
+// scheme and host are checked; the path is the provider's business.
+function isOptionalHttpURL(value: string | undefined): boolean {
+  const trimmedValue = value?.trim() || ''
+  if (!trimmedValue) return true
+  try {
+    const parsedURL = new URL(trimmedValue)
+    return (
+      (parsedURL.protocol === 'http:' || parsedURL.protocol === 'https:') &&
+      Boolean(parsedURL.hostname)
+    )
+  } catch {
+    return false
+  }
+}
+
 function isOptionalProxyURL(value: string | undefined): boolean {
   const trimmedValue = value?.trim() || ''
   if (!trimmedValue) return true
@@ -266,6 +282,18 @@ export const channelFormSchema = z
       .refine(isOptionalProxyURL, ERROR_MESSAGES.INVALID_PROXY),
     http_protocol: z.enum(['auto', 'http1']).optional(),
     http2_connection_shards: z.number().int().optional(),
+    balance_query_disabled: z.boolean().optional(),
+    balance_query_type: z.string().optional(),
+    balance_query_base_url: z
+      .string()
+      .optional()
+      .refine(isOptionalHttpURL, ERROR_MESSAGES.INVALID_BALANCE_QUERY_BASE_URL),
+    batch_enabled: z.boolean().optional(),
+    batch_base_url: z
+      .string()
+      .optional()
+      .refine(isOptionalHttpURL, ERROR_MESSAGES.INVALID_BATCH_BASE_URL),
+    batch_key: z.string().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_websocket_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
@@ -456,6 +484,12 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   proxy: '',
   http_protocol: HTTP_PROTOCOL_AUTO,
   http2_connection_shards: 1,
+  balance_query_disabled: false,
+  balance_query_type: '',
+  balance_query_base_url: '',
+  batch_enabled: false,
+  batch_base_url: '',
+  batch_key: '',
   pass_through_body_enabled: false,
   responses_websocket_enabled: false,
   system_prompt: '',
@@ -499,6 +533,12 @@ export function transformChannelToFormDefaults(
     proxy: '',
     http_protocol: HTTP_PROTOCOL_AUTO as 'auto' | 'http1',
     http2_connection_shards: 1,
+    balance_query_disabled: false,
+    balance_query_type: '',
+    balance_query_base_url: '',
+    batch_enabled: false,
+    batch_base_url: '',
+    batch_key: '',
     pass_through_body_enabled: false,
     responses_websocket_enabled: false,
     system_prompt: '',
@@ -519,6 +559,12 @@ export function transformChannelToFormDefaults(
         proxy: parsed.proxy || '',
         http_protocol: protocol,
         http2_connection_shards: protocol === HTTP_PROTOCOL_HTTP1 ? 1 : shards,
+        balance_query_disabled: parsed.balance_query_disabled === true,
+        balance_query_type: parsed.balance_query_type || '',
+        balance_query_base_url: parsed.balance_query_base_url || '',
+        batch_enabled: parsed.batch_enabled || false,
+        batch_base_url: parsed.batch_base_url || '',
+        batch_key: parsed.batch_key || '',
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         responses_websocket_enabled:
           parsed.responses_websocket_enabled === true,
@@ -666,6 +712,35 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.http_protocol = HTTP_PROTOCOL_HTTP1
   } else if (shards > 1) {
     settingObj.http2_connection_shards = shards
+  }
+
+  // Omitted when unset so a channel that never touched the balance override
+  // keeps the JSON it had.
+  if (formData.balance_query_disabled) {
+    settingObj.balance_query_disabled = true
+  }
+  const balanceQueryType = formData.balance_query_type?.trim()
+  if (balanceQueryType) {
+    settingObj.balance_query_type = balanceQueryType
+  }
+  const balanceQueryBaseUrl = normalizeBaseUrl(formData.balance_query_base_url)
+  if (balanceQueryBaseUrl) {
+    settingObj.balance_query_base_url = balanceQueryBaseUrl
+  }
+
+  // Batch inference is off unless an operator turned it on. The host and key
+  // are only written when the vendor serves batch somewhere other than its
+  // relay endpoint, so a channel that shares both keeps the JSON it had.
+  if (formData.batch_enabled) {
+    settingObj.batch_enabled = true
+  }
+  const batchBaseUrl = normalizeBaseUrl(formData.batch_base_url)
+  if (batchBaseUrl) {
+    settingObj.batch_base_url = batchBaseUrl
+  }
+  const batchKey = formData.batch_key?.trim()
+  if (batchKey) {
+    settingObj.batch_key = batchKey
   }
 
   return JSON.stringify(settingObj)

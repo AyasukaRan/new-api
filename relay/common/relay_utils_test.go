@@ -140,3 +140,20 @@ func TestTaskDurationBounds(t *testing.T) {
 		})
 	}
 }
+
+// A channel base URL can carry HTTP basic auth. url.URL.String() renders the
+// userinfo back verbatim, so the password would otherwise reach every log line
+// and audit record built from a sanitized URL.
+func TestSanitizeURLForLogDropsBasicAuthPassword(t *testing.T) {
+	assert.Equal(t, "https://svc@upstream.example.com/v1/chat/completions",
+		SanitizeURLForLog("https://svc:s3cr3t@upstream.example.com/v1/chat/completions"))
+
+	sanitized := SanitizeURLForLog("https://svc:s3cr3t@upstream.example.com/v1/models?key=abc")
+	assert.NotContains(t, sanitized, "s3cr3t")
+	assert.NotContains(t, sanitized, "abc")
+
+	// A URL with no credentials is returned untouched, so nothing re-encodes
+	// query ordering for the sake of this check.
+	assert.Equal(t, "https://upstream.example.com/v1/models?b=2&a=1",
+		SanitizeURLForLog("https://upstream.example.com/v1/models?b=2&a=1"))
+}

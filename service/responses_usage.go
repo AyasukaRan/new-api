@@ -99,7 +99,7 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 	// Upstream bills the prompt as soon as it starts generating, so a stream
 	// that produced any event but no usage still owes its input tokens unless
 	// upstream reported an explicit failure.
-	billsPrompt := a.usage.CompletionTokens != 0 || (a.started && !a.info.StreamStatus.ResponseFailed())
+	billsPrompt := a.usage.CompletionTokens != 0 || (a.started && !a.info.StreamStatus.ResponseFailed() && (a.info.ClientWs == nil || a.info.StreamStatus.ResponseOutcome() == string(relaycommon.ResponseOutcomeCompleted)))
 	if a.usage.PromptTokens == 0 && billsPrompt {
 		a.usage.PromptTokens = a.info.GetEstimatePromptTokens()
 	}

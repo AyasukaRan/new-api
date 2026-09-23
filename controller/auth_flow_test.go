@@ -1066,6 +1066,61 @@ func TestOAuthLoginLegacyGitHubBindingMigratesAfterLoginVerification(t *testing.
 	}
 }
 
+func TestOAuthLegacyGitHubMigrationRacesWithBinding(t *testing.T) {
+	setupSecurityEnrollmentTest(t)
+	legacy := &model.User{Username: "legacy-claim", AffCode: "legacy-claim", GitHubId: "old-login", Status: common.UserStatusEnabled, AuthVersion: 1}
+	other := &model.User{Username: "other-claim", AffCode: "other-claim", Status: common.UserStatusEnabled, AuthVersion: 1}
+	require.NoError(t, model.DB.Create(legacy).Error)
+	require.NoError(t, model.DB.Create(other).Error)
+	connection, err := model.DB.DB()
+	require.NoError(t, err)
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		connection.SetMaxOpenConns(1)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		<-start
+		results <- model.DB.Transaction(func(tx *gorm.DB) error {
+			_, err := model.MigrateLegacyGitHubBindingWithTx(tx, legacy.Id, "old-login", "900001")
+			return err
+		})
+	})
+	workers.Go(func() {
+		<-start
+		results <- model.UpdateUserBindColumn(other.Id, "github_id", "900001")
+	})
+	close(start)
+	workers.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	require.Equal(t, 1, successes, "one numeric GitHub identity can authorize only one local account")
+	var owners []model.User
+	require.NoError(t, model.DB.Where("github_id = ?", "900001").Find(&owners).Error)
+	require.Len(t, owners, 1)
+	var claims []model.ExternalIdentityClaim
+	require.NoError(t, model.DB.Where("provider = ?", model.ExternalIdentityProviderGitHub).Find(&claims).Error)
+	require.Len(t, claims, 1)
+	assert.Equal(t, owners[0].Id, claims[0].UserId)
+	assert.Equal(t, "900001", claims[0].Subject)
+	loser := legacy
+	if owners[0].Id == legacy.Id {
+		loser = other
+	}
+	require.NoError(t, owners[0].ClearBinding(model.ExternalIdentityProviderGitHub))
+	require.NoError(t, model.UpdateUserBindColumn(loser.Id, "github_id", "900001"), "unbinding releases the identity atomically")
+	claims = nil
+	require.NoError(t, model.DB.Where("provider = ?", model.ExternalIdentityProviderGitHub).Find(&claims).Error)
+	require.Len(t, claims, 1)
+	assert.Equal(t, loser.Id, claims[0].UserId)
+}
+
 func TestOAuthBindIgnoresLegacyGitHubUsernames(t *testing.T) {
 	tests := []struct {
 		name          string

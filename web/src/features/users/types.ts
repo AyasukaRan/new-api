@@ -32,6 +32,20 @@ export type UserStatus = z.infer<typeof userStatusSchema>
 export const userRoleSchema = z.number()
 export type UserRole = z.infer<typeof userRoleSchema>
 
+export const userSubscriptionSummarySchema = z.object({
+  id: z.number(),
+  plan_id: z.number(),
+  plan_title: z.string(),
+  amount_used: z.number(),
+  amount_total: z.number(),
+  next_reset_time: z.number(),
+  last_reset_time: z.number(),
+  end_time: z.number(),
+})
+export type UserSubscriptionSummary = z.infer<
+  typeof userSubscriptionSummarySchema
+>
+
 export const userSchema = z.object({
   id: z.number(),
   username: z.string(),
@@ -44,6 +58,7 @@ export const userSchema = z.object({
   email: z.string().optional(),
   quota: z.number(),
   used_quota: z.number(),
+  subscriptions: z.array(userSubscriptionSummarySchema).optional(),
   request_count: z.number(),
   group: z.string(),
   aff_code: z.string().optional(),
@@ -149,4 +164,4 @@ export interface ManageUserQuotaPayload {
 // Dialog Types
 // ============================================================================
 
-export type UsersDialogType = 'create' | 'update' | 'delete'
+export type UsersDialogType = 'create' | 'update' | 'delete' | 'subscriptions'

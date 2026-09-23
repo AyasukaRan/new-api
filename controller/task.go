@@ -126,8 +126,21 @@ func writeTaskArtifacts(c *gin.Context, task *model.Task, dashboard bool) {
 	c.JSON(http.StatusOK, response)
 }
 
+// taskArtifactsAreReadable reports whether a task has reached a state where its
+// plugin may publish artifacts.
+//
+// A failed task is included because for some work the failure is the
+// deliverable: a batch that completed with every request rejected produces an
+// error file naming the per-line cause, and that file is the only way to find
+// out what went wrong. Plugins whose output only exists on success already
+// return no artifacts for a failed task, so this widens nothing for them.
+func taskArtifactsAreReadable(task *model.Task) bool {
+	return task != nil &&
+		(task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure)
+}
+
 func projectTaskArtifacts(task *model.Task) ([]relaychannel.TaskArtifact, error) {
-	if task == nil || task.Status != model.TaskStatusSuccess || !taskHasPluginExecution(task) {
+	if !taskArtifactsAreReadable(task) || !taskHasPluginExecution(task) {
 		return []relaychannel.TaskArtifact{}, nil
 	}
 	adaptor := relay.GetTaskAdaptor(task.Platform)
@@ -291,11 +304,13 @@ func TaskArtifactContent(c *gin.Context) {
 		writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
 		return
 	}
-	if task.Status != model.TaskStatusSuccess {
+	if !taskArtifactsAreReadable(task) {
 		writeTaskArtifactError(c, http.StatusConflict, "artifact_not_ready", "Task artifacts are not ready")
 		return
 	}
 	if !taskHasPluginExecution(task) {
+		// legacyVideoAvailable stays success-only: a failed legacy task has no
+		// result URL to serve.
 		if artifactKey != "video" || !legacyVideoAvailable(task) {
 			writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
 			return

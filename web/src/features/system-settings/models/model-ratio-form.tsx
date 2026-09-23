@@ -180,6 +180,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
   const { t } = useTranslation()
   const isUnsetVariant = variant === 'unset'
   const [editMode, setEditMode] = useState<'visual' | 'json'>('visual')
+  const [channelScope, setChannelScope] = useState<string | null>(null)
   const visualEditorRef = useRef<ModelRatioVisualEditorHandle>(null)
 
   const enabledModelsQuery = useQuery({
@@ -220,8 +221,12 @@ export const ModelRatioForm = memo(function ModelRatioForm({
   )
 
   const toggleEditMode = useCallback(() => {
-    setEditMode((prev) => (prev === 'visual' ? 'json' : 'visual'))
-  }, [])
+    if (editMode === 'visual' && visualEditorRef.current) {
+      visualEditorRef.current.requestEditorChange(() => setEditMode('json'))
+      return
+    }
+    setEditMode('visual')
+  }, [editMode])
 
   const handleSave = useCallback(async () => {
     if (editMode === 'visual') {
@@ -266,16 +271,18 @@ export const ModelRatioForm = memo(function ModelRatioForm({
                 )}
               />
             </SettingsPageActionsPortal>
-            <Button
-              type='button'
-              variant='destructive'
-              size='sm'
-              onClick={onReset}
-              disabled={isResetting}
-            >
-              <RotateCcw data-icon='inline-start' />
-              {t('Reset prices')}
-            </Button>
+            {channelScope === null && (
+              <Button
+                type='button'
+                variant='destructive'
+                size='sm'
+                onClick={onReset}
+                disabled={isResetting}
+              >
+                <RotateCcw data-icon='inline-start' />
+                {t('Reset prices')}
+              </Button>
+            )}
             {editMode === 'json' && (
               <Button
                 type='button'
@@ -338,6 +345,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               filterMode={isUnsetVariant ? 'unset' : 'all'}
               onSave={handleSave}
               isSaving={isSaving}
+              onScopeChange={setChannelScope}
               onChange={(field, value) => {
                 const fieldMap: Record<string, keyof ModelFormValues> = {
                   'billing_setting.billing_mode': 'BillingMode',

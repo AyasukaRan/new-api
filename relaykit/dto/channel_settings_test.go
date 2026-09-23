@@ -732,3 +732,65 @@ func TestChannelOtherSettingsValidateToolLossPolicy(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tool_loss_policy")
 }
+
+// A vendor that serves batch from its chat endpoint needs no extra
+// configuration; one that does not must be able to say so without a second
+// channel. Both directions have to work off the same two optional fields.
+func TestBatchCredentialsFallBackToTheChannelsOwnEndpoint(t *testing.T) {
+	cases := []struct {
+		name            string
+		settings        ChannelSettings
+		expectedBaseURL string
+		expectedKey     string
+	}{
+		{
+			name:            "an unconfigured channel uses its own endpoint",
+			settings:        ChannelSettings{BatchEnabled: true},
+			expectedBaseURL: "https://relay.example.com",
+			expectedKey:     "relay-key",
+		},
+		{
+			name:            "a separate batch host and credential both apply",
+			settings:        ChannelSettings{BatchEnabled: true, BatchBaseURL: "https://batch.example.com", BatchKey: "batch-key"},
+			expectedBaseURL: "https://batch.example.com",
+			expectedKey:     "batch-key",
+		},
+		{
+			name:            "a separate host alone keeps the channel credential",
+			settings:        ChannelSettings{BatchEnabled: true, BatchBaseURL: "https://batch.example.com"},
+			expectedBaseURL: "https://batch.example.com",
+			expectedKey:     "relay-key",
+		},
+		{
+			name:            "a separate credential alone keeps the channel host",
+			settings:        ChannelSettings{BatchEnabled: true, BatchKey: "batch-key"},
+			expectedBaseURL: "https://relay.example.com",
+			expectedKey:     "batch-key",
+		},
+		{
+			name:            "blank overrides are ignored rather than sent as empty",
+			settings:        ChannelSettings{BatchEnabled: true, BatchBaseURL: "   ", BatchKey: "  "},
+			expectedBaseURL: "https://relay.example.com",
+			expectedKey:     "relay-key",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			baseURL, key := testCase.settings.BatchCredentials("https://relay.example.com", "relay-key")
+			assert.Equal(t, testCase.expectedBaseURL, baseURL)
+			assert.Equal(t, testCase.expectedKey, key)
+		})
+	}
+}
+
+func TestValidateBatchRejectsAnUnusableAddress(t *testing.T) {
+	settings := ChannelSettings{BatchBaseURL: "  https://batch.example.com/  ", BatchKey: "  k  "}
+	require.NoError(t, settings.ValidateBatch())
+	assert.Equal(t, "https://batch.example.com", settings.BatchBaseURL)
+	assert.Equal(t, "k", settings.BatchKey)
+
+	for _, address := range []string{"batch.example.com", "ftp://batch.example.com", "://"} {
+		invalid := ChannelSettings{BatchBaseURL: address}
+		assert.Error(t, invalid.ValidateBatch(), address)
+	}
+}

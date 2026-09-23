@@ -89,6 +89,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     isAdminView: isAdmin,
     isRootView: isRoot,
     viewAccess,
+    logSource,
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
@@ -160,6 +161,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       'logs',
       logCategory,
       viewAccess,
+      logSource,
       pagination.pageIndex + 1,
       pagination.pageSize,
       columnFilters,
@@ -168,6 +170,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
     queryFn: async () => {
       const result = await fetchLogsByCategory({
+        source: logSource,
         logCategory,
         isAdmin,
         page: pagination.pageIndex + 1,
@@ -185,7 +188,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     placeholderData: (previousData, previousQuery) => {
       if (
         previousQuery?.queryKey[1] === logCategory &&
-        previousQuery.queryKey[2] === viewAccess
+        previousQuery.queryKey[2] === viewAccess &&
+        previousQuery.queryKey[3] === logSource
       ) {
         return previousData
       }
@@ -198,6 +202,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     logCategory,
     isAdmin,
     isRoot,
+    logSource,
     showBillingSource
   )
   const isLoadingData = isLoading || (isFetching && !data)
@@ -230,9 +235,15 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       isLoading={isLoadingData}
       isFetching={isFetching}
       emptyTitle={t('No Logs Found')}
-      emptyDescription={t(
-        'No usage logs available. Logs will appear here once API calls are made.'
-      )}
+      emptyDescription={
+        logSource === 'test'
+          ? t(
+              'No test logs available. Successful model tests with usage data will appear here.'
+            )
+          : t(
+              'No usage logs available. Logs will appear here once API calls are made.'
+            )
+      }
       skeletonKeyPrefix='usage-log-skeleton'
       applyHeaderSize
       tableClassName={cn(

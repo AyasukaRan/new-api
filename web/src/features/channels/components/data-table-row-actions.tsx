@@ -67,6 +67,7 @@ import {
   handleToggleChannelStatus,
   isChannelEnabled,
   isMultiKeyChannel,
+  parseChannelSettings,
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
@@ -110,9 +111,14 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     e.stopPropagation()
     setIsTesting(true)
     try {
-      await handleTestChannel(channel.id, { channelName: channel.name }, () => {
-        queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
-      })
+      await handleTestChannel(
+        channel.id,
+        { channelName: channel.name },
+        () => {
+          queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+        },
+        queryClient
+      )
     } finally {
       setIsTesting(false)
     }
@@ -281,8 +287,27 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             </DropdownMenuShortcut>
           </DropdownMenuItem>
 
+          <DropdownMenuItem
+            onClick={() => {
+              setCurrentRow(channel)
+              setOpen('channel-monitoring')
+            }}
+          >
+            {t('Channel monitoring')}
+            <DropdownMenuShortcut>
+              <Gauge size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+
           {/* Query Balance */}
-          <DropdownMenuItem onClick={handleQueryBalance}>
+          <DropdownMenuItem
+            onClick={handleQueryBalance}
+            disabled={
+              channel.type !== 57 &&
+              parseChannelSettings(channel.setting)?.balance_query_disabled ===
+                true
+            }
+          >
             {t('Query Balance')}
             <DropdownMenuShortcut>
               <DollarSign size={16} />

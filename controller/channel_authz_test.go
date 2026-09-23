@@ -103,6 +103,7 @@ func TestClearChannelReadOnlyFields(t *testing.T) {
 		ResponseTime:       33,
 		Balance:            44.5,
 		BalanceUpdatedTime: 55,
+		BalanceMonitor:     &model.ChannelBalanceMonitor{KnownBalance: 999},
 		UsedQuota:          66,
 		Models:             "gpt-4o",
 		Group:              "default",
@@ -114,6 +115,7 @@ func TestClearChannelReadOnlyFields(t *testing.T) {
 		"response_time":        channel.ResponseTime,
 		"balance":              channel.Balance,
 		"balance_updated_time": channel.BalanceUpdatedTime,
+		"balance_monitor":      channel.BalanceMonitor,
 		"used_quota":           channel.UsedQuota,
 		"models":               channel.Models,
 		"group":                channel.Group,
@@ -124,6 +126,7 @@ func TestClearChannelReadOnlyFields(t *testing.T) {
 	assert.Zero(t, channel.ResponseTime)
 	assert.Zero(t, channel.Balance)
 	assert.Zero(t, channel.BalanceUpdatedTime)
+	assert.Nil(t, channel.BalanceMonitor)
 	assert.Zero(t, channel.UsedQuota)
 	assert.Equal(t, "gpt-4o", channel.Models)
 	assert.Equal(t, "default", channel.Group)

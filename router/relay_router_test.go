@@ -89,6 +89,72 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 	}
 }
 
+// One provider account backs every user of a channel, so a file id alone is
+// not an authorization: the gateway has to scope it to whoever uploaded it.
+func TestFilesAreScopedToTheUserThatUploadedThem(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.RelayFile{}))
+
+	tokenFor := func(username string, key string) int {
+		user := model.User{Username: username, Status: common.UserStatusEnabled, Group: "default", Quota: 100, AffCode: username}
+		require.NoError(t, model.DB.Create(&user).Error)
+		require.NoError(t, model.DB.Create(&model.Token{
+			UserId: user.Id, Key: key, Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true,
+		}).Error)
+		return user.Id
+	}
+	ownerId := tokenFor("files-owner", "filesownerkey")
+	tokenFor("files-stranger", "filesstrangerkey")
+	require.NoError(t, (&model.RelayFile{
+		FileId: "file-owned", UserId: ownerId, ChannelId: 1, Model: "4.0Ultra",
+		Purpose: "batch", Filename: "batch.jsonl", Bytes: 42,
+	}).Insert())
+
+	engine := gin.New()
+	SetRelayRouter(engine)
+	call := func(method string, path string, key string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, nil)
+		request.Header.Set("Authorization", "Bearer "+key)
+		engine.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	t.Run("a stranger cannot read a file they do not own", func(t *testing.T) {
+		assert.Equal(t, http.StatusNotFound, call(http.MethodGet, "/v1/files/file-owned", "filesstrangerkey").Code)
+	})
+
+	t.Run("a stranger cannot delete a file they do not own", func(t *testing.T) {
+		assert.Equal(t, http.StatusNotFound, call(http.MethodDelete, "/v1/files/file-owned", "filesstrangerkey").Code)
+		_, err := model.GetRelayFile(ownerId, "file-owned")
+		assert.NoError(t, err, "the owner's record must survive a stranger's delete")
+	})
+
+	t.Run("a stranger cannot download a file they do not own", func(t *testing.T) {
+		assert.Equal(t, http.StatusNotFound, call(http.MethodGet, "/v1/files/file-owned/content", "filesstrangerkey").Code)
+	})
+
+	t.Run("an unknown id is refused the same way as one owned by someone else", func(t *testing.T) {
+		assert.Equal(t, http.StatusNotFound, call(http.MethodGet, "/v1/files/file-imagined", "filesownerkey").Code)
+	})
+
+	t.Run("the listing shows only the caller's own files", func(t *testing.T) {
+		recorder := call(http.MethodGet, "/v1/files", "filesstrangerkey")
+		require.Equal(t, http.StatusOK, recorder.Code)
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+		assert.Empty(t, payload["data"])
+
+		recorder = call(http.MethodGet, "/v1/files", "filesownerkey")
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+		listed, ok := payload["data"].([]any)
+		require.True(t, ok)
+		require.Len(t, listed, 1)
+		assert.Equal(t, "file-owned", listed[0].(map[string]any)["id"])
+	})
+}
+
 func setupRelayRouterTestDB(t *testing.T) {
 	t.Helper()
 

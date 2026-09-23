@@ -49,15 +49,15 @@ function formItemOf(control: HTMLElement) {
 }
 
 describe('channel health layout', () => {
-  it('nests only the test mode and interval under the scheduled channel tests switch', () => {
+  it('nests only the idle interval under the scheduled channel tests switch', () => {
     show()
     const options = screen.getByRole('group', {
       name: 'Scheduled test options',
     })
-    expect(within(options).getByRole('combobox')).toBeVisible()
+    expect(within(options).queryByRole('combobox')).not.toBeInTheDocument()
     expect(
       within(options).getByRole('spinbutton', {
-        name: 'Test interval (minutes)',
+        name: 'Idle test interval (minutes)',
       })
     ).toBeVisible()
     expect(
@@ -72,7 +72,7 @@ describe('channel health layout', () => {
     show()
     for (const name of [
       'Scheduled channel tests',
-      'Re-enable on success',
+      'Automatically refresh balances',
       'Disable on failure',
     ]) {
       expect(formItemOf(screen.getByRole('switch', { name }))).toHaveAttribute(
@@ -89,9 +89,6 @@ describe('channel health layout', () => {
     )?.parentElement
     expect(grid).toHaveAttribute('data-settings-form-span', 'full')
     for (const control of [
-      screen.getByRole('spinbutton', {
-        name: 'Health check timeout threshold (seconds)',
-      }),
       screen.getByRole('textbox', { name: 'Auto-disable status codes' }),
       screen.getByRole('textbox', { name: 'Failure keywords' }),
     ]) {

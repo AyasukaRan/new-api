@@ -77,6 +77,13 @@ beforeEach(() => {
         }
       case '/api/user/models':
         return { data: { success: true, data: ['gpt-4o-mini'] } }
+      case '/api/subscription/self':
+        return {
+          data: {
+            success: true,
+            data: { subscriptions: [], all_subscriptions: [] },
+          },
+        }
       case '/api/data/self':
         return { data: { success: true, data: [] } }
       default:

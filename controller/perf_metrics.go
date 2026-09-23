@@ -3,6 +3,8 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -10,6 +12,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 )
+
+func GetAdminPerfMetrics(c *gin.Context) {
+	modelName := strings.TrimSpace(c.Query("model"))
+	if modelName == "" || utf8.RuneCountInString(modelName) > 128 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "a valid model is required"})
+		return
+	}
+	hours, _ := strconv.Atoi(c.DefaultQuery("hours", "24"))
+	result, err := perfmetrics.QueryAdminModel(modelName, hours)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "unable to read channel monitoring"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}
 
 func GetPerfMetricsSummary(c *gin.Context) {
 	hours := 24
@@ -52,11 +69,12 @@ func GetPerfMetrics(c *gin.Context) {
 		}
 	}
 
+	activeRatios := ratio_setting.GetGroupRatioCopy()
 	result, err := perfmetrics.Query(perfmetrics.QueryParams{
 		Model:         modelName,
 		Group:         c.Query("group"),
 		Hours:         hours,
-		AllowedGroups: append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto"),
+		AllowedGroups: append(lo.Keys(activeRatios), "auto"),
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -66,6 +84,12 @@ func GetPerfMetrics(c *gin.Context) {
 		return
 	}
 
+	if group := c.Query("group"); group != "" && group != "auto" {
+		if _, active := activeRatios[group]; !active {
+			result.AvailabilityRate = nil
+			result.AvailabilitySeries = nil
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    result,

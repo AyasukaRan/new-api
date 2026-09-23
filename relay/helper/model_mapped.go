@@ -1,65 +1,34 @@
 package helper
 
 import (
-	"errors"
-	"fmt"
-
-	rootcommon "github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/modelmapping"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/gin-gonic/gin"
 )
+
+// ResolveMappedModel follows a channel's model_mapping chain and reports the
+// upstream name for originModel, and whether any rename applied.
+//
+// It is shared rather than inlined because a model reaches a provider by more
+// than one route: a request body carries it, and so does every line of an
+// uploaded batch file. Both have to arrive under the same upstream name.
+func ResolveMappedModel(modelMapping string, originModel string) (string, bool, error) {
+	return modelmapping.ResolveMappedModel(modelMapping, originModel)
+}
 
 func ModelMappedHelper(c *gin.Context, info *relaycommon.RelayInfo, request dto.Request) error {
 	if info.ChannelMeta == nil {
 		info.ChannelMeta = &relaycommon.ChannelMeta{}
 	}
 
-	// map model name
-	modelMapping := c.GetString("model_mapping")
-	if modelMapping != "" && modelMapping != "{}" {
-		modelMap := make(map[string]string)
-		err := rootcommon.Unmarshal([]byte(modelMapping), &modelMap)
-		if err != nil {
-			return fmt.Errorf("unmarshal_model_mapping_failed")
-		}
-
-		// 支持链式模型重定向，最终使用链尾的模型
-		currentModel := info.OriginModelName
-		visitedModels := map[string]bool{
-			currentModel: true,
-		}
-		for {
-			mappedModel, exists := modelMap[currentModel]
-			baseModel := hostreasoning.BaseModelName(currentModel)
-			if (!exists || mappedModel == "") && baseModel != currentModel {
-				mappedModel, exists = modelMap[baseModel]
-			}
-			if exists && mappedModel != "" {
-				// 模型重定向循环检测，避免无限循环
-				if visitedModels[mappedModel] {
-					if mappedModel == currentModel {
-						if currentModel == info.OriginModelName {
-							info.IsModelMapped = false
-							return nil
-						}
-
-						info.IsModelMapped = true
-						break
-					}
-					return errors.New("model_mapping_contains_cycle")
-				}
-				visitedModels[mappedModel] = true
-				currentModel = mappedModel
-				info.IsModelMapped = true
-			} else {
-				break
-			}
-		}
-		if info.IsModelMapped {
-			info.UpstreamModelName = currentModel
-		}
+	upstreamModel, mapped, err := ResolveMappedModel(c.GetString("model_mapping"), info.OriginModelName)
+	if err != nil {
+		return err
+	}
+	if mapped {
+		info.IsModelMapped = true
+		info.UpstreamModelName = upstreamModel
 	}
 
 	if request != nil {

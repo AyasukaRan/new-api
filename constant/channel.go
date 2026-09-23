@@ -1,5 +1,7 @@
 package constant
 
+import "strings"
+
 const (
 	ChannelTypeUnknown        = 0
 	ChannelTypeOpenAI         = 1
@@ -59,8 +61,9 @@ const (
 	ChannelTypeSub2API        = 59
 	ChannelTypeNewAPI         = 60
 	ChannelTypeTaskPlugin     = 61
-	ChannelTypeVLLM           = 62
+	ChannelTypeIFlytekMaaS    = 62
 	ChannelTypeSGLang         = 63
+	ChannelTypeVLLM           = 64
 	ChannelTypeDummy          // this one is only for count, do not add any channel after this
 
 )
@@ -130,8 +133,9 @@ var ChannelBaseURLs = []string{
 	"",                                          //59
 	"",                                          //60
 	"",                                          //61
-	"",                                          //62
-	"",                                          //63
+	"https://maas-api.cn-huabei-1.xf-yun.com", //62
+	"", //63
+	"", //64
 }
 
 func GetChannelBaseURL(channelType int) string {
@@ -139,6 +143,21 @@ func GetChannelBaseURL(channelType int) string {
 		return ""
 	}
 	return ChannelBaseURLs[channelType]
+}
+
+// channelBatchBaseURLs holds the host a provider serves batch inference from,
+// for the providers that do not serve it from their relay host. A channel that
+// enables batch then needs no address of its own, exactly as it needs no relay
+// address: the built-in default applies unless an operator overrides it.
+var channelBatchBaseURLs = map[int]string{
+	ChannelTypeIFlytekMaaS: "https://spark-api-open.xf-yun.com",
+}
+
+// GetChannelBatchBaseURL returns the built-in batch host for a channel type,
+// or empty when the provider serves batch from the same host as everything
+// else.
+func GetChannelBatchBaseURL(channelType int) string {
+	return channelBatchBaseURLs[channelType]
 }
 
 var ChannelTypeNames = map[int]string{
@@ -200,6 +219,7 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeSub2API:        "Sub2API",
 	ChannelTypeNewAPI:         "New API",
 	ChannelTypeTaskPlugin:     "Task Plugin",
+	ChannelTypeIFlytekMaaS:    "iFlytek MaaS",
 	ChannelTypeVLLM:           "vLLM",
 	ChannelTypeSGLang:         "SGLang",
 }
@@ -233,6 +253,41 @@ var ChannelSpecialBases = map[string]ChannelSpecialBase{
 		ClaudeBaseURL: "https://ark.cn-beijing.volces.com/api/coding",
 		OpenAIBaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3",
 	},
+}
+
+// BalanceQueryTypes are the provider billing APIs a channel can be pointed at,
+// keyed by the name stored in its settings. A gateway often speaks one
+// provider's relay protocol while exposing another's billing endpoint — an
+// OpenAI-compatible proxy configured as a Gemini channel, say — and without
+// this a channel could only ever be queried the way its own type dictates.
+//
+// Only the types that have a balance implementation are listed.
+var BalanceQueryTypes = map[string]int{
+	"openai":      ChannelTypeOpenAI,
+	"custom":      ChannelTypeCustom,
+	"aiproxy":     ChannelTypeAIProxy,
+	"api2gpt":     ChannelTypeAPI2GPT,
+	"aigc2d":      ChannelTypeAIGC2D,
+	"siliconflow": ChannelTypeSiliconFlow,
+	"deepseek":    ChannelTypeDeepSeek,
+	"openrouter":  ChannelTypeOpenRouter,
+	"moonshot":    ChannelTypeMoonshot,
+}
+
+// BalanceQueryChannelType maps a stored override onto a channel type.
+func BalanceQueryChannelType(name string) (int, bool) {
+	channelType, ok := BalanceQueryTypes[strings.ToLower(strings.TrimSpace(name))]
+	return channelType, ok
+}
+
+// IsValidBalanceQueryType reports whether an override names a supported billing
+// API. Empty is valid and means "use the channel's own type".
+func IsValidBalanceQueryType(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return true
+	}
+	_, ok := BalanceQueryChannelType(name)
+	return ok
 }
 
 // IsAdvancedCustomChannel includes named channels backed by route presets.

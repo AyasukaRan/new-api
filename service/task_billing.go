@@ -346,6 +346,12 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	if !hasRatioSetting || modelRatio <= 0 {
 		return false
 	}
+	// The ratio frozen at submit already reflects the serving channel's price,
+	// which cannot be rebuilt here: this runs long after the request and the
+	// task records only which channel ran it, not what that channel charged.
+	if billingContext := task.PrivateData.BillingContext; billingContext != nil && billingContext.ModelRatio > 0 {
+		modelRatio = billingContext.ModelRatio
+	}
 
 	// 获取用户和组的倍率信息
 	group := task.Group
@@ -367,6 +373,13 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 		finalGroupRatio = userGroupRatio
 	} else {
 		finalGroupRatio = groupRatio
+	}
+	// The ratio frozen at submit already carries the serving channel's markup,
+	// which cannot be rebuilt here: this runs long after the request, and the
+	// task only records which channel ran it, not what it charged. Recomputing
+	// from the global tables would refund the markup on every token-settled task.
+	if billingContext := task.PrivateData.BillingContext; billingContext != nil && billingContext.GroupRatio > 0 {
+		finalGroupRatio = billingContext.GroupRatio
 	}
 
 	// 计算 OtherRatios 乘积（视频折扣、时长等）

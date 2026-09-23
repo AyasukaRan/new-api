@@ -87,6 +87,18 @@ func SetRelayRouter(router *gin.Engine) {
 		})
 	}
 	{
+		// Files API. The upload picks a channel from the model named inside the
+		// uploaded file; every later operation is pinned to the channel that
+		// already holds the bytes, which is also where ownership is checked.
+		fileRouter := relayV1Router.Group("/files")
+		fileRouter.GET("", controller.RelayFileList)
+		fileRouter.POST("", middleware.PrepareRelayFileUpload(), middleware.Distribute(), controller.RelayFileUpload)
+		pinnedFileRouter := fileRouter.Group("", middleware.PrepareRelayFile(), middleware.Distribute())
+		pinnedFileRouter.GET("/:id", controller.RelayFileRetrieve)
+		pinnedFileRouter.DELETE("/:id", controller.RelayFileDelete)
+		pinnedFileRouter.GET("/:id/content", controller.RelayFileContent)
+	}
+	{
 		//http router
 		httpRouter := relayV1Router.Group("")
 		httpRouter.Use(middleware.Distribute())
@@ -163,11 +175,6 @@ func SetRelayRouter(router *gin.Engine) {
 
 		// not implemented
 		httpRouter.POST("/images/variations", controller.RelayNotImplemented)
-		httpRouter.GET("/files", controller.RelayNotImplemented)
-		httpRouter.POST("/files", controller.RelayNotImplemented)
-		httpRouter.DELETE("/files/:id", controller.RelayNotImplemented)
-		httpRouter.GET("/files/:id", controller.RelayNotImplemented)
-		httpRouter.GET("/files/:id/content", controller.RelayNotImplemented)
 		httpRouter.POST("/fine-tunes", controller.RelayNotImplemented)
 		httpRouter.GET("/fine-tunes", controller.RelayNotImplemented)
 		httpRouter.GET("/fine-tunes/:id", controller.RelayNotImplemented)

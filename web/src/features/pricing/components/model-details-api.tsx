@@ -39,6 +39,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useStatus } from '@/hooks/use-status'
+import { currentBaseUrl } from '@/lib/base-path'
 
 import {
   buildRateLimits,
@@ -456,7 +457,7 @@ function CodeSamplesSection(props: {
     if (candidate && typeof candidate === 'string') {
       return candidate.replace(/\/$/, '')
     }
-    if (typeof window !== 'undefined') return window.location.origin
+    if (typeof window !== 'undefined') return currentBaseUrl()
     return 'https://api.example.com'
   }, [status])
 

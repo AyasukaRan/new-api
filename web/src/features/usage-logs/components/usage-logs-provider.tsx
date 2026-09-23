@@ -22,7 +22,7 @@ import { createContext, useContext, useState, type ReactNode } from 'react'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
-import type { ChannelAffinityInfo } from '../types'
+import type { ChannelAffinityInfo, LogSource } from '../types'
 
 export type LogsViewScope = 'all' | 'self'
 export type LogsViewAccess = 'self' | 'admin' | 'root'
@@ -36,6 +36,7 @@ export function resolveLogsViewAccess(
 }
 
 interface UsageLogsContextValue {
+  logSource: LogSource
   selectedUserId: number | null
   setSelectedUserId: (userId: number | null) => void
   userInfoDialogOpen: boolean
@@ -54,7 +55,10 @@ const UsageLogsContext = createContext<UsageLogsContextValue | undefined>(
   undefined
 )
 
-export function UsageLogsProvider({ children }: { children: ReactNode }) {
+export function UsageLogsProvider(props: {
+  children: ReactNode
+  source?: LogSource
+}) {
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
   const [userInfoDialogOpen, setUserInfoDialogOpen] = useState(false)
   const [affinityTarget, setAffinityTarget] =
@@ -66,6 +70,7 @@ export function UsageLogsProvider({ children }: { children: ReactNode }) {
   return (
     <UsageLogsContext.Provider
       value={{
+        logSource: props.source ?? 'usage',
         selectedUserId,
         setSelectedUserId,
         userInfoDialogOpen,
@@ -80,7 +85,7 @@ export function UsageLogsProvider({ children }: { children: ReactNode }) {
         setViewScope,
       }}
     >
-      {children}
+      {props.children}
     </UsageLogsContext.Provider>
   )
 }
@@ -103,13 +108,19 @@ export function useUsageLogsContext() {
  */
 export function useLogsViewScope() {
   const role = useAuthStore((state) => state.auth.user?.role ?? ROLE.GUEST)
-  const { viewScope, setViewScope } = useUsageLogsContext()
-  const canManageScope = role >= ROLE.ADMIN
+  const {
+    viewScope: preferredScope,
+    setViewScope,
+    logSource,
+  } = useUsageLogsContext()
+  const viewScope = logSource === 'test' ? 'all' : preferredScope
+  const canManageScope = role >= ROLE.ADMIN && logSource !== 'test'
   const viewAccess = resolveLogsViewAccess(role, viewScope)
   const isAdminView = viewAccess !== 'self'
   const isRootView = viewAccess === 'root'
 
   return {
+    logSource,
     canManageScope,
     viewScope,
     setViewScope,

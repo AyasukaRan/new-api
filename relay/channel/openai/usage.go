@@ -22,6 +22,7 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 		if usage.PromptTokensDetails.CachedTokens == 0 {
 			if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
 				usage.PromptTokensDetails.CachedTokens = usage.InputTokensDetails.CachedTokens
+				usage.PromptTokensDetails.CachedTokensDetails = usage.InputTokensDetails.Clone().CachedTokensDetails
 			} else if cachedTokens, ok := extractCachedTokensFromBody(responseBody); ok {
 				usage.PromptTokensDetails.CachedTokens = cachedTokens
 			} else if usage.PromptCacheHitTokens > 0 {
@@ -33,6 +34,7 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 		if usage.PromptTokensDetails.CachedTokens == 0 {
 			if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
 				usage.PromptTokensDetails.CachedTokens = usage.InputTokensDetails.CachedTokens
+				usage.PromptTokensDetails.CachedTokensDetails = usage.InputTokensDetails.Clone().CachedTokensDetails
 			} else if cachedTokens, ok := extractMoonshotCachedTokensFromBody(responseBody); ok {
 				usage.PromptTokensDetails.CachedTokens = cachedTokens
 			} else if cachedTokens, ok := extractCachedTokensFromBody(responseBody); ok {

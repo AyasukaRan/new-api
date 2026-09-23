@@ -22,6 +22,7 @@ import { createSectionRegistry } from '@/features/system-settings/utils/section-
  * Usage logs page section definitions
  */
 const USAGE_LOGS_SECTIONS = [
+  { id: 'test', titleKey: 'Test Logs', build: () => null },
   {
     id: 'common',
     titleKey: 'Common Logs',

@@ -268,7 +268,13 @@
     "cost": 40000,
     "tier": "image",
     "billingUnit": "request",
-    "fixedPrice": 0.04
+    "fixedPrice": 0.04,
+    "conversion": {
+      "model_name": "gpt-image-2",
+      "pricing": {
+        "ModelPrice": 0.04
+      }
+    }
   },
   {
     "name": "audio pricing ignores text cache discounts",
@@ -312,7 +318,8 @@
         "CacheRatio": 0.1,
         "AudioRatio": 2
       }
-    }
+    },
+    "conversionUnsupportedReason": "Overlapping cache and media pricing must be converted manually."
   },
   {
     "name": "text requests retain configured cache discount",

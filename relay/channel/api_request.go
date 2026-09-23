@@ -559,6 +559,12 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		}
 	}
 
+	// Everything the adaptors build funnels through here, with the request
+	// fully assembled: final URL, final headers after channel setup and header
+	// overrides, and a body that has already been model-mapped, converted,
+	// stripped and parameter-overridden.
+	service.CaptureUpstreamRequest(c, info, req)
+
 	resp, err := relayClient.Do(req)
 	if err != nil {
 		logger.LogError(c, "do request failed: "+err.Error())
@@ -582,6 +588,11 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
 		c.Set(common2.UpstreamRequestIdKey, upID)
 	}
+
+	// resp.Body is still untouched here. A tee is the only way to see the real
+	// stream: the SSE scanner discards comments, event lines and blank lines
+	// before any handler is given a chance to look at them.
+	service.CaptureUpstreamResponse(c, info, resp)
 
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()

@@ -176,6 +176,18 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		url := info.ChannelBaseUrl
 		url = strings.Replace(url, "{model}", info.UpstreamModelName, -1)
 		return url, nil
+	case constant.ChannelTypeIFlytekMaaS:
+		// iFlytek MaaS is OpenAI-compatible but versions its paths /v2 instead
+		// of /v1. Swapping the leading segment keeps every endpoint working
+		// (chat/completions, models, embeddings) without enumerating relay
+		// modes. RequestURLPath carries the query string, so trim the prefix
+		// rather than replacing "/v1" anywhere in the string.
+		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
+			info.RelayMode != relayconstant.RelayModeResponses &&
+			info.RelayMode != relayconstant.RelayModeResponsesCompact {
+			return fmt.Sprintf("%s/v2/chat/completions", info.ChannelBaseUrl), nil
+		}
+		return info.ChannelBaseUrl + "/v2" + strings.TrimPrefix(info.RequestURLPath, "/v1"), nil
 	default:
 		if (info.RelayFormat == types.RelayFormatClaude || info.RelayFormat == types.RelayFormatGemini) &&
 			info.RelayMode != relayconstant.RelayModeResponses &&
@@ -251,7 +263,13 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
-	if info.ChannelType != constant.ChannelTypeOpenAI && info.ChannelType != constant.ChannelTypeAzure {
+	// Without stream_options the upstream never reports usage on a streamed
+	// response and billing falls back to the local tokenizer, so a provider
+	// that does support it has to be listed here as well as in
+	// streamSupportedChannels — that map alone is a no-op on this path.
+	if info.ChannelType != constant.ChannelTypeOpenAI &&
+		info.ChannelType != constant.ChannelTypeAzure &&
+		info.ChannelType != constant.ChannelTypeIFlytekMaaS {
 		request.StreamOptions = nil
 	}
 	// Nested reasoning is an OpenRouter-compatible input dialect and needs
