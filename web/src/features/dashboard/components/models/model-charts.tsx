@@ -62,7 +62,6 @@ interface ModelChartsProps {
   title?: string
   description?: string
   headerActions?: ReactNode
-  children?: ReactNode
 }
 
 export function ModelCharts(props: ModelChartsProps) {
@@ -199,9 +198,6 @@ export function ModelCharts(props: ModelChartsProps) {
           />
         )}
       </div>
-      {props.children && (
-        <div className='border-t p-4 sm:p-5'>{props.children}</div>
-      )}
     </div>
   )
 }
