@@ -581,7 +581,19 @@ func identifyClientTool(header http.Header) string {
 			return "Bun"
 		}
 	}
-	return requestSourceLanguages[language]
+	if source := requestSourceLanguages[language]; source != "" {
+		return source
+	}
+	// Unrecognized declarations stay unknown; only requests without any source
+	// declaration are ordinary HTTP requests.
+	for _, key := range []string{"User-Agent", "Originator", "Editor-Version", "X-Title", "HTTP-Referer", "X-Client-Name", "X-Stainless-Lang", "X-Stainless-Runtime"} {
+		for _, value := range header.Values(key) {
+			if strings.TrimSpace(value) != "" {
+				return ""
+			}
+		}
+	}
+	return "Normal HTTP"
 }
 
 // These names describe an explicitly declared product, not a guess from request

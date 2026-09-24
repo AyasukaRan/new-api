@@ -195,9 +195,10 @@ func TestRequestMetadataIsolatesRetriedChannelAttempts(t *testing.T) {
 
 func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		headers map[string]string
-		want    string
+		name         string
+		headers      map[string]string
+		headerValues http.Header
+		want         string
 	}{
 		{name: "Codex", headers: map[string]string{"User-Agent": "codex_cli_rs/0.100 (Darwin)"}, want: "Codex CLI"},
 		{name: "Codex originator", headers: map[string]string{"originator": "codex_cli_rs"}, want: "Codex CLI"},
@@ -278,7 +279,38 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 		{name: "email is not a client name", headers: map[string]string{"X-Client-Name": "private@example.com"}},
 		{name: "control characters are not trimmed away", headers: map[string]string{"X-Client-Name": "Runner\n"}},
 		{name: "name length is bounded", headers: map[string]string{"X-Client-Name": strings.Repeat("a", 65)}},
-		{name: "missing headers stay unknown"},
+		{name: "nil headers are normal HTTP", want: "Normal HTTP"},
+		{name: "empty headers are normal HTTP", headers: map[string]string{}, want: "Normal HTTP"},
+		{
+			name: "inbound HTTP request without source declarations",
+			headers: map[string]string{
+				"Accept": "*/*", "Accept-Encoding": "gzip", "Authorization": "Bearer not-retained",
+				"Content-Length": "123", "Content-Type": "application/json",
+				"X-Forwarded-For": "192.0.2.10", "X-Forwarded-Host": "api.example.com", "X-Forwarded-Proto": "https",
+			},
+			want: "Normal HTTP",
+		},
+		{
+			name: "empty source declarations are normal HTTP",
+			headers: map[string]string{
+				"User-Agent": "", "Originator": "", "Editor-Version": "", "X-Title": "",
+				"HTTP-Referer": "", "X-Client-Name": "", "X-Stainless-Lang": "", "X-Stainless-Runtime": "",
+			},
+			want: "Normal HTTP",
+		},
+		{
+			name: "whitespace source declarations are normal HTTP",
+			headers: map[string]string{
+				"User-Agent": " \t ", "Originator": " \t ", "Editor-Version": " \t ", "X-Title": " \t ",
+				"HTTP-Referer": " \t ", "X-Client-Name": " \t ", "X-Stainless-Lang": " \t ", "X-Stainless-Runtime": " \t ",
+			},
+			want: "Normal HTTP",
+		},
+		{name: "unknown originator stays unknown", headers: map[string]string{"Originator": "private-originator"}},
+		{name: "unknown editor stays unknown", headers: map[string]string{"Editor-Version": "private-editor/1.0"}},
+		{name: "referer alone insufficient", headers: map[string]string{"HTTP-Referer": "https://cline.bot"}},
+		{name: "runtime alone stays unknown", headers: map[string]string{"X-Stainless-Runtime": "private-runtime"}},
+		{name: "later source declaration stays unknown", headerValues: http.Header{"User-Agent": {" \t ", "private-product/1.0"}}},
 		{name: "missing product version", headers: map[string]string{"User-Agent": "python-requests/"}},
 		{name: "unrelated SDK", headers: map[string]string{"User-Agent": "anthropic-python/1.0.0", "x-opencode-session": "arbitrary"}},
 		{name: "title alone insufficient", headers: map[string]string{"X-Title": "Cline"}},
@@ -287,13 +319,17 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Request.Header = test.headerValues.Clone()
+			if test.headers != nil {
+				c.Request.Header = make(http.Header)
+			}
 			for key, value := range test.headers {
 				c.Request.Header.Set(key, value)
 			}
-			c.Request.Header.Set("X-Private-Context", "not retained")
 			info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions}
 			defer BeginRequestMetadata(c, info)()
 			// Later upstream header overrides must not replace the original source.
+			c.Request.Header = make(http.Header)
 			c.Request.Header.Set("User-Agent", "opencode/99.0.0")
 			other := model.NewLogOther()
 			AppendRequestMetadata(c, info, other)
