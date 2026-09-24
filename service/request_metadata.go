@@ -599,6 +599,7 @@ func identifyClientTool(header http.Header) string {
 // These names describe an explicitly declared product, not a guess from request
 // content. Applications which hide behind an SDK can opt in with X-Client-Name.
 var requestSourceApplications = map[string]string{
+	"codewhale":          "CodeWhale",
 	"n8n":                "n8n",
 	"dify":               "Dify",
 	"flowise":            "Flowise",
