@@ -117,6 +117,75 @@ describe('request trace conversation', () => {
     }
   )
 
+  test.each([
+    '[\n  {"used_tag": "first\nsecond", "result": "normal"}\n]',
+    '{"rows":[{"id":1}],"unfinished":',
+  ])(
+    'preserves malformed JSON replies as original code instead of interpreting Markdown: %s',
+    async (content) => {
+      const user = userEvent.setup()
+      render(
+        <RequestTraceConversation
+          legs={[
+            leg(null, {
+              direction: 'client_response',
+              rendered: { content, stream: false },
+            }),
+          ]}
+        />
+      )
+
+      const raw = screen.getByRole('textbox', { name: 'JSON' })
+      expect(raw).toHaveTextContent(content.startsWith('[') ? '[' : '{')
+      expect(raw).toHaveTextContent(
+        content.includes('used_tag') ? '"used_tag"' : '"rows"'
+      )
+      expect(raw).not.toHaveTextContent('“')
+      expect(
+        screen.queryByRole('list', { name: 'JSON tree' })
+      ).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
+      expect(await navigator.clipboard.readText()).toBe(content)
+    }
+  )
+
+  test('keeps a complete leading JSON document and its following Markdown distinct', () => {
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(null, {
+            direction: 'client_response',
+            rendered: { content: '{"rows":[1]}\n\n**Done**', stream: false },
+          }),
+        ]}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /rows/ })).toBeInTheDocument()
+    expect(screen.getByText('Done').tagName).toBe('STRONG')
+  })
+
+  test('keeps a leading Markdown link as a link instead of treating it as broken JSON', () => {
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(null, {
+            direction: 'client_response',
+            rendered: { content: '[1](https://example.com)', stream: false },
+          }),
+        ]}
+      />
+    )
+
+    expect(screen.getByRole('link', { name: '1' })).toHaveAttribute(
+      'href',
+      'https://example.com'
+    )
+    expect(
+      screen.queryByRole('textbox', { name: 'JSON' })
+    ).not.toBeInTheDocument()
+  })
+
   test('separate JSON blocks keep surrounding Markdown and original numeric tokens', async () => {
     const user = userEvent.setup()
     const first = '{"rows":[1],"id":9007199254740993}'

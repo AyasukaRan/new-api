@@ -162,10 +162,7 @@ func (s *geminiGroundingStreamCandidate) appendContent(content dto.GeminiChatCon
 		partStart := part.text.Len()
 		part.text.WriteString(text)
 
-		// A standalone newline is intentionally omitted by the existing Gemini
-		// renderer. Keep it in the source part so later byte offsets stay correct,
-		// but do not claim that it has a corresponding rendered span.
-		if text == "\n" || index >= len(renderedParts) || renderedParts[index].startByte < 0 {
+		if index >= len(renderedParts) || renderedParts[index].startByte < 0 {
 			continue
 		}
 		renderedStart := renderedBase + renderedParts[index].startByte

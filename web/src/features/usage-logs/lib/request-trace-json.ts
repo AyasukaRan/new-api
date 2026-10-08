@@ -156,10 +156,45 @@ export function isJsonFenceLanguage(info: string): boolean {
   return language === 'json' || language === 'application/json'
 }
 
-/** Recognize a JSON document or a single JSON fence, preserving its source. */
+/** Preserve clearly JSON-shaped documents when their syntax is incomplete. */
+function isMalformedJsonDocument(content: string): boolean {
+  // Stay narrow: a Markdown link like [1](url) is not a JSON document.
+  if (!/^(?:\{\s*"|\[\s*\{\s*")/.test(content)) return false
+
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  const limit = Math.min(content.length, MAX_JSON_BLOCK_CHARACTERS)
+  for (let index = 0; index < limit; index++) {
+    const character = content[index]
+    if (quoted) {
+      if (character === '\n' || character === '\r') return true
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') quoted = true
+    else if (character === '{' || character === '[') depth++
+    else if (character === '}' || character === ']') {
+      if (--depth !== 0) continue
+      if (!isStructuredJson(content.slice(0, index + 1))) return true
+
+      // A valid leading document followed by another line remains mixed
+      // Markdown, so its tree and the following explanation render separately.
+      const remainder = content.slice(index + 1)
+      return remainder.trim() !== '' && !/^[ \t]*\r?\n/.test(remainder)
+    }
+  }
+  return true
+}
+
+/** Recognize JSON, malformed JSON candidates or a single fence without rewriting. */
 export function getTraceJsonContent(content: string): string | undefined {
   const trimmed = content.trim()
-  if (isStructuredJson(trimmed)) return content
+  if (isStructuredJson(trimmed) || isMalformedJsonDocument(trimmed)) {
+    return content
+  }
 
   // Only a whole fence is unwrapped here. Mixed Markdown stays in Response so
   // lists, quotes and surrounding prose retain their original structure.

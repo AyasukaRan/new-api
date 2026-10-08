@@ -437,6 +437,99 @@ func TestConvertResponseUsesBillingUsageWhenRestoringNativeTargets(t *testing.T)
 	assert.Equal(t, 17, geminiValue.UsageMetadata.TotalTokenCount)
 }
 
+func TestGeminiResponsePreservesTextPartBoundaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		parts      []dto.GeminiPart
+		want       string
+		wantStream string
+	}{
+		{
+			name: "JSON split inside keys values and escapes",
+			parts: []dto.GeminiPart{
+				{Text: `[{"used_`}, {Text: `tag`}, {Text: `":"cli`},
+				{Text: `ent","text":"line`}, {Text: `\`}, {Text: `nnext`},
+				{Text: `","ok":`}, {Text: `true}`}, {Text: `]`},
+			},
+			want: `[{"used_tag":"client","text":"line\nnext","ok":true}]`,
+		},
+		{
+			name: "source whitespace and empty parts",
+			parts: []dto.GeminiPart{
+				{Text: ""}, {Text: " first "}, {Text: ""}, {Text: "line"},
+				{Text: "\n"}, {Text: "\n"}, {Text: "second\n"}, {Text: ""},
+			},
+			want: " first line\n\nsecond\n",
+		},
+		{
+			name: "rendered image and code keep their block separators",
+			parts: []dto.GeminiPart{
+				{Text: "before"},
+				{InlineData: &dto.GeminiInlineData{MimeType: "image/png", Data: "aW1hZ2U="}},
+				{Text: "after"},
+				{ExecutableCode: &dto.GeminiPartExecutableCode{Language: "python", Code: "print(1)"}},
+				{CodeExecutionResult: &dto.GeminiPartCodeExecutionResult{Output: "1"}},
+			},
+			want:       "before\n![image](data:image/png;base64,aW1hZ2U=)\nafter\n```python\nprint(1)\n```\n```output\n1\n```",
+			wantStream: "before\n![image](data:image/png;base64,aW1hZ2U=)\nafter\n```python\nprint(1)\n```\n\n```output\n1\n```\n",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := &dto.GeminiChatResponse{
+				Candidates: []dto.GeminiChatCandidate{{
+					Content: dto.GeminiChatContent{Parts: testCase.parts},
+				}},
+			}
+			nonStream := ResponseGeminiChat2OpenAI("chatcmpl-parts", 1, response)
+			require.Len(t, nonStream.Choices, 1)
+			assert.Equal(t, testCase.want, nonStream.Choices[0].Message.StringContent())
+
+			stream, _ := StreamResponseGeminiChat2OpenAI(response)
+			require.Len(t, stream.Choices, 1)
+			wantStream := testCase.wantStream
+			if wantStream == "" {
+				wantStream = testCase.want
+			}
+			assert.Equal(t, wantStream, stream.Choices[0].Delta.GetContentString())
+		})
+	}
+}
+
+func TestGeminiStreamGroundingPreservesStandaloneNewline(t *testing.T) {
+	state, err := NewResponseStreamState(types.RelayFormatGemini, types.RelayFormatOpenAI, ResponseStreamOptions{
+		ID: "chatcmpl-grounding", Model: "gemini-test",
+	})
+	require.NoError(t, err)
+	var content strings.Builder
+	var annotations []byte
+	for _, text := range []string{"hello", "\n", "world"} {
+		candidate := dto.GeminiChatCandidate{
+			Content: dto.GeminiChatContent{Parts: []dto.GeminiPart{{Text: text}}},
+		}
+		if text == "world" {
+			candidate.GroundingMetadata = &dto.GeminiGroundingMetadata{
+				GroundingChunks:   []byte(`[{"web":{"uri":"https://example.com/source","title":"Source"}}]`),
+				GroundingSupports: []byte(`[{"segment":{"partIndex":0,"startIndex":5,"endIndex":11,"text":"\nworld"},"groundingChunkIndices":[0]}]`),
+			}
+		}
+		results, err := ConvertStreamResponseChunk(nil, nil, state, &dto.GeminiChatResponse{
+			Candidates: []dto.GeminiChatCandidate{candidate},
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		chunk, ok := results[0].Value.(*dto.ChatCompletionsStreamResponse)
+		require.True(t, ok)
+		require.Len(t, chunk.Choices, 1)
+		content.WriteString(chunk.Choices[0].Delta.GetContentString())
+		if len(chunk.Choices[0].Delta.Annotations) > 0 {
+			annotations = chunk.Choices[0].Delta.Annotations
+		}
+	}
+	assert.Equal(t, "hello\nworld", content.String())
+	assert.JSONEq(t, `[{"type":"url_citation","url_citation":{"start_index":5,"end_index":11,"url":"https://example.com/source","title":"Source"}}]`, string(annotations))
+}
+
 func TestConvertStreamResponseDirectConverters(t *testing.T) {
 	info := &convmeta.Values{
 		ClaudeConvertInfo: &convmeta.ClaudeConvertInfo{
