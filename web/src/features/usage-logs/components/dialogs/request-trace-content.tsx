@@ -54,6 +54,7 @@ export function RequestTraceContent(props: { content: string }) {
   return (
     <Response
       final
+      className='whitespace-pre-wrap'
       markdown={requestTraceMarkdown}
       renderCodeBlock={renderTraceCodeBlock}
       maxMarkdownCharacters={hasJsonBlock ? 2_000_000 : undefined}

@@ -51,6 +51,37 @@ function leg(
 }
 
 describe('request trace conversation', () => {
+  test.each(['\n', '\r\n'])(
+    'preserves recorded request line breaks and spacing with %j separators',
+    async (separator) => {
+      const user = userEvent.setup()
+      const content = [
+        'Please parse the test information:',
+        '',
+        '**Project**: Public',
+        'appid: sample-app',
+        'Language: en_us',
+        'Tickets: 1001,  1002',
+      ].join(separator)
+      render(
+        <RequestTraceConversation
+          legs={[leg({ messages: [{ role: 'user', content }] })]}
+        />
+      )
+
+      const message = within(screen.getByRole('article', { name: 'User' }))
+      const paragraph = message.getByText(/appid: sample-app/)
+      expect(paragraph.textContent).toBe(
+        'Project: Public\nappid: sample-app\nLanguage: en_us\nTickets: 1001,  1002'
+      )
+      // The trace preserves text-node whitespace, including Markdown soft breaks.
+      expect(paragraph.closest('.whitespace-pre-wrap')).not.toBeNull()
+      expect(message.getByText('Project').tagName).toBe('STRONG')
+      await user.click(message.getByRole('button', { name: 'Copy message' }))
+      expect(await navigator.clipboard.readText()).toBe(content)
+    }
+  )
+
   test.each([
     'Result:\n{"rows":[{"text":"literal **stars** &amp;"}]}\nDone.',
     'Result:\n\n{\n  "rows": [\n\n    {"text":"literal **stars** &amp;"}\n  ]\n}\n\nDone.',
@@ -1639,8 +1670,8 @@ describe('request trace conversation', () => {
     expect(sources.flatMap((source) => source.messages)).toHaveLength(0)
   })
 
-  test('long messages start collapsed and expand into a bounded scroll area', async () => {
-    const longContent = `Large captured message ${'context '.repeat(1_200)}`
+  test('long messages retain newlines when expanded into a bounded plain-text fallback', async () => {
+    const longContent = `Large captured message\nLanguage: en_us\n${'context '.repeat(3_000)}`
     render(
       <RequestTraceConversation
         legs={[leg({ messages: [{ role: 'user', content: longContent }] })]}
@@ -1661,6 +1692,10 @@ describe('request trace conversation', () => {
     )
     expect(panel).toHaveTextContent('Large captured message')
     expect(panel).toHaveClass('overflow-auto', 'max-h-[32rem]')
+    const content = message.getByText(longContent, {
+      normalizer: (text) => text,
+    })
+    expect(content).toHaveClass('whitespace-pre-wrap')
   })
 
   test('reasoning uses a single-line collapsed label and opens with the keyboard', async () => {
