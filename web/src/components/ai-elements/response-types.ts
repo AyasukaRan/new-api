@@ -21,12 +21,21 @@ import type { FootnoteNode, ParsedNode } from 'stream-markdown-parser'
 
 import type { FadeRun } from './response-fade'
 
+export type ResponseCodeBlockRenderer = (
+  code: string,
+  language: string
+) => ReactNode
+
 export type ResponseProps = {
   children?: ReactNode
   className?: string
   final?: boolean
   /** Distinct stream-markdown-parser cache id when multiple Responses stream concurrently */
   parserId?: string
+  /** Return undefined to keep the default viewer for an unhandled language. */
+  renderCodeBlock?: ResponseCodeBlockRenderer
+  /** Override the Markdown parsing budget for bounded, specialized viewers. */
+  maxMarkdownCharacters?: number
 }
 
 export type AlertKind = 'note' | 'tip' | 'important' | 'warning' | 'caution'

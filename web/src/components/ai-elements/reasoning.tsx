@@ -21,6 +21,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { BrainIcon, ChevronDownIcon } from 'lucide-react'
 import {
   type ComponentProps,
+  type ReactNode,
   createContext,
   memo,
   useContext,
@@ -187,7 +188,7 @@ export const ReasoningTrigger = memo(
 export type ReasoningContentProps = ComponentProps<
   typeof CollapsibleContent
 > & {
-  children: string
+  children: ReactNode
 }
 
 export const ReasoningContent = memo(
@@ -204,13 +205,17 @@ export const ReasoningContent = memo(
         {...props}
       >
         <div className='transition-[opacity,transform] duration-200 ease-out group-data-[closed]/reasoning-content:-translate-y-1 group-data-[closed]/reasoning-content:opacity-0 group-data-[open]/reasoning-content:translate-y-0 group-data-[open]/reasoning-content:opacity-100 motion-reduce:transition-none'>
-          <Response
-            className='grid gap-1.5 [&_li]:my-0.5 [&_ol]:my-1.5 [&_p]:my-1.5 [&_p]:leading-5 [&_ul]:my-1.5'
-            final={!isStreaming}
-            parserId='new-api-reasoning'
-          >
-            {children}
-          </Response>
+          {typeof children === 'string' ? (
+            <Response
+              className='grid gap-1.5 [&_li]:my-0.5 [&_ol]:my-1.5 [&_p]:my-1.5 [&_p]:leading-5 [&_ul]:my-1.5'
+              final={!isStreaming}
+              parserId='new-api-reasoning'
+            >
+              {children}
+            </Response>
+          ) : (
+            children
+          )}
         </div>
       </CollapsibleContent>
     )

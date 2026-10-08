@@ -20,17 +20,16 @@ import { ChevronDown, Wrench } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { CodeBlock } from '@/components/ai-elements/code-block'
 import { Message, MessageContent } from '@/components/ai-elements/message'
 import {
   Reasoning,
   ReasoningContent,
   ReasoningTrigger,
 } from '@/components/ai-elements/reasoning'
-import { Response } from '@/components/ai-elements/response'
-import { Tool, ToolContent, ToolInput } from '@/components/ai-elements/tool'
+import { Tool, ToolContent } from '@/components/ai-elements/tool'
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState } from '@/components/empty-state'
+import { JsonViewer } from '@/components/json-viewer'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -38,13 +37,16 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import { cn } from '@/lib/utils'
 
 import {
   buildRequestTraceConversation,
   type TraceConversationMessage,
   type TraceConversationPart,
 } from '../../lib/request-trace-conversation'
+import { getTraceJsonContent } from '../../lib/request-trace-json'
 import type { RequestTraceLeg } from '../../types'
+import { RequestTraceContent } from './request-trace-content'
 
 interface TraceConversationEntry {
   id: string
@@ -112,17 +114,23 @@ function TraceToolPart(props: {
         />
       </CollapsibleTrigger>
       <ToolContent>
-        {isCall && <ToolInput input={props.part.value} />}
+        {isCall && (
+          <div className='p-3'>
+            <JsonViewer
+              code={
+                props.part.rawArguments ??
+                (typeof props.part.value === 'string'
+                  ? props.part.value
+                  : JSON.stringify(props.part.value, null, 2))
+              }
+              title={t('Parameters')}
+            />
+          </div>
+        )}
         {/* ToolOutput omits falsy results and lacks trace copy/line-limit controls. */}
         {result && (
           <div className='p-3'>
-            <CodeBlock
-              code={code ?? ''}
-              language='json'
-              title={t('Tool result')}
-              showToolbar
-              maxExpandedLines={24}
-            />
+            <JsonViewer code={code ?? ''} title={t('Tool result')} />
           </div>
         )}
       </ToolContent>
@@ -160,15 +168,22 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
       return JSON.stringify(part.value, null, 2)
     })
     .join('\n\n')
-  // Tools already own a collapsed, bounded panel. A large matched result must
-  // not hide the entire call card behind another message-level disclosure.
-  const textLength = props.entry.parts.reduce((length, { part }) => {
-    if (part.type === 'text' || part.type === 'reasoning') {
-      return length + part.text.length
-    }
-    if (part.type === 'raw') return length + JSON.stringify(part.value).length
-    return length
-  }, 0)
+  // JSON and tools own bounded disclosures. Only long prose needs
+  // another message-level collapse; a JSON reply should immediately show its tree.
+  const textLength = useMemo(
+    () =>
+      props.entry.parts.reduce((length, { part }) => {
+        if (part.type === 'reasoning') return length + part.text.length
+        if (
+          part.type === 'text' &&
+          getTraceJsonContent(part.text) === undefined
+        ) {
+          return length + part.text.length
+        }
+        return length
+      }, 0),
+    [props.entry.parts]
+  )
   const isLongMessage = textLength > 8_000
   const [expanded, setExpanded] = useState(!isLongMessage)
 
@@ -206,14 +221,17 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
               />
             </CollapsibleTrigger>
           )}
-          <CollapsibleContent className='max-h-[32rem] space-y-3 overflow-auto overscroll-contain'>
+          <CollapsibleContent
+            className={cn(
+              'min-w-0 space-y-3',
+              isLongMessage && 'max-h-[32rem] overflow-auto overscroll-contain'
+            )}
+          >
             {props.entry.parts.map((entry) => {
               const part = entry.part
               if (part.type === 'text') {
                 return (
-                  <Response key={entry.id} final>
-                    {part.text}
-                  </Response>
+                  <RequestTraceContent key={entry.id} content={part.text} />
                 )
               }
               if (part.type === 'reasoning') {
@@ -230,22 +248,19 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
                         aria-hidden='true'
                       />
                     </ReasoningTrigger>
-                    <ReasoningContent>{part.text}</ReasoningContent>
+                    <ReasoningContent>
+                      <RequestTraceContent content={part.text} />
+                    </ReasoningContent>
                   </Reasoning>
                 )
               }
               if (part.type === 'raw') {
                 const code = JSON.stringify(part.value, null, 2)
                 return (
-                  <CodeBlock
+                  <JsonViewer
                     key={entry.id}
                     code={code}
-                    language='json'
                     title={t('Other content')}
-                    showToolbar
-                    defaultCollapsed
-                    collapsedLines={6}
-                    maxExpandedLines={24}
                   />
                 )
               }
@@ -358,15 +373,7 @@ export function RequestTraceConversation(props: { legs: RequestTraceLeg[] }) {
                 </p>
               )}
               {source.leg.body && (
-                <CodeBlock
-                  code={source.leg.body}
-                  language='text'
-                  title={t('Raw payload')}
-                  showToolbar
-                  defaultCollapsed
-                  collapsedLines={6}
-                  maxExpandedLines={24}
-                />
+                <JsonViewer code={source.leg.body} title={t('Raw payload')} />
               )}
             </div>
           )}

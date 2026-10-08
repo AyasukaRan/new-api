@@ -27,6 +27,7 @@ export type TraceConversationPart =
       id?: string
       name?: string
       value: unknown
+      rawArguments?: string
       linked?: boolean
       isError?: boolean
       result?: { value: unknown; isError?: boolean; name?: string }
@@ -148,6 +149,7 @@ function conversationParts(content: unknown): TraceConversationPart[] {
         id: optionalString(part.call_id) ?? optionalString(part.id),
         name: optionalString(part.name),
         value: toolValue(part.arguments ?? part.input),
+        rawArguments: optionalString(part.arguments ?? part.input),
       }
     }
     if (
@@ -238,6 +240,7 @@ function conversationMessages(items: unknown[]): TraceConversationMessage[] {
             id: optionalString(call?.id),
             name: optionalString(fn.name),
             value: toolValue(fn.arguments),
+            rawArguments: optionalString(fn.arguments),
           })
         }
       }
@@ -247,6 +250,7 @@ function conversationMessages(items: unknown[]): TraceConversationMessage[] {
           type: 'tool-call',
           name: optionalString(legacyCall.name),
           value: toolValue(legacyCall.arguments),
+          rawArguments: optionalString(legacyCall.arguments),
         })
       }
     }
@@ -553,6 +557,7 @@ function conversationSource(leg: RequestTraceLeg): TraceConversationSource {
         id: call.id,
         name: call.name,
         value: toolValue(call.arguments),
+        rawArguments: optionalString(call.arguments),
       })
     }
     if (parts.length > 0) source.messages.push({ role: 'assistant', parts })

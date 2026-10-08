@@ -23,6 +23,7 @@ import { getMarkdown, parseMarkdownToStructure } from 'stream-markdown-parser'
 
 import { cn } from '@/lib/utils'
 
+import { ResponseCodeBlockProvider } from './response-code-block'
 import { getMarkdownContent, parseResponseContent } from './response-content'
 import {
   beginRun,
@@ -58,7 +59,8 @@ export const Response = memo((props: ResponseProps) => {
   const shouldAnimate = !isFinal
   const parserId = props.parserId ?? DEFAULT_PARSER_ID
   const markdown = getCachedMarkdown(parserId)
-  const shouldParseMarkdown = content.length <= MAX_PARSED_MARKDOWN_CHARS
+  const shouldParseMarkdown =
+    content.length <= (props.maxMarkdownCharacters ?? MAX_PARSED_MARKDOWN_CHARS)
   const fadeStateRef = useRef<FadeState | null>(null)
   if (fadeStateRef.current == null) {
     fadeStateRef.current = createFadeState()
@@ -110,15 +112,17 @@ export const Response = memo((props: ResponseProps) => {
   })
 
   return (
-    <div
-      className={cn(
-        'size-full min-w-0 text-pretty [&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
-        props.className
-      )}
-    >
-      {renderedContent}
-      {footnotes}
-    </div>
+    <ResponseCodeBlockProvider renderCodeBlock={props.renderCodeBlock}>
+      <div
+        className={cn(
+          'size-full min-w-0 text-pretty [&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+          props.className
+        )}
+      >
+        {renderedContent}
+        {footnotes}
+      </div>
+    </ResponseCodeBlockProvider>
   )
 })
 

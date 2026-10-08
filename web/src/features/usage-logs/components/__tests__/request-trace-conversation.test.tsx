@@ -23,6 +23,10 @@ import { describe, expect, test } from 'vitest'
 import { buildRequestTraceConversation } from '../../lib/request-trace-conversation'
 import type { RequestTraceLeg } from '../../types'
 import { RequestTraceConversation } from '../dialogs/request-trace-conversation'
+import {
+  RequestTraceRawLeg,
+  RequestTraceRenderedLeg,
+} from '../dialogs/request-trace-leg'
 
 function leg(
   body: unknown,
@@ -47,6 +51,213 @@ function leg(
 }
 
 describe('request trace conversation', () => {
+  test.each([
+    '{"rows":[{"translation":"Translated text"}]}',
+    '```json\n{"rows":[{"translation":"Translated text"}]}\n```',
+    'Recorded output:\n\n```json\n{"rows":[{"translation":"Translated text"}]}\n```\n\nEnd of output.',
+    '```json\n{"rows":[]}\n```\n\nBetween outputs.\n\n```json\n{"rows":[1]}\n```',
+  ])(
+    'JSON reply offers nested disclosure without losing message text: %s',
+    async (content) => {
+      render(
+        <RequestTraceConversation
+          legs={[
+            leg(
+              { choices: [{ message: { content } }] },
+              { direction: 'client_response' }
+            ),
+          ]}
+        />
+      )
+
+      const message = within(screen.getByRole('article', { name: 'Assistant' }))
+      const rows = message.getByRole('button', { name: /rows/ })
+      expect(rows).toHaveAttribute('aria-expanded', 'true')
+      rows.focus()
+      await userEvent.keyboard('{Enter}')
+      expect(rows).toHaveAttribute('aria-expanded', 'false')
+      await userEvent.keyboard('{Enter}')
+      expect(rows).toHaveAttribute('aria-expanded', 'true')
+      if (content.startsWith('Recorded')) {
+        expect(message.getByText('Recorded output:')).toBeInTheDocument()
+        expect(message.getByText('End of output.')).toBeInTheDocument()
+      }
+      if (content.includes('Between outputs.')) {
+        expect(message.getByText('Between outputs.')).toBeInTheDocument()
+      }
+    }
+  )
+
+  test('raw JSON body preserves number spelling when copied', async () => {
+    const user = userEvent.setup()
+    const body = '{ "id": 9007199254740993, "value": -0, "scale": 1e3 }'
+    render(
+      <RequestTraceRawLeg
+        traceId='trace-json'
+        leg={leg(null, { body })}
+        view='body'
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
+
+    expect(await navigator.clipboard.readText()).toBe(body)
+    expect(screen.getByText('9007199254740993')).toBeInTheDocument()
+    expect(screen.getByText('-0')).toBeInTheDocument()
+    expect(screen.getByText('1e3')).toBeInTheDocument()
+  })
+
+  test('rendered responses and captured headers use the same JSON disclosure', () => {
+    const { rerender } = render(
+      <RequestTraceRenderedLeg
+        leg={leg(null, {
+          rendered: { content: '{"rows":[1,2]}', stream: false },
+        })}
+        label='Client response'
+        showAttempt={false}
+      />
+    )
+    expect(screen.getByRole('button', { name: /rows/ })).toHaveAttribute(
+      'aria-expanded'
+    )
+
+    rerender(
+      <RequestTraceRawLeg
+        traceId='trace-json'
+        leg={leg(null, { headers: { Accept: ['application/json'] } })}
+        view='headers'
+      />
+    )
+    expect(screen.getByRole('button', { name: /Accept/ })).toHaveAttribute(
+      'aria-expanded'
+    )
+  })
+
+  test('long JSON replies expose their tree immediately instead of hiding the message', () => {
+    const content = JSON.stringify({
+      rows: [{ text: 'Recorded text '.repeat(800) }],
+    })
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(null, {
+            direction: 'client_response',
+            rendered: { content, stream: false },
+          }),
+        ]}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /rows/ })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Expand' })
+    ).not.toBeInTheDocument()
+    // The JSON viewer owns scrolling; its message must not add another scrollbar.
+    expect(
+      screen
+        .getByRole('article', { name: 'Assistant' })
+        .querySelectorAll('.overflow-auto')
+    ).toHaveLength(1)
+  })
+
+  test('JSON in recorded reasoning uses the same tree when opened', async () => {
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(null, {
+            direction: 'client_response',
+            rendered: {
+              content: 'Answer',
+              reasoning: '{"steps":[{"check":"complete"}]}',
+              stream: false,
+            },
+          }),
+        ]}
+      />
+    )
+    expect(
+      screen.queryByRole('button', { name: /steps/ })
+    ).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Reasoning' }))
+    expect(screen.getByRole('button', { name: /steps/ })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+  })
+
+  test.each(['json', 'quoted-unlabelled'])(
+    'large %s fences retain surrounding Markdown and stay expandable',
+    async (style) => {
+      const code = JSON.stringify({
+        rows: [{ text: 'Detailed captured content '.repeat(1_000) }],
+      })
+      const fence =
+        style === 'json'
+          ? `\`\`\`json\n${code}\n\`\`\``
+          : `> \`\`\`\n> ${code}\n> \`\`\``
+      const content = `## Recorded output\n\n${fence}\n\nEnd of output.`
+      render(
+        <RequestTraceConversation
+          legs={[
+            leg(null, {
+              direction: 'client_response',
+              rendered: { content, stream: false },
+            }),
+          ]}
+        />
+      )
+      await userEvent.click(screen.getByRole('button', { name: 'Expand' }))
+
+      expect(
+        screen.getByRole('heading', { name: 'Recorded output' })
+      ).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /rows/ })).toBeInTheDocument()
+      expect(screen.getByText('End of output.')).toBeInTheDocument()
+    }
+  )
+
+  test('tool arguments and matched JSON output retain independent trees inside one card', async () => {
+    const user = userEvent.setup()
+    const argumentsCode = '{ "id": 9007199254740993, "options": {"limit": 0} }'
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg({
+            messages: [
+              {
+                role: 'assistant',
+                tool_calls: [
+                  {
+                    id: 'call_json',
+                    type: 'function',
+                    function: { name: 'lookup', arguments: argumentsCode },
+                  },
+                ],
+              },
+              {
+                role: 'tool',
+                tool_call_id: 'call_json',
+                content: '{"rows":[{"found":false}]}',
+              },
+            ],
+          }),
+        ]}
+      />
+    )
+    await user.click(
+      screen.getByRole('button', { name: /Tool call lookup call_json/ })
+    )
+
+    expect(screen.getByRole('button', { name: /options/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /rows/ })).toBeInTheDocument()
+    expect(screen.getByText('9007199254740993')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('article', { name: 'Tool' })
+    ).not.toBeInTheDocument()
+    await user.click(screen.getAllByRole('button', { name: 'Copy JSON' })[0])
+    expect(await navigator.clipboard.readText()).toBe(argumentsCode)
+  })
+
   test('joins client history with the final reply without repeating upstream retries', () => {
     const legs = [
       leg(
@@ -171,6 +382,7 @@ describe('request trace conversation', () => {
             id: 'call_branch',
             name: 'bash',
             value: { command: 'git branch --show-current' },
+            rawArguments: '{"command":"git branch --show-current"}',
             linked: true,
             result: { value: 'main' },
           },
@@ -198,6 +410,7 @@ describe('request trace conversation', () => {
             id: 'call_status',
             name: 'bash',
             value: { command: 'git status --short' },
+            rawArguments: '{"command":"git status --short"}',
             linked: true,
             result: { value: '(no output)' },
           },

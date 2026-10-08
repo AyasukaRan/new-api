@@ -19,36 +19,19 @@ For commercial licensing, please contact support@quantumnous.com
 import { ChevronDown, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { CodeBlock } from '@/components/ai-elements/code-block'
 import {
   Reasoning,
   ReasoningContent,
   ReasoningTrigger,
 } from '@/components/ai-elements/reasoning'
-import { Response } from '@/components/ai-elements/response'
-import { ToolContent, ToolInput } from '@/components/ai-elements/tool'
+import { ToolContent } from '@/components/ai-elements/tool'
+import { JsonViewer } from '@/components/json-viewer'
 import { StatusBadge } from '@/components/status-badge'
 import { Collapsible, CollapsibleTrigger } from '@/components/ui/collapsible'
 
 import type { RequestTraceLeg, RequestTraceToolCall } from '../../types'
+import { RequestTraceContent } from './request-trace-content'
 import { RequestTraceObject } from './request-trace-object'
-
-/** Pretty-prints a JSON payload, leaving anything unparseable untouched. */
-function formatPayload(body: string): { code: string; language: string } {
-  const trimmed = body.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-    return { code: body, language: 'text' }
-  }
-  try {
-    return {
-      code: JSON.stringify(JSON.parse(trimmed), null, 2),
-      language: 'json',
-    }
-  } catch {
-    // A truncated payload is no longer valid JSON but is still worth reading.
-    return { code: body, language: 'json' }
-  }
-}
 
 export function RequestTraceRawLeg(props: {
   traceId: string
@@ -65,32 +48,18 @@ export function RequestTraceRawLeg(props: {
       )
     }
     return (
-      <CodeBlock
+      <JsonViewer
         code={JSON.stringify(props.leg.headers, null, 2)}
-        language='json'
         title={t('Headers')}
-        showToolbar
-        maxExpandedLines={40}
       />
     )
   }
-  const payload = formatPayload(props.leg.body)
   return (
     <div className='min-w-0 space-y-3'>
       {props.leg.has_object && (
         <RequestTraceObject traceId={props.traceId} leg={props.leg} />
       )}
-      {props.leg.body && (
-        <CodeBlock
-          code={payload.code}
-          language={payload.language}
-          title={t('Body')}
-          showToolbar
-          showLineNumbers
-          collapsedLines={20}
-          maxExpandedLines={40}
-        />
-      )}
+      {props.leg.body && <JsonViewer code={props.leg.body} title={t('Body')} />}
       {!props.leg.body && !props.leg.has_object && (
         <p className='text-muted-foreground text-sm'>
           {t('No body was captured for this leg.')}
@@ -103,17 +72,11 @@ export function RequestTraceRawLeg(props: {
 /**
  * A recorded tool call is a request, not a completed invocation: the trace has
  * no result and no lifecycle state. ToolHeader would have to be given one and
- * would label it "Running" or "Completed", so the header is composed here while
- * the argument rendering is reused from ToolInput.
+ * would label it "Running" or "Completed", so the header is composed here and
+ * the captured argument source is preserved in the JSON viewer.
  */
 function RequestTraceToolCallItem(props: { call: RequestTraceToolCall }) {
   const { t } = useTranslation()
-  let parsedArguments: unknown = props.call.arguments ?? ''
-  try {
-    parsedArguments = JSON.parse(props.call.arguments || '{}')
-  } catch {
-    parsedArguments = props.call.arguments
-  }
 
   return (
     <Collapsible className='not-prose w-full rounded-md border'>
@@ -130,7 +93,12 @@ function RequestTraceToolCallItem(props: { call: RequestTraceToolCall }) {
         />
       </CollapsibleTrigger>
       <ToolContent>
-        <ToolInput input={parsedArguments} />
+        <div className='p-3'>
+          <JsonViewer
+            code={props.call.arguments ?? ''}
+            title={t('Parameters')}
+          />
+        </div>
       </ToolContent>
     </Collapsible>
   )
@@ -195,11 +163,13 @@ export function RequestTraceRenderedLeg(props: {
               aria-hidden='true'
             />
           </ReasoningTrigger>
-          <ReasoningContent>{rendered.reasoning}</ReasoningContent>
+          <ReasoningContent>
+            <RequestTraceContent content={rendered.reasoning} />
+          </ReasoningContent>
         </Reasoning>
       )}
 
-      {rendered.content && <Response final>{rendered.content}</Response>}
+      {rendered.content && <RequestTraceContent content={rendered.content} />}
 
       {rendered.tool_calls?.map((call, index) => (
         <RequestTraceToolCallItem

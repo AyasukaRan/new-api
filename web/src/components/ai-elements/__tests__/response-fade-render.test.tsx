@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { Response } from '../response'
@@ -35,9 +35,9 @@ describe('Response streaming fade', () => {
   test('wraps newly streamed words when final is false', () => {
     const { rerender } = render(<Response final={false}>Hello</Response>)
 
-    expect(document.querySelectorAll('[data-stream-fade]').length).toBeGreaterThan(
-      0
-    )
+    expect(
+      document.querySelectorAll('[data-stream-fade]').length
+    ).toBeGreaterThan(0)
     expect(screen.getByText('Hello')).toBeTruthy()
 
     rerender(<Response final={false}>Hello world</Response>)
@@ -74,9 +74,9 @@ describe('Response streaming fade', () => {
   test('does not re-animate words after markdown restructuring around strong', () => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
     const { rerender } = render(<Response final={false}>**fin</Response>)
-    expect(document.querySelectorAll('[data-stream-fade]').length).toBeGreaterThan(
-      0
-    )
+    expect(
+      document.querySelectorAll('[data-stream-fade]').length
+    ).toBeGreaterThan(0)
 
     vi.spyOn(performance, 'now').mockReturnValue(
       1000 + FADE_DURATION_MS + FADE_STAGGER_MAX_MS + 1
@@ -104,11 +104,82 @@ describe('Response streaming fade', () => {
     const { rerender } = render(
       <Response final={false}>Streaming text</Response>
     )
-    expect(document.querySelectorAll('[data-stream-fade]').length).toBeGreaterThan(
-      0
-    )
+    expect(
+      document.querySelectorAll('[data-stream-fade]').length
+    ).toBeGreaterThan(0)
 
     rerender(<Response final>Streaming text</Response>)
     expect(document.querySelectorAll('[data-stream-fade]')).toHaveLength(0)
+  })
+})
+
+describe('Response code block rendering', () => {
+  test('an optional renderer replaces fenced JSON inside quotes and lists while preserving surrounding Markdown', () => {
+    render(
+      <Response
+        final
+        renderCodeBlock={(code, language) => {
+          if (language !== 'json') return undefined
+          return <section aria-label='JSON output'>{code}</section>
+        }}
+      >
+        {[
+          'Before the result',
+          '',
+          '> ```json',
+          '> {"source":"quoted"}',
+          '> ```',
+          '',
+          '- List result',
+          '',
+          '  ```json',
+          '  {"source":"listed"}',
+          '  ```',
+          '',
+          '```python',
+          'print("unchanged")',
+          '```',
+        ].join('\n')}
+      </Response>
+    )
+
+    expect(screen.getByText('Before the result')).toBeInTheDocument()
+    expect(screen.getAllByRole('region', { name: 'JSON output' })).toHaveLength(
+      2
+    )
+    const quote = screen.getByText('{"source":"quoted"}')
+    expect(quote.closest('blockquote')).not.toBeNull()
+    expect(
+      within(screen.getByRole('listitem')).getByRole('region', {
+        name: 'JSON output',
+      })
+    ).toHaveTextContent('{"source":"listed"}')
+    expect(screen.getByText('python')).toBeInTheDocument()
+    expect(screen.getByText('print("unchanged")')).toBeInTheDocument()
+  })
+
+  test('a response without a renderer keeps the default code viewer beside a customized response', () => {
+    const json = '```json\n{"enabled":true}\n```'
+    render(
+      <>
+        <Response
+          final
+          renderCodeBlock={(code) => (
+            <section aria-label='JSON output'>{code}</section>
+          )}
+        >
+          {json}
+        </Response>
+        <Response final>{json}</Response>
+      </>
+    )
+
+    expect(screen.getAllByRole('region', { name: 'JSON output' })).toHaveLength(
+      1
+    )
+    expect(screen.getByText('json')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Copy code' })
+    ).toBeInTheDocument()
   })
 })
