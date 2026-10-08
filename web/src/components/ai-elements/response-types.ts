@@ -17,7 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ReactNode } from 'react'
-import type { FootnoteNode, ParsedNode } from 'stream-markdown-parser'
+import type {
+  FootnoteNode,
+  ParsedNode,
+  getMarkdown,
+} from 'stream-markdown-parser'
 
 import type { FadeRun } from './response-fade'
 
@@ -27,6 +31,8 @@ export type ResponseCodeBlockRenderer = (
 ) => ReactNode
 
 export type ResponseProps = {
+  /** Optional, stable parser instance for feature-specific Markdown rules. */
+  markdown?: ReturnType<typeof getMarkdown>
   children?: ReactNode
   className?: string
   final?: boolean

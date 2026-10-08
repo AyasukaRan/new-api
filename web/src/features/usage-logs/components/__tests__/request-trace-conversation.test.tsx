@@ -52,6 +52,93 @@ function leg(
 
 describe('request trace conversation', () => {
   test.each([
+    'Result:\n{"rows":[{"text":"literal **stars** &amp;"}]}\nDone.',
+    'Result:\n\n{\n  "rows": [\n\n    {"text":"literal **stars** &amp;"}\n  ]\n}\n\nDone.',
+    '```json title="result.json"\n{"rows":[{"text":"literal **stars** &amp;"}]}\n```',
+    '```application/json\n{"rows":[{"text":"literal **stars** &amp;"}]}\n```',
+    '> Result:\n> {"rows":[{"text":"literal **stars** &amp;"}]}\n> Done.',
+  ])(
+    'recognizes JSON inside prose and annotated fences without rewriting values: %s',
+    async (content) => {
+      const user = userEvent.setup()
+      render(
+        <RequestTraceConversation
+          legs={[
+            leg(null, {
+              direction: 'client_response',
+              rendered: { content, stream: false },
+            }),
+          ]}
+        />
+      )
+
+      expect(screen.getByRole('button', { name: /rows/ })).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Expand 0' }))
+      expect(screen.getByText('"literal **stars** &amp;"')).toBeInTheDocument()
+      if (content.includes('Result:')) {
+        expect(screen.getByText('Result:')).toBeInTheDocument()
+        expect(screen.getByText('Done.')).toBeInTheDocument()
+      }
+      await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
+      expect(JSON.parse(await navigator.clipboard.readText())).toEqual({
+        rows: [{ text: 'literal **stars** &amp;' }],
+      })
+    }
+  )
+
+  test('separate JSON blocks keep surrounding Markdown and original numeric tokens', async () => {
+    const user = userEvent.setup()
+    const first = '{"rows":[1],"id":9007199254740993}'
+    const second = '{"rows":[2]}'
+    const content = `**First**\n${first}\n\nBetween outputs.\n\n${second}\n\n**Done**`
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(null, {
+            direction: 'client_response',
+            rendered: { content, stream: false },
+          }),
+        ]}
+      />
+    )
+
+    expect(screen.getAllByRole('button', { name: /rows/ })).toHaveLength(2)
+    expect(screen.getByText('First').tagName).toBe('STRONG')
+    expect(screen.getByText('Between outputs.')).toBeInTheDocument()
+    expect(screen.getByText('Done').tagName).toBe('STRONG')
+    await user.click(screen.getAllByRole('button', { name: 'Copy JSON' })[0])
+    expect(await navigator.clipboard.readText()).toBe(first)
+  })
+
+  test.each([
+    '```python\n{"rows":[1]}\n```',
+    'Inline `{"rows":[1]}` stays code.',
+    'A [1](https://example.com) link.',
+    'Result:\n{"rows":[{"value":1}],"unfinished":\nDone.',
+    'Result:\n{"rows":[{"value":1}],invalid:true}\nDone.',
+  ])(
+    'keeps non-JSON code and malformed outer documents out of the tree: %s',
+    (content) => {
+      render(
+        <RequestTraceConversation
+          legs={[
+            leg(null, {
+              direction: 'client_response',
+              rendered: { content, stream: false },
+            }),
+          ]}
+        />
+      )
+      expect(
+        screen.queryByRole('list', { name: 'JSON tree' })
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'Copy JSON' })
+      ).not.toBeInTheDocument()
+    }
+  )
+
+  test.each([
     '{"rows":[{"translation":"Translated text"}]}',
     '```json\n{"rows":[{"translation":"Translated text"}]}\n```',
     'Recorded output:\n\n```json\n{"rows":[{"translation":"Translated text"}]}\n```\n\nEnd of output.',
@@ -185,16 +272,18 @@ describe('request trace conversation', () => {
     )
   })
 
-  test.each(['json', 'quoted-unlabelled'])(
-    'large %s fences retain surrounding Markdown and stay expandable',
+  test.each(['json', 'quoted-unlabelled', 'unfenced'])(
+    'large %s JSON blocks retain surrounding Markdown and stay expandable',
     async (style) => {
       const code = JSON.stringify({
         rows: [{ text: 'Detailed captured content '.repeat(1_000) }],
       })
-      const fence =
-        style === 'json'
-          ? `\`\`\`json\n${code}\n\`\`\``
-          : `> \`\`\`\n> ${code}\n> \`\`\``
+      let fence = code
+      if (style === 'json') {
+        fence = `\`\`\`json\n${code}\n\`\`\``
+      } else if (style === 'quoted-unlabelled') {
+        fence = `> \`\`\`\n> ${code}\n> \`\`\``
+      }
       const content = `## Recorded output\n\n${fence}\n\nEnd of output.`
       render(
         <RequestTraceConversation
@@ -256,6 +345,48 @@ describe('request trace conversation', () => {
     ).not.toBeInTheDocument()
     await user.click(screen.getAllByRole('button', { name: 'Copy JSON' })[0])
     expect(await navigator.clipboard.readText()).toBe(argumentsCode)
+  })
+
+  test('mixed tool output recognizes fenced and unfenced JSON while copying the complete result', async () => {
+    const user = userEvent.setup()
+    const content =
+      'First result:\n{"rows":[{"found":false}]}\n\nSecond result:\n```json\n{"details":[{"count":0}]}\n```\n\nComplete.'
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg({
+            messages: [
+              {
+                role: 'assistant',
+                tool_calls: [
+                  {
+                    id: 'call_mixed',
+                    type: 'function',
+                    function: { name: 'lookup', arguments: '{}' },
+                  },
+                ],
+              },
+              {
+                role: 'tool',
+                tool_call_id: 'call_mixed',
+                content,
+              },
+            ],
+          }),
+        ]}
+      />
+    )
+    await user.click(
+      screen.getByRole('button', { name: /Tool call lookup call_mixed/ })
+    )
+
+    expect(screen.getByRole('button', { name: /rows/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /details/ })).toBeInTheDocument()
+    expect(screen.getByText('First result:')).toBeInTheDocument()
+    expect(screen.getByText('Second result:')).toBeInTheDocument()
+    expect(screen.getByText('Complete.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Copy to clipboard' }))
+    expect(await navigator.clipboard.readText()).toBe(content)
   })
 
   test('joins client history with the final reply without repeating upstream retries', () => {
@@ -1459,7 +1590,7 @@ describe('request trace conversation', () => {
   })
 
   test('a long matched result remains under the tool card without hiding its header', async () => {
-    const longResult = `Large tool result ${'output '.repeat(1_300)}`
+    const longResult = `Large tool result\n[stdout] **literal** <tag>\n{"unfinished":\n${'output '.repeat(1_300)}`
     render(
       <RequestTraceConversation
         legs={[
@@ -1487,6 +1618,9 @@ describe('request trace conversation', () => {
 
     expect(call).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('Tool result')).toBeInTheDocument()
+    expect(
+      screen.getByRole('textbox', { name: 'Tool result' })
+    ).toHaveTextContent('[stdout] **literal** <tag>')
     expect(
       screen.getByRole('article', { name: 'Assistant' })
     ).toHaveTextContent('Large tool result')

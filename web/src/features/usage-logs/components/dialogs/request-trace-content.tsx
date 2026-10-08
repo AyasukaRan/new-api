@@ -22,12 +22,16 @@ import { Response } from '@/components/ai-elements/response'
 import { JsonViewer } from '@/components/json-viewer'
 import { isStructuredJson } from '@/components/json-viewer/json-source'
 
-import { getTraceJsonContent } from '../../lib/request-trace-json'
+import {
+  getTraceJsonContent,
+  isJsonFenceLanguage,
+  requestTraceMarkdown,
+} from '../../lib/request-trace-json'
 
 function renderTraceCodeBlock(code: string, language: string): ReactNode {
-  const normalized = language.toLowerCase()
+  const normalized = language.trim().toLowerCase()
   if (
-    normalized === 'json' ||
+    isJsonFenceLanguage(normalized) ||
     ((normalized === 'plaintext' || normalized === 'text') &&
       isStructuredJson(code))
   ) {
@@ -43,13 +47,16 @@ export function RequestTraceContent(props: { content: string }) {
   )
   if (json !== undefined) return <JsonViewer code={json} />
 
-  const hasJsonFence =
-    /(`{3,}|~{3,})[ \t]*(?:json\b|\r?\n\s*(?:>\s*)*[{[])/i.test(props.content)
+  const hasJsonBlock =
+    /(`{3,}|~{3,})[ \t]*(?:(?:application\/)?json\b|\r?\n\s*(?:>\s*)*[{[])/i.test(
+      props.content
+    ) || /^(?:[ \t]*>[ \t]*)*[ \t]*[{[]/m.test(props.content)
   return (
     <Response
       final
+      markdown={requestTraceMarkdown}
       renderCodeBlock={renderTraceCodeBlock}
-      maxMarkdownCharacters={hasJsonFence ? 2_000_000 : undefined}
+      maxMarkdownCharacters={hasJsonBlock ? 2_000_000 : undefined}
     >
       {props.content}
     </Response>

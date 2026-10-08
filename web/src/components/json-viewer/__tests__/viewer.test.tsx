@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import { JsonViewer } from '../../json-viewer'
 
@@ -93,6 +93,37 @@ describe('JsonViewer', () => {
     expect(screen.getByText(JSON.stringify(value))).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
     expect(await navigator.clipboard.readText()).toBe(code)
+  })
+
+  test('recognizes JSON surrounded by a byte order mark while copying the untouched source', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+    const code = '\ufeff {"rows":[{"id":9007199254740993}]} \ufeff'
+    render(<JsonViewer code={code} />)
+
+    expect(screen.getByRole('button', { name: 'Collapse rows' })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Expand 0' }))
+    expect(screen.getByText('9007199254740993')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(code)
+  })
+
+  test('keeps the original payload when valid JSON cannot form a reliable syntax tree', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.spyOn(navigator.clipboard, 'writeText')
+    // JSON permits lone UTF-16 surrogates, but the JavaScript syntax parser
+    // inserts recovery nodes for the unescaped surrogate in this source.
+    const code = '{"value":"\ud800"}'
+    render(<JsonViewer code={code} title='Body' />)
+
+    expect(screen.getByRole('textbox', { name: 'Body' })).toHaveTextContent(
+      code
+    )
+    expect(
+      screen.queryByRole('button', { name: 'Collapse $' })
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Copy JSON' }))
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(code)
   })
 
   test('shows empty containers, null and false without hiding them', () => {

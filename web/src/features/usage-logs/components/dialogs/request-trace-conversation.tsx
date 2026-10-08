@@ -30,6 +30,7 @@ import { Tool, ToolContent } from '@/components/ai-elements/tool'
 import { CopyButton } from '@/components/copy-button'
 import { EmptyState } from '@/components/empty-state'
 import { JsonViewer } from '@/components/json-viewer'
+import { isStructuredJson } from '@/components/json-viewer/json-source'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -44,7 +45,11 @@ import {
   type TraceConversationMessage,
   type TraceConversationPart,
 } from '../../lib/request-trace-conversation'
-import { getTraceJsonContent } from '../../lib/request-trace-json'
+import {
+  getTraceJsonContent,
+  isJsonFenceLanguage,
+  requestTraceMarkdown,
+} from '../../lib/request-trace-json'
 import type { RequestTraceLeg } from '../../types'
 import { RequestTraceContent } from './request-trace-content'
 
@@ -52,6 +57,66 @@ interface TraceConversationEntry {
   id: string
   message: TraceConversationMessage
   parts: { id: string; part: TraceConversationPart }[]
+}
+
+function TraceToolResult(props: { value: unknown }) {
+  const { t } = useTranslation()
+  const code =
+    typeof props.value === 'string'
+      ? props.value
+      : JSON.stringify(props.value, null, 2)
+  const renderResultAsContent = useMemo(() => {
+    if (
+      typeof props.value !== 'string' ||
+      !code ||
+      code.length > 2_000_000 ||
+      !/[{[`~]/.test(code) ||
+      isStructuredJson(code)
+    ) {
+      return false
+    }
+    // Confirm actual JSON blocks before rendering Markdown. Ordinary stdout
+    // and malformed JSON keep their original whitespace and literal markup.
+    return requestTraceMarkdown.parse(code, {}).some((token) => {
+      const language = token.info.trim().toLowerCase()
+      if (
+        token.type === 'code_block' ||
+        (token.type === 'fence' &&
+          (language === '' || language === 'text' || language === 'plaintext'))
+      ) {
+        return isStructuredJson(token.content)
+      }
+      if (token.type !== 'fence' || !isJsonFenceLanguage(language)) return false
+      try {
+        JSON.parse(token.content.trim())
+        return true
+      } catch {
+        return false
+      }
+    })
+  }, [code, props.value])
+
+  return (
+    <div className='p-3'>
+      {renderResultAsContent ? (
+        <>
+          <div className='mb-2 flex items-center justify-between gap-2'>
+            <h4 className='text-muted-foreground text-xs font-medium'>
+              {t('Tool result')}
+            </h4>
+            <CopyButton
+              value={code ?? ''}
+              className='size-7'
+              tooltip={t('Copy to clipboard')}
+            />
+          </div>
+          <RequestTraceContent content={code ?? ''} />
+        </>
+      ) : (
+        <JsonViewer code={code ?? ''} title={t('Tool result')} />
+      )}
+    </div>
+  )
 }
 
 function TraceToolPart(props: {
@@ -62,11 +127,6 @@ function TraceToolPart(props: {
   const label = isCall ? t('Tool call') : t('Tool result')
   const result = isCall ? props.part.result : props.part
   const toolName = props.part.name ?? props.part.result?.name
-  const code =
-    result &&
-    (typeof result.value === 'string'
-      ? result.value
-      : JSON.stringify(result.value, null, 2))
 
   return (
     <Tool className='mb-0'>
@@ -128,11 +188,7 @@ function TraceToolPart(props: {
           </div>
         )}
         {/* ToolOutput omits falsy results and lacks trace copy/line-limit controls. */}
-        {result && (
-          <div className='p-3'>
-            <JsonViewer code={code ?? ''} title={t('Tool result')} />
-          </div>
-        )}
+        {result && <TraceToolResult value={result.value} />}
       </ToolContent>
     </Tool>
   )

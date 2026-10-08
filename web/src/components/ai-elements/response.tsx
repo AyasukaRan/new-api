@@ -58,7 +58,7 @@ export const Response = memo((props: ResponseProps) => {
   const isFinal = props.final ?? true
   const shouldAnimate = !isFinal
   const parserId = props.parserId ?? DEFAULT_PARSER_ID
-  const markdown = getCachedMarkdown(parserId)
+  const markdown = props.markdown ?? getCachedMarkdown(parserId)
   const shouldParseMarkdown =
     content.length <= (props.maxMarkdownCharacters ?? MAX_PARSED_MARKDOWN_CHARS)
   const fadeStateRef = useRef<FadeState | null>(null)

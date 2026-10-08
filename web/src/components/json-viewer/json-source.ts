@@ -28,7 +28,7 @@ export function isStructuredJson(code: string): boolean {
   const trimmed = code.trim()
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return false
   try {
-    JSON.parse(code)
+    JSON.parse(trimmed)
     return true
   } catch {
     return false
@@ -37,9 +37,27 @@ export function isStructuredJson(code: string): boolean {
 
 export function parseJsonSource(code: string): JsonSyntaxNode | null {
   try {
-    JSON.parse(code)
+    // Match detection's whitespace/BOM handling without shifting source spans.
+    JSON.parse(code.trim())
+    const tree = jsonParser.parse(code)
+    const root = tree.topNode.firstChild
+    if (
+      !root ||
+      code.slice(0, root.from).trim() ||
+      code.slice(root.to).trim()
+    ) {
+      return null
+    }
+
+    // Valid JSON can still exceed the JavaScript parser's recovery limits or
+    // contain unsupported Unicode. A partial/recovered tree must not hide data.
+    const cursor = tree.cursor()
+    do {
+      if (cursor.type.isError) return null
+    } while (cursor.next())
+
     // Source spans preserve numeric precision, duplicate properties and escapes.
-    return jsonParser.parse(code).topNode.firstChild
+    return root
   } catch {
     return null
   }
