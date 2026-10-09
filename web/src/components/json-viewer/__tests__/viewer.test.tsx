@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, test, vi } from 'vitest'
 
@@ -136,5 +136,160 @@ describe('JsonViewer', () => {
     expect(screen.getByText('null')).toBeVisible()
     expect(screen.getByText('false')).toBeVisible()
     expect(screen.getByText('0')).toBeVisible()
+  })
+
+  test('keeps a short key in the value text flow and wraps long words without break-all', () => {
+    render(
+      <JsonViewer code='{"text":"Ord med mellemrum og etmegetlangtordudenmellemrum"}' />
+    )
+
+    const key = screen.getByText('"text":')
+    const content = key.parentElement
+    expect(content).toHaveClass('wrap-anywhere', 'whitespace-pre-wrap')
+    expect(content).not.toHaveClass('flex', 'break-all')
+    expect(content).toContainElement(
+      screen.getByText('"Ord med mellemrum og etmegetlangtordudenmellemrum"')
+    )
+  })
+
+  test('expands and collapses all containers while keeping large documents incrementally visible', async () => {
+    const user = userEvent.setup()
+    const rows = Array.from({ length: 50 }, (_, index) => ({
+      details: { id: index, enabled: true, label: `entry-${index}` },
+    }))
+    render(<JsonViewer code={JSON.stringify({ rows })} />)
+
+    await user.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(screen.getByText('"entry-0"')).toBeVisible()
+    expect(screen.queryByText('"entry-49"')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Show more nodes' }))
+    expect(screen.getByText('"entry-49"')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(screen.getByRole('button', { name: 'Expand $' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    expect(screen.queryByText('"entry-0"')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(screen.getByText('"entry-0"')).toBeVisible()
+  })
+
+  test('finds keys and values in collapsed and paginated nodes, navigates hits and clears the search', async () => {
+    const user = userEvent.setup()
+    const rows = Array.from({ length: 52 }, (_, index) => ({
+      label: `row-${index}`,
+    }))
+    rows[1] = { label: 'needle value' }
+    const code = JSON.stringify({ rows }).replace(
+      '"label":"row-51"',
+      '"needle_key":"last row"'
+    )
+    render(<JsonViewer code={code} />)
+    await user.click(screen.getByRole('button', { name: 'Collapse all' }))
+
+    const search = screen.getByRole('searchbox', { name: 'Search JSON' })
+    await user.type(search, 'needle')
+    expect(screen.getByRole('status')).toHaveTextContent('1 of 2 matches')
+    const first = screen.getByText('"needle value"')
+    expect(first.closest('mark')).toBeInTheDocument()
+    expect(first.closest('li')).toHaveAttribute('aria-current', 'true')
+    await user.click(screen.getByRole('button', { name: 'Next match' }))
+    const last = screen.getByText('"needle_key":')
+    expect(last.closest('mark')).toBeInTheDocument()
+    expect(last.closest('li')).toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('status')).toHaveTextContent('2 of 2 matches')
+    expect(screen.queryByText('"row-0"')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Previous match' }))
+    expect(screen.getByText('"needle value"').closest('li')).toHaveAttribute(
+      'aria-current',
+      'true'
+    )
+    await user.clear(search)
+    expect(screen.getByRole('button', { name: 'Expand 1' })).toBeVisible()
+    expect(screen.queryByText('"needle value"')).not.toBeInTheDocument()
+    await user.type(search, 'absent')
+    expect(screen.getByRole('status')).toHaveTextContent('No matches')
+    expect(screen.getByRole('button', { name: 'Next match' })).toBeDisabled()
+  })
+
+  test('copies each duplicate node verbatim and copies escaped JSONPath segments', async () => {
+    const user = userEvent.setup()
+    const code =
+      '{"a.b":[{"id":9007199254740993,"id":0.1234567890123456789}],"a\\\"b":false}'
+    render(<JsonViewer code={code} />)
+    await user.click(screen.getByRole('button', { name: 'Expand 0' }))
+
+    const bigInteger = screen.getByText('9007199254740993').closest('li')
+    expect(bigInteger).not.toBeNull()
+    if (!bigInteger) throw new Error('Missing integer node')
+    await user.click(
+      within(bigInteger).getByRole('button', { name: 'Copy node JSON' })
+    )
+    expect(await navigator.clipboard.readText()).toBe('9007199254740993')
+    await user.click(
+      within(bigInteger).getByRole('button', { name: 'Copy JSON path' })
+    )
+    expect(await navigator.clipboard.readText()).toBe('$["a.b"][0]["id"]')
+    const decimal = screen.getByText('0.1234567890123456789').closest('li')
+    expect(decimal).not.toBeNull()
+    if (!decimal) throw new Error('Missing decimal node')
+    await user.click(
+      within(decimal).getByRole('button', { name: 'Copy node JSON' })
+    )
+    expect(await navigator.clipboard.readText()).toBe('0.1234567890123456789')
+    const escapedKey = screen.getByText('false').closest('li')
+    expect(escapedKey).not.toBeNull()
+    if (!escapedKey) throw new Error('Missing escaped-key node')
+    await user.click(
+      within(escapedKey).getByRole('button', { name: 'Copy JSON path' })
+    )
+    expect(await navigator.clipboard.readText()).toBe('$["a\\\"b"]')
+  })
+
+  test('aligns search results to the JSON viewport top when an ancestor clips its lower half', async () => {
+    const user = userEvent.setup()
+    render(<JsonViewer code='{"rows":[{"text":"needle"}]}' />)
+    const viewport = screen.getByRole('list', {
+      name: 'JSON tree',
+    }).parentElement
+    if (!viewport) throw new Error('Missing JSON viewport')
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
+    const originalBounds = HTMLElement.prototype.getBoundingClientRect
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: HTMLElement) {
+        if (this === viewport) return new DOMRect(0, 100, 800, 200)
+        if (this.getAttribute('aria-current') === 'true') {
+          return new DOMRect(0, 500 - viewport.scrollTop, 800, 24)
+        }
+        return originalBounds.call(this)
+      }
+    )
+
+    await user.type(
+      screen.getByRole('searchbox', { name: 'Search JSON' }),
+      'needle'
+    )
+    expect(screen.getByText('"needle"')).toBeVisible()
+    // An enclosing conversation may clip the viewport's lower half, so
+    // aligning with its bottom can still leave the result out of sight.
+    expect(viewport.scrollTop).toBe(400)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  test('resets search and disclosure state when a different payload is displayed', async () => {
+    const user = userEvent.setup()
+    const view = render(<JsonViewer code='{"rows":[{"id":"old result"}]}' />)
+    await user.type(
+      screen.getByRole('searchbox', { name: 'Search JSON' }),
+      'old result'
+    )
+    expect(screen.getByText('"old result"')).toBeVisible()
+
+    view.rerender(<JsonViewer code='{"rows":[{"id":"new result"}]}' />)
+    expect(screen.getByRole('searchbox', { name: 'Search JSON' })).toHaveValue(
+      ''
+    )
+    expect(screen.getByRole('button', { name: 'Expand 0' })).toBeVisible()
+    expect(screen.queryByText('"new result"')).not.toBeInTheDocument()
   })
 })
