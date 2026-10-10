@@ -154,17 +154,25 @@ export function JsonTreeRow(props: {
           />
         )}
       </div>
-      <div className='flex shrink-0 items-center opacity-60 transition-opacity group-hover/json-node:opacity-100 focus-within:opacity-100'>
+      <div className='flex shrink-0 flex-col items-end opacity-60 transition-opacity group-hover/json-node:opacity-100 focus-within:opacity-100 sm:flex-row sm:items-center'>
         <CopyButton
-          className='size-6'
+          className='h-6 px-1.5'
+          iconClassName='size-3'
+          size='sm'
           value={props.code.slice(entry.node.from, entry.node.to)}
           tooltip={t('Copy node JSON')}
-        />
+        >
+          JSON
+        </CopyButton>
         <CopyButton
-          className='size-6'
+          className='h-6 px-1.5'
+          iconClassName='size-3'
+          size='sm'
           value={getJsonPath(entry)}
           tooltip={t('Copy JSON path')}
-        />
+        >
+          {t('Path')}
+        </CopyButton>
       </div>
     </li>
   )
