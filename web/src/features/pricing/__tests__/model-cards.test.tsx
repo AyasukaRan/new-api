@@ -163,7 +163,9 @@ describe('model cards', () => {
     )
     expect(
       within(metrics).getByRole('status', { name: 'Current status' })
-    ).toHaveTextContent('Not monitored')
+    ).toHaveTextContent('No recent observations')
+    expect(within(metrics).getByText('No data')).toBeVisible()
+    expect(within(metrics).queryByText('Not monitored')).not.toBeInTheDocument()
     expect(within(metrics).getByText('—s')).toBeVisible()
     expect(within(metrics).getByText('—t/s')).toBeVisible()
     expect(within(metrics).queryByText(/100/)).not.toBeInTheDocument()
@@ -265,8 +267,8 @@ describe('model cards', () => {
     {
       availability_rate: Number.NaN,
       current_available: undefined,
-      expected: 'Not monitored',
-      status: 'Not monitored',
+      expected: 'No data',
+      status: 'No recent observations',
       statusColor: 'text-muted-foreground',
     },
   ])(
@@ -311,8 +313,8 @@ describe('model cards', () => {
 
   it.each([
     { observedAt: 1788782400, status: 'Waiting for update' },
-    { observedAt: 0, status: 'Not monitored' },
-    { observedAt: Number.NaN, status: 'Not monitored' },
+    { observedAt: 0, status: 'No recent observations' },
+    { observedAt: Number.NaN, status: 'No recent observations' },
   ])(
     'distinguishes stale observations from missing observations ($observedAt)',
     ({ observedAt, status }) => {
@@ -352,7 +354,7 @@ describe('model cards', () => {
     )
     expect(
       screen.getByRole('status', { name: 'Current status' })
-    ).toHaveTextContent('Not monitored')
+    ).toHaveTextContent('No recent observations')
     expect(screen.queryByText('100.0%')).not.toBeInTheDocument()
   })
 
@@ -379,7 +381,7 @@ describe('model cards', () => {
       name: 'no samples',
       availability: undefined,
       history: undefined,
-      expected: 'Not monitored',
+      expected: 'No data',
     },
     {
       name: 'zero availability with a different legacy rate',

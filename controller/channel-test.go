@@ -164,7 +164,7 @@ models:
 					result.summary.Skipped++
 					continue models
 				}
-				if !channelModelProbeDue(activity, channel.TestTime, now, interval) {
+				if !channelModelProbeDue(activity, now, interval) {
 					result.summary.Skipped++
 					// Cached outcomes only assist a new probe's model-wide result.
 					// Read them when the round ends, so a request completing while
@@ -390,6 +390,12 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 	}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	requestCtx := ctx
+	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); scheduled {
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+	}
 
 	endpointType = normalizeChannelTestEndpoint(channel, testModel, endpointType)
 	switch constant.EndpointType(endpointType) {
@@ -410,7 +416,7 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 	if isStream && constant.EndpointType(endpointType) == constant.EndpointTypeGemini {
 		requestPath = strings.Replace(requestPath, ":generateContent", ":streamGenerateContent", 1)
 	}
-	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, requestPath, nil)
+	c.Request = httptest.NewRequestWithContext(requestCtx, http.MethodPost, requestPath, nil)
 
 	cache, err := model.GetUserCache(testUserID)
 	if err != nil {
@@ -708,6 +714,13 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 		if ctx.Err() != nil {
 			return
 		}
+		// A probe deadline is an upstream failure; losing the task's parent
+		// context is cancellation and must not replace completed health data.
+		if err := requestCtx.Err(); err != nil {
+			testSucceeded = false
+			result.localErr = err
+			result.newAPIError = types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout)
+		}
 		sample := perfmetrics.RelaySample(info, testSucceeded, outputTokens)
 		result.sample = &sample
 	}()
@@ -742,6 +755,13 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 		}
 	}
 	usageA, respErr := adaptor.DoResponse(c, httpResp, info)
+	if err := requestCtx.Err(); err != nil {
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout),
+		}
+	}
 	if respErr != nil {
 		return testResult{
 			context:     c,
@@ -1182,14 +1202,20 @@ type channelTestSummary struct {
 type channelAvailabilityRoundKey struct{}
 type channelIdleProbeIntervalKey struct{}
 
-func channelModelProbeDue(activity model.ChannelModelActivity, previousChannelTest int64, now time.Time, interval time.Duration) bool {
-	lastObserved := max(activity.LastRequestAt, activity.LastProbeAt)
-	if lastObserved == 0 {
-		// Preserve the previous release's channel-level deadline until this
-		// particular model has its own durable activity state.
-		lastObserved = previousChannelTest * 1000
+func channelModelProbeDue(activity model.ChannelModelActivity, now time.Time, interval time.Duration) bool {
+	if now.UnixMilli() < activity.RequestActiveUntil {
+		return false
 	}
-	return now.UnixMilli() >= activity.RequestActiveUntil && now.UnixMilli()-lastObserved >= interval.Milliseconds()
+	lastObserved := max(activity.LastRequestAt, activity.LastProbeAt, activity.LastResultAt)
+	if activity.LastRequestAt == 0 && activity.LastResultAt == 0 {
+		// An unseen model must not inherit another model's channel deadline.
+		// Retry incomplete setup briefly, without reporting an upstream failure.
+		if lastObserved == 0 {
+			return true
+		}
+		interval = min(interval, time.Minute)
+	}
+	return now.UnixMilli()-lastObserved >= interval.Milliseconds()
 }
 
 type channelModelProbe struct {

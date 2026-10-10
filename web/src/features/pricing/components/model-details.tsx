@@ -328,7 +328,7 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
           value={
             Number.isFinite(availabilityRate)
               ? formatUptimePct(availabilityRate)
-              : t('Not monitored')
+              : t('No data')
           }
           valueClassName={getSuccessRateTextClass(availabilityRate)}
         />

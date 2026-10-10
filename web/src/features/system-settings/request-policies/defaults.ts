@@ -59,7 +59,7 @@ export const defaultRequestPolicySettings: RequestPolicySettings = {
   AutomaticEnableChannelEnabled: false,
   AutomaticDisableKeywords: '',
   AutomaticDisableStatusCodes: '401',
-  'monitor_setting.auto_test_channel_enabled': false,
+  'monitor_setting.auto_test_channel_enabled': true,
   'monitor_setting.auto_test_channel_minutes': 10,
   'monitor_setting.channel_test_concurrency': 1,
   'monitor_setting.channel_test_mode': 'scheduled_all',

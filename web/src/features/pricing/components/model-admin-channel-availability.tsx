@@ -71,7 +71,7 @@ export function ModelAdminChannelAvailability(props: { modelName: string }) {
   }
   const channels = metricsQuery.data?.data.channels ?? []
   if (channels.length === 0) {
-    return <EmptyState title={t('Not monitored')} bordered />
+    return <EmptyState title={t('No data')} bordered />
   }
 
   return (
@@ -107,7 +107,7 @@ export function ModelAdminChannelAvailability(props: { modelName: string }) {
                     {channel.availability_rate != null &&
                     Number.isFinite(channel.availability_rate)
                       ? formatUptimePct(channel.availability_rate)
-                      : t('Not monitored')}
+                      : t('No data')}
                   </span>
                 </span>
               </span>

@@ -36,7 +36,7 @@ const (
 
 // 默认配置
 var monitorSetting = MonitorSetting{
-	AutoTestChannelEnabled:   false,
+	AutoTestChannelEnabled:   true,
 	AutoTestChannelMinutes:   10,
 	ChannelTestMode:          ChannelTestModeScheduledAll,
 	ChannelTestConcurrency:   DefaultChannelTestConcurrency,

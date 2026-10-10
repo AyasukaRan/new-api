@@ -45,13 +45,17 @@ func (channelTestHandler) NewPayload() any { return channelTestTaskPayload{Sched
 
 func (channelTestHandler) ShouldSchedule(now time.Time, latest *model.SystemTask) (bool, error) {
 	var channels []model.Channel
-	if err := model.DB.Select("id", "models", "test_time").Where("status <> ?", common.ChannelStatusManuallyDisabled).Find(&channels).Error; err != nil {
+	if err := model.DB.Select("id", "models", "type", "model_mapping", "setting").Where("status = ?", common.ChannelStatusEnabled).Find(&channels).Error; err != nil {
 		return false, err
 	}
 	ids := make([]int, 0, len(channels))
 	for _, channel := range channels {
-		if strings.Trim(channel.Models, " ,") != "" {
-			ids = append(ids, channel.Id)
+		for _, name := range channel.GetModels() {
+			name = strings.TrimSpace(name)
+			if name != "" && !isImageChannelTest(&channel, name, "") {
+				ids = append(ids, channel.Id)
+				break
+			}
 		}
 	}
 	if len(ids) == 0 {
@@ -74,7 +78,7 @@ func (channelTestHandler) ShouldSchedule(now time.Time, latest *model.SystemTask
 	for _, channel := range channels {
 		for _, name := range channel.GetModels() {
 			name = strings.TrimSpace(name)
-			if name != "" && channelModelProbeDue(byRoute[channelModelProbe{channel.Id, name}], channel.TestTime, now, interval) {
+			if name != "" && !isImageChannelTest(&channel, name, "") && channelModelProbeDue(byRoute[channelModelProbe{channel.Id, name}], now, interval) {
 				return true, nil
 			}
 		}

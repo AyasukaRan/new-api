@@ -55,7 +55,7 @@ export function ModelCurrentAvailability(props: {
   const { t } = useTranslation()
   const observedAt = props.observedAt ?? 0
   const hasObservation = Number.isFinite(observedAt) && observedAt > 0
-  let label = t('Not monitored')
+  let label = t('No recent observations')
   let variant: StatusVariant = 'neutral'
   if (props.available === true) {
     label = t('Currently available')
@@ -189,7 +189,7 @@ export const ModelPerfBadge = memo(function ModelPerfBadge(
           samplesLabel={t(
             'Availability history; gray bars indicate missing data.'
           )}
-          emptyLabel={t('Not monitored')}
+          emptyLabel={t('No data')}
         />
         <div title={t('Average latency')}>
           <dt className='text-muted-foreground text-[11px] leading-4'>

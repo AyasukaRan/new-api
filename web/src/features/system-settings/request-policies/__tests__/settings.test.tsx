@@ -188,6 +188,33 @@ afterEach(() => {
 
 describe('request policy settings', () => {
   it.each([
+    { name: 'missing', enabled: undefined, expected: true },
+    { name: 'explicitly disabled', enabled: false, expected: false },
+  ])(
+    'shows idle monitoring correctly when its saved option is $name',
+    async ({ enabled, expected }) => {
+      const response = optionsResponse()
+      response.data = response.data.filter(
+        (option) => option.key !== 'monitor_setting.auto_test_channel_enabled'
+      )
+      if (enabled !== undefined) {
+        response.data.push({
+          key: 'monitor_setting.auto_test_channel_enabled',
+          value: String(enabled),
+        })
+      }
+      vi.mocked(api.get).mockResolvedValue({ data: response })
+
+      await renderPolicies('/system-settings/request-policies/health')
+
+      expect(
+        await screen.findByRole('switch', { name: 'Scheduled channel tests' })
+      ).toHaveAttribute('aria-checked', String(expected))
+      expect(api.patch).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
     ['retry', 'Save Changes'],
     ['health', 'Save Changes'],
     ['filtering', 'Save sensitive words'],

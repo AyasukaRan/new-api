@@ -609,12 +609,16 @@ func TestChannelIdleMonitoringUsesRealRequests(t *testing.T) {
 	previousGroups := ratio_setting.GroupRatio2JSONString()
 	previousMinutes := operation_setting.GetMonitorSetting().AutoTestChannelMinutes
 	previousInterval := common.RequestInterval
+	previousStreamingTimeout := constant.StreamingTimeout
 	common.RequestInterval = 0
+	constant.StreamingTimeout = 10
+	service.InitHttpClient()
 	withSelfUseModeDisabled(t)
 	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "true", "monitor_setting.auto_test_channel_minutes": "10"}))
 	t.Cleanup(func() {
 		common.RequestInterval = previousInterval
+		constant.StreamingTimeout = previousStreamingTimeout
 		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
 		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 			"perf_metrics_setting.enabled": strconv.FormatBool(previousPerf.Enabled), "monitor_setting.auto_test_channel_minutes": strconv.FormatFloat(previousMinutes, 'g', -1, 64),
@@ -663,7 +667,7 @@ func TestChannelIdleMonitoringUsesRealRequests(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{"error":{"message":"fixture unavailable","type":"server_error"}}`)
 					return
 				}
-				_, _ = fmt.Fprint(w, `{"id":"test","model":"test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+				writeChannelTestSuccess(w, body.Stream != nil && *body.Stream)
 			}))
 			t.Cleanup(upstream.Close)
 			now := time.Now()
@@ -784,8 +788,11 @@ func TestChannelIdleMonitoringUsesRealRequests(t *testing.T) {
 						"last_request_at": firstRequestAt, "last_probe_at": firstRequestAt, "request_active_until": 0,
 						"last_result_at": firstRequestAt, "last_result_success": false,
 					}).Error)
+					// The second route must be idle since its completed result,
+					// as well as since the request/probe that produced that result.
 					require.NoError(t, db.Model(&model.ChannelModelActivity{}).Where("channel_id = ? AND model_name = ?", channels[1].Id, shared).Updates(map[string]any{
 						"last_request_at": now.Add(-2 * interval).UnixMilli(), "last_probe_at": now.Add(-2 * interval).UnixMilli(), "request_active_until": 0,
+						"last_result_at": now.Add(-2 * interval).UnixMilli(), "last_result_success": false,
 					}).Error)
 					var beforeRound, beforeFirst, beforeUnrelated model.ChannelPerfMetric
 					require.NoError(t, db.Where("model_name = ? AND source = ?", shared, perfmetrics.SourceAvailabilityAll).First(&beforeRound).Error)
@@ -821,9 +828,17 @@ func TestChannelIdleMonitoringUsesRealRequests(t *testing.T) {
 
 func TestChannelIdleScheduleUsesPairDeadline(t *testing.T) {
 	previousMinutes := operation_setting.GetMonitorSetting().AutoTestChannelMinutes
+	previousEnabled := operation_setting.GetMonitorSetting().AutoTestChannelEnabled
+	t.Setenv("CHANNEL_TEST_ENABLED", "")
+	t.Setenv("CHANNEL_TEST_FREQUENCY", "")
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_enabled": "false"}))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_minutes": "10"}))
+	assert.False(t, (channelTestHandler{}).Enabled(), "an existing explicit opt-out survives unrelated configuration reloads")
 	t.Cleanup(func() {
-		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_minutes": strconv.FormatFloat(previousMinutes, 'g', -1, 64)}))
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+			"monitor_setting.auto_test_channel_minutes": strconv.FormatFloat(previousMinutes, 'g', -1, 64),
+			"monitor_setting.auto_test_channel_enabled": strconv.FormatBool(previousEnabled),
+		}))
 	})
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		t.Run(dialect.kind, func(t *testing.T) {
@@ -865,8 +880,186 @@ func TestChannelIdleScheduleUsesPairDeadline(t *testing.T) {
 			require.NoError(t, err)
 			assert.False(t, due, "even a setup-only check backs off instead of creating a task on every scheduler tick")
 			inflight := model.ChannelModelActivity{LastRequestAt: start.UnixMilli(), RequestActiveUntil: checkedAt.Add(interval).UnixMilli()}
-			assert.False(t, channelModelProbeDue(inflight, 0, checkedAt, interval), "an active stream is not idle after its initial start timestamp ages")
-			assert.True(t, channelModelProbeDue(inflight, 0, checkedAt.Add(interval), interval), "expired leases cannot keep a crashed request active forever")
+			assert.False(t, channelModelProbeDue(inflight, checkedAt, interval), "an active stream is not idle after its initial start timestamp ages")
+			assert.True(t, channelModelProbeDue(inflight, checkedAt.Add(interval), interval), "expired leases cannot keep a crashed request active forever")
+
+			// A freshly added model must not wait for another model's recent
+			// channel-level test. Local preflight failures have a short retry,
+			// while real requests retain the complete configured idle interval.
+			require.NoError(t, db.Model(channel).Updates(map[string]any{"models": "new-model", "test_time": checkedAt.Unix()}).Error)
+			due, err = (channelTestHandler{}).ShouldSchedule(checkedAt, latest)
+			require.NoError(t, err)
+			assert.True(t, due)
+			require.NoError(t, model.RecordChannelModelProbe(channel.Id, "new-model", checkedAt.UnixMilli(), nil))
+			for _, event := range []struct {
+				after time.Duration
+				want  bool
+			}{{59 * time.Second, false}, {time.Minute, true}} {
+				due, err = (channelTestHandler{}).ShouldSchedule(checkedAt.Add(event.after), latest)
+				require.NoError(t, err)
+				assert.Equal(t, event.want, due)
+			}
+			require.NoError(t, model.RecordChannelModelRequest(channel.Id, "new-model", checkedAt.UnixMilli(), 0, nil))
+			due, err = (channelTestHandler{}).ShouldSchedule(checkedAt.Add(time.Minute), latest)
+			require.NoError(t, err)
+			assert.False(t, due, "even an unfinished real request restarts the full idle interval")
+			assert.True(t, channelModelProbeDue(model.ChannelModelActivity{LastProbeAt: checkedAt.UnixMilli()}, checkedAt.Add(30*time.Second), 30*time.Second), "short configured intervals are not lengthened to one minute")
+
+			for _, excluded := range []struct {
+				name    string
+				status  int
+				models  string
+				mapping string
+			}{
+				{"manually_disabled", common.ChannelStatusManuallyDisabled, "text-model", ""},
+				{"automatically_disabled", common.ChannelStatusAutoDisabled, "text-model", ""},
+				{"images_only", common.ChannelStatusEnabled, "gpt-image-1,gemini-3-pro-image-preview", ""},
+				{"mapped_image", common.ChannelStatusEnabled, "image-alias", `{"image-alias":"gpt-image-1"}`},
+			} {
+				t.Run(excluded.name, func(t *testing.T) {
+					require.NoError(t, db.Model(channel).Updates(map[string]any{"status": excluded.status, "models": excluded.models, "model_mapping": excluded.mapping}).Error)
+					for _, previousTask := range []*model.SystemTask{nil, latest} {
+						due, err := (channelTestHandler{}).ShouldSchedule(checkedAt.Add(2*interval), previousTask)
+						require.NoError(t, err)
+						assert.False(t, due, "excluded routes cannot enqueue an empty cycle, including the first run")
+					}
+				})
+			}
+		})
+	}
+}
+
+type channelProbeTestTransport func(*http.Request) (*http.Response, error)
+
+func (transport channelProbeTestTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func TestAutomaticChannelProbeDeadlineAndIncompleteSetup(t *testing.T) {
+	previousInterval, previousStreamingTimeout := common.RequestInterval, constant.StreamingTimeout
+	previousPerf, previousGroups := perf_metrics_setting.GetSetting(), ratio_setting.GroupRatio2JSONString()
+	common.RequestInterval, constant.StreamingTimeout = 0, 10
+	t.Cleanup(func() {
+		common.RequestInterval, constant.StreamingTimeout = previousInterval, previousStreamingTimeout
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": strconv.FormatBool(previousPerf.Enabled)}))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
+	})
+	withSelfUseModeDisabled(t)
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	previousTransport, previousTimeout := client.Transport, client.Timeout
+	client.Timeout = 0
+	t.Cleanup(func() { client.Transport, client.Timeout = previousTransport, previousTimeout })
+
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.ChannelModelActivity{}, &model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.Log{}))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "true"}))
+			t.Cleanup(func() { require.NoError(t, perfmetrics.Flush()) })
+			user := &model.User{Username: "probe-deadline-user", Password: "unused", Group: "default", Status: common.UserStatusEnabled, Role: common.RoleRootUser, AffCode: "probedl"}
+			require.NoError(t, db.Create(user).Error)
+			for _, test := range []struct {
+				name         string
+				scheduled    bool
+				parentLimit  bool
+				timeout      bool
+				cancel       bool
+				missingPrice bool
+			}{
+				{name: "scheduled_timeout_continues", scheduled: true, timeout: true},
+				{name: "manual_without_deadline", scheduled: false},
+				{name: "manual_keeps_existing_deadline", parentLimit: true},
+				{name: "parent_cancellation_is_neutral", scheduled: true, cancel: true},
+				{name: "unpriced_setup_is_neutral", scheduled: true, missingPrice: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					first, second := "probe-"+test.name+"-first", "probe-"+test.name+"-second"
+					prices := map[string]float64{}
+					if !test.missingPrice {
+						prices[first], prices[second] = 1, 1
+					}
+					encoded, err := common.Marshal(prices)
+					require.NoError(t, err)
+					require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(encoded)))
+					channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Status: common.ChannelStatusEnabled, Models: first + "," + second, Group: "default", BaseURL: common.GetPointer("http://probe-fixture.invalid"), TestTime: time.Now().Unix()}
+					require.NoError(t, db.Create(channel).Error)
+					parent, cancel := context.WithCancel(context.Background())
+					t.Cleanup(cancel)
+					if test.parentLimit {
+						var stop context.CancelFunc
+						parent, stop = context.WithDeadline(parent, time.Now().Add(5*time.Minute))
+						t.Cleanup(stop)
+					}
+					ctx := parent
+					if test.scheduled {
+						ctx = context.WithValue(ctx, channelIdleProbeIntervalKey{}, 20*time.Minute)
+					}
+					attempts := []string{}
+					client.Transport = channelProbeTestTransport(func(request *http.Request) (*http.Response, error) {
+						var body dto.GeneralOpenAIRequest
+						require.NoError(t, common.DecodeJson(request.Body, &body))
+						attempts = append(attempts, body.Model)
+						deadline, limited := request.Context().Deadline()
+						assert.Equal(t, test.scheduled || test.parentLimit, limited, "only scheduled probes get a new request deadline")
+						if test.scheduled {
+							remaining := time.Until(deadline)
+							assert.Positive(t, remaining)
+							assert.LessOrEqual(t, remaining, time.Minute, "the upstream request cannot exceed the automatic probe limit")
+						} else if test.parentLimit {
+							inherited, _ := parent.Deadline()
+							assert.Equal(t, inherited, deadline)
+						}
+						if test.cancel {
+							cancel()
+							return nil, request.Context().Err()
+						}
+						if test.timeout && body.Model == first {
+							return nil, context.DeadlineExceeded
+						}
+						response := httptest.NewRecorder()
+						writeChannelTestSuccess(response, true)
+						return response.Result(), nil
+					})
+					result := testChannel(ctx, channel, user.Id, "", "", true)
+					require.NoError(t, perfmetrics.Flush())
+					activity, err := model.GetChannelModelActivity(channel.Id, first)
+					require.NoError(t, err)
+					switch {
+					case test.cancel:
+						assert.Equal(t, []string{first}, attempts)
+						assert.Zero(t, result.summary.Tested)
+						assert.Zero(t, activity.LastResultAt, "losing the parent lease is not an upstream failure")
+					case test.missingPrice:
+						assert.Empty(t, attempts)
+						assert.Positive(t, activity.LastProbeAt)
+						assert.Zero(t, activity.LastResultAt)
+						assert.True(t, channelModelProbeDue(activity, time.UnixMilli(activity.LastProbeAt).Add(time.Minute), 20*time.Minute))
+					default:
+						assert.NoError(t, parent.Err(), "one upstream timeout must not cancel the scheduled task")
+						assert.Equal(t, []string{first, second}, attempts)
+						assert.Positive(t, activity.LastResultAt)
+						assert.Equal(t, !test.timeout, activity.LastResultSuccess)
+						want := channelTestSummary{Tested: 2, Succeeded: 2}
+						if test.timeout {
+							want.Succeeded, want.Failed = 1, 1
+						}
+						assert.Equal(t, want, result.summary)
+					}
+					if test.cancel || test.missingPrice {
+						observations, err := model.GetChannelKeyObservations([]int{channel.Id}, first)
+						require.NoError(t, err)
+						assert.Empty(t, observations, "local setup and cancellation cannot publish key availability")
+						var count int64
+						require.NoError(t, db.Model(&model.ChannelPerfMetric{}).Where("channel_id = ?", channel.Id).Count(&count).Error)
+						assert.Zero(t, count)
+					}
+				})
+			}
 		})
 	}
 }

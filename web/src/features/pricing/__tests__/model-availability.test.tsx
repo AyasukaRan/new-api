@@ -301,15 +301,16 @@ describe('model availability details', () => {
       ],
     })
     const row = screen.getByRole('row', { name: /Channel 1/ })
-    expect(within(row).getAllByText('Not monitored')).toHaveLength(3)
+    expect(within(row).getAllByText('No data')).toHaveLength(2)
+    expect(within(row).queryByText('Not monitored')).not.toBeInTheDocument()
     expect(
       within(row).getByRole('status', { name: 'Current status' })
-    ).toHaveTextContent('Not monitored')
+    ).toHaveTextContent('No recent observations')
     expect(within(row).queryByText(/100/)).not.toBeInTheDocument()
     const overall = screen.getByRole('group', {
       name: 'Availability (last 24h)',
     })
-    expect(within(overall).getByText('Not monitored')).toBeVisible()
+    expect(within(overall).getByText('No data')).toBeVisible()
   })
 
   it.each([82, 100, 0])(
@@ -482,7 +483,7 @@ describe('model availability details', () => {
     renderPerformance()
     expect(screen.getByText('Loading...')).toBeVisible()
     await user.click(await screen.findByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('Not monitored')).toBeVisible()
+    expect(await screen.findByText('No data')).toBeVisible()
     expect(
       screen.getByText('Performance data is not yet available for this model.')
     ).toBeVisible()
@@ -615,7 +616,7 @@ describe('admin channel key diagnostics', () => {
     expect(within(unknown).getByText('Disabled')).toBeVisible()
     expect(
       within(unknown).getByRole('status', { name: 'Current status' })
-    ).toHaveTextContent('Not monitored')
+    ).toHaveTextContent('No recent observations')
     expect(within(unknown).queryByText(/1970/)).not.toBeInTheDocument()
     const staleFailure = within(table).getByRole('row', {
       name: /sk-\*\*\*e5f6/,
@@ -706,7 +707,7 @@ describe('admin channel key diagnostics', () => {
         },
       })
     )
-    expect(await screen.findByText('Not monitored')).toBeVisible()
+    expect(await screen.findByText('No data')).toBeVisible()
     expect(screen.queryByText('Primary Provider')).not.toBeInTheDocument()
   })
 })

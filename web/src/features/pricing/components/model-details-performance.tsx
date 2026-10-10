@@ -166,7 +166,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
   ) {
     return (
       <EmptyState
-        title={t('Not monitored')}
+        title={t('No data')}
         description={t('Performance data is not yet available for this model.')}
         bordered
       />
@@ -197,7 +197,7 @@ export function ModelDetailsPerformance(props: { model: PricingModel }) {
           value={
             Number.isFinite(availabilityRate)
               ? formatUptimePct(availabilityRate)
-              : t('Not monitored')
+              : t('No data')
           }
           valueClassName={getSuccessRateTextClass(availabilityRate)}
         />
@@ -273,7 +273,7 @@ export function ModelChannelAvailability(props: {
           headerRowClassName={tableStyles.compactHeaderRow}
           data={props.channels}
           getRowKey={(channel) => channel.channel_index}
-          emptyContent={t('Not monitored')}
+          emptyContent={t('No data')}
           columns={[
             {
               id: 'channel',
@@ -308,7 +308,7 @@ export function ModelChannelAvailability(props: {
                 >
                   {channel.availability_rate != null
                     ? formatUptimePct(channel.availability_rate)
-                    : t('Not monitored')}
+                    : t('No data')}
                 </span>
               ),
             },
@@ -329,7 +329,7 @@ export function ModelChannelAvailability(props: {
                   series={toUptimeSeries(channel.series)}
                   size='sm'
                   showOverall={false}
-                  emptyLabel={t('Not monitored')}
+                  emptyLabel={t('No data')}
                   ariaLabel={t('Channel {{number}} availability samples', {
                     number: channel.channel_index,
                   })}
