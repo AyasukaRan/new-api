@@ -58,6 +58,23 @@ export const channelsQueryKeys = {
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
 }
 
+async function refreshChannelStatusQueries(
+  queryClient?: QueryClient
+): Promise<void> {
+  if (!queryClient) return
+  await Promise.all(
+    [
+      channelsQueryKeys.all,
+      ['models'],
+      ['pricing'],
+      ['channel-monitoring'],
+      perfMetricsQueryKeys.summaries,
+      perfMetricsQueryKeys.details,
+      ['perf-metrics-admin'],
+    ].map((queryKey) => queryClient.invalidateQueries({ queryKey }))
+  )
+}
+
 function getChannelTestResponseTime(
   response: ChannelTestResponse
 ): number | undefined {
@@ -128,7 +145,7 @@ export async function handleEnableChannel(
     const response = await updateChannelStatus(id, CHANNEL_STATUS.ENABLED)
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.ENABLED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     } else {
       handleServerError(response, i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
@@ -153,7 +170,7 @@ export async function handleDisableChannel(
     )
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.DISABLED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     } else {
       handleServerError(response, i18next.t(ERROR_MESSAGES.UPDATE_FAILED))
@@ -426,14 +443,14 @@ export async function handleBatchEnable(
 
   try {
     const response = await batchUpdateChannelStatus(ids, CHANNEL_STATUS.ENABLED)
-    const successCount = response.success ? response.data || 0 : 0
+    const successCount = response.data ?? 0
     const failCount = ids.length - successCount
 
     if (successCount > 0) {
       toast.success(
         i18next.t('{{count}} channel(s) enabled', { count: successCount })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     }
 
@@ -467,14 +484,14 @@ export async function handleBatchDisable(
       ids,
       CHANNEL_STATUS.MANUAL_DISABLED
     )
-    const successCount = response.success ? response.data || 0 : 0
+    const successCount = response.data ?? 0
     const failCount = ids.length - successCount
 
     if (successCount > 0) {
       toast.success(
         i18next.t('{{count}} channel(s) disabled', { count: successCount })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     }
 
@@ -538,7 +555,7 @@ export async function handleEnableTagChannels(
       toast.success(
         i18next.t('Enabled all channels with tag: {{tag}}', { tag })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     } else {
       handleServerError(response, i18next.t('Failed to enable tag channels'))
@@ -562,7 +579,7 @@ export async function handleDisableTagChannels(
       toast.success(
         i18next.t('Disabled all channels with tag: {{tag}}', { tag })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     } else {
       handleServerError(response, i18next.t('Failed to disable tag channels'))

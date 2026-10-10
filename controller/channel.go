@@ -861,6 +861,7 @@ func AddChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.InitChannelCache()
 	createAudit := map[string]any{
 		"name":  addChannelRequest.Channel.Name,
 		"type":  addChannelRequest.Channel.Type,
@@ -1344,12 +1345,16 @@ func UpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
-	if changed {
+	changed, err := model.UpdateChannelStatusWithError(id, "", req.Status, "manual operation")
+	if changed || err == nil {
 		model.InitChannelCache()
-		if req.Status != common.ChannelStatusEnabled {
-			closeActiveChannelWebSockets([]int{id})
-		}
+	}
+	if changed && req.Status != common.ChannelStatusEnabled {
+		closeActiveChannelWebSockets([]int{id})
+	}
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 	recordManageAudit(c, "channel.status_update", map[string]any{
 		"id":      id,
@@ -1371,19 +1376,32 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 	}
 	changedCount := 0
 	var disabledIDs []int
+	var updateErr error
 	for _, id := range req.Ids {
-		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
+		changed, err := model.UpdateChannelStatusWithError(id, "", req.Status, "manual batch operation")
+		if changed {
 			changedCount++
 			if req.Status != common.ChannelStatusEnabled {
 				disabledIDs = append(disabledIDs, id)
 			}
 		}
+		if err != nil {
+			updateErr = errors.Join(updateErr, fmt.Errorf("channel #%d: %w", id, err))
+		}
 	}
-	if changedCount > 0 {
+	if changedCount > 0 || updateErr == nil {
 		model.InitChannelCache()
 	}
 	if len(disabledIDs) > 0 {
 		closeActiveChannelWebSockets(disabledIDs)
+	}
+	if updateErr != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": updateErr.Error(),
+			"data":    changedCount,
+		})
+		return
 	}
 	recordManageAudit(c, "channel.status_update_batch", map[string]any{
 		"count":  changedCount,

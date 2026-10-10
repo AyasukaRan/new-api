@@ -377,6 +377,10 @@ func (channel *Channel) Save() error {
 // Keeping this allowlist here prevents a stale channel snapshot from
 // overwriting credentials, accounting counters, or channel configuration.
 func (channel *Channel) saveStatusState() error {
+	return channel.saveStatusStateWithDB(DB)
+}
+
+func (channel *Channel) saveStatusStateWithDB(tx *gorm.DB) error {
 	if channel.Id == 0 {
 		return errors.New("channel ID is 0")
 	}
@@ -387,7 +391,7 @@ func (channel *Channel) saveStatusState() error {
 	if channel.ChannelInfo.IsMultiKey {
 		updates["channel_info"] = channel.ChannelInfo
 	}
-	return DB.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+	return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
 }
 
 func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
@@ -773,6 +777,17 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
+	changed, err := UpdateChannelStatusWithError(channelId, usingKey, status, reason)
+	if err != nil {
+		common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channelId, status, err))
+	}
+	return changed
+}
+
+// UpdateChannelStatusWithError distinguishes an unchanged channel from a failed
+// update. Channel status and routing abilities commit together before the change
+// is published to the in-memory cache.
+func UpdateChannelStatusWithError(channelId int, usingKey string, status int, reason string) (bool, error) {
 	if common.MemoryCacheEnabled {
 		channelStatusLock.Lock()
 		defer channelStatusLock.Unlock()
@@ -785,72 +800,56 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 	pollingLock.Lock()
 	defer pollingLock.Unlock()
 
-	if common.MemoryCacheEnabled {
-		channelCache, _ := CacheGetChannel(channelId)
-		if channelCache == nil {
-			return false
-		}
-		if channelCache.ChannelInfo.IsMultiKey {
-			beforeStatus := channelCache.Status
-			// 如果是多Key模式，更新缓存中的状态
-			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
-			if beforeStatus != channelCache.Status {
-				CacheUpdateChannelStatus(channelId, channelCache.Status)
-			}
-			//CacheUpdateChannel(channelCache)
-			//return true
-		} else {
-			// 如果缓存渠道存在，且状态已是目标状态，直接返回
-			if channelCache.Status == status {
-				return false
-			}
-			CacheUpdateChannelStatus(channelId, status)
-		}
-	}
-
-	shouldUpdateAbilities := false
-	defer func() {
-		if shouldUpdateAbilities {
-			err := UpdateAbilityStatus(channelId, status == common.ChannelStatusEnabled)
-			if err != nil {
-				common.SysLog(fmt.Sprintf("failed to update ability status: channel_id=%d, error=%v", channelId, err))
-			}
-		}
-	}()
+	// A newly created channel may not have reached this process's routing cache
+	// yet. Management updates must use persisted state, never cache presence.
 	channel, err := GetChannelById(channelId, true)
 	if err != nil {
-		return false
-	} else {
-		// A manual channel operation must replace the exhaustion reason even
-		// when the status value is already manually disabled.
-		overridesKeyExhaustion := channel.ChannelInfo.IsMultiKey && usingKey == "" &&
-			status == common.ChannelStatusManuallyDisabled && reason != ChannelStatusReasonAllKeysDisabled &&
-			channel.GetOtherInfo()["status_reason"] == ChannelStatusReasonAllKeysDisabled
-		if channel.Status == status && !overridesKeyExhaustion {
-			return false
-		}
+		return false, err
+	}
+	// A manual channel operation must replace the exhaustion reason even
+	// when the status value is already manually disabled.
+	overridesKeyExhaustion := channel.ChannelInfo.IsMultiKey && usingKey == "" &&
+		status == common.ChannelStatusManuallyDisabled && reason != ChannelStatusReasonAllKeysDisabled &&
+		channel.GetOtherInfo()["status_reason"] == ChannelStatusReasonAllKeysDisabled
+	if channel.Status == status && !overridesKeyExhaustion && (!channel.ChannelInfo.IsMultiKey || usingKey == "") {
+		return false, nil
+	}
 
-		if channel.ChannelInfo.IsMultiKey {
-			beforeStatus := channel.Status
-			handlerMultiKeyUpdate(channel, usingKey, status, reason)
-			if beforeStatus != channel.Status {
-				shouldUpdateAbilities = true
-			}
-		} else {
-			info := channel.GetOtherInfo()
-			info["status_reason"] = reason
-			info["status_time"] = common.GetTimestamp()
-			channel.SetOtherInfo(info)
-			channel.Status = status
-			shouldUpdateAbilities = true
+	beforeStatus := channel.Status
+	if channel.ChannelInfo.IsMultiKey {
+		handlerMultiKeyUpdate(channel, usingKey, status, reason)
+	} else {
+		info := channel.GetOtherInfo()
+		info["status_reason"] = reason
+		info["status_time"] = common.GetTimestamp()
+		channel.SetOtherInfo(info)
+		channel.Status = status
+	}
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		if err := channel.saveStatusStateWithDB(tx); err != nil {
+			return err
 		}
-		err = channel.saveStatusState()
-		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
-			return false
+		if beforeStatus != channel.Status {
+			return tx.Model(&Ability{}).Where("channel_id = ?", channelId).
+				Select("enabled").Update("enabled", channel.Status == common.ChannelStatusEnabled).Error
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+
+	// Publish only persisted changes. Updating the cached object first would
+	// make a failed write appear successful and suppress subsequent retries.
+	if common.MemoryCacheEnabled {
+		if channelCache, _ := CacheGetChannel(channelId); channelCache != nil {
+			if channelCache.ChannelInfo.IsMultiKey {
+				handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
+			}
+			CacheUpdateChannelStatus(channelId, channel.Status)
 		}
 	}
-	return true
+	return true, nil
 }
 
 func EnableChannelByTag(tag string) error {
