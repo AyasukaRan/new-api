@@ -561,6 +561,17 @@ func identifyClientTool(header http.Header) string {
 	if application != "" {
 		return application
 	}
+	// Extension origins are an exact product allowlist, never an authentication
+	// signal. A path, joined origins, or repeated header is not a single origin.
+	origin, originCount := "", 0
+	for key, values := range header {
+		if strings.EqualFold(key, "Origin") && len(values) > 0 {
+			origin, originCount = values[0], originCount+len(values)
+		}
+	}
+	if originCount == 1 && origin == "chrome-extension://modkelfkcfjpgbfmnbnllalkiogfofhb" {
+		return "Read Frog"
+	}
 	if sdk != "" {
 		return sdk
 	}

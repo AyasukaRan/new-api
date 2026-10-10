@@ -194,6 +194,8 @@ func TestRequestMetadataIsolatesRetriedChannelAttempts(t *testing.T) {
 }
 
 func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) {
+	const readFrogOrigin = "chrome-extension://modkelfkcfjpgbfmnbnllalkiogfofhb"
+	const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36"
 	for _, test := range []struct {
 		name         string
 		headers      map[string]string
@@ -266,6 +268,27 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 		{name: "declared custom automation", headers: map[string]string{"X-Client-Name": " 自动化平台 nightly-v2.1 ", "User-Agent": "python-requests/2.32.5"}, want: "自动化平台 nightly-v2.1"},
 		{name: "custom app wins over platform", headers: map[string]string{"X-Client-Name": "Regression Runner", "User-Agent": "n8n"}, want: "Regression Runner"},
 		{name: "CLI wins over explicit name", headers: map[string]string{"X-Client-Name": "Custom Runner", "User-Agent": "deepseek-harness/0.1.5 n8n/1.0.0"}, want: "DeepSeek Harness"},
+		{name: "Read Frog browser extension", headers: map[string]string{"Origin": readFrogOrigin, "User-Agent": browserUserAgent}, want: "Read Frog"},
+		{name: "Read Frog origin without user agent", headers: map[string]string{"Origin": readFrogOrigin}, want: "Read Frog"},
+		{name: "Read Frog lowercase header name", headerValues: http.Header{"origin": {readFrogOrigin}}, want: "Read Frog"},
+		{name: "CLI wins over extension", headers: map[string]string{"Origin": readFrogOrigin, "User-Agent": "codex_cli_rs/0.100"}, want: "Codex CLI"},
+		{name: "explicit name wins over extension", headers: map[string]string{"Origin": readFrogOrigin, "User-Agent": browserUserAgent, "X-Client-Name": "Custom Runner"}, want: "Custom Runner"},
+		{name: "known application wins over extension", headers: map[string]string{"Origin": readFrogOrigin, "User-Agent": "n8n/1.123.0"}, want: "n8n"},
+		{name: "extension wins over SDK", headers: map[string]string{"Origin": readFrogOrigin, "User-Agent": "OpenAI/JS 1.1.0"}, want: "Read Frog"},
+		{name: "extension wins over HTTP client", headers: map[string]string{"Origin": readFrogOrigin, "User-Agent": "axios/1.9.0"}, want: "Read Frog"},
+		{name: "extension origin path is not accepted", headers: map[string]string{"Origin": readFrogOrigin + "/", "User-Agent": browserUserAgent}},
+		{name: "extension origin whitespace is not normalized", headers: map[string]string{"Origin": " " + readFrogOrigin + " ", "User-Agent": browserUserAgent}},
+		{name: "extension origin suffix is not accepted", headers: map[string]string{"Origin": readFrogOrigin + ".example.com", "User-Agent": browserUserAgent}},
+		{name: "extension origin concatenation is not accepted", headers: map[string]string{"Origin": readFrogOrigin + ", https://example.com", "User-Agent": browserUserAgent}},
+		{name: "extension origin space separated list is not accepted", headers: map[string]string{"Origin": readFrogOrigin + " https://example.com", "User-Agent": browserUserAgent}},
+		{name: "extension origin query is not accepted", headers: map[string]string{"Origin": readFrogOrigin + "?source=read-frog", "User-Agent": browserUserAgent}},
+		{name: "extension origin credentials are not accepted", headers: map[string]string{"Origin": "chrome-extension://private@modkelfkcfjpgbfmnbnllalkiogfofhb", "User-Agent": browserUserAgent}},
+		{name: "extension ID over HTTPS is not accepted", headers: map[string]string{"Origin": "https://modkelfkcfjpgbfmnbnllalkiogfofhb", "User-Agent": browserUserAgent}},
+		{name: "extension name is not an origin identity", headers: map[string]string{"Origin": "chrome-extension://read-frog", "User-Agent": browserUserAgent}},
+		{name: "repeated extension origins are not accepted", headerValues: http.Header{"Origin": {readFrogOrigin, readFrogOrigin}, "User-Agent": {browserUserAgent}}},
+		{name: "second extension origin is not accepted", headerValues: http.Header{"Origin": {"https://example.com", readFrogOrigin}, "User-Agent": {browserUserAgent}}},
+		{name: "differently cased duplicate origins are not accepted", headerValues: http.Header{"Origin": {readFrogOrigin}, "origin": {"https://example.com"}, "User-Agent": {browserUserAgent}}},
+		{name: "unknown origin alone preserves normal HTTP", headers: map[string]string{"Origin": "https://example.com"}, want: "Normal HTTP"},
 		{name: "runtime only from compatible language", headers: map[string]string{"X-Stainless-Lang": "js", "X-Stainless-Runtime": "node"}, want: "Node.js"},
 		{name: "language without runtime", headers: map[string]string{"X-Stainless-Lang": "go"}, want: "Go"},
 		{name: "inconsistent runtime does not override language", headers: map[string]string{"X-Stainless-Lang": "python", "X-Stainless-Runtime": "node"}, want: "Python"},
@@ -329,10 +352,13 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 				c.Request.Header.Set(key, value)
 			}
 			info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions}
+			originalHeaders := c.Request.Header.Clone()
 			defer BeginRequestMetadata(c, info)()
+			assert.Equal(t, originalHeaders, c.Request.Header, "source attribution must not alter the original request headers")
 			// Later upstream header overrides must not replace the original source.
 			c.Request.Header = make(http.Header)
 			c.Request.Header.Set("User-Agent", "opencode/99.0.0")
+			c.Request.Header.Set("Origin", readFrogOrigin)
 			other := model.NewLogOther()
 			AppendRequestMetadata(c, info, other)
 			if test.want == "" {
