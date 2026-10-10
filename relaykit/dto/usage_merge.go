@@ -49,6 +49,7 @@ func MergeUsageNonZero(current *Usage, incoming *Usage) *Usage {
 			details.CachedTokensDetails != nil ||
 			details.CachedCreationTokens > 0 ||
 			details.CacheWriteTokens > 0 ||
+			details.CacheCreationInputTokens > 0 ||
 			details.TextTokens > 0 ||
 			details.AudioTokens > 0 ||
 			details.ImageTokens > 0 {
@@ -323,6 +324,9 @@ func mergeInputTokenDetails(current *InputTokenDetails, incoming InputTokenDetai
 	}
 	if incoming.CacheWriteTokens > 0 {
 		current.CacheWriteTokens = incoming.CacheWriteTokens
+	}
+	if incoming.CacheCreationInputTokens > 0 {
+		current.CacheCreationInputTokens = incoming.CacheCreationInputTokens
 	}
 	if incoming.TextTokens > 0 {
 		current.TextTokens = incoming.TextTokens

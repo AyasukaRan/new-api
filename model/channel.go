@@ -849,6 +849,9 @@ func UpdateChannelStatusWithError(channelId int, usingKey string, status int, re
 			CacheUpdateChannelStatus(channelId, channel.Status)
 		}
 	}
+	if beforeStatus != channel.Status {
+		InvalidatePricingCache()
+	}
 	return true, nil
 }
 

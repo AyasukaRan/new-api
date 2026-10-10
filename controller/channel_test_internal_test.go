@@ -22,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -495,7 +496,7 @@ func TestResolveChannelTestUserIDUsesRequestUser(t *testing.T) {
 	require.Equal(t, 2, userID)
 }
 
-func TestSelectChannelsForAutomaticTestSkipsOnlyUnavailableChannels(t *testing.T) {
+func TestSelectChannelsForAutomaticTestSkipsDisabledChannels(t *testing.T) {
 	autoBanEnabled, autoBanDisabled := 1, 0
 	channels := []*model.Channel{
 		nil,
@@ -508,7 +509,73 @@ func TestSelectChannelsForAutomaticTestSkipsOnlyUnavailableChannels(t *testing.T
 
 	selected := selectChannelsForAutomaticTest(channels)
 
-	assert.Equal(t, []*model.Channel{channels[1], channels[2], channels[3], channels[5]}, selected)
+	assert.Equal(t, []*model.Channel{channels[1], channels[2], channels[5]}, selected)
+}
+
+func TestChannelTestWorkersAllowDisabledChannelsOnlyForManualChecks(t *testing.T) {
+	previousInterval := common.RequestInterval
+	common.RequestInterval = 0
+	t.Cleanup(func() { common.RequestInterval = previousInterval })
+	channels := []*model.Channel{nil, {Id: 1, Status: common.ChannelStatusEnabled}, {Id: 2, Status: common.ChannelStatusManuallyDisabled}, {Id: 3, Status: common.ChannelStatusAutoDisabled}}
+	for _, scheduled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(scheduled), func(t *testing.T) {
+			ctx := context.Background()
+			if scheduled {
+				ctx = context.WithValue(ctx, channelIdleProbeIntervalKey{}, time.Minute)
+			}
+			var checked []int
+			summary := runChannelTestWorkers(ctx, channels, 1, func(_ context.Context, channel *model.Channel) channelTestSummary {
+				checked = append(checked, channel.Id)
+				return channelTestSummary{Tested: 1, Succeeded: 1}
+			}, nil)
+			if scheduled {
+				assert.Equal(t, []int{1}, checked)
+			} else {
+				assert.Equal(t, []int{1, 2, 3}, checked)
+			}
+			assert.Equal(t, len(checked), summary.Tested)
+		})
+	}
+}
+
+func TestImageHealthChecksSkipBeforeObservationsAndProbeTimers(t *testing.T) {
+	_, err := jsplugin.DefaultRegistry.Register(`
+export const meta = {apiVersion:1,key:"health-image-test",name:"Health image test",version:"1.0.0",author:{name:"Test"},models:["creative-model"],protocols:["openai_image"],fetchMode:"per_task"};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+export const protocols={openai_image:{decodeRequest(ctx){return ctx;},render(ctx,task){return task;}}};
+`, jsplugin.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, jsplugin.DefaultRegistry.Unregister("health-image-test")) })
+	previousDB := model.DB
+	model.DB = nil
+	t.Cleanup(func() { model.DB = previousDB })
+	for _, test := range []struct{ name, mapping, endpoint, settings string }{
+		{name: "gpt-image-2"}, {name: "qwen-image-3.0"}, {name: "gemini-3.1-flash-image-preview"},
+		{name: "doubao-seedream-4-0"}, {name: "draw", mapping: `{"draw":"alias","alias":"gpt-image-2"}`},
+		{name: "creative-model", settings: `{"task_plugin_key":"health-image-test"}`},
+		{name: "ordinary-model", endpoint: string(constant.EndpointTypeImageGeneration)},
+	} {
+		t.Run(test.name+test.endpoint, func(t *testing.T) {
+			channel := &model.Channel{Id: 42, Type: constant.ChannelTypeTaskPlugin, Models: test.name, ModelMapping: &test.mapping, Setting: &test.settings}
+			for _, scheduled := range []bool{false, true} {
+				ctx := context.Background()
+				if scheduled {
+					ctx = context.WithValue(ctx, channelIdleProbeIntervalKey{}, time.Minute)
+				}
+				result := testChannel(ctx, channel, 1, "", test.endpoint, true)
+				require.NoError(t, result.localErr)
+				assert.Nil(t, result.sample)
+				assert.Equal(t, channelTestSummary{Skipped: 1}, result.summary)
+				assert.Zero(t, result.responseTime)
+			}
+			result := testChannelModel(context.Background(), channel, 1, test.name, test.endpoint, true)
+			assert.Equal(t, channelTestSummary{Skipped: 1}, result.summary)
+		})
+	}
+	assert.False(t, isImageChannelTest(&model.Channel{}, "gemini-3.8-flash", ""))
 }
 
 func TestRunChannelTestWorkersHonorsConfiguredConcurrency(t *testing.T) {
@@ -672,6 +739,7 @@ func TestChannelTestPublishesModelMonitoring(t *testing.T) {
 			}{
 				{name: "nonstream"},
 				{name: "stream", stream: true},
+				{name: "automatic_stream", stream: true},
 				{name: "http_error", wantError: true},
 				{name: "invalid_body", wantError: true},
 				{name: "network_error", wantError: true},
@@ -705,7 +773,7 @@ func TestChannelTestPublishesModelMonitoring(t *testing.T) {
 							_, _ = fmt.Fprint(w, `{"error":{"message":"upstream unavailable","type":"server_error"}}`)
 						case "invalid_body":
 							_, _ = fmt.Fprint(w, `{"invalid_json":`)
-						case "stream":
+						case "stream", "automatic_stream":
 							w.Header().Set("Content-Type", "text/event-stream")
 							_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4o-mini\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\n")
 							w.(http.Flusher).Flush()
@@ -730,7 +798,13 @@ func TestChannelTestPublishesModelMonitoring(t *testing.T) {
 					}
 					require.NoError(t, db.Create(channel).Error)
 
-					result := testChannel(context.Background(), channel, user.Id, modelName, endpoint, test.stream)
+					var result testResult
+					if test.name == "automatic_stream" {
+						result.summary = testChannelForHealthCheck(context.Background(), channel, user.Id)
+						require.Equal(t, channelTestSummary{Tested: 1, Succeeded: 1}, result.summary)
+					} else {
+						result = testChannel(context.Background(), channel, user.Id, modelName, endpoint, test.stream)
+					}
 					if test.wantError {
 						require.Error(t, result.localErr)
 					} else {
@@ -820,7 +894,22 @@ func TestChannelTestPublishesModelMonitoring(t *testing.T) {
 	}
 }
 
+func writeChannelTestSuccess(w http.ResponseWriter, stream bool) {
+	if stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"test\",\"model\":\"test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"test\",\"model\":\"test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\ndata: [DONE]\n\n")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprint(w, `{"id":"test","model":"test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+}
+
 func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 10
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
 	previousPerf := perf_metrics_setting.GetSetting()
 	previousGroups := ratio_setting.GroupRatio2JSONString()
 	previousConsume, previousExport := common.LogConsumeEnabled, common.DataExportEnabled
@@ -854,6 +943,8 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 				setupError  bool
 				cancel      bool
 				completed   bool
+				disable     bool
+				scheduled   bool
 				wantKeys    []int
 			}{
 				{name: "insufficient_balance_then_success", healthyKey: 1, completed: true, wantKeys: []int{0, 1, 2}},
@@ -865,6 +956,8 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 				{name: "success_with_neutral_keys", healthyKey: 1, neutralKeys: map[int]bool{0: true, 2: true}, completed: true, wantKeys: []int{0, 1, 2}},
 				{name: "failure_with_neutral_key", healthyKey: -1, neutralKeys: map[int]bool{1: true}, wantKeys: []int{0, 1, 2}},
 				{name: "all_keys_neutral", healthyKey: -1, neutralKeys: map[int]bool{0: true, 1: true, 2: true}, wantKeys: []int{0, 1, 2}},
+				{name: "scheduled_disabled_after_first_key", healthyKey: 0, disable: true, scheduled: true, wantKeys: []int{0}},
+				{name: "manual_disabled_after_first_key", healthyKey: 0, disable: true, completed: true, wantKeys: []int{0, 1, 2}},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					name := fmt.Sprintf("key-probe-%s-%s-%d", dialect.kind, test.name, time.Now().UnixNano())
@@ -874,7 +967,14 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 					ctx, cancel := context.WithCancel(context.Background())
 					t.Cleanup(cancel)
 					requests := make(chan int, 3)
+					var channel *model.Channel
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						var request dto.GeneralOpenAIRequest
+						if !assert.NoError(t, common.DecodeJson(r.Body, &request)) {
+							w.WriteHeader(http.StatusBadRequest)
+							return
+						}
+						assert.Equal(t, common.GetPointer(true), request.Stream)
 						index := map[string]int{"Bearer fixture-key-0": 0, "Bearer fixture-key-1": 1, "Bearer fixture-key-2": 2}[r.Header.Get("Authorization")]
 						select {
 						case requests <- index:
@@ -883,6 +983,9 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 						}
 						if test.cancel {
 							cancel()
+						}
+						if test.disable && index == 0 {
+							assert.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
 						}
 						w.Header().Set("Content-Type", "application/json")
 						if test.neutralKeys[index] {
@@ -899,16 +1002,20 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 							_, _ = fmt.Fprint(w, `{"error":{"message":"insufficient balance","type":"insufficient_quota"}}`)
 							return
 						}
-						_, _ = fmt.Fprint(w, `{"id":"test","model":"test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+						writeChannelTestSuccess(w, true)
 					}))
 					t.Cleanup(upstream.Close)
-					channel := &model.Channel{
+					channel = &model.Channel{
 						Type: constant.ChannelTypeOpenAI, Key: "fixture-key-0\nfixture-key-1\nfixture-key-2", Status: common.ChannelStatusEnabled,
 						Models: name, Group: user.Group, BaseURL: common.GetPointer(upstream.URL), TestTime: 100,
 						ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling, MultiKeyPollingIndex: 2, MultiKeyStatusList: test.statuses},
 					}
 					if test.setupError {
 						channel.ModelMapping = common.GetPointer(`{"broken":`)
+					}
+					if test.scheduled {
+						ctx = context.WithValue(ctx, channelIdleProbeIntervalKey{}, time.Minute)
+						channel.Models += "," + name + "-next"
 					}
 					require.NoError(t, db.Create(channel).Error)
 					previousObservedAt := time.Now().Add(-time.Minute).UnixMilli()
@@ -943,7 +1050,11 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 						require.NoError(t, err)
 						assert.JSONEq(t, string(originalInfo), string(encoded), "monitoring must not mutate key states or polling cursor in memory or SQL")
 					}
-					assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+					wantStatus := common.ChannelStatusEnabled
+					if test.disable {
+						wantStatus = common.ChannelStatusManuallyDisabled
+					}
+					assert.Equal(t, wantStatus, stored.Status)
 					assert.Equal(t, channel.Key, stored.Key)
 					var legacy []model.PerfMetric
 					require.NoError(t, db.Where("model_name = ?", name).Find(&legacy).Error)
@@ -957,9 +1068,15 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 							require.NoError(t, err)
 							assert.Zero(t, activity.LastResultAt, "failed and neutral keys leave the aggregate health unknown")
 						}
-						if test.cancel {
+						if test.cancel || test.scheduled {
 							assert.Zero(t, summary.Tested)
 							assert.EqualValues(t, 100, stored.TestTime)
+						}
+						if test.scheduled {
+							assert.Equal(t, channelTestSummary{Skipped: 2}, summary)
+							var nextModelActivity int64
+							require.NoError(t, db.Model(&model.ChannelModelActivity{}).Where("channel_id = ? AND model_name = ?", channel.Id, name+"-next").Count(&nextModelActivity).Error)
+							assert.Zero(t, nextModelActivity, "disabled scheduled models do not advance probe timers")
 						}
 						return
 					}
@@ -971,7 +1088,12 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 					require.Len(t, legacy, 1)
 					assert.EqualValues(t, 1, legacy[0].RequestCount)
 					assert.Equal(t, wantSuccess, legacy[0].SuccessCount)
-					require.Len(t, observations, 4, "one physical probe, one channel observation, one group round and one model-wide round")
+					if test.disable {
+						require.Len(t, observations, 1, "manual diagnosis of a disabled channel only records the physical probe")
+						assert.Equal(t, perfmetrics.SourceProbe, observations[0].Source, "disabled channels cannot contribute route or availability state")
+					} else {
+						require.Len(t, observations, 4, "one physical probe, one channel observation, one group round and one model-wide round")
+					}
 					for _, observation := range observations {
 						assert.Contains(t, []string{perfmetrics.SourceProbe, perfmetrics.SourceRouteState, perfmetrics.SourceAvailability, perfmetrics.SourceAvailabilityAll}, observation.Source)
 						assert.EqualValues(t, 1, observation.RequestCount, "failed key attempts cannot dilute a recovered channel's availability")
@@ -997,6 +1119,9 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 }
 
 func TestChannelHealthChecksAllConfiguredModelsMonitoringOnly(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 10
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
 	previousInterval := common.RequestInterval
 	previousDisable, previousEnable := common.AutomaticDisableChannelEnabled, common.AutomaticEnableChannelEnabled
 	previousPerf := perf_metrics_setting.GetSetting()
@@ -1050,7 +1175,7 @@ func TestChannelHealthChecksAllConfiguredModelsMonitoringOnly(t *testing.T) {
 					_, _ = fmt.Fprint(w, `{"error":{"message":"bad key","type":"invalid_api_key"}}`)
 					return
 				}
-				_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","model":"health","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+				writeChannelTestSuccess(w, request.Stream != nil && *request.Stream)
 			}))
 			t.Cleanup(upstream.Close)
 			autoBan := 1
@@ -1151,17 +1276,20 @@ func TestChannelHealthChecksAllConfiguredModelsMonitoringOnly(t *testing.T) {
 					case mixedModels[0]:
 						assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 						assert.NotEmpty(t, request["messages"])
-						_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","model":"health","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+						assert.Equal(t, true, request["stream"])
+						writeChannelTestSuccess(w, true)
 					case mixedModels[1]:
 						assert.Equal(t, "/v1/embeddings", r.URL.Path)
 						assert.Equal(t, []any{"hello world"}, request["input"])
 						assert.NotContains(t, request, "messages")
+						assert.NotEqual(t, true, request["stream"])
 						_, _ = fmt.Fprint(w, `{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"model":"embedding","usage":{"prompt_tokens":5,"total_tokens":5}}`)
 					case mixedModels[2]:
 						assert.Equal(t, "/v1/rerank", r.URL.Path)
 						assert.NotEmpty(t, request["query"])
 						assert.Len(t, request["documents"], 2)
 						assert.NotContains(t, request, "input")
+						assert.NotEqual(t, true, request["stream"])
 						_, _ = fmt.Fprint(w, `{"results":[{"index":0,"relevance_score":0.9}],"usage":{"total_tokens":5}}`)
 					default:
 						t.Errorf("unexpected model %q", name)
@@ -1172,7 +1300,7 @@ func TestChannelHealthChecksAllConfiguredModelsMonitoringOnly(t *testing.T) {
 				channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: "mixed model endpoints", Key: "mixed-key", Status: common.ChannelStatusEnabled, Models: strings.Join(mixedModels, ","), Group: user.Group, BaseURL: common.GetPointer(mixedUpstream.URL)}
 				require.NoError(t, db.Create(channel).Error)
 
-				result := testChannel(context.Background(), channel, user.Id, "", "", false)
+				result := testChannel(context.Background(), channel, user.Id, "", "", true)
 
 				require.NoError(t, result.localErr)
 				assert.Equal(t, channelTestSummary{Tested: 3, Succeeded: 3}, result.summary)
@@ -1668,6 +1796,9 @@ func TestChannelAvailabilityIndependentOfGroups(t *testing.T) {
 }
 
 func TestChannelAvailabilityRoundsAndUsage(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 10
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
 	previousInterval := common.RequestInterval
 	previousPerf := perf_metrics_setting.GetSetting()
 	previousGroups := ratio_setting.GroupRatio2JSONString()
@@ -1712,9 +1843,14 @@ func TestChannelAvailabilityRoundsAndUsage(t *testing.T) {
 			var firstHealthy atomic.Bool
 			firstHealthy.Store(true)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request dto.GeneralOpenAIRequest
+				if !assert.NoError(t, common.DecodeJson(r.Body, &request)) {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				if (r.Header.Get("Authorization") == "Bearer first-key" && firstHealthy.Load()) || r.Header.Get("Authorization") == "Bearer disabled-key" {
-					_, _ = fmt.Fprint(w, `{"id":"test","model":"test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+					writeChannelTestSuccess(w, request.Stream != nil && *request.Stream)
 					return
 				}
 				w.WriteHeader(http.StatusServiceUnavailable)

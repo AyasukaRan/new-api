@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -17,6 +18,7 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 		merged := cloneStringMap(info.RequestHeaders)
 		maps.Copy(merged, input.Headers)
 		input.Headers = merged
+		setBillingRequestFormat(&input, info.Request)
 		return input, nil
 	}
 
@@ -30,6 +32,11 @@ func ResolveIncomingBillingExprRequestInput(c *gin.Context, info *relaycommon.Re
 		return billingexpr.RequestInput{}, err
 	}
 	input.Body = bodyBytes
+	var request dto.Request
+	if info != nil {
+		request = info.Request
+	}
+	setBillingRequestFormat(&input, request)
 	return input, nil
 }
 
@@ -62,6 +69,7 @@ func BuildBillingExprRequestInputFromRequest(request dto.Request, headers map[st
 	input := billingexpr.RequestInput{
 		Headers: cloneStringMap(headers),
 	}
+	setBillingRequestFormat(&input, request)
 	if request == nil {
 		return input, nil
 	}
@@ -72,6 +80,30 @@ func BuildBillingExprRequestInputFromRequest(request dto.Request, headers map[st
 	}
 	input.Body = bodyBytes
 	return input, nil
+}
+
+// This reserved value belongs only to the frozen billing input. Never add it to
+// the incoming request or upstream headers, or trust a client's value for it.
+func setBillingRequestFormat(input *billingexpr.RequestInput, request dto.Request) {
+	const key = "x-new-api-billing-request-format"
+	for name := range input.Headers {
+		if strings.EqualFold(strings.TrimSpace(name), key) {
+			delete(input.Headers, name)
+		}
+	}
+	if input.Headers == nil {
+		input.Headers = make(map[string]string)
+	}
+	format := ""
+	switch request.(type) {
+	case *dto.GeneralOpenAIRequest:
+		format = string(types.RelayFormatOpenAI)
+	case *dto.ClaudeRequest:
+		format = types.RelayFormatClaude
+	case *dto.OpenAIResponsesRequest:
+		format = types.RelayFormatOpenAIResponses
+	}
+	input.Headers[key] = format
 }
 
 func readIncomingBillingExprBody(c *gin.Context) ([]byte, error) {

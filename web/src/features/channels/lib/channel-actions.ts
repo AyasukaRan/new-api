@@ -300,23 +300,39 @@ export async function handleTestChannel(
     success: boolean,
     responseTime?: number,
     error?: string,
-    errorCode?: string
+    errorCode?: string,
+    skipped?: boolean
   ) => void,
   queryClient?: QueryClient
 ): Promise<void> {
-  const payload =
-    options && (options.testModel || options.endpointType || options.stream)
-      ? {
-          ...(options.testModel ? { model: options.testModel } : {}),
-          ...(options.endpointType
-            ? { endpoint_type: options.endpointType }
-            : {}),
-          ...(options.stream ? { stream: true } : {}),
-        }
-      : undefined
+  const payload = {
+    ...(options?.testModel ? { model: options.testModel } : {}),
+    ...(options?.endpointType ? { endpoint_type: options.endpointType } : {}),
+    stream: options?.stream ?? true,
+  }
 
   try {
     const response = await testChannel(id, payload)
+    if (
+      response.success &&
+      response.data?.tested === 0 &&
+      (response.data.skipped ?? 0) > 0
+    ) {
+      if (!options?.silent) {
+        toast.info(
+          i18next.t('{{target}} test skipped', {
+            target: getChannelTestLabel(options),
+          }),
+          {
+            description: i18next.t(
+              'Image generation models are excluded from health checks'
+            ),
+          }
+        )
+      }
+      onTestComplete?.(false, undefined, undefined, undefined, true)
+      return
+    }
     const responseTime = getChannelTestResponseTime(response)
     const duration = formatChannelTestDuration(responseTime)
     const target = getChannelTestLabel(options)

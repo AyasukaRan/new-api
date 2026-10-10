@@ -232,6 +232,10 @@ export interface ChannelTestResponse {
   data?: {
     response_time?: number
     error?: string
+    tested?: number
+    succeeded?: number
+    failed?: number
+    skipped?: number
   }
 }
 

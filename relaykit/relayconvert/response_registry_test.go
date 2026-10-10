@@ -798,18 +798,77 @@ func TestCachedTokenDetailsSurviveUsageSnapshotsAndUnknownEvents(t *testing.T) {
 func TestCachedTokenDetailsAccumulationDoesNotWrapOrSubtract(t *testing.T) {
 	maximum := dto.InputTokenDetails{
 		CachedTokens: math.MaxInt, CachedCreationTokens: math.MaxInt, CacheWriteTokens: math.MaxInt,
-		TextTokens: math.MaxInt, AudioTokens: math.MaxInt, ImageTokens: math.MaxInt,
+		CacheCreationInputTokens: math.MaxInt,
+		TextTokens:               math.MaxInt, AudioTokens: math.MaxInt, ImageTokens: math.MaxInt,
 		CachedTokensDetails: &dto.CachedTokenDetails{TextTokens: lo.ToPtr(math.MaxInt), AudioTokens: lo.ToPtr(math.MaxInt), ImageTokens: lo.ToPtr(math.MaxInt)},
 	}
 	total := maximum.Clone()
 	for _, count := range []int{1, -1} {
 		total.Add(dto.InputTokenDetails{
 			CachedTokens: count, CachedCreationTokens: count, CacheWriteTokens: count,
-			TextTokens: count, AudioTokens: count, ImageTokens: count,
+			CacheCreationInputTokens: count,
+			TextTokens:               count, AudioTokens: count, ImageTokens: count,
 			CachedTokensDetails: &dto.CachedTokenDetails{TextTokens: lo.ToPtr(count), AudioTokens: lo.ToPtr(count), ImageTokens: lo.ToPtr(count)},
 		})
 		assert.Equal(t, maximum, total, "large accumulated usage stays positive and negative input cannot reduce billing counters")
 	}
+}
+
+func TestDashScopeCacheCreationSurvivesUsageAndProtocolConversion(t *testing.T) {
+	for _, detailsKey := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		t.Run(detailsKey, func(t *testing.T) {
+			// DashScope sends this field on both compatible Chat and Responses
+			// usage. Later streaming frames may omit unchanged usage details.
+			var usage dto.Usage
+			require.NoError(t, kitutil.Unmarshal([]byte(`{"`+detailsKey+`":{"cache_creation_input_tokens":40}}`), &usage))
+			assert.True(t, dto.HasOpenAIUsageTokens(&usage))
+			merged := dto.MergeUsageNonZero(nil, &usage)
+			dto.MergeUsageNonZero(merged, &dto.Usage{PromptTokens: 100, CompletionTokens: 10})
+			dto.MergeUsageNonZero(merged, &dto.Usage{})
+			canonical, ok := dto.NewOpenAIChatBillingUsage(merged).CanonicalUsage()
+			require.True(t, ok)
+			assert.Equal(t, 40, canonical.PromptTokensDetails.CacheCreationTokensTotal())
+			encoded, err := kitutil.Marshal(canonical)
+			require.NoError(t, err)
+			assert.Contains(t, string(encoded), `"cache_creation_input_tokens":40`)
+
+			chat := textRegistryChatResponse()
+			chat.Usage = *canonical
+			responses, err := ConvertResponse(nil, nil, types.RelayFormatOpenAIResponses, chat)
+			require.NoError(t, err)
+			require.NotNil(t, responses.Usage.InputTokensDetails)
+			assert.Equal(t, 40, responses.Usage.InputTokensDetails.CacheCreationInputTokens)
+			roundTrip, err := ConvertResponse(nil, nil, types.RelayFormatOpenAI, responses.Value)
+			require.NoError(t, err)
+			assert.Equal(t, 40, roundTrip.Usage.PromptTokensDetails.CacheCreationTokensTotal())
+
+			claude, err := ConvertResponse(nil, nil, types.RelayFormatClaude, chat)
+			require.NoError(t, err)
+			require.IsType(t, &dto.ClaudeResponse{}, claude.Value)
+			claudeUsage := claude.Value.(*dto.ClaudeResponse).Usage
+			require.NotNil(t, claudeUsage)
+			assert.Equal(t, 40, claudeUsage.CacheCreationInputTokens)
+			assert.Equal(t, 60, claudeUsage.InputTokens, "cache creation is split from the OpenAI input total exactly once")
+		})
+	}
+
+	for _, test := range []struct {
+		name    string
+		details dto.InputTokenDetails
+		want    int
+	}{
+		{"aliases are not summed", dto.InputTokenDetails{CachedCreationTokens: 30, CacheWriteTokens: 40, CacheCreationInputTokens: 40}, 40},
+		{"negative counts do not reduce charges", dto.InputTokenDetails{CachedCreationTokens: -3, CacheWriteTokens: -2, CacheCreationInputTokens: -1}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, test.details.CacheCreationTokensTotal())
+		})
+	}
+
+	var total dto.InputTokenDetails
+	total.Add(dto.InputTokenDetails{CacheCreationInputTokens: 40})
+	total.Add(dto.InputTokenDetails{CacheCreationInputTokens: 20})
+	assert.Equal(t, 60, total.CacheCreationTokensTotal(), "independent usage events add their cache writes")
 }
 
 func textRegistryChatResponse() *dto.OpenAITextResponse {

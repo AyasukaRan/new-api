@@ -1041,7 +1041,7 @@ func TestAlibabaOpenAIImageProtocolBindings(t *testing.T) {
 	registry := jsplugin.NewRegistry()
 	plugin, err := registry.RegisterFactory(source, jsplugin.Options{Key: "alibaba"})
 	require.NoError(t, err)
-	for _, name := range []string{"qwen-image-3.0-pro", "qwen-image-plus", "qwen-image-edit-plus", "z-image-turbo", "wan2.6-t2i", "wan2.2-t2i-flash", "wan2.5-i2i-preview", "wanx2.1-imageedit", "qwen-image-edit-max-2026-01-16"} {
+	for _, name := range []string{"qwen-image-3.0-pro", "qwen-image-2.1-pro", "qwen-image-plus", "qwen-image-edit-plus", "z-image-turbo", "wan2.6-t2i", "wan2.2-t2i-flash", "wan2.5-i2i-preview", "wanx2.1-imageedit", "qwen-image-edit-max-2026-01-16"} {
 		for _, path := range []string{"/v1/images/generations", "/v1/images/edits"} {
 			binding, found := registry.Generation().LookupEndpoint(http.MethodPost, path, name)
 			require.True(t, found, name+" "+path)
@@ -1079,6 +1079,10 @@ func decodeAlibabaImage(t *testing.T, plugin *jsplugin.LoadedPlugin, operation s
 func TestAlibabaOpenAIImageDecodeAndSubmission(t *testing.T) {
 	plugin := newAlibabaPlugin(t)
 	const base = "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+	referenceImages := make([]any, 11)
+	for i := range referenceImages {
+		referenceImages[i] = fmt.Sprintf("https://cdn.example/reference-%d.png", i)
+	}
 	for _, tc := range []struct {
 		name, model, operation string
 		body                   map[string]any
@@ -1088,6 +1092,12 @@ func TestAlibabaOpenAIImageDecodeAndSubmission(t *testing.T) {
 		wantFacts              map[string]any
 		wantRatios             map[string]any
 	}{
+		{"qwen-image-2.1-pro six images", "qwen-image-2.1-pro", "generate", map[string]any{"prompt": "a glass bottle on a transparent background", "n": 6, "size": "1024x1024"},
+			"multimodal-generation/generation", "", "text_to_image", 6,
+			map[string]any{"image_count": float64(6)}, map[string]any{"image_count": float64(6)}},
+		{"qwen-image-2.1-pro accepts ten references", "qwen-image-2.1-pro", "edit", map[string]any{"prompt": "combine the objects on a transparent background", "image": referenceImages[:10], "n": 6},
+			"multimodal-generation/generation", "", "image_to_image", 6,
+			map[string]any{"image_count": float64(6)}, map[string]any{"image_count": float64(6)}},
 		{"qwen-image-3.0-pro two images", "qwen-image-3.0-pro", "generate", map[string]any{"prompt": "a white siamese cat", "n": 2, "size": "1024x1024"},
 			"multimodal-generation/generation", "", "text_to_image", 2,
 			map[string]any{"image_count": float64(2), "output_image_type": "qima_output_1k", "input_image_count": float64(0)}, map[string]any{"image_count": float64(2)}},
@@ -1135,6 +1145,16 @@ func TestAlibabaOpenAIImageDecodeAndSubmission(t *testing.T) {
 			if extra, ok := tc.body["parameters"].(map[string]any); ok {
 				for key, expected := range alibabaObject(t, extra) {
 					assert.Equal(t, expected, parameters[key], key)
+				}
+			}
+			if messages, ok := upstreamBody["input"].(map[string]any)["messages"].([]any); ok {
+				content := messages[0].(map[string]any)["content"].([]any)
+				assert.Equal(t, tc.body["prompt"], content[len(content)-1].(map[string]any)["text"])
+				if images, ok := tc.body["image"].([]any); ok {
+					require.Len(t, content, len(images)+1)
+					for i, image := range images {
+						assert.Equal(t, image, content[i].(map[string]any)["image"])
+					}
 				}
 			}
 			assert.Equal(t, tc.wantFacts, facts)
@@ -1260,6 +1280,9 @@ func TestAlibabaOpenAIImageDecodeAndSubmission(t *testing.T) {
 		{"wanx2.1-imageedit bounds n", "wanx2.1-imageedit", "edit", map[string]any{"prompt": "x", "image": "https://cdn.example/1.png", "n": 5}, "", "n must be an integer between 1 and 4"},
 		{"fixed count model rejects n=2 before reservation", "qwen-image-plus", "generate", map[string]any{"prompt": "a cat", "n": 2}, "", "n must be 1 for this model"},
 		{"z-image rejects n=2", "z-image-turbo", "generate", map[string]any{"prompt": "a cat", "n": 2}, "", "n must be 1 for this model"},
+		{"qwen-image-2.1-pro rejects n=7 before reservation", "qwen-image-2.1-pro", "generate", map[string]any{"prompt": "a cat", "n": 7}, "", "n must be an integer between 1 and 6"},
+		{"qwen-image-2.1-pro rejects parameter count overrides", "qwen-image-2.1-pro", "generate", map[string]any{"prompt": "a cat", "n": 6, "parameters": map[string]any{"n": 7}}, "", "n must be an integer between 1 and 6"},
+		{"qwen-image-2.1-pro rejects eleven references", "qwen-image-2.1-pro", "edit", map[string]any{"prompt": "combine", "image": referenceImages}, "", "too many input images for this model"},
 		{"qwen-image-3.0 bounds n", "qwen-image-3.0-pro", "generate", map[string]any{"prompt": "a cat", "n": 7}, "", "n must be an integer between 1 and 6"},
 		{"legacy bounds n", "wan2.2-t2i-flash", "generate", map[string]any{"prompt": "a cat", "n": 5}, "", "n must be an integer between 1 and 4"},
 		{"edit requires an image", "qwen-image-edit-plus", "edit", map[string]any{"prompt": "watercolor"}, "image is required", ""},
@@ -1313,6 +1336,8 @@ func TestAlibabaOpenAIImageCountDerivationAndRender(t *testing.T) {
 		wantData    int
 		wantErr     bool
 	}{
+		{"qwen-image-2.1-pro settles one actual image from two requested", "qwen-image-2.1-pro", map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": []any{map[string]any{"image": first}}}}}}, map[string]any{"image_count": 1, "width": 1024, "height": 1024},
+			map[string]any{"image_count": float64(1)}, 1, false},
 		{"qwen-image-3.0 reports output_image_count", "qwen-image-3.0-pro", map[string]any{"choices": twoImagesOneChoice},
 			map[string]any{"output_width": 1024, "output_height": 1024, "input_image_count": 0, "input_image_type": "qima_input_1k", "output_image_count": 2, "output_image_type": "qima_output_1k"},
 			map[string]any{"image_count": float64(2), "output_image_type": "qima_output_1k", "input_image_count": float64(0)}, 2, false},
@@ -1362,6 +1387,9 @@ func TestAlibabaOpenAIImageCountDerivationAndRender(t *testing.T) {
 				assert.Equal(t, tc.wantFacts, parsed.Immediate.UsageFacts)
 				ratios := adaptor.AdjustBillingOnSubmit(info, parsed.TaskData)
 				assert.Equal(t, tc.wantFacts["image_count"], ratios["image_count"], "legacy per-call pricing settles to the same count")
+				cost, _, err := billingexpr.RunExprWithRequest(`tier("image", u("image_count") * 0.1)`, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: parsed.Immediate.UsageFacts})
+				require.NoError(t, err)
+				assert.InDelta(t, tc.wantFacts["image_count"].(float64)*0.1, cost, 1e-9, "task pricing uses the actual output count, without token scaling")
 			}
 			value, err := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_image", "render"}, map[string]any{"model": tc.model}, map[string]any{"task_id": "task_public", "status": "SUCCESS", "created_at": 1700000000, "data": body})
 			require.NoError(t, err)

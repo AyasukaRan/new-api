@@ -107,7 +107,7 @@ type ModelRow = {
   model: string
 }
 
-type TestStatus = 'idle' | 'testing' | 'success' | 'error'
+type TestStatus = 'idle' | 'testing' | 'success' | 'error' | 'skipped'
 
 type TestResult = {
   status: TestStatus
@@ -122,6 +122,7 @@ type BatchProgress = {
   completed: number
   success: number
   failed: number
+  skipped: number
 }
 
 type ChannelTestCachePatch = {
@@ -323,7 +324,7 @@ function ChannelTestDialogContent({
     typeof toast.loading
   > | null>(null)
   const [endpointType, setEndpointType] = useState('auto')
-  const [isStreamTest, setIsStreamTest] = useState(false)
+  const [isStreamTest, setIsStreamTest] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({})
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
@@ -381,7 +382,7 @@ function ChannelTestDialogContent({
 
     batchProgressToastIdRef.current = toast.loading(title, {
       id: batchProgressToastIdRef.current ?? undefined,
-      description: `${completedText} · ${resultText}`,
+      description: `${completedText} · ${resultText} · ${t('{{count}} skipped', { count: batchProgress.skipped })}`,
     })
   }, [batchProgress, dismissBatchProgressToast, isBatchStopRequested, t])
 
@@ -390,7 +391,7 @@ function ChannelTestDialogContent({
   const resetState = useCallback(() => {
     batchStopRequestedRef.current = true
     setEndpointType('auto')
-    setIsStreamTest(false)
+    setIsStreamTest(true)
     setSearchTerm('')
     setTestResults({})
     setRowSelection({})
@@ -412,9 +413,6 @@ function ChannelTestDialogContent({
     if (value === null) return
 
     setEndpointType(value)
-    if (STREAM_INCOMPATIBLE_ENDPOINTS.has(value)) {
-      setIsStreamTest(false)
-    }
   }, [])
 
   const handleSearchTermChange = useCallback(
@@ -551,13 +549,15 @@ function ChannelTestDialogContent({
             channelName: currentRow.name,
             testModel: model,
             endpointType: endpointType === 'auto' ? undefined : endpointType,
-            stream: effectiveStreamTest || undefined,
+            stream: effectiveStreamTest,
             silent,
           },
-          (success, responseTime, error, errorCode) => {
+          (success, responseTime, error, errorCode, skipped) => {
             const completedAt = Date.now()
+            let status: TestStatus = success ? 'success' : 'error'
+            if (skipped) status = 'skipped'
             finalResult = {
-              status: success ? 'success' : 'error',
+              status,
               responseTime,
               completedAt,
               error,
@@ -621,6 +621,7 @@ function ChannelTestDialogContent({
         completed: 0,
         success: 0,
         failed: 0,
+        skipped: 0,
       })
 
       let resultPatch: ChannelTestCachePatch | undefined
@@ -628,6 +629,7 @@ function ChannelTestDialogContent({
       let completedCount = 0
       let successCount = 0
       let failedCount = 0
+      let skippedCount = 0
 
       try {
         const createFallbackResult = (error?: unknown): TestResult => ({
@@ -641,14 +643,18 @@ function ChannelTestDialogContent({
           completedCount += 1
           if (result.status === 'success') {
             successCount += 1
+          } else if (result.status === 'skipped') {
+            skippedCount += 1
+          } else {
+            failedCount += 1
           }
-          failedCount = completedCount - successCount
 
           setBatchProgress({
             total: uniqueModels.length,
             completed: completedCount,
             success: successCount,
             failed: failedCount,
+            skipped: skippedCount,
           })
         }
 
@@ -699,6 +705,10 @@ function ChannelTestDialogContent({
           batchStopRequestedRef.current && completedCount < uniqueModels.length
 
         dismissBatchProgressToast()
+        const skippedDescription =
+          skippedCount > 0
+            ? { description: t('{{count}} skipped', { count: skippedCount }) }
+            : undefined
         if (stopped) {
           toast.info(
             t(
@@ -709,7 +719,8 @@ function ChannelTestDialogContent({
                 success: successCount,
                 failed: failedCount,
               }
-            )
+            ),
+            skippedDescription
           )
         } else if (failedCount > 0) {
           toast.error(
@@ -719,13 +730,15 @@ function ChannelTestDialogContent({
                 success: successCount,
                 failed: failedCount,
               }
-            )
+            ),
+            skippedDescription
           )
         } else {
           toast.success(
             t('Batch test completed: {{count}} succeeded', {
               count: successCount,
-            })
+            }),
+            skippedDescription
           )
         }
       } finally {
@@ -1155,6 +1168,12 @@ function ChannelTestDialogContent({
 function TestStatusCell({ result }: { result?: TestResult }) {
   const { t } = useTranslation()
 
+  if (result?.status === 'skipped') {
+    return (
+      <StatusBadge label={t('Skipped')} variant='neutral' copyable={false} />
+    )
+  }
+
   if (!result || result.status === 'idle') {
     return (
       <StatusBadge label={t('Not tested')} variant='neutral' copyable={false} />
@@ -1191,6 +1210,14 @@ function TestResultCell({
   onOpenDetails: (details: FailureDetailsState) => void
 }) {
   const { t } = useTranslation()
+
+  if (result?.status === 'skipped') {
+    return (
+      <span className='text-muted-foreground text-sm'>
+        {t('Image generation models are excluded from health checks')}
+      </span>
+    )
+  }
 
   if (!result || result.status === 'idle') {
     return <span className='text-muted-foreground text-sm'>-</span>

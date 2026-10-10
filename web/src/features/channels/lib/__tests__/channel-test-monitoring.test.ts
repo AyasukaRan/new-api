@@ -36,6 +36,47 @@ afterEach(() => {
 })
 
 describe('channel tests refresh model monitoring', () => {
+  it.each([undefined, false])(
+    'defaults to streaming while preserving an explicit stream=%s diagnostic choice',
+    async (stream) => {
+      const request = vi.spyOn(api, 'get').mockResolvedValue({
+        data: { success: true, time: 0.25 },
+      })
+
+      await handleTestChannel(12, { silent: true, stream })
+
+      expect(request).toHaveBeenCalledWith(
+        '/api/channel/test/12',
+        expect.objectContaining({ params: { stream: stream ?? true } })
+      )
+    }
+  )
+
+  it('reports an excluded image model as skipped without a response time', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        success: true,
+        time: 0,
+        data: { tested: 0, succeeded: 0, failed: 0, skipped: 1 },
+      },
+    })
+    const completed = vi.fn()
+
+    await handleTestChannel(
+      12,
+      { silent: true, testModel: 'gpt-image-2' },
+      completed
+    )
+
+    expect(completed).toHaveBeenCalledWith(
+      false,
+      undefined,
+      undefined,
+      undefined,
+      true
+    )
+  })
+
   it.each([
     { entry: 'direct', outcome: 'success' },
     { entry: 'direct', outcome: 'failure' },

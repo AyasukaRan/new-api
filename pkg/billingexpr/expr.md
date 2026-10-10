@@ -178,6 +178,14 @@ OpenAI 已于 2026-05-12 下线 DALL·E 2/3；其校验、默认值和倍率保�
 | `ceil` | `ceil(x) → float64` | Ceiling |
 | `floor` | `floor(x) → float64` | Floor |
 
+The gateway reserves `header("x-new-api-billing-request-format")` for trusted
+billing context: `openai`, `claude`, or `openai_responses`, determined from the
+parsed request DTO (empty for other or unknown request types). Client values are
+always replaced. This value is frozen for settlement and is not sent upstream.
+Use it to guard protocol-specific `param()` paths, because the frozen body can
+also contain unrecognized client fields. It identifies the incoming protocol;
+pricing rules must still account for any upstream protocol conversion.
+
 ### Expression Examples
 
 ```

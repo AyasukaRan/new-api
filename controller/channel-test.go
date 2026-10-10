@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -70,6 +72,37 @@ func normalizeChannelTestEndpoint(channel *model.Channel, testModel string, endp
 	}
 }
 
+func isImageChannelTest(channel *model.Channel, name, endpointType string) bool {
+	if constant.EndpointType(endpointType) == constant.EndpointTypeImageGeneration {
+		return true
+	}
+	names := []string{name}
+	settings := dto.ChannelSettings{}
+	if channel != nil {
+		if channel.Setting != nil {
+			// Classification must not repair or persist channel settings.
+			_ = common.UnmarshalJsonStr(*channel.Setting, &settings)
+		}
+		if mapped, changed, err := helper.ResolveMappedModel(channel.GetModelMapping(), name); err == nil && changed {
+			names = append(names, mapped)
+		}
+	}
+	for _, candidate := range names {
+		lower := strings.ToLower(candidate)
+		if common.IsImageGenerationModel(lower) || strings.Contains(lower, "seedream") || strings.Contains(lower, "seededit") ||
+			strings.HasPrefix(lower, "gemini-") && strings.Contains(lower, "-image") ||
+			slices.Contains(model.GetModelSupportEndpointTypes(candidate), constant.EndpointTypeImageGeneration) {
+			return true
+		}
+		for _, binding := range jsplugin.DefaultRegistry.Generation().LookupEndpointCandidates(http.MethodPost, "/v1/images/generations", candidate) {
+			if channel != nil && (slices.Contains(binding.Plugin.Meta.ChannelTypes, channel.Type) || settings.BindsTaskPlugin(binding.Plugin.Meta.Key)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	if c != nil {
 		if userID := c.GetInt("id"); userID > 0 {
@@ -114,6 +147,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	var nextProbeAt time.Time
 models:
 	for _, name := range models {
+		if isImageChannelTest(channel, name, endpointType) {
+			result.summary.Skipped++
+			continue
+		}
 		for {
 			if err := ctx.Err(); err != nil {
 				result.localErr = err
@@ -161,6 +198,13 @@ models:
 			result.localErr = err
 			return result
 		}
+		if modelResult.summary.Skipped > 0 {
+			result.summary.Skipped += modelResult.summary.Skipped
+			if result.localErr == nil {
+				result.localErr = modelResult.localErr
+			}
+			continue
+		}
 		result.responseTime += time.Since(started).Milliseconds()
 		result.summary.Tested++
 		if modelResult.localErr == nil && modelResult.newAPIError == nil {
@@ -185,7 +229,26 @@ models:
 	return result
 }
 
+// Scheduled jobs hold a channel snapshot while waiting and probing its models.
+// Recheck persisted status before each new model or key; manual diagnosis is allowed.
+func scheduledChannelTestAllowed(ctx context.Context, channelID int) (bool, error) {
+	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); !scheduled {
+		return true, nil
+	}
+	var current model.Channel
+	if err := model.DB.WithContext(ctx).Select("status").Where("id = ?", channelID).Take(&current).Error; err != nil {
+		return false, fmt.Errorf("failed to read channel status: %w", err)
+	}
+	return current.Status == common.ChannelStatusEnabled, nil
+}
+
 func testChannelModel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+	if isImageChannelTest(channel, testModel, endpointType) {
+		return testResult{summary: channelTestSummary{Skipped: 1}}
+	}
+	if allowed, err := scheduledChannelTestAllowed(ctx, channel.Id); !allowed {
+		return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
+	}
 	if err := model.RecordChannelModelProbe(channel.Id, testModel, time.Now().UnixMilli(), nil); err != nil {
 		common.SysError("failed to record channel check time: " + err.Error())
 	}
@@ -221,9 +284,14 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	var hasNeutralResult bool
 	var latencyMs int64
 	var successfulLatencyMs int64
-	for _, key := range keys {
+	for index, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return testResult{localErr: err}
+		}
+		if index > 0 {
+			if allowed, err := scheduledChannelTestAllowed(ctx, channel.Id); !allowed {
+				return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
+			}
 		}
 		// Pin only this test attempt to a key. Calling the routing selector on
 		// the original multi-key channel would advance its persistent cursor.
@@ -324,6 +392,10 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 	c, _ := gin.CreateTestContext(w)
 
 	endpointType = normalizeChannelTestEndpoint(channel, testModel, endpointType)
+	switch constant.EndpointType(endpointType) {
+	case constant.EndpointTypeEmbeddings, constant.EndpointTypeJinaRerank, constant.EndpointTypeImageGeneration, constant.EndpointTypeOpenAIResponseCompact:
+		isStream = false
+	}
 
 	requestPath := "/v1/chat/completions"
 
@@ -875,7 +947,7 @@ func validateTestResponseBody(respBody []byte, isStream bool) error {
 }
 
 func shouldUseStreamForAutomaticChannelTest(channel *model.Channel) bool {
-	return channel != nil && channel.Type == constant.ChannelTypeCodex
+	return channel != nil
 }
 
 func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
@@ -1043,7 +1115,7 @@ func TestChannel(c *gin.Context) {
 	//}()
 	testModel := c.Query("model")
 	endpointType := c.Query("endpoint_type")
-	isStream, _ := strconv.ParseBool(c.Query("stream"))
+	isStream, _ := strconv.ParseBool(c.DefaultQuery("stream", "true"))
 	testUserID, err := resolveChannelTestUserID(c)
 	if err != nil {
 		common.ApiError(c, err)
@@ -1072,7 +1144,9 @@ func TestChannel(c *gin.Context) {
 	}
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
-	go channel.UpdateResponseTime(result.responseTime)
+	if result.summary.Tested > 0 {
+		go channel.UpdateResponseTime(result.responseTime)
+	}
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -1092,6 +1166,7 @@ func TestChannel(c *gin.Context) {
 			"tested":        result.summary.Tested,
 			"succeeded":     result.summary.Succeeded,
 			"failed":        result.summary.Failed,
+			"skipped":       result.summary.Skipped,
 		},
 	})
 }
@@ -1184,7 +1259,8 @@ func runChannelTestWorkers(
 					}
 
 					result := channelTestSummary{}
-					if channel != nil && channel.Status != common.ChannelStatusManuallyDisabled {
+					_, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration)
+					if channel != nil && (!scheduled || channel.Status == common.ChannelStatusEnabled) {
 						result = run(ctx, channel)
 					}
 
@@ -1371,7 +1447,10 @@ func runChannelTestTask(ctx context.Context, _ string, notify bool, report func(
 	if err != nil {
 		return channelTestSummary{}, err
 	}
-	selected := selectChannelsForAutomaticTest(channels)
+	selected := channels
+	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); scheduled {
+		selected = selectChannelsForAutomaticTest(channels)
+	}
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
 	summary := performChannelTests(ctx, selected, testUserID, concurrency, report)
 	if notify && (ctx == nil || ctx.Err() == nil) {
@@ -1383,7 +1462,7 @@ func runChannelTestTask(ctx context.Context, _ string, notify bool, report func(
 func selectChannelsForAutomaticTest(channels []*model.Channel) []*model.Channel {
 	selected := make([]*model.Channel, 0, len(channels))
 	for _, channel := range channels {
-		if channel == nil || channel.Status == common.ChannelStatusManuallyDisabled {
+		if channel == nil || channel.Status != common.ChannelStatusEnabled {
 			continue
 		}
 		selected = append(selected, channel)

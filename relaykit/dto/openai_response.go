@@ -269,9 +269,12 @@ type InputTokenDetails struct {
 	// input_tokens_details.cache_write_tokens (Responses). It is billed at the
 	// cache-creation price.
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
-	TextTokens       int `json:"text_tokens"`
-	AudioTokens      int `json:"audio_tokens"`
-	ImageTokens      int `json:"image_tokens"`
+	// CacheCreationInputTokens is DashScope's compatible API cache-write count.
+	// It is an alias of the counters above, not an additional token category.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	TextTokens               int `json:"text_tokens"`
+	AudioTokens              int `json:"audio_tokens"`
+	ImageTokens              int `json:"image_tokens"`
 }
 
 // CachedTokenDetails describes subsets of cached_tokens. Pointers distinguish
@@ -326,6 +329,7 @@ func (d *InputTokenDetails) Add(incoming InputTokenDetails) {
 	d.CachedTokens = addInputTokenCount(d.CachedTokens, incoming.CachedTokens)
 	d.CachedCreationTokens = addInputTokenCount(d.CachedCreationTokens, incoming.CachedCreationTokens)
 	d.CacheWriteTokens = addInputTokenCount(d.CacheWriteTokens, incoming.CacheWriteTokens)
+	d.CacheCreationInputTokens = addInputTokenCount(d.CacheCreationInputTokens, incoming.CacheCreationInputTokens)
 	d.TextTokens = addInputTokenCount(d.TextTokens, incoming.TextTokens)
 	d.AudioTokens = addInputTokenCount(d.AudioTokens, incoming.AudioTokens)
 	d.ImageTokens = addInputTokenCount(d.ImageTokens, incoming.ImageTokens)
@@ -358,12 +362,13 @@ func addInputTokenCount(current, incoming int) int {
 
 // CacheCreationTokensTotal returns the cache-write token count regardless of
 // which field the upstream reported it in: Claude-derived conversions populate
-// CachedCreationTokens while OpenAI reports cache_write_tokens natively. Both
-// are billed at the cache-creation price; when both are present the larger
+// CachedCreationTokens, OpenAI reports cache_write_tokens, and DashScope reports
+// cache_creation_input_tokens. All are billed at the cache-creation price;
+// when multiple aliases are present the largest
 // value wins so the same tokens are never double-counted. Negative upstream
 // values are clamped to zero so they can never lower a charge.
 func (d InputTokenDetails) CacheCreationTokensTotal() int {
-	total := max(d.CacheWriteTokens, d.CachedCreationTokens)
+	total := max(d.CacheWriteTokens, d.CachedCreationTokens, d.CacheCreationInputTokens)
 	if total < 0 {
 		return 0
 	}

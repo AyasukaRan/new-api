@@ -53,6 +53,53 @@ func setupChannelManagementTest(t *testing.T) int {
 	return root.Id
 }
 
+func TestModelSquareHidesModelsWithoutEnabledChannels(t *testing.T) {
+	setupChannelManagementTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Model{}, &model.Vendor{}))
+	channels := []model.Channel{
+		{Name: "catalog-enabled", Type: 1, Status: common.ChannelStatusEnabled, Key: "test-key", Models: "shared,enabled-only", Group: "default"},
+		{Name: "catalog-disabled", Type: 1, Status: common.ChannelStatusManuallyDisabled, Key: "test-key", Models: "shared,disabled-only", Group: "disabled-group"},
+		{Name: "catalog-auto-disabled", Type: 1, Status: common.ChannelStatusAutoDisabled, Key: "test-key", Models: "auto-disabled-only", Group: "default"},
+	}
+	for i := range channels {
+		require.NoError(t, channels[i].Insert())
+		t.Cleanup(func() { require.NoError(t, channels[i].Delete()) })
+	}
+	// A stale ability must never override the actual channel status.
+	require.NoError(t, model.DB.Model(&model.Ability{}).Where("channel_id IN ?", []int{channels[1].Id, channels[2].Id}).Update("enabled", true).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channels[2].Id + 1000, Model: "orphan-model", Group: "default", Enabled: true}).Error)
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("model = ?", "orphan-model").Delete(&model.Ability{}).Error)
+		model.InvalidatePricingCache()
+	})
+	model.InvalidatePricingCache()
+	visible := make(map[string]model.Pricing)
+	for _, item := range model.GetPricing() {
+		visible[item.ModelName] = item
+	}
+	assert.Contains(t, visible, "shared")
+	assert.ElementsMatch(t, []string{"default"}, visible["shared"].EnableGroup)
+	assert.Contains(t, visible, "enabled-only")
+	assert.NotContains(t, visible, "disabled-only")
+	assert.NotContains(t, visible, "auto-disabled-only")
+	assert.NotContains(t, visible, "orphan-model")
+
+	changed, err := model.UpdateChannelStatusWithError(channels[0].Id, "", common.ChannelStatusManuallyDisabled, "manual")
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Empty(t, model.GetPricing(), "disabling the final route invalidates the catalog immediately")
+	changed, err = model.UpdateChannelStatusWithError(channels[1].Id, "", common.ChannelStatusEnabled, "manual")
+	require.NoError(t, err)
+	require.True(t, changed)
+	visible = make(map[string]model.Pricing)
+	for _, item := range model.GetPricing() {
+		visible[item.ModelName] = item
+	}
+	assert.Len(t, visible, 2)
+	assert.ElementsMatch(t, []string{"disabled-group"}, visible["shared"].EnableGroup)
+	assert.Contains(t, visible, "disabled-only")
+}
+
 func TestMultiKeyEnableRestoresOnlyExhaustedChannels(t *testing.T) {
 	rootID := setupChannelManagementTest(t)
 	database := model.DB
