@@ -270,6 +270,19 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 	}
 	for _, channel := range channels {
 		if channel != nil {
+			// Full-key callers render indexed credentials from this snapshot.
+			// A concurrent replacement must not attach newer indexed balances
+			// to those older keys. List callers intentionally omit credentials.
+			if channel.Key != "" {
+				configurationHash, err := channelBalanceConfigurationHash(channel)
+				if err != nil {
+					return err
+				}
+				if configurationHash != configurationHashes[channel.Id] {
+					channel.BalanceMonitor = &ChannelBalanceMonitor{ConfigurationChanged: true, KeyBalances: []ChannelKeyBalance{}}
+					continue
+				}
+			}
 			channel.BalanceMonitor = monitors[channel.Id]
 			if channel.BalanceMonitor == nil && channel.BalanceUpdatedTime > 0 {
 				balance := channel.Balance

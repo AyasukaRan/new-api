@@ -415,12 +415,13 @@ export async function resetCodexUsage(
  * Manage multi-key channel operations
  */
 export async function manageMultiKeys(
-  params: MultiKeyManageParams
+  params: MultiKeyManageParams,
+  signal?: AbortSignal
 ): Promise<MultiKeyStatusResponse | { success: boolean; message?: string }> {
   const res = await api.post(
     '/api/channel/multi_key/manage',
     params,
-    channelActionConfig()
+    channelActionConfig({ signal })
   )
   return res.data
 }
@@ -432,15 +433,19 @@ export async function getMultiKeyStatus(
   channelId: number,
   page = 1,
   pageSize = 50,
-  status?: number
+  status?: number,
+  signal?: AbortSignal
 ): Promise<MultiKeyStatusResponse> {
-  return manageMultiKeys({
-    channel_id: channelId,
-    action: 'get_key_status',
-    page,
-    page_size: pageSize,
-    status,
-  }) as Promise<MultiKeyStatusResponse>
+  return manageMultiKeys(
+    {
+      channel_id: channelId,
+      action: 'get_key_status',
+      page,
+      page_size: pageSize,
+      status,
+    },
+    signal
+  ) as Promise<MultiKeyStatusResponse>
 }
 
 /**

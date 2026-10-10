@@ -758,7 +758,7 @@ export function useChannelsColumns(
   } = {}
 ): ColumnDef<Channel>[] {
   const { t, i18n } = useTranslation()
-  const { sensitiveVisible } = useChannels()
+  const { sensitiveVisible, setCurrentRow, setOpen } = useChannels()
   const enableSelection = options.enableSelection ?? true
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   // The column definitions only depend on the translation function, the active
@@ -976,13 +976,24 @@ export function useChannelsColumns(
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <span className='border-border bg-muted text-primary inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border' />
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='icon'
+                          className='text-primary size-6 shrink-0'
+                          aria-label={t('Manage Keys')}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setCurrentRow(channel)
+                            setOpen('multi-key-manage')
+                          }}
+                        />
                       }
                     >
                       <MultiKeyModeIcon className='h-3 w-3' />
                     </TooltipTrigger>
                     <TooltipContent side='top'>
-                      {multiKeyTooltip}
+                      {t('Manage Keys')} · {multiKeyTooltip}
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
@@ -1401,6 +1412,6 @@ export function useChannelsColumns(
         meta: { pinned: 'right' as const },
       },
     ],
-    [enableSelection, t, locale, sensitiveVisible]
+    [enableSelection, t, locale, sensitiveVisible, setCurrentRow, setOpen]
   )
 }

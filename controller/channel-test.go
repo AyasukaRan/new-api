@@ -246,11 +246,18 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	if isImageChannelTest(channel, testModel, endpointType) {
 		return testResult{summary: channelTestSummary{Skipped: 1}}
 	}
-	if allowed, err := scheduledChannelTestAllowed(ctx, channel.Id); !allowed {
-		return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
-	}
-	if err := model.RecordChannelModelProbe(channel.Id, testModel, time.Now().UnixMilli(), nil); err != nil {
-		common.SysError("failed to record channel check time: " + err.Error())
+	_, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration)
+	if scheduled {
+		// A job's channel snapshot can outlive credential edits between models.
+		var current model.Channel
+		if err := model.DB.WithContext(ctx).First(&current, channel.Id).Error; err != nil {
+			return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
+		}
+		if current.Status != common.ChannelStatusEnabled || isImageChannelTest(&current, testModel, endpointType) ||
+			!slices.ContainsFunc(current.GetModels(), func(name string) bool { return strings.TrimSpace(name) == testModel }) {
+			return testResult{summary: channelTestSummary{Skipped: 1}}
+		}
+		channel = &current
 	}
 	type testKey struct {
 		value string
@@ -276,6 +283,9 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	snapshot.Keys = nil
 	lock.Unlock()
 	if len(keys) == 0 {
+		if scheduled {
+			return testResult{summary: channelTestSummary{Skipped: 1}}
+		}
 		err := types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
 		return testResult{localErr: err, newAPIError: err}
 	}
@@ -284,14 +294,32 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	var hasNeutralResult bool
 	var latencyMs int64
 	var successfulLatencyMs int64
-	for index, key := range keys {
+	var attempted bool
+	for _, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return testResult{localErr: err}
 		}
-		if index > 0 {
-			if allowed, err := scheduledChannelTestAllowed(ctx, channel.Id); !allowed {
+		if scheduled {
+			var current model.Channel
+			if err := model.DB.WithContext(ctx).First(&current, channel.Id).Error; err != nil {
 				return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
 			}
+			// Never apply an index from the old ordered keys to a replacement
+			// configuration. Retry that configuration in the next monitoring round.
+			if current.Status != common.ChannelStatusEnabled || current.Key != channel.Key || current.ChannelInfo.IsMultiKey != channel.ChannelInfo.IsMultiKey ||
+				isImageChannelTest(&current, testModel, endpointType) ||
+				!slices.ContainsFunc(current.GetModels(), func(name string) bool { return strings.TrimSpace(name) == testModel }) {
+				return testResult{summary: channelTestSummary{Skipped: 1}}
+			}
+			if status, configured := current.ChannelInfo.MultiKeyStatusList[key.index]; key.index >= 0 && configured && status != common.ChannelStatusEnabled {
+				continue
+			}
+		}
+		if !attempted {
+			if err := model.RecordChannelModelProbe(channel.Id, testModel, time.Now().UnixMilli(), nil); err != nil {
+				common.SysError("failed to record channel check time: " + err.Error())
+			}
+			attempted = true
 		}
 		// Pin only this test attempt to a key. Calling the routing selector on
 		// the original multi-key channel would advance its persistent cursor.
@@ -334,6 +362,9 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		if key.index >= 0 {
 			common.SysLog(fmt.Sprintf("channel test key failed: channel_id=%d key_index=%d model=%s", channel.Id, key.index, testModel))
 		}
+	}
+	if !attempted {
+		return testResult{summary: channelTestSummary{Skipped: 1}}
 	}
 	if successfulResult != nil {
 		result = *successfulResult

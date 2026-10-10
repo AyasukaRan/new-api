@@ -58,7 +58,7 @@ export const channelsQueryKeys = {
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
 }
 
-async function refreshChannelStatusQueries(
+export async function refreshChannelStatusQueries(
   queryClient?: QueryClient
 ): Promise<void> {
   if (!queryClient) return

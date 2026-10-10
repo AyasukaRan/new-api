@@ -936,16 +936,18 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 			user := &model.User{Username: "multi-key-monitor-user", Password: "unused", Group: "default", Status: common.UserStatusEnabled, Role: common.RoleRootUser, AffCode: "multikeymonitor"}
 			require.NoError(t, db.Create(user).Error)
 			for _, test := range []struct {
-				name        string
-				healthyKey  int
-				statuses    map[int]int
-				neutralKeys map[int]bool
-				setupError  bool
-				cancel      bool
-				completed   bool
-				disable     bool
-				scheduled   bool
-				wantKeys    []int
+				name         string
+				healthyKey   int
+				statuses     map[int]int
+				neutralKeys  map[int]bool
+				setupError   bool
+				cancel       bool
+				completed    bool
+				disable      bool
+				scheduled    bool
+				changeBefore string
+				changeAfter  string
+				wantKeys     []int
 			}{
 				{name: "insufficient_balance_then_success", healthyKey: 1, completed: true, wantKeys: []int{0, 1, 2}},
 				{name: "all_keys_fail", healthyKey: -1, completed: true, wantKeys: []int{0, 1, 2}},
@@ -958,6 +960,12 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 				{name: "all_keys_neutral", healthyKey: -1, neutralKeys: map[int]bool{0: true, 1: true, 2: true}, wantKeys: []int{0, 1, 2}},
 				{name: "scheduled_disabled_after_first_key", healthyKey: 0, disable: true, scheduled: true, wantKeys: []int{0}},
 				{name: "manual_disabled_after_first_key", healthyKey: 0, disable: true, completed: true, wantKeys: []int{0, 1, 2}},
+				{name: "scheduled_stale_enabled_key", healthyKey: 2, scheduled: true, changeBefore: "disable_first_key", completed: true, wantKeys: []int{1, 2}},
+				{name: "scheduled_key_disabled_after_first_key", healthyKey: 2, scheduled: true, changeAfter: "disable_second_key", completed: true, wantKeys: []int{0, 2}},
+				{name: "scheduled_reordered_keys", healthyKey: 0, scheduled: true, changeAfter: "reorder_keys", wantKeys: []int{0}},
+				{name: "scheduled_image_mapping_before_start", healthyKey: -1, scheduled: true, changeBefore: "image_mapping", wantKeys: []int{}},
+				{name: "scheduled_image_mapping_during_keys", healthyKey: 0, scheduled: true, changeAfter: "image_mapping", wantKeys: []int{0}},
+				{name: "scheduled_model_removed", healthyKey: -1, scheduled: true, changeBefore: "remove_model", wantKeys: []int{}},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					name := fmt.Sprintf("key-probe-%s-%s-%d", dialect.kind, test.name, time.Now().UnixNano())
@@ -968,6 +976,33 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 					t.Cleanup(cancel)
 					requests := make(chan int, 3)
 					var channel *model.Channel
+					applySavedChange := func(change string) error {
+						updates := map[string]any{}
+						switch change {
+						case "disable_first_key", "disable_second_key":
+							index := 0
+							if change == "disable_second_key" {
+								index = 1
+							}
+							info := channel.ChannelInfo
+							info.MultiKeyStatusList = map[int]int{index: common.ChannelStatusManuallyDisabled}
+							updates["channel_info"] = info
+						case "reorder_keys":
+							updates["key"] = "fixture-key-1\nfixture-key-0\nfixture-key-2"
+						case "image_mapping":
+							mapping, err := common.Marshal(map[string]string{name: "gpt-image-1"})
+							if err != nil {
+								return err
+							}
+							updates["model_mapping"] = string(mapping)
+						case "remove_model":
+							updates["models"] = "another-model"
+						}
+						if len(updates) > 0 {
+							return db.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+						}
+						return nil
+					}
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						var request dto.GeneralOpenAIRequest
 						if !assert.NoError(t, common.DecodeJson(r.Body, &request)) {
@@ -986,6 +1021,12 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 						}
 						if test.disable && index == 0 {
 							assert.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+						}
+						if index == 0 {
+							if !assert.NoError(t, applySavedChange(test.changeAfter)) {
+								w.WriteHeader(http.StatusInternalServerError)
+								return
+							}
 						}
 						w.Header().Set("Content-Type", "application/json")
 						if test.neutralKeys[index] {
@@ -1015,9 +1056,12 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 					}
 					if test.scheduled {
 						ctx = context.WithValue(ctx, channelIdleProbeIntervalKey{}, time.Minute)
-						channel.Models += "," + name + "-next"
+						if test.disable {
+							channel.Models += "," + name + "-next"
+						}
 					}
 					require.NoError(t, db.Create(channel).Error)
+					require.NoError(t, applySavedChange(test.changeBefore))
 					previousObservedAt := time.Now().Add(-time.Minute).UnixMilli()
 					for index := range test.neutralKeys {
 						key := fmt.Sprintf("fixture-key-%d", index)
@@ -1045,17 +1089,26 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 					}
 					var stored model.Channel
 					require.NoError(t, db.First(&stored, channel.Id).Error)
-					for _, info := range []model.ChannelInfo{channel.ChannelInfo, stored.ChannelInfo} {
-						encoded, err := common.Marshal(info)
-						require.NoError(t, err)
-						assert.JSONEq(t, string(originalInfo), string(encoded), "monitoring must not mutate key states or polling cursor in memory or SQL")
+					encodedInfo, err := common.Marshal(channel.ChannelInfo)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(originalInfo), string(encodedInfo), "monitoring must not mutate the in-memory channel snapshot")
+					expectedInfo := channel.ChannelInfo
+					if test.changeBefore == "disable_first_key" {
+						expectedInfo.MultiKeyStatusList = map[int]int{0: common.ChannelStatusManuallyDisabled}
+					} else if test.changeAfter == "disable_second_key" {
+						expectedInfo.MultiKeyStatusList = map[int]int{1: common.ChannelStatusManuallyDisabled}
 					}
+					assert.Equal(t, expectedInfo, stored.ChannelInfo, "monitoring must preserve saved edits and the polling cursor")
 					wantStatus := common.ChannelStatusEnabled
 					if test.disable {
 						wantStatus = common.ChannelStatusManuallyDisabled
 					}
 					assert.Equal(t, wantStatus, stored.Status)
-					assert.Equal(t, channel.Key, stored.Key)
+					if test.changeAfter == "reorder_keys" {
+						assert.Equal(t, "fixture-key-1\nfixture-key-0\nfixture-key-2", stored.Key)
+					} else {
+						assert.Equal(t, channel.Key, stored.Key)
+					}
 					var legacy []model.PerfMetric
 					require.NoError(t, db.Where("model_name = ?", name).Find(&legacy).Error)
 					var observations []model.ChannelPerfMetric
@@ -1073,10 +1126,15 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 							assert.EqualValues(t, 100, stored.TestTime)
 						}
 						if test.scheduled {
-							assert.Equal(t, channelTestSummary{Skipped: 2}, summary)
+							assert.Equal(t, channelTestSummary{Skipped: len(channel.GetModels())}, summary)
 							var nextModelActivity int64
 							require.NoError(t, db.Model(&model.ChannelModelActivity{}).Where("channel_id = ? AND model_name = ?", channel.Id, name+"-next").Count(&nextModelActivity).Error)
 							assert.Zero(t, nextModelActivity, "disabled scheduled models do not advance probe timers")
+							if len(test.wantKeys) == 0 {
+								activity, err := model.GetChannelModelActivity(channel.Id, name)
+								require.NoError(t, err)
+								assert.Zero(t, activity.LastProbeAt, "removed and image models cannot advance probe timers")
+							}
 						}
 						return
 					}

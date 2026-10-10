@@ -1719,9 +1719,11 @@ type MultiKeyStatusResponse struct {
 	PageSize   int         `json:"page_size"`
 	TotalPages int         `json:"total_pages"`
 	// Statistics
-	EnabledCount        int `json:"enabled_count"`
-	ManualDisabledCount int `json:"manual_disabled_count"`
-	AutoDisabledCount   int `json:"auto_disabled_count"`
+	EnabledCount         int                          `json:"enabled_count"`
+	ManualDisabledCount  int                          `json:"manual_disabled_count"`
+	AutoDisabledCount    int                          `json:"auto_disabled_count"`
+	BalanceMonitor       *model.ChannelBalanceMonitor `json:"balance_monitor"`
+	BalanceQueryDisabled bool                         `json:"balance_query_disabled"`
 }
 
 type KeyStatus struct {
@@ -1729,7 +1731,7 @@ type KeyStatus struct {
 	Status       int    `json:"status"` // 1: enabled, 2: disabled
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
-	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
+	KeyPreview   string `json:"key_preview"` // masked credential for identification
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1779,6 +1781,26 @@ func ManageMultiKeys(c *gin.Context) {
 
 	switch request.Action {
 	case "get_key_status":
+		// Reload after waiting for key mutations so statuses and balances are
+		// derived from the same credential snapshot.
+		channel, err = model.GetChannelById(request.ChannelId, true)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if !channel.ChannelInfo.IsMultiKey {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "该渠道不是多密钥模式"})
+			return
+		}
+		if err = model.PopulateChannelBalanceMonitors([]*model.Channel{channel}); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		balanceQueryErr := channel.CheckBalanceQueryEnabled()
+		if balanceQueryErr != nil && !errors.Is(balanceQueryErr, model.ErrChannelBalanceQueryDisabled) {
+			common.ApiError(c, balanceQueryErr)
+			return
+		}
 		keys := channel.GetKeys()
 
 		// Default pagination parameters
@@ -1825,18 +1847,18 @@ func ManageMultiKeys(c *gin.Context) {
 					reason = channel.ChannelInfo.MultiKeyDisabledReason[i]
 				}
 			}
-
-			// Create key preview (first 10 chars)
-			keyPreview := key
-			if len(key) > 10 {
-				keyPreview = key[:10] + "..."
+			keyPreview := model.MaskTokenKey(key)
+			if len(key) <= 10 || strings.ContainsAny(key, "{|[") {
+				// Composite credentials can contain independently usable short
+				// secrets; revealing their raw prefix/suffix is not safe.
+				keyPreview = "********"
 			}
 
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
 				Index:        i,
 				Status:       status,
 				DisabledTime: disabledTime,
-				Reason:       reason,
+				Reason:       model.SanitizeChannelObservationError(channel, key, reason),
 				KeyPreview:   keyPreview,
 			})
 		}
@@ -1877,14 +1899,16 @@ func ManageMultiKeys(c *gin.Context) {
 			"success": true,
 			"message": "",
 			"data": MultiKeyStatusResponse{
-				Keys:                pageKeyStatusList,
-				Total:               filteredTotal, // Total of filtered results
-				Page:                page,
-				PageSize:            pageSize,
-				TotalPages:          totalPages,
-				EnabledCount:        enabledCount,        // Overall statistics
-				ManualDisabledCount: manualDisabledCount, // Overall statistics
-				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
+				Keys:                 pageKeyStatusList,
+				Total:                filteredTotal, // Total of filtered results
+				Page:                 page,
+				PageSize:             pageSize,
+				TotalPages:           totalPages,
+				EnabledCount:         enabledCount,        // Overall statistics
+				ManualDisabledCount:  manualDisabledCount, // Overall statistics
+				AutoDisabledCount:    autoDisabledCount,   // Overall statistics
+				BalanceMonitor:       channel.BalanceMonitor,
+				BalanceQueryDisabled: errors.Is(balanceQueryErr, model.ErrChannelBalanceQueryDisabled),
 			},
 		})
 		return

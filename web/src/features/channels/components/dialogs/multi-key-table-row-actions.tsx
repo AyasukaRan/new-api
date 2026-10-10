@@ -26,6 +26,7 @@ type MultiKeyTableRowActionsProps = {
   keyIndex: number
   status: number
   canDelete: boolean
+  disabled?: boolean
   onAction: (action: MultiKeyConfirmAction) => void
 }
 
@@ -33,17 +34,19 @@ export function MultiKeyTableRowActions({
   keyIndex,
   status,
   canDelete,
+  disabled,
   onAction,
 }: MultiKeyTableRowActionsProps) {
   const { t } = useTranslation()
   const isEnabled = status === 1
 
   return (
-    <div className='flex justify-end gap-2'>
+    <div className='flex flex-wrap justify-end gap-2'>
       {isEnabled ? (
         <Button
           variant='outline'
           size='sm'
+          disabled={disabled}
           onClick={() => onAction({ type: 'disable', keyIndex })}
         >
           {t('Disable')}
@@ -52,6 +55,7 @@ export function MultiKeyTableRowActions({
         <Button
           variant='outline'
           size='sm'
+          disabled={disabled}
           onClick={() => onAction({ type: 'enable', keyIndex })}
         >
           {t('Enable')}
@@ -64,7 +68,7 @@ export function MultiKeyTableRowActions({
           if (!canDelete) return
           onAction({ type: 'delete', keyIndex })
         }}
-        disabled={!canDelete}
+        disabled={disabled || !canDelete}
         title={
           canDelete ? undefined : t('No permission to perform this action')
         }

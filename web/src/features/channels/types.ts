@@ -37,6 +37,7 @@ export type ChannelInfo = z.infer<typeof channelInfoSchema>
 export const channelKeyBalanceSchema = z.object({
   index: z.number(),
   balance: z.number().nullable(),
+  last_known_balance: z.number().nullable().optional(),
   error: z.string().optional(),
 })
 
@@ -337,6 +338,8 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
+    balance_monitor: ChannelBalanceMonitor | null
+    balance_query_disabled: boolean
   }
 }
 

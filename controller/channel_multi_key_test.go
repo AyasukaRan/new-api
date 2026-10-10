@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -51,6 +52,131 @@ func setupChannelManagementTest(t *testing.T) int {
 	require.NoError(t, database.Raw(versionQuery).Scan(&version).Error)
 	t.Logf("database=%s version=%s", common.MainDatabaseType(), version)
 	return root.Id
+}
+
+func TestMultiKeyStatusReturnsMatchingBalancesAndMaskedCredentials(t *testing.T) {
+	rootID := setupChannelManagementTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.ChannelBalanceSample{}))
+	keys := []string{"abc", "sk-fixture-long-key-secret", "account-part|secret-part", `{"private_key":"private-value"}`}
+	channel := &model.Channel{Name: t.Name(), Type: 1, Key: strings.Join(keys, "\n"), Models: "test-model", Group: "default", Status: common.ChannelStatusEnabled,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: len(keys),
+			MultiKeyStatusList:     map[int]int{1: common.ChannelStatusManuallyDisabled, 2: common.ChannelStatusAutoDisabled},
+			MultiKeyDisabledReason: map[int]string{1: "rejected " + keys[1], 2: "account-part and secret-part rejected"},
+		},
+	}
+	require.NoError(t, channel.Insert())
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.ChannelBalanceSample{}).Error)
+		require.NoError(t, channel.Delete())
+	})
+	queryStatus := func(request MultiKeyManageRequest) MultiKeyStatusResponse {
+		t.Helper()
+		request.ChannelId, request.Action = channel.Id, "get_key_status"
+		payload, err := common.Marshal(request)
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("id", rootID)
+		c.Set("role", common.RoleRootUser)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/multi_key/manage", bytes.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		ManageMultiKeys(c)
+		var result struct {
+			Success bool                   `json:"success"`
+			Data    MultiKeyStatusResponse `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &result))
+		require.True(t, result.Success, recorder.Body.String())
+		for _, secret := range append(keys, "account-part", "secret-part", "private-value") {
+			assert.NotContains(t, recorder.Body.String(), secret)
+		}
+		assert.NotContains(t, recorder.Body.String(), "configuration_hash")
+		assert.NotContains(t, recorder.Body.String(), "key_balances_json")
+		assert.Contains(t, recorder.Body.String(), `"balance_monitor":`)
+		return result.Data
+	}
+	initial := queryStatus(MultiKeyManageRequest{})
+	assert.Nil(t, initial.BalanceMonitor, "never queried must remain unknown, not zero")
+	assert.False(t, initial.BalanceQueryDisabled)
+	require.Len(t, initial.Keys, 4)
+	assert.Equal(t, "********", initial.Keys[0].KeyPreview)
+	assert.Equal(t, model.MaskTokenKey(keys[1]), initial.Keys[1].KeyPreview)
+	assert.Equal(t, "********", initial.Keys[2].KeyPreview)
+	assert.Equal(t, "********", initial.Keys[3].KeyPreview)
+	assert.Contains(t, initial.Keys[1].Reason, "[redacted]")
+	assert.Contains(t, initial.Keys[2].Reason, "[redacted]")
+
+	complete := &model.ChannelBalanceSample{StartedAt: 100, CheckedAt: 100, KnownBalance: 5.5, Success: true,
+		KeyBalances: []model.ChannelKeyBalance{
+			{Index: 0, Balance: common.GetPointer(1.5)}, {Index: 1, Balance: common.GetPointer(float64(0))},
+			{Index: 2, Balance: common.GetPointer(float64(-3))}, {Index: 3, Balance: common.GetPointer(float64(4))},
+		},
+	}
+	require.NoError(t, model.RecordChannelBalanceSample(channel, complete))
+	filtered := queryStatus(MultiKeyManageRequest{Status: common.GetPointer(common.ChannelStatusManuallyDisabled), Page: 20, PageSize: 1})
+	require.Len(t, filtered.Keys, 1)
+	assert.Equal(t, 1, filtered.Keys[0].Index)
+	assert.Equal(t, 1, filtered.Page)
+	assert.Equal(t, 1, filtered.Total)
+	assert.Equal(t, 2, filtered.EnabledCount)
+	assert.Equal(t, 1, filtered.ManualDisabledCount)
+	assert.Equal(t, 1, filtered.AutoDisabledCount)
+	require.NotNil(t, filtered.BalanceMonitor)
+	assert.Equal(t, complete.KeyBalances, filtered.BalanceMonitor.KeyBalances, "pagination must preserve original key indexes in the snapshot")
+	assert.Equal(t, common.GetPointer(5.5), filtered.BalanceMonitor.Balance)
+
+	partial := &model.ChannelBalanceSample{StartedAt: 200, CheckedAt: 200, KnownBalance: 4, Partial: true,
+		KeyBalances: []model.ChannelKeyBalance{
+			{Index: 0, Error: "balance_query_failed"}, {Index: 1, Balance: common.GetPointer(float64(0))},
+			{Index: 2, Balance: common.GetPointer(float64(-3))}, {Index: 3, Balance: common.GetPointer(float64(4))},
+		},
+	}
+	require.NoError(t, model.RecordChannelBalanceSample(channel, partial))
+	require.NoError(t, model.DB.Model(channel).Update("setting", `{"balance_query_disabled":true}`).Error)
+	failed := queryStatus(MultiKeyManageRequest{Page: 2, PageSize: 2})
+	assert.True(t, failed.BalanceQueryDisabled)
+	require.Len(t, failed.Keys, 2)
+	assert.Equal(t, 2, failed.Keys[0].Index)
+	require.NotNil(t, failed.BalanceMonitor)
+	assert.True(t, failed.BalanceMonitor.Partial)
+	assert.EqualValues(t, 200, failed.BalanceMonitor.CheckedAt)
+	assert.Equal(t, common.GetPointer(5.5), failed.BalanceMonitor.Balance, "failed refresh keeps only the last complete channel total")
+	require.Len(t, failed.BalanceMonitor.KeyBalances, 4)
+	assert.Nil(t, failed.BalanceMonitor.KeyBalances[0].Balance, "previous key balance must not masquerade as a current successful read")
+	assert.Equal(t, common.GetPointer(1.5), failed.BalanceMonitor.KeyBalances[0].LastKnownBalance)
+	assert.Equal(t, "balance_query_failed", failed.BalanceMonitor.KeyBalances[0].Error)
+	assert.Equal(t, initial.Keys[2].Status, failed.Keys[0].Status, "balance refresh cannot revive a disabled key")
+
+	// An old key snapshot may race a replacement and its first completed read.
+	// Neither the API nor a full-key caller may match that newer sample by index.
+	keys[0], keys[1] = keys[1], keys[0]
+	require.NoError(t, model.DB.Model(channel).Updates(map[string]any{"key": strings.Join(keys, "\n"), "setting": "{}"}).Error)
+	changed := queryStatus(MultiKeyManageRequest{})
+	require.NotNil(t, changed.BalanceMonitor)
+	assert.True(t, changed.BalanceMonitor.ConfigurationChanged)
+	assert.Empty(t, changed.BalanceMonitor.KeyBalances)
+	assert.Nil(t, changed.BalanceMonitor.Balance)
+	current, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	require.NoError(t, model.RecordChannelBalanceSample(current, &model.ChannelBalanceSample{StartedAt: 300, CheckedAt: 300, KnownBalance: 9, Success: true,
+		KeyBalances: []model.ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(float64(9))}},
+	}))
+	stale := *channel
+	stale.Key = strings.Join([]string{keys[1], keys[0], keys[2], keys[3]}, "\n")
+	listItem := model.Channel{Id: channel.Id}
+	require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{&stale, &listItem}))
+	require.NotNil(t, stale.BalanceMonitor)
+	assert.True(t, stale.BalanceMonitor.ConfigurationChanged)
+	assert.Empty(t, stale.BalanceMonitor.KeyBalances)
+	assert.Nil(t, stale.BalanceMonitor.Balance)
+	require.NotNil(t, listItem.BalanceMonitor)
+	assert.False(t, listItem.BalanceMonitor.ConfigurationChanged, "keyless channel lists still use the private current configuration read")
+	assert.Equal(t, common.GetPointer(float64(9)), listItem.BalanceMonitor.Balance)
+	updated := queryStatus(MultiKeyManageRequest{})
+	require.NotNil(t, updated.BalanceMonitor)
+	assert.False(t, updated.BalanceMonitor.ConfigurationChanged)
+	assert.Equal(t, model.MaskTokenKey(keys[0]), updated.Keys[0].KeyPreview)
+	assert.Equal(t, common.GetPointer(float64(9)), updated.BalanceMonitor.KeyBalances[0].Balance)
 }
 
 func TestModelSquareHidesModelsWithoutEnabledChannels(t *testing.T) {
