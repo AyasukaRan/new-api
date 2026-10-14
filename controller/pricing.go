@@ -3,7 +3,6 @@ package controller
 import (
 	"maps"
 
-	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -12,27 +11,7 @@ import (
 )
 
 func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string]string) []model.Pricing {
-	if len(pricing) == 0 {
-		return pricing
-	}
-	if len(usableGroup) == 0 {
-		return []model.Pricing{}
-	}
-
-	filtered := make([]model.Pricing, 0, len(pricing))
-	for _, item := range pricing {
-		if common.StringsContains(item.EnableGroup, "all") {
-			filtered = append(filtered, item)
-			continue
-		}
-		for _, group := range item.EnableGroup {
-			if _, ok := usableGroup[group]; ok {
-				filtered = append(filtered, item)
-				break
-			}
-		}
-	}
-	return filtered
+	return model.FilterPricingByUsableGroups(pricing, usableGroup)
 }
 
 func GetPricing(c *gin.Context) {

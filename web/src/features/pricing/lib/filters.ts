@@ -24,7 +24,13 @@ import {
   ENDPOINT_TYPES,
 } from '../constants'
 import type { PricingModel } from '../types'
-import { hasTaskUsageSchema } from './dynamic-price'
+import { getChannelPricingVariants } from './channel-pricing'
+import {
+  getDynamicPricingSummary,
+  hasTaskUsageSchema,
+  isUnconfiguredTaskUsageModel,
+} from './dynamic-price'
+import { getDisplayGroupRatio } from './model-helpers'
 
 // ----------------------------------------------------------------------------
 // Filter Utilities
@@ -76,19 +82,28 @@ export function filterByGroup(
  */
 export function filterByQuotaType(
   models: PricingModel[],
-  quotaType: string
+  quotaType: string,
+  selectedGroup?: string
 ): PricingModel[] {
   if (quotaType === QUOTA_TYPES.ALL) return models
-  // Task-usage models form their own bucket, disjoint from token/request.
-  if (quotaType === QUOTA_TYPES.TASK) {
-    return models.filter((m) => hasTaskUsageSchema(m))
-  }
   const targetType =
     quotaType === QUOTA_TYPES.TOKEN
       ? QUOTA_TYPE_VALUES.TOKEN
       : QUOTA_TYPE_VALUES.REQUEST
-  return models.filter(
-    (m) => m.quota_type === targetType && !hasTaskUsageSchema(m)
+  return models.filter((model) =>
+    getChannelPricingVariants(model, selectedGroup).some((variant) => {
+      if (quotaType === QUOTA_TYPES.TASK) return hasTaskUsageSchema(variant)
+      if (hasTaskUsageSchema(variant)) return false
+      const summary = getDynamicPricingSummary(variant, { tokenUnit: 'M' })
+      if (summary?.entries.length) {
+        return summary.entries.some((entry) =>
+          targetType === QUOTA_TYPE_VALUES.TOKEN
+            ? entry.unit === 'token'
+            : entry.unit === 'request' || entry.unit === 'image'
+        )
+      }
+      return variant.quota_type === targetType
+    })
   )
 }
 
@@ -108,8 +123,38 @@ export function filterByEndpointType(
 /**
  * Get model price for sorting
  */
-function getModelPrice(model: PricingModel): number {
-  return model.quota_type === 0 ? model.model_ratio : model.model_price || 0
+function getModelPrice(
+  model: PricingModel,
+  selectedGroup?: string,
+  now?: Date
+): number | undefined {
+  if (
+    model.pricing_configured === false &&
+    !model.channel_pricing_variants?.length
+  ) {
+    return undefined
+  }
+  const ratio = getDisplayGroupRatio(model, selectedGroup)
+  const summary = getDynamicPricingSummary(model, {
+    tokenUnit: 'M',
+    selectedGroup: selectedGroup ?? FILTER_ALL,
+    now,
+    groupRatioMultiplier: ratio,
+  })
+  if (summary) {
+    if (summary.isSpecialExpression) return undefined
+    const entry =
+      summary.primaryEntries.find((item) => item.field === 'inputPrice') ??
+      summary.primaryEntries[0]
+    if (!entry) return undefined
+    return entry.value * (model.channel_pricing_variants?.length ? 1 : ratio)
+  }
+  if (isUnconfiguredTaskUsageModel(model)) return undefined
+  const price =
+    model.quota_type === 0 ? model.model_ratio * 2 : model.model_price
+  return typeof price === 'number' && Number.isFinite(price)
+    ? price * ratio
+    : undefined
 }
 
 /**
@@ -117,7 +162,9 @@ function getModelPrice(model: PricingModel): number {
  */
 export function sortModels(
   models: PricingModel[],
-  sortBy: string
+  sortBy: string,
+  selectedGroup?: string,
+  now?: Date
 ): PricingModel[] {
   const sorted = [...models]
 
@@ -128,11 +175,19 @@ export function sortModels(
       )
       break
     case SORT_OPTIONS.PRICE_LOW:
-      sorted.sort((a, b) => getModelPrice(a) - getModelPrice(b))
+    case SORT_OPTIONS.PRICE_HIGH: {
+      const prices = new Map(
+        models.map((model) => [model, getModelPrice(model, selectedGroup, now)])
+      )
+      sorted.sort((a, b) => {
+        const left = prices.get(a)
+        const right = prices.get(b)
+        if (left === undefined) return right === undefined ? 0 : 1
+        if (right === undefined) return -1
+        return sortBy === SORT_OPTIONS.PRICE_LOW ? left - right : right - left
+      })
       break
-    case SORT_OPTIONS.PRICE_HIGH:
-      sorted.sort((a, b) => getModelPrice(b) - getModelPrice(a))
-      break
+    }
   }
 
   return sorted
@@ -151,15 +206,16 @@ export function filterAndSortModels(
     endpointType: string
     tag: string
     sortBy: string
-  }
+  },
+  now?: Date
 ): PricingModel[] {
   let result = filterBySearch(models, filters.search)
   result = filterByVendor(result, filters.vendor)
   result = filterByGroup(result, filters.group)
-  result = filterByQuotaType(result, filters.quotaType)
+  result = filterByQuotaType(result, filters.quotaType, filters.group)
   result = filterByEndpointType(result, filters.endpointType)
   result = filterByTag(result, filters.tag)
-  result = sortModels(result, filters.sortBy)
+  result = sortModels(result, filters.sortBy, filters.group, now)
 
   return result
 }

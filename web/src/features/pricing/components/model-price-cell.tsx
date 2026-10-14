@@ -24,6 +24,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import { useBillingTime } from '../hooks/use-billing-time'
+import { getModelBillingExpressions } from '../lib/channel-pricing'
 import {
   getDynamicDisplayGroupRatio,
   getDynamicPriceUnitLabelKey,
@@ -55,7 +56,7 @@ export function ModelPriceCell(props: {
   const options = props.options ?? {}
   const tokenUnit = options.tokenUnit ?? DEFAULT_TOKEN_UNIT
   const tokenUnitLabel = tokenUnit === 'K' ? '1K' : '1M'
-  const billingTime = useBillingTime(props.model.billing_expr)
+  const billingTime = useBillingTime(getModelBillingExpressions(props.model))
   const dynamic = useMemo(
     () =>
       getDynamicPricingSummary(props.model, {
@@ -64,6 +65,7 @@ export function ModelPriceCell(props: {
         showRechargePrice: options.showRechargePrice,
         now: billingTime === undefined ? undefined : new Date(billingTime),
         tokenUnit,
+        selectedGroup: options.selectedGroup ?? 'all',
         showCurrencySymbol: false,
         groupRatioMultiplier: getDynamicDisplayGroupRatio(
           props.model,
@@ -144,8 +146,8 @@ export function ModelPriceCell(props: {
     if (metrics.length === 0) {
       return (
         <span className='text-muted-foreground text-sm'>
-          {dynamic.hasUnconfiguredProviders
-            ? t('Not configured')
+          {dynamic.hasUnconfiguredProviders || dynamic.hasUnconfiguredChannels
+            ? t('Unset price')
             : t('Dynamic Pricing')}
           {providerCaption && (
             <span className='block text-xs'>
@@ -158,6 +160,12 @@ export function ModelPriceCell(props: {
       )
     }
     if (dynamic.isTaskUsage || hasRequestPrice) caption = currencyLabel
+    if (dynamic.channelCount && dynamic.channelCount > 1) {
+      caption += ` · ${t('Prices vary by channel')}`
+    }
+    if (dynamic.hasUnconfiguredChannels) {
+      caption += ` · ${t('Some channel prices are not configured')}`
+    }
     if (dynamic.isTimePricing) caption += ` · ${t('Current period price')}`
     if (dynamic.isMixedBilling) {
       caption += ` · ${t('Token or per-call pricing')}`

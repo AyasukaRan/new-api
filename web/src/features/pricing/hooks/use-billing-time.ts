@@ -62,14 +62,20 @@ function getNoTime(): undefined {
 
 /** One minute clock for active time-dependent previews; never used by settlement logs. */
 export function useBillingTime(
-  expression: string | null | undefined,
+  expression: string | readonly string[] | null | undefined,
   enabled = true
 ): number | undefined {
-  const compiled =
-    expression && enabled ? compileBillingExpression(expression) : null
+  const expressions =
+    typeof expression === 'string' ? [expression] : (expression ?? [])
   const needsTime =
-    compiled?.status === 'ready' &&
-    TIME_FUNCTIONS.some((name) => compiled.functions.has(name))
+    enabled &&
+    expressions.some((item) => {
+      const compiled = item ? compileBillingExpression(item) : null
+      return (
+        compiled?.status === 'ready' &&
+        TIME_FUNCTIONS.some((name) => compiled.functions.has(name))
+      )
+    })
   return useSyncExternalStore(
     needsTime ? subscribeBillingTime : subscribeWithoutTime,
     needsTime ? getBillingTime : getNoTime,

@@ -2,16 +2,20 @@ package model
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/types"
 )
 
@@ -26,6 +30,8 @@ type PricingPluginVariant struct {
 }
 
 type Pricing struct {
+	ChannelPricingVariants []Pricing                            `json:"channel_pricing_variants,omitempty"`
+	PricingConfigured      bool                                 `json:"pricing_configured"`
 	BillingPluginVariants  []PricingPluginVariant               `json:"billing_plugin_variants,omitempty"`
 	ModelName              string                               `json:"model_name"`
 	Description            string                               `json:"description,omitempty"`
@@ -190,6 +196,208 @@ func appendPricingEndpoint(endpoints []string, endpoint string) []string {
 	return append(endpoints, endpoint)
 }
 
+// HasPriceOrRatioEntry reports an explicit price after wildcard normalization;
+// the self-use fallback is not a configured model price.
+func HasPriceOrRatioEntry(name string) bool {
+	formatted := ratio_setting.FormatMatchingModelName(name)
+	if _, ok := ratio_setting.GetModelPrice(formatted, false); ok {
+		return true
+	}
+	if ratio_setting.HasConfiguredModelRatio(formatted) {
+		return true
+	}
+	return billing_setting.GetBillingMode(formatted) == billing_setting.BillingModeTieredExpr
+}
+
+// ResolveBillingModelName is shared by HTTP relay and public pricing, so a
+// reasoning modifier never changes the price displayed for the billed model.
+func ResolveBillingModelName(origin string, channelID int) string {
+	var candidates []string
+	if !reasoning.ParseModelModifiers(origin).HasModifiers() {
+		candidates = append(candidates, origin)
+	}
+	candidates = append(candidates, hostreasoning.CanonicalBillingModelNames(origin)...)
+	base := hostreasoning.BaseModelName(origin)
+	candidates = append(candidates, base)
+	seen := make(map[string]struct{}, len(candidates))
+	for _, name := range candidates {
+		if name == "" {
+			continue
+		}
+		if _, found := seen[name]; found {
+			continue
+		}
+		seen[name] = struct{}{}
+		_, channelConfigured := ratio_setting.GetChannelModelPricing(name, channelID)
+		if HasPriceOrRatioEntry(name) || channelConfigured {
+			return name
+		}
+	}
+	return base
+}
+
+// resolveChannelPricing describes the same channel override precedence used by
+// relay, without evaluating a request or changing any stored billing settings.
+func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.LoadedPlugin, mappedModel string, sharedModel bool) Pricing {
+	pricing := base
+	pricing.ChannelPricingVariants = nil
+	pricing.BillingPluginVariants = nil
+	pricing.BillingUsageSchema = nil
+	pricing.BillingUsageExamples = nil
+	pricing.BillingMode = ""
+	pricing.BillingExpr = ""
+	pricing.ModelPrice = 0
+	pricing.ModelRatio = 0
+	pricing.CompletionRatio = 0
+	pricing.CacheRatio = nil
+	pricing.CreateCacheRatio = nil
+	pricing.ImageRatio = nil
+	pricing.AudioRatio = nil
+	pricing.AudioCompletionRatio = nil
+	pricing.QuotaType = 0
+	pricing.PricingConfigured = false
+	name := base.ModelName
+	if provider == nil {
+		name = ResolveBillingModelName(name, channelID)
+	}
+	mode := billing_setting.GetChannelBillingMode(name, channelID)
+	expression, _ := billing_setting.GetChannelBillingExpr(name, channelID)
+	if provider != nil {
+		schema, examples := provider.Meta.UsageForModels(mappedModel, name)
+		pricing.BillingUsageSchema = jsplugin.CloneUsageSchema(schema)
+		pricing.BillingUsageExamples = jsplugin.CloneUsageExamples(examples)
+		var found bool
+		expression, found = billing_setting.ResolveTaskBillingExpr(provider.Meta.Key, name, mappedModel)
+		mode = billing_setting.BillingModeRatio
+		if found || billing_setting.GetBillingMode(name) == billing_setting.BillingModeTieredExpr {
+			mode = billing_setting.BillingModeTieredExpr
+		}
+		for _, candidate := range []string{name, mappedModel} {
+			if pinnedMode, pinnedExpr, pinned := ratio_setting.ChannelBillingMode(candidate, channelID); pinned {
+				name, mode, expression = candidate, pinnedMode, pinnedExpr
+				break
+			}
+		}
+	}
+	pricing.BillingMode = mode
+	if mode == billing_setting.BillingModeTieredExpr {
+		pricing.BillingExpr = expression
+		_, compileErr := billingexpr.CompileFromCache(expression)
+		pricing.PricingConfigured = strings.TrimSpace(expression) != "" && compileErr == nil
+		if provider != nil && (billingexpr.UsesFixedPricing(expression) || (sharedModel && !billing_setting.TaskExprCompatible(expression, pricing.BillingUsageSchema))) {
+			pricing.BillingExpr = ""
+			pricing.PricingConfigured = false
+		}
+		return pricing
+	}
+
+	override, _ := ratio_setting.GetChannelModelPricing(name, channelID)
+	price, hasPrice := ratio_setting.GetModelPrice(name, false)
+	if !hasPrice && provider != nil {
+		price, hasPrice = ratio_setting.GetDefaultModelPriceMap()[name]
+	}
+	if override.ModelPrice != nil {
+		price = ratio_setting.ResolveModelPrice(override.ModelPrice, -1)
+		hasPrice = price >= 0
+	}
+	if mode != ratio_setting.ChannelBillingModePerToken && (hasPrice || mode == ratio_setting.ChannelBillingModePerRequest) {
+		pricing.QuotaType = 1
+		pricing.PricingConfigured = hasPrice
+		if hasPrice {
+			pricing.ModelPrice = price
+		}
+		return pricing
+	}
+	modelRatio, hasRatio, _ := ratio_setting.GetModelRatio(name)
+	pricing.PricingConfigured = hasRatio || (override.ModelRatio != nil && ratio_setting.ResolveRatio(override.ModelRatio, -1) >= 0)
+	if pricing.PricingConfigured {
+		pricing.ModelRatio = ratio_setting.ResolveRatio(override.ModelRatio, modelRatio)
+	}
+	pricing.CompletionRatio = ratio_setting.ResolveRatio(override.CompletionRatio, ratio_setting.GetCompletionRatio(name))
+	cache, hasCache := ratio_setting.GetCacheRatio(name)
+	if hasCache || override.CacheRatio != nil {
+		value := ratio_setting.ResolveRatio(override.CacheRatio, cache)
+		pricing.CacheRatio = &value
+	}
+	createCache, hasCreateCache := ratio_setting.GetCreateCacheRatio(name)
+	if hasCreateCache || override.CreateCacheRatio != nil {
+		value := ratio_setting.ResolveRatio(override.CreateCacheRatio, createCache)
+		pricing.CreateCacheRatio = &value
+	}
+	image, hasImage := ratio_setting.GetImageRatio(name)
+	if hasImage || override.ImageRatio != nil {
+		value := ratio_setting.ResolveRatio(override.ImageRatio, image)
+		pricing.ImageRatio = &value
+	}
+	if ratio_setting.ContainsAudioRatio(name) || override.AudioRatio != nil {
+		value := ratio_setting.ResolveRatio(override.AudioRatio, ratio_setting.GetAudioRatio(name))
+		pricing.AudioRatio = &value
+	}
+	if ratio_setting.ContainsAudioCompletionRatio(name) || override.AudioCompletionRatio != nil {
+		value := ratio_setting.ResolveRatio(override.AudioCompletionRatio, ratio_setting.GetAudioCompletionRatio(name))
+		pricing.AudioCompletionRatio = &value
+	}
+	return pricing
+}
+
+// FilterPricingByUsableGroups filters before merging equal prices, so neither a
+// price nor a group belonging only to an inaccessible channel can escape the
+// cached, site-wide catalog. The returned slices do not mutate that cache.
+func FilterPricingByUsableGroups(pricing []Pricing, usableGroup map[string]string) []Pricing {
+	filtered := make([]Pricing, 0, len(pricing))
+	for _, item := range pricing {
+		candidates := item.ChannelPricingVariants
+		if len(candidates) == 0 {
+			candidates = []Pricing{item}
+		}
+		variants := make([]Pricing, 0, len(candidates))
+		byPrice := make(map[string]int)
+		allGroups := make(map[string]struct{})
+		for _, candidate := range candidates {
+			groups := make([]string, 0)
+			for group := range usableGroup {
+				if slices.Contains(candidate.EnableGroup, "all") || slices.Contains(candidate.EnableGroup, group) {
+					groups = append(groups, group)
+					allGroups[group] = struct{}{}
+				}
+			}
+			if len(groups) == 0 {
+				continue
+			}
+			slices.Sort(groups)
+			candidate.EnableGroup = nil
+			candidate.ChannelPricingVariants = nil
+			encoded, err := common.Marshal(candidate)
+			if err != nil {
+				continue
+			}
+			key := string(encoded)
+			if index, found := byPrice[key]; found {
+				variants[index].EnableGroup = append(variants[index].EnableGroup, groups...)
+				slices.Sort(variants[index].EnableGroup)
+				variants[index].EnableGroup = slices.Compact(variants[index].EnableGroup)
+				continue
+			}
+			candidate.EnableGroup = groups
+			byPrice[key] = len(variants)
+			variants = append(variants, candidate)
+		}
+		if len(variants) == 0 {
+			continue
+		}
+		visible := variants[0]
+		visible.PricingVersion = item.PricingVersion
+		visible.EnableGroup = make([]string, 0, len(allGroups))
+		for group := range allGroups {
+			visible.EnableGroup = append(visible.EnableGroup, group)
+		}
+		slices.Sort(visible.EnableGroup)
+		visible.ChannelPricingVariants = variants
+		filtered = append(filtered, visible)
+	}
+	return filtered
+}
+
 func updatePricing() {
 	//modelRatios := common.GetModelRatios()
 	enableAbilities, err := GetAllEnableAbilityWithChannels()
@@ -229,6 +437,9 @@ func updatePricing() {
 	}
 
 	modelGroupsMap := make(map[string]*types.Set[string])
+	modelChannelGroups := make(map[string]map[int][]string)
+	pricingChannels := make(map[int]*Channel)
+	pricingModelMappings := make(map[int]map[string]string)
 
 	for _, ability := range enableAbilities {
 		groups, ok := modelGroupsMap[ability.Model]
@@ -237,6 +448,27 @@ func updatePricing() {
 			modelGroupsMap[ability.Model] = groups
 		}
 		groups.Add(ability.Group)
+		if modelChannelGroups[ability.Model] == nil {
+			modelChannelGroups[ability.Model] = make(map[int][]string)
+		}
+		modelChannelGroups[ability.Model][ability.ChannelId] = append(modelChannelGroups[ability.Model][ability.ChannelId], ability.Group)
+		if _, loaded := pricingChannels[ability.ChannelId]; !loaded {
+			channel, loadErr := CacheGetChannel(ability.ChannelId)
+			if loadErr != nil {
+				common.SysError(fmt.Sprintf("load pricing channel: channel_id=%d, error=%v", ability.ChannelId, loadErr))
+			}
+			pricingChannels[ability.ChannelId] = channel
+			if channel != nil {
+				mapping := make(map[string]string)
+				if raw := channel.GetModelMapping(); raw != "" && raw != "{}" {
+					if parseErr := common.UnmarshalJsonStr(raw, &mapping); parseErr != nil {
+						common.SysError(fmt.Sprintf("load pricing model mapping: channel_id=%d, error=%v", channel.Id, parseErr))
+						mapping = nil
+					}
+				}
+				pricingModelMappings[ability.ChannelId] = mapping
+			}
+		}
 	}
 
 	//这里使用切片而不是Set，因为一个模型可能支持多个端点类型，并且第一个端点是优先使用端点
@@ -348,9 +580,11 @@ func updatePricing() {
 		if findPrice {
 			pricing.ModelPrice = modelPrice
 			pricing.QuotaType = 1
+			pricing.PricingConfigured = true
 		} else {
-			modelRatio, _, _ := ratio_setting.GetModelRatio(model)
+			modelRatio, configured, _ := ratio_setting.GetModelRatio(model)
 			pricing.ModelRatio = modelRatio
+			pricing.PricingConfigured = configured
 			pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
 			pricing.QuotaType = 0
 		}
@@ -375,12 +609,14 @@ func updatePricing() {
 			if expr, ok := billing_setting.GetBillingExpr(model); ok && strings.TrimSpace(expr) != "" {
 				pricing.BillingMode = billingMode
 				pricing.BillingExpr = expr
+				pricing.PricingConfigured = true
 			}
 		} else if target, resolved := ResolveTaskModelAlias(pluginGeneration, model); resolved && target.Declared != "" {
 			if tailMode := billing_setting.GetBillingMode(target.Declared); tailMode == "tiered_expr" {
 				if expr, ok := billing_setting.GetBillingExpr(target.Declared); ok && strings.TrimSpace(expr) != "" {
 					pricing.BillingMode = tailMode
 					pricing.BillingExpr = expr
+					pricing.PricingConfigured = true
 				}
 			}
 		}
@@ -425,6 +661,57 @@ func updatePricing() {
 					BillingUsageSchema: jsplugin.CloneUsageSchema(schema), BillingUsageExamples: jsplugin.CloneUsageExamples(examples),
 				})
 			}
+		}
+		channelIDs := make([]int, 0, len(modelChannelGroups[model]))
+		for channelID := range modelChannelGroups[model] {
+			channelIDs = append(channelIDs, channelID)
+		}
+		slices.Sort(channelIDs)
+		for _, channelID := range channelIDs {
+			channel := pricingChannels[channelID]
+			variant := Pricing{
+				ModelName: model, Description: pricing.Description, Icon: pricing.Icon, Tags: pricing.Tags,
+				VendorID: pricing.VendorID, SupportedEndpointTypes: pricing.SupportedEndpointTypes,
+				EnableGroup: modelChannelGroups[model][channelID],
+			}
+			if channel == nil {
+				// A cache miss must not turn an unknown task/plugin binding into
+				// a configured text price. Keep the model visible as unconfigured.
+				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
+				continue
+			}
+			mappedModel := model
+			if target, cyclic := followChannelModelMapping(pricingModelMappings[channelID], model); !cyclic {
+				mappedModel = target
+			}
+			candidates := pluginGeneration.PluginsByModel(model)
+			if len(candidates) == 0 && mappedModel != model {
+				candidates = pluginGeneration.PluginsByModel(mappedModel)
+			}
+			matchedProvider := false
+			for _, candidate := range candidates {
+				if channel.Type == constant.ChannelTypeTaskPlugin || channel.Type == constant.ChannelTypeNewAPI {
+					if !channel.GetSetting().BindsTaskPlugin(candidate.Meta.Key) {
+						continue
+					}
+				} else if !slices.Contains(candidate.Meta.ChannelTypes, channel.Type) {
+					continue
+				}
+				matchedProvider = true
+				variant = resolveChannelPricing(pricing, channelID, candidate, mappedModel, pluginGeneration.SharedModel(model) || pluginGeneration.SharedModel(mappedModel))
+				variant.EnableGroup = modelChannelGroups[model][channelID]
+				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
+			}
+			if matchedProvider {
+				continue
+			}
+			if channel.Type == constant.ChannelTypeTaskPlugin {
+				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
+				continue
+			}
+			variant = resolveChannelPricing(pricing, channelID, nil, mappedModel, false)
+			variant.EnableGroup = modelChannelGroups[model][channelID]
+			pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 		}
 		pricingMap = append(pricingMap, pricing)
 	}

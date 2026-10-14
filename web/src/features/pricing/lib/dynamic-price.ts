@@ -36,6 +36,7 @@ import {
   type ParsedTier,
 } from './billing-expr'
 import { compileBillingExpression } from './billing-expression/parser'
+import { getChannelPricingVariants } from './channel-pricing'
 import { getDisplayGroupRatio } from './model-helpers'
 import { withPluginPricing } from './plugin-pricing'
 import {
@@ -47,6 +48,8 @@ import { getTaskPricingDisplayTiers } from './task-matrix-display'
 
 export type DynamicPriceOptions = {
   tokenUnit: TokenUnit
+  /** Undefined shows base prices; all or a group applies each route’s group ratio. */
+  selectedGroup?: string
   showCurrencySymbol?: boolean
   showRechargePrice?: boolean
   priceRate?: number
@@ -97,6 +100,8 @@ export type DynamicPricingSummary = {
   isTimePricing?: boolean
   isMixedBilling?: boolean
   providerCount?: number
+  channelCount?: number
+  hasUnconfiguredChannels?: boolean
   hasUnconfiguredProviders?: boolean
 }
 
@@ -141,6 +146,9 @@ function isTaskPricingTier(tier: DynamicPricingTier): tier is ParsedTaskTier {
 }
 
 export function isDynamicPricingModel(model: PricingModel): boolean {
+  if (model.channel_pricing_variants?.length) {
+    return getChannelPricingVariants(model).some(isDynamicPricingModel)
+  }
   if (model.billing_plugin_variants?.length) {
     return model.billing_plugin_variants.some(
       (variant) =>
@@ -382,10 +390,172 @@ export function getDynamicPriceEntries(
   })
 }
 
+function getChannelPricingSummary(
+  model: PricingModel,
+  options: DynamicPriceOptions
+): DynamicPricingSummary {
+  const variants = getChannelPricingVariants(model, options.selectedGroup)
+  const summaries: DynamicPricingSummary[] = []
+  const ranges = new Map<
+    string,
+    { entry: DynamicPriceEntry; min: number; max: number }
+  >()
+  const primaryKeys = new Set<string>()
+  let hasUnconfiguredChannels = variants.length === 0
+  for (const variant of variants) {
+    if (variant.pricing_configured === false) {
+      hasUnconfiguredChannels = true
+      continue
+    }
+    const ratio =
+      options.selectedGroup === undefined
+        ? (options.groupRatioMultiplier ?? 1)
+        : getDisplayGroupRatio(variant, options.selectedGroup)
+    let summary = getDynamicPricingSummary(variant, {
+      ...options,
+      groupRatioMultiplier: 1,
+    })
+    if (!summary) {
+      if (isUnconfiguredTaskUsageModel(variant)) {
+        hasUnconfiguredChannels = true
+        continue
+      }
+      let tier: ParsedTier
+      if (variant.quota_type === 1 && Number.isFinite(variant.model_price)) {
+        tier = {
+          label: '',
+          conditions: [],
+          billingUnit: 'request',
+          fixedPrice: variant.model_price,
+        }
+      } else if (
+        variant.quota_type === 0 &&
+        Number.isFinite(variant.model_ratio)
+      ) {
+        const base = variant.model_ratio * 2
+        tier = {
+          label: '',
+          conditions: [],
+          inputPrice: base,
+          outputPrice: base * variant.completion_ratio,
+        }
+        const extraPrices = [
+          ['cacheReadPrice', variant.cache_ratio],
+          ['cacheCreatePrice', variant.create_cache_ratio],
+          ['imagePrice', variant.image_ratio],
+          ['audioInputPrice', variant.audio_ratio],
+          [
+            'audioOutputPrice',
+            variant.audio_ratio != null &&
+            variant.audio_completion_ratio != null
+              ? variant.audio_ratio * variant.audio_completion_ratio
+              : undefined,
+          ],
+        ] as const
+        for (const [field, multiplier] of extraPrices) {
+          if (multiplier != null && Number.isFinite(multiplier)) {
+            tier[field] = base * multiplier
+          }
+        }
+      } else {
+        hasUnconfiguredChannels = true
+        continue
+      }
+      const entries = getDynamicPriceEntries(tier, {
+        ...options,
+        groupRatioMultiplier: 1,
+      })
+      summary = {
+        tiers: [tier],
+        tier,
+        tierCount: 1,
+        hasRequestRules: false,
+        isSpecialExpression: false,
+        rawExpression: '',
+        entries,
+        primaryEntries: entries.filter(
+          (entry) =>
+            entry.unit === 'request' || PRIMARY_DYNAMIC_FIELDS.has(entry.field)
+        ),
+        secondaryEntries: entries.filter(
+          (entry) =>
+            entry.unit !== 'request' && !PRIMARY_DYNAMIC_FIELDS.has(entry.field)
+        ),
+        isTaskUsage: false,
+      }
+    }
+    summaries.push(summary)
+    for (const entry of summary.entries) {
+      // Task usage fields and protocol token fields are distinct even if named alike.
+      const key = `${entry.labelKind}:${entry.field}:${entry.unit}`
+      const range = ranges.get(key)
+      ranges.set(key, {
+        entry: range?.entry ?? { ...entry, key },
+        min: Math.min(
+          range?.min ?? Infinity,
+          (entry.minValue ?? entry.value) * ratio
+        ),
+        max: Math.max(
+          range?.max ?? -Infinity,
+          (entry.maxValue ?? entry.value) * ratio
+        ),
+      })
+    }
+    for (const entry of summary.primaryEntries) {
+      primaryKeys.add(`${entry.labelKind}:${entry.field}:${entry.unit}`)
+    }
+  }
+  const formatOptions = { ...options, groupRatioMultiplier: 1 }
+  const entries = [...ranges.values()].map(({ entry, min, max }) => {
+    const format = entry.variable
+      ? formatDynamicUnitPrice
+      : formatTaskUsageUnitPrice
+    return {
+      ...entry,
+      value: min,
+      minValue: min,
+      maxValue: max,
+      formatted: format(min, formatOptions),
+      formattedRange:
+        min === max
+          ? undefined
+          : `${format(min, formatOptions)} – ${format(max, formatOptions)}`,
+    }
+  })
+  const hasTokenPrice = entries.some((entry) => entry.variable)
+  const hasRequestPrice = entries.some(
+    (entry) => entry.unit === 'request' || entry.unit === 'image'
+  )
+  return {
+    tiers: summaries.flatMap((summary) => summary.tiers),
+    tier: summaries.length === 1 ? summaries[0].tier : null,
+    tierCount: Math.max(0, ...summaries.map((summary) => summary.tierCount)),
+    hasRequestRules: summaries.some((summary) => summary.hasRequestRules),
+    isSpecialExpression: summaries.some(
+      (summary) => summary.isSpecialExpression
+    ),
+    rawExpression: summaries.length === 1 ? summaries[0].rawExpression : '',
+    entries,
+    primaryEntries: entries.filter((entry) => primaryKeys.has(entry.key)),
+    secondaryEntries: entries.filter((entry) => !primaryKeys.has(entry.key)),
+    isTaskUsage:
+      summaries.length > 0 && summaries.every((summary) => summary.isTaskUsage),
+    isTimePricing: summaries.some((summary) => summary.isTimePricing),
+    isMixedBilling:
+      (hasTokenPrice && hasRequestPrice) ||
+      summaries.some((summary) => summary.isMixedBilling),
+    channelCount: variants.length,
+    hasUnconfiguredChannels,
+  }
+}
+
 export function getDynamicPricingSummary(
   model: PricingModel,
   options: DynamicPriceOptions
 ): DynamicPricingSummary | null {
+  if (model.channel_pricing_variants?.length) {
+    return getChannelPricingSummary(model, options)
+  }
   const variants = model.billing_plugin_variants
   if (variants?.length) {
     const summaries = variants.flatMap((variant) => {
@@ -596,6 +766,17 @@ export function getCardExamplePrice(
   model: PricingModel,
   options: DynamicPriceOptions
 ): CardExamplePrice | null {
+  if (model.channel_pricing_variants?.length) {
+    const variants = getChannelPricingVariants(model, options.selectedGroup)
+    if (variants.length !== 1) return null
+    return getCardExamplePrice(variants[0], {
+      ...options,
+      groupRatioMultiplier:
+        options.selectedGroup === undefined
+          ? options.groupRatioMultiplier
+          : getDisplayGroupRatio(variants[0], options.selectedGroup),
+    })
+  }
   if (model.billing_plugin_variants?.length) {
     const variant = model.billing_plugin_variants.find(
       (provider) => provider.billing_expr

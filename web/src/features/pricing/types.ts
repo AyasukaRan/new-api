@@ -56,6 +56,10 @@ export type BillingPluginVariant = {
 }
 
 export type PricingModel = {
+  /** Effective anonymous channel prices, restricted to the viewer’s groups. */
+  channel_pricing_variants?: PricingModel[]
+  /** Distinguishes missing prices from explicitly configured zero prices. */
+  pricing_configured?: boolean
   billing_plugin_variants?: BillingPluginVariant[]
   id: number
   model_name: string

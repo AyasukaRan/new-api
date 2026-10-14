@@ -23,6 +23,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import { useBillingTime } from '../hooks/use-billing-time'
+import { getModelBillingExpressions } from '../lib/channel-pricing'
 import {
   getDynamicDisplayGroupRatio,
   getDynamicPricingSummary,
@@ -50,12 +51,13 @@ export function CachedPriceCell(props: {
 
   const model = props.model
   const currency = useSystemConfigStore((state) => state.config.currency)
-  const billingTime = useBillingTime(model.billing_expr)
+  const billingTime = useBillingTime(getModelBillingExpressions(model))
   const dynamicSummary = useMemo(
     () =>
       getDynamicPricingSummary(model, {
         now: billingTime === undefined ? undefined : new Date(billingTime),
         tokenUnit,
+        selectedGroup: selectedGroup ?? 'all',
         showRechargePrice,
         priceRate,
         usdExchangeRate,
@@ -107,7 +109,7 @@ export function CachedPriceCell(props: {
               </span>
             )}
             <span className='font-mono text-sm tabular-nums'>
-              {stripTrailingZeros(entry.formatted)}
+              {entry.formattedRange ?? stripTrailingZeros(entry.formatted)}
             </span>
           </div>
         ))}

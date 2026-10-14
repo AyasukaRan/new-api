@@ -27,13 +27,14 @@ import type { PricingModel } from '../types'
 
 interface ModelBillingModeBadgeProps {
   model: PricingModel
+  selectedGroup?: string
   appearance?: 'default' | 'caption'
   className?: string
 }
 
 export function ModelBillingModeBadge(props: ModelBillingModeBadgeProps) {
   const { t } = useTranslation()
-  const labelKey = getBillingModeLabelKey(props.model)
+  const labelKey = getBillingModeLabelKey(props.model, props.selectedGroup)
   const label = t(labelKey)
   const isCaption = props.appearance === 'caption'
   let variant: StatusVariant = 'purple'

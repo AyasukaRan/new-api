@@ -12,12 +12,10 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
-	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -434,45 +432,11 @@ func HasModelBillingConfig(modelName string) bool {
 // tiered billing-mode entry after a single wildcard normalization. Self-use
 // fallback does not count as a configured ratio.
 func HasPriceOrRatioEntry(name string) bool {
-	formatted := ratio_setting.FormatMatchingModelName(name)
-	if _, ok := ratio_setting.GetModelPrice(formatted, false); ok {
-		return true
-	}
-	if ratio_setting.HasConfiguredModelRatio(formatted) {
-		return true
-	}
-	return billing_setting.GetBillingMode(formatted) == billing_setting.BillingModeTieredExpr
+	return model.HasPriceOrRatioEntry(name)
 }
 
 func resolveBillingModelName(origin string, channelId int) string {
-	var candidates []string
-	if !reasoning.ParseModelModifiers(origin).HasModifiers() {
-		candidates = append(candidates, origin)
-	}
-	candidates = append(candidates, hostreasoning.CanonicalBillingModelNames(origin)...)
-	base := hostreasoning.BaseModelName(origin)
-	candidates = append(candidates, base)
-
-	seen := make(map[string]struct{}, len(candidates))
-	matched := ""
-	for _, name := range candidates {
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		_, channelConfigured := ratio_setting.GetChannelModelPricing(name, channelId)
-		if HasPriceOrRatioEntry(name) || channelConfigured {
-			matched = name
-			break
-		}
-	}
-	if matched == "" {
-		matched = base
-	}
-	return matched
+	return model.ResolveBillingModelName(origin, channelId)
 }
 
 func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billingModelName string, promptTokens int, groupRatioInfo hosttypes.GroupRatioInfo) (hosttypes.PriceData, error) {

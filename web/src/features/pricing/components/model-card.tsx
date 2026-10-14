@@ -29,6 +29,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import { useBillingTime } from '../hooks/use-billing-time'
+import { getModelBillingExpressions } from '../lib/channel-pricing'
 import {
   getCardExamplePrice,
   getDynamicDisplayGroupRatio,
@@ -70,12 +71,13 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
   const modelIcon = modelIconKey ? getLobeIcon(modelIconKey, 28) : null
   const initial = props.model.model_name?.charAt(0).toUpperCase() || '?'
   const isUnconfiguredTaskUsage = isUnconfiguredTaskUsageModel(props.model)
-  const billingTime = useBillingTime(props.model.billing_expr)
+  const billingTime = useBillingTime(getModelBillingExpressions(props.model))
   const currency = useSystemConfigStore((state) => state.config.currency)
   const dynamicPriceOptions = useMemo(
     () => ({
       now: billingTime === undefined ? undefined : new Date(billingTime),
       tokenUnit,
+      selectedGroup: props.selectedGroup ?? 'all',
       showRechargePrice,
       priceRate,
       usdExchangeRate,
@@ -191,12 +193,13 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
         </>
       )
     } else {
+      let fallback = t('Dynamic Pricing')
+      if (dynamicSummary.hasUnconfiguredProviders) {
+        fallback = t('Usage-based billing · price not configured')
+      }
+      if (dynamicSummary.hasUnconfiguredChannels) fallback = t('Unset price')
       priceSummary = (
-        <span className='text-muted-foreground col-span-full'>
-          {dynamicSummary.hasUnconfiguredProviders
-            ? t('Usage-based billing · price not configured')
-            : t('Dynamic Pricing')}
-        </span>
+        <span className='text-muted-foreground col-span-full'>{fallback}</span>
       )
     }
   } else if (isUnconfiguredTaskUsage) {
@@ -317,7 +320,24 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           aria-label={t('Pricing')}
           className='mt-auto flex min-w-0 flex-col gap-1.5'
         >
-          <ModelBillingModeBadge model={props.model} appearance='caption' />
+          <ModelBillingModeBadge
+            model={props.model}
+            selectedGroup={props.selectedGroup}
+            appearance='caption'
+          />
+          {Boolean(
+            dynamicSummary?.channelCount && dynamicSummary.channelCount > 1
+          ) && (
+            <span className='text-muted-foreground text-xs'>
+              {t('Prices vary by channel')}
+            </span>
+          )}
+          {dynamicSummary?.hasUnconfiguredChannels &&
+            dynamicSummary.entries.length > 0 && (
+              <span className='text-muted-foreground text-xs'>
+                {t('Some channel prices are not configured')}
+              </span>
+            )}
           {dynamicSummary?.providerCount && (
             <span className='text-muted-foreground text-xs break-words'>
               {t('{{count}} providers', {

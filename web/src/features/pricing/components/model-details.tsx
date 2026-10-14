@@ -69,6 +69,11 @@ import { usePricingData } from '../hooks/use-pricing-data'
 import type { ParsedTaskTier } from '../lib/billing-expr'
 import { formatBillingCondition } from '../lib/billing-expression/condition-display'
 import {
+  getChannelPricingVariants,
+  getChannelPricingKey,
+  getModelBillingExpressions,
+} from '../lib/channel-pricing'
+import {
   formatTaskUsageUnitPrice,
   getDynamicPriceEntries,
   getDynamicPriceUnitLabelKey,
@@ -80,7 +85,11 @@ import {
   type DynamicPriceEntry,
 } from '../lib/dynamic-price'
 import { parseTags } from '../lib/filters'
-import { getAvailableGroups, isTokenBasedModel } from '../lib/model-helpers'
+import {
+  getAvailableGroups,
+  getConfiguredGroupRatio,
+  isTokenBasedModel,
+} from '../lib/model-helpers'
 import { withPluginPricing } from '../lib/plugin-pricing'
 import { formatFixedPrice, formatGroupPrice } from '../lib/price'
 import {
@@ -693,7 +702,7 @@ function PriceSection(props: {
   const baseGroupKey = '_base'
   const baseGroupRatioMap = { [baseGroupKey]: 1 }
   const currency = useSystemConfigStore((state) => state.config.currency)
-  const billingTime = useBillingTime(props.model.billing_expr)
+  const billingTime = useBillingTime(getModelBillingExpressions(props.model))
   const dynamicSummary = useMemo(
     () =>
       getDynamicPricingSummary(props.model, {
@@ -716,6 +725,18 @@ function PriceSection(props: {
       currency,
     ]
   )
+
+  if (
+    props.model.pricing_configured === false &&
+    !props.model.channel_pricing_variants?.length
+  ) {
+    return (
+      <section>
+        <SectionTitle>{t('Base Price')}</SectionTitle>
+        <p className='text-muted-foreground text-sm'>{t('Unset price')}</p>
+      </section>
+    )
+  }
 
   const primaryPriceTypes: { label: string; type: PriceType }[] = [
     { label: t('Input'), type: 'input' },
@@ -795,6 +816,12 @@ function PriceSection(props: {
               ` · ${t('Not configured for some providers')}`}
           </p>
         )}
+        {dynamicSummary.hasUnconfiguredChannels &&
+          dynamicSummary.entries.length > 0 && (
+            <p className='text-muted-foreground mb-2 text-xs'>
+              {t('Some channel prices are not configured')}
+            </p>
+          )}
         {dynamicSummary.isMixedBilling && (
           <p className='text-muted-foreground mb-2 text-xs'>
             {t('Token or per-call pricing')}
@@ -834,8 +861,9 @@ function PriceSection(props: {
           </div>
         ) : (
           <p className='text-muted-foreground text-sm'>
-            {dynamicSummary.hasUnconfiguredProviders
-              ? t('Not configured')
+            {dynamicSummary.hasUnconfiguredProviders ||
+            dynamicSummary.hasUnconfiguredChannels
+              ? t('Unset price')
               : t('Dynamic Pricing')}
           </p>
         )}
@@ -1042,6 +1070,7 @@ type GroupPricingSectionProps = {
 
 function GroupPricingSection(props: GroupPricingSectionProps) {
   const { t } = useTranslation()
+  if (props.model.pricing_configured === false) return null
   const variants = props.model.billing_plugin_variants
   if (!variants?.length) {
     return <ProviderGroupPricingSection {...props} />
@@ -1210,7 +1239,7 @@ function ProviderGroupPricingSection(
     })
     const formattedPricesByGroup = new Map(
       availableGroups.map((group) => {
-        const ratio = props.groupRatio[group] || 1
+        const ratio = getConfiguredGroupRatio(props.groupRatio, group)
         return [
           group,
           getDynamicFormattedPricesByTier(dynamicTiers, {
@@ -1233,7 +1262,7 @@ function ProviderGroupPricingSection(
         <AutoGroupChain model={props.model} autoGroups={props.autoGroups} />
         <div className='space-y-3'>
           {availableGroups.map((group) => {
-            const ratio = props.groupRatio[group] || 1
+            const ratio = getConfiguredGroupRatio(props.groupRatio, group)
             const formattedPricesByTier =
               formattedPricesByGroup.get(group) ??
               new Map<DynamicPricingTier, Map<string, string>>()
@@ -1439,7 +1468,8 @@ function ProviderGroupPricingSection(
             header: t('Ratio'),
             className: thClass,
             cellClassName: 'text-muted-foreground py-2.5 font-mono',
-            cell: (group) => `${props.groupRatio[group] || 1}x`,
+            cell: (group) =>
+              `${getConfiguredGroupRatio(props.groupRatio, group)}x`,
           },
           ...(isTokenBased
             ? [
@@ -1511,10 +1541,71 @@ export interface ModelDetailsContentProps {
   showRechargePrice?: boolean
 }
 
-export function ModelDetailsContent(props: ModelDetailsContentProps) {
+export type ModelPricingDetailsProps = Pick<
+  ModelDetailsContentProps,
+  | 'model'
+  | 'groupRatio'
+  | 'usableGroup'
+  | 'autoGroups'
+  | 'priceRate'
+  | 'usdExchangeRate'
+  | 'tokenUnit'
+  | 'showRechargePrice'
+>
+
+/** Shared pricing panel for the public detail page and its drawer. */
+export function ModelPricingDetails(props: ModelPricingDetailsProps) {
   const { t } = useTranslation()
   const showRechargePrice = props.showRechargePrice ?? false
-
+  const variants = props.model.channel_pricing_variants?.length
+    ? getChannelPricingVariants(props.model)
+    : null
+  if (variants?.length === 1) {
+    return <ModelPricingDetails {...props} model={variants[0]} />
+  }
+  if (variants?.length) {
+    const pricingOptions = variants.map((variant) => ({
+      model: variant,
+      key: getChannelPricingKey(variant),
+    }))
+    return (
+      <section className='bg-card/60 space-y-5 rounded-xl border p-4 shadow-sm'>
+        <SectionTitle>{t('Channel pricing')}</SectionTitle>
+        <p className='text-muted-foreground text-sm'>
+          {t(
+            'The actual price depends on the channel that handles your request.'
+          )}
+        </p>
+        <PriceSection
+          model={props.model}
+          priceRate={props.priceRate}
+          usdExchangeRate={props.usdExchangeRate}
+          tokenUnit={props.tokenUnit}
+          showRechargePrice={showRechargePrice}
+        />
+        <Tabs
+          key={`${props.model.model_name}:${pricingOptions.map((option) => option.key).join('|')}`}
+          defaultValue={pricingOptions[0].key}
+        >
+          <TabsList
+            aria-label={t('Channel pricing')}
+            className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'
+          >
+            {pricingOptions.map((option, index) => (
+              <TabsTrigger key={option.key} value={option.key}>
+                {t('Price option {{number}}', { number: index + 1 })}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {pricingOptions.map((option) => (
+            <TabsContent key={option.key} value={option.key}>
+              <ModelPricingDetails {...props} model={option.model} />
+            </TabsContent>
+          ))}
+        </Tabs>
+      </section>
+    )
+  }
   const isDynamic =
     props.model.billing_mode === 'tiered_expr' &&
     Boolean(props.model.billing_expr)
@@ -1529,6 +1620,45 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
     simpleTaskPricing ||
     taskTiers.length === 0
 
+  return (
+    <section className='bg-card/60 space-y-5 rounded-xl border p-4 shadow-sm'>
+      <SectionTitle>{t('Pricing')}</SectionTitle>
+      {showBasePrices && (
+        <PriceSection
+          model={props.model}
+          priceRate={props.priceRate}
+          usdExchangeRate={props.usdExchangeRate}
+          tokenUnit={props.tokenUnit}
+          showRechargePrice={showRechargePrice}
+        />
+      )}
+      {isDynamic && !simpleTaskPricing && (
+        <DynamicPricingBreakdown
+          billingExpr={props.model.billing_expr}
+          usageSchema={props.model.billing_usage_schema}
+          taskPriceOptions={{
+            showRechargePrice,
+            priceRate: props.priceRate,
+            usdExchangeRate: props.usdExchangeRate,
+          }}
+        />
+      )}
+      <GroupPricingSection
+        model={props.model}
+        groupRatio={props.groupRatio}
+        usableGroup={props.usableGroup}
+        autoGroups={props.autoGroups}
+        priceRate={props.priceRate}
+        usdExchangeRate={props.usdExchangeRate}
+        tokenUnit={props.tokenUnit}
+        showRechargePrice={showRechargePrice}
+      />
+    </section>
+  )
+}
+
+export function ModelDetailsContent(props: ModelDetailsContentProps) {
+  const { t } = useTranslation()
   return (
     <div className='@container/details space-y-4'>
       <ModelHeader model={props.model} />
@@ -1553,39 +1683,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
         <TabsContent value='overview' className='space-y-6 outline-none'>
           <OverviewSummaryGrid model={props.model} />
 
-          <section className='bg-card/60 space-y-5 rounded-xl border p-4 shadow-sm'>
-            <SectionTitle>{t('Pricing')}</SectionTitle>
-            {showBasePrices && (
-              <PriceSection
-                model={props.model}
-                priceRate={props.priceRate}
-                usdExchangeRate={props.usdExchangeRate}
-                tokenUnit={props.tokenUnit}
-                showRechargePrice={showRechargePrice}
-              />
-            )}
-            {isDynamic && !simpleTaskPricing && (
-              <DynamicPricingBreakdown
-                billingExpr={props.model.billing_expr}
-                usageSchema={props.model.billing_usage_schema}
-                taskPriceOptions={{
-                  showRechargePrice,
-                  priceRate: props.priceRate,
-                  usdExchangeRate: props.usdExchangeRate,
-                }}
-              />
-            )}
-            <GroupPricingSection
-              model={props.model}
-              groupRatio={props.groupRatio}
-              usableGroup={props.usableGroup}
-              autoGroups={props.autoGroups}
-              priceRate={props.priceRate}
-              usdExchangeRate={props.usdExchangeRate}
-              tokenUnit={props.tokenUnit}
-              showRechargePrice={showRechargePrice}
-            />
-          </section>
+          <ModelPricingDetails {...props} />
 
           <ModelBackendDetailsSection model={props.model} />
         </TabsContent>

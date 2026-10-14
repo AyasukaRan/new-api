@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { PricingModel } from '../types'
+import { getChannelPricingVariants } from './channel-pricing'
 import { hasTaskUsageSchema, isDynamicPricingModel } from './dynamic-price'
 import { isTokenBasedModel } from './model-helpers'
 
@@ -25,10 +26,21 @@ export type BillingModeLabelKey =
   | 'Dynamic Pricing'
   | 'Token-based'
   | 'Task billing'
+  | 'Channel pricing'
 
 export function getBillingModeLabelKey(
-  model: PricingModel
+  model: PricingModel,
+  selectedGroup?: string
 ): BillingModeLabelKey {
+  if (model.channel_pricing_variants?.length) {
+    const modes = new Set(
+      getChannelPricingVariants(model, selectedGroup).map((variant) =>
+        getBillingModeLabelKey(variant)
+      )
+    )
+    if (modes.size === 1) return [...modes][0]
+    return 'Channel pricing'
+  }
   // Task-usage models badge as one business category; the metering unit
   // ($/1M token, $/credit, $/second) is already carried by the price line.
   if (hasTaskUsageSchema(model)) return 'Task billing'

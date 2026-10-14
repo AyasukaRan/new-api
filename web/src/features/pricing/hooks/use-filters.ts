@@ -30,8 +30,10 @@ import {
   VIEW_MODES,
   type ViewMode,
 } from '../constants'
+import { getModelBillingExpressions } from '../lib/channel-pricing'
 import { filterAndSortModels, extractAllTags } from '../lib/filters'
 import type { PricingModel, TokenUnit } from '../types'
+import { useBillingTime } from './use-billing-time'
 
 type FilterState = {
   search?: string
@@ -71,6 +73,10 @@ export function useFilters(models: PricingModel[]) {
   const searchInput = filterState.search || ''
   const debouncedSearchInput = useDebounce(searchInput, 200)
   const sortBy = filterState.sort || SORT_OPTIONS.NAME
+  const billingTime = useBillingTime(
+    models.flatMap(getModelBillingExpressions),
+    sortBy !== SORT_OPTIONS.NAME
+  )
   const vendorFilter = filterState.vendor || FILTER_ALL
   const groupFilter = filterState.group || FILTER_ALL
   const quotaTypeFilter = filterState.quotaType || QUOTA_TYPES.ALL
@@ -149,15 +155,19 @@ export function useFilters(models: PricingModel[]) {
   const filteredModels = useMemo(() => {
     if (!models || models.length === 0) return []
 
-    return filterAndSortModels(models, {
-      search: debouncedSearchInput,
-      vendor: vendorFilter,
-      group: groupFilter,
-      quotaType: quotaTypeFilter,
-      endpointType: endpointTypeFilter,
-      tag: tagFilter,
-      sortBy,
-    })
+    return filterAndSortModels(
+      models,
+      {
+        search: debouncedSearchInput,
+        vendor: vendorFilter,
+        group: groupFilter,
+        quotaType: quotaTypeFilter,
+        endpointType: endpointTypeFilter,
+        tag: tagFilter,
+        sortBy,
+      },
+      billingTime === undefined ? undefined : new Date(billingTime)
+    )
   }, [
     models,
     debouncedSearchInput,
@@ -167,6 +177,7 @@ export function useFilters(models: PricingModel[]) {
     endpointTypeFilter,
     tagFilter,
     sortBy,
+    billingTime,
   ])
 
   const hasActiveFilters = useMemo(
