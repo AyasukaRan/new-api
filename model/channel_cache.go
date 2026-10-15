@@ -142,10 +142,20 @@ func GetRandomSatisfiedChannel(
 
 	// Balance checks may wait for a key-status update or refresh from SQL.
 	// Release the cache lock first: status writers acquire polling then cache.
+	var probeError *ChannelProbeError
 	filterRelayCandidates := func(ids []int) []int {
 		kept := make([]int, 0, len(ids))
 		for _, id := range ids {
-			if channel := candidates[id]; channel == nil || channel.HasRelayBalanceForRequest(filters) {
+			channel := candidates[id]
+			if channel != nil {
+				if failure := channel.RelayProbeError(model, filters); failure != nil {
+					if probeError == nil || failure.ObservedAt > probeError.ObservedAt {
+						probeError = failure
+					}
+					continue
+				}
+			}
+			if channel == nil || channel.HasRelayBalanceForRequest(filters) {
 				kept = append(kept, id)
 			}
 		}
@@ -157,6 +167,9 @@ func GetRandomSatisfiedChannel(
 	}
 
 	if len(channels) == 0 {
+		if probeError != nil {
+			return nil, probeError
+		}
 		return nil, nil
 	}
 

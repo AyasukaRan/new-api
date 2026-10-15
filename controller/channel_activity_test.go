@@ -272,6 +272,8 @@ func TestChannelKeyMonitoringDatabaseMatrix(t *testing.T) {
 					var preservedLog model.Log
 					require.NoError(t, logDB.First(&preservedLog, log.Id).Error)
 					assert.Equal(t, log, preservedLog)
+					var persistedObservations []model.ChannelKeyObservation
+					require.NoError(t, db.Find(&persistedObservations).Error)
 					reopened, err := gorm.Open(db.Dialector, &gorm.Config{})
 					require.NoError(t, err)
 					reopenedConnection, err := reopened.DB()
@@ -279,7 +281,7 @@ func TestChannelKeyMonitoringDatabaseMatrix(t *testing.T) {
 					t.Cleanup(func() { require.NoError(t, reopenedConnection.Close()) })
 					var restarted []model.ChannelKeyObservation
 					require.NoError(t, reopened.Find(&restarted).Error)
-					assert.ElementsMatch(t, rows, restarted)
+					assert.ElementsMatch(t, persistedObservations, restarted)
 				})
 			}
 		})

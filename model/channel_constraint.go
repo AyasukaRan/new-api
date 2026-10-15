@@ -21,9 +21,6 @@ func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.Channe
 	if ch == nil {
 		return false, ""
 	}
-	if !ch.HasRelayBalanceForRequest(filters) {
-		return false, dto.FilterChannelBalance
-	}
 	for _, kind := range filterEvalOrder {
 		for _, filter := range filters {
 			if filter.Kind != kind {
@@ -33,6 +30,9 @@ func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.Channe
 				return false, kind
 			}
 		}
+	}
+	if !ch.HasRelayBalanceForRequest(filters) {
+		return false, dto.FilterChannelBalance
 	}
 	return true, ""
 }

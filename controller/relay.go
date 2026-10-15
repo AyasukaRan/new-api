@@ -291,6 +291,11 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		// Capture the selected channel configuration before the request starts,
 		// so a later admin edit cannot relabel its key observation.
 		if channel, err := model.CacheGetChannel(c.GetInt("channel_id")); err == nil && channel != nil {
+			if !service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
+				if probeErr := channel.RelayCredentialProbeError(info.OriginModelName, common.GetContextKeyString(c, constant.ContextKeyChannelKey)); probeErr != nil {
+					return nil, probeErr.NewAPIError()
+				}
+			}
 			service.RequestPolicy(c).BeginAttempt(channel, info.UsingGroup)
 			return channel, nil
 		}
@@ -314,6 +319,10 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		var err error
 		channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(retryParam)
 		if err != nil {
+			var probeErr *model.ChannelProbeError
+			if errors.As(err, &probeErr) {
+				return nil, probeErr.NewAPIError()
+			}
 			return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
 		if channel == nil {
@@ -324,7 +333,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			break
 		}
 		_, pinned, _ := service.GetChannelConstraints(c).ResolvedPin()
-		if newAPIError.GetErrorCode() != model.ErrorCodeChannelBalanceUnavailable || pinned || selection > 0 {
+		if (newAPIError.GetErrorCode() != model.ErrorCodeChannelBalanceUnavailable && newAPIError.GetErrorCode() != model.ErrorCodeChannelProbeUnavailable) || pinned || selection > 0 {
 			return nil, newAPIError
 		}
 	}
@@ -580,10 +589,19 @@ func executeTaskSubmissionWith(
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
 			channel = lockedCh
+			if retryParam.GetRetry() == 0 && !service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
+				if probeErr := channel.RelayCredentialProbeError(relayInfo.OriginModelName, common.GetContextKeyString(c, constant.ContextKeyChannelKey)); probeErr != nil {
+					taskErr = service.TaskErrorWrapperLocal(probeErr, string(model.ErrorCodeChannelProbeUnavailable), http.StatusServiceUnavailable)
+					break
+				}
+			}
 			policy.BeginAttempt(channel, relayInfo.UsingGroup)
 			if retryParam.GetRetry() > 0 {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
 					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)
+					if setupErr.GetErrorCode() == model.ErrorCodeChannelProbeUnavailable {
+						taskErr.Code, taskErr.StatusCode = string(setupErr.GetErrorCode()), setupErr.StatusCode
+					}
 					break
 				}
 			}
@@ -593,6 +611,9 @@ func executeTaskSubmissionWith(
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
 				taskErr = service.TaskErrorWrapperLocal(channelErr.Err, "get_channel_failed", channelErr.StatusCode)
+				if channelErr.GetErrorCode() == model.ErrorCodeChannelProbeUnavailable {
+					taskErr.Code = string(channelErr.GetErrorCode())
+				}
 				break
 			}
 		}

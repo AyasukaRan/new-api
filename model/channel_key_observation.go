@@ -202,14 +202,82 @@ func RecordChannelKeyObservation(channel *Channel, modelName, key string, observ
 		errorMessage = ""
 	}
 	row := ChannelKeyObservation{ID: id, ChannelID: channel.Id, ModelName: modelName, ObservedAt: observedAt, Success: *success, StatusCode: statusCode, ErrorText: SanitizeChannelObservationError(channel, key, errorMessage), Source: source}
-	updates := map[string]any{}
-	for column, value := range map[string]any{"observed_at": observedAt, "success": row.Success, "status_code": row.StatusCode, "error_text": row.ErrorText, "source": row.Source} {
-		// <= remains correct with MySQL's ordered assignment evaluation.
-		updates[column] = gorm.Expr("CASE WHEN channel_key_observations.observed_at <= ? THEN ? ELSE channel_key_observations."+column+" END", observedAt, value)
+	probeModel := channel.probeModelName(modelName)
+	probeObservationID, err := ChannelKeyObservationID(channel, probeModel, key)
+	if err != nil {
+		return err
 	}
+	stateID := channelProbeStateID(probeObservationID)
+	_, stateKnown := channelProbeObservations(channel, probeModel)[stateID]
+	committed := []ChannelKeyObservation{row}
+	database := DB
 	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
 	defer cancel()
-	return DB.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoUpdates: clause.Assignments(updates)}).Create(&row).Error
+	err = database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var previous []ChannelKeyObservation
+		if !stateKnown {
+			// Preserve pre-upgrade probe state before a first in-flight request
+			// overwrites the normal observation. Once dedicated state exists,
+			// the cache avoids this compatibility read on the hot path.
+			legacyID, _ := LegacyChannelKeyObservationID(channel, probeModel, key)
+			if err := tx.Where("id IN ?", []string{id, probeObservationID, legacyID}).Find(&previous).Error; err != nil {
+				return err
+			}
+		}
+		if err := upsertChannelKeyObservation(tx, row, false); err != nil {
+			return err
+		}
+		for _, existing := range previous {
+			if existing.Source != "probe" && !(existing.Source == "request" && existing.Success) {
+				continue
+			}
+			existing.ID, existing.ModelName, existing.Source = stateID, probeModel, channelProbeStateSource
+			if err := upsertChannelKeyObservation(tx, existing, existing.Success); err != nil {
+				return err
+			}
+			committed = append(committed, existing)
+		}
+		if source != "probe" && !row.Success {
+			return nil
+		}
+		// Keep probe/recovery state independent from newer request failures.
+		// Both rows commit together so cache invalidation never exposes a
+		// partially recorded result. Ordinary monitoring retains its raw name.
+		row.ID, row.ModelName, row.Source = stateID, probeModel, channelProbeStateSource
+		committed = append(committed, row)
+		return upsertChannelKeyObservation(tx, row, row.Success)
+	})
+	if err == nil {
+		cacheCommittedChannelObservations(database, committed)
+	}
+	return err
+}
+
+func upsertChannelKeyObservation(tx *gorm.DB, row ChannelKeyObservation, strictlyNewer bool) error {
+	comparison := "<="
+	if strictlyNewer {
+		// A successful request must be newer than a failed probe to recover;
+		// failure wins an equal-millisecond tie regardless of arrival order.
+		comparison = "<"
+	}
+	values := []struct {
+		column string
+		value  any
+	}{
+		{"error_text", row.ErrorText}, {"source", row.Source},
+		{"status_code", row.StatusCode}, {"success", row.Success},
+		{"observed_at", row.ObservedAt},
+	}
+	updates := make(clause.Set, 0, len(values))
+	for _, value := range values {
+		updates = append(updates, clause.Assignment{
+			Column: clause.Column{Name: value.column},
+			Value:  gorm.Expr("CASE WHEN channel_key_observations.observed_at "+comparison+" ? THEN ? ELSE channel_key_observations."+value.column+" END", row.ObservedAt, value.value),
+		})
+	}
+	// MySQL evaluates assignments left-to-right. Updating observed_at last
+	// keeps every conditional assignment against the original timestamp.
+	return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoUpdates: updates}).Create(&row).Error
 }
 
 func GetChannelKeyObservations(channelIDs []int, modelName string) ([]ChannelKeyObservation, error) {
@@ -222,6 +290,7 @@ func GetChannelKeyObservations(channelIDs []int, modelName string) ([]ChannelKey
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
 	defer cancel()
-	err := DB.WithContext(ctx).Where("channel_id IN ? AND model_name = ?", channelIDs, modelName).Find(&rows).Error
+	err := DB.WithContext(ctx).Where("channel_id IN ? AND model_name = ?", channelIDs, modelName).
+		Where("source <> ? OR source IS NULL", channelProbeStateSource).Find(&rows).Error
 	return rows, err
 }

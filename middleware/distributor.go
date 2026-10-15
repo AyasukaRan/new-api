@@ -137,7 +137,7 @@ func Distribute() func(c *gin.Context) {
 				break
 			}
 			_, pinned, _ := constraints.ResolvedPin()
-			if setupErr.GetErrorCode() == model.ErrorCodeChannelBalanceUnavailable && !pinned && selection == 0 {
+			if (setupErr.GetErrorCode() == model.ErrorCodeChannelBalanceUnavailable || setupErr.GetErrorCode() == model.ErrorCodeChannelProbeUnavailable) && !pinned && selection == 0 {
 				usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 				replacement, _, selectErr := service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
 					Ctx: c, ModelName: modelRequest.Model, TokenGroup: usingGroup, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0),
@@ -655,7 +655,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if len(channelTest) > 0 && channelTest[0] {
 		key, index, newAPIError = channel.GetNextEnabledKey()
 	} else {
-		key, index, newAPIError = channel.GetNextRelayKey(service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable))
+		key, index, newAPIError = channel.GetNextRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable))
 	}
 	if newAPIError != nil {
 		return newAPIError

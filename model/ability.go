@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -117,7 +118,22 @@ func GetChannel(
 	if err != nil {
 		return nil, err
 	}
-	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	abilities, probeError := filterRelayAbilities(abilities, model, filters)
+	if len(abilities) == 0 {
+		if normalized := ratio_setting.RoutingMatchModelName(model); normalized != model {
+			if err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, normalized, true).Order("priority DESC, weight DESC").Find(&abilities).Error; err != nil {
+				return nil, err
+			}
+			var normalizedError *ChannelProbeError
+			abilities, normalizedError = filterRelayAbilities(abilities, model, filters)
+			if normalizedError != nil && (probeError == nil || normalizedError.ObservedAt > probeError.ObservedAt) {
+				probeError = normalizedError
+			}
+		}
+		if len(abilities) == 0 && probeError != nil {
+			return nil, probeError
+		}
+	}
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
@@ -168,8 +184,13 @@ func GetChannel(
 // predicate used by the memory-cache path. A failed channel lookup fails
 // closed when a task-plugin identity is required and fails open otherwise.
 func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
+	filtered, _ := filterRelayAbilities(abilities, modelName, filters)
+	return filtered
+}
+
+func filterRelayAbilities(abilities []Ability, modelName string, filters []dto.ChannelFilter) ([]Ability, *ChannelProbeError) {
 	if len(abilities) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	channelIds := make([]int, 0, len(abilities))
@@ -185,9 +206,9 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
 		if identityFilterRequiresKey(filters) {
-			return nil
+			return nil, nil
 		}
-		return abilities
+		return abilities, nil
 	}
 
 	channelsByID := make(map[int]*Channel, len(channels))
@@ -196,13 +217,28 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 	}
 
 	filtered := make([]Ability, 0, len(abilities))
+	var probeError *ChannelProbeError
 	for _, ability := range abilities {
 		channel := channelsByID[ability.ChannelId]
-		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok {
-			filtered = append(filtered, ability)
+		if channel == nil || channel.Status != common.ChannelStatusEnabled {
+			continue
 		}
+		matches, rejectedBy := ChannelSatisfiesFilters(channel, modelName, filters)
+		if !matches && rejectedBy != dto.FilterChannelBalance {
+			continue
+		}
+		if failure := channel.RelayProbeError(modelName, filters); failure != nil {
+			if probeError == nil || failure.ObservedAt > probeError.ObservedAt {
+				probeError = failure
+			}
+			continue
+		}
+		if !matches {
+			continue
+		}
+		filtered = append(filtered, ability)
 	}
-	return filtered
+	return filtered, probeError
 }
 
 func identityFilterRequiresKey(filters []dto.ChannelFilter) bool {

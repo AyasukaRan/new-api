@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
@@ -110,6 +111,10 @@ func classifyFailure(local bool, code, errorType string, status int) Outcome {
 			return OutcomeIgnored
 		}
 		switch types.ErrorCode(code) {
+		case model.ErrorCodeChannelProbeUnavailable:
+			// This request reused a recorded probe failure without contacting
+			// the provider, so it is not another availability observation.
+			return OutcomeIgnored
 		case types.ErrorCodeInvalidRequest, types.ErrorCodeSensitiveWordsDetected, types.ErrorCodeReadRequestBodyFailed,
 			types.ErrorCodeConvertRequestFailed, types.ErrorCodeAccessDenied, types.ErrorCodeBadRequestBody,
 			types.ErrorCodeInsufficientUserQuota, types.ErrorCodePreConsumeTokenQuotaFailed, types.ErrorCodePromptBlocked:

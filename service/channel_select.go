@@ -147,12 +147,20 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(
+			var groupErr error
+			channel, groupErr = model.GetRandomSatisfiedChannel(
 				autoGroup,
 				param.ModelName,
 				priorityRetry,
 				filters,
 			)
+			var probeErr *model.ChannelProbeError
+			if errors.As(groupErr, &probeErr) {
+				var previous *model.ChannelProbeError
+				if !errors.As(err, &previous) || probeErr.ObservedAt > previous.ObservedAt {
+					err = probeErr
+				}
+			}
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -166,6 +174,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				continue
 			}
 			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
+			err = nil
 			selectGroup = autoGroup
 			logger.LogDebug(param.Ctx, "Auto selected group: %s", autoGroup)
 
@@ -200,7 +209,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			return nil, param.TokenGroup, err
 		}
 	}
-	return channel, selectGroup, nil
+	return channel, selectGroup, err
 }
 
 func pinnedTaskPluginIdentities(c *gin.Context, expected string) ([]int, []string) {
@@ -297,11 +306,19 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			return nil, "", pinnedChannelUnavailable(pin, http.StatusForbidden, i18n.MsgDistributorChannelDisabled)
 		}
 		if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+			if kind == dto.FilterChannelBalance {
+				if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
+					return nil, "", channelProbeSelectionError(probeErr)
+				}
+			}
 			return nil, "", &ChannelSelectError{
 				StatusCode: http.StatusBadRequest, Code: types.ErrorCode(kind), MessageID: i18n.MsgDistributorNoAvailableChannel,
 				Params:     map[string]any{"Group": common.GetContextKeyString(c, constant.ContextKeyUsingGroup), "Model": modelName},
 				FilterKind: kind, Channel: channel,
 			}
+		}
+		if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
+			return nil, "", channelProbeSelectionError(probeErr)
 		}
 		return channel, "", nil
 	}
@@ -314,6 +331,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			affinityUsable := false
 			preferred, err := model.CacheGetChannel(preferredChannelID)
 			affinitySatisfied := false
+			var probeErr *model.ChannelProbeError
 			if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled {
 				affinitySatisfied, _ = model.ChannelSatisfiesFilters(preferred, modelName, constraints.Filters)
 			}
@@ -323,24 +341,33 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 					for _, g := range GetRequestAutoGroups(c, userGroup) {
 						if model.IsChannelEnabledForGroupModel(g, modelName, preferred.Id) {
 							selectGroup = g
-							common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
-							channel = preferred
 							affinityUsable = true
-							MarkChannelAffinityUsed(c, g, preferred.Id)
 							break
 						}
 					}
 				} else if model.IsChannelEnabledForGroupModel(usingGroup, modelName, preferred.Id) {
-					channel = preferred
 					selectGroup = usingGroup
 					affinityUsable = true
-					MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
+				}
+			}
+			if affinityUsable {
+				probeErr = preferred.RelayProbeError(modelName, constraints.Filters)
+				affinityUsable = probeErr == nil
+				if affinityUsable {
+					channel = preferred
+					if usingGroup == "auto" {
+						common.SetContextKey(c, constant.ContextKeyAutoGroup, selectGroup)
+					}
+					MarkChannelAffinityUsed(c, selectGroup, preferred.Id)
 				}
 			}
 			if !affinityUsable && !ShouldKeepChannelAffinityOnChannelDisabled() {
 				ClearCurrentChannelAffinityCache(c)
 			}
 			if !affinityUsable && RequestPolicy(c).SessionMode == "strict" {
+				if probeErr != nil {
+					return nil, "", channelProbeSelectionError(probeErr)
+				}
 				return nil, "", &ChannelSelectError{StatusCode: http.StatusServiceUnavailable, Message: "strict_session_binding_unavailable"}
 			}
 		}
@@ -350,6 +377,10 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		var err error
 		channel, selectGroup, err = CacheGetRandomSatisfiedChannel(retry)
 		if err != nil {
+			var probeErr *model.ChannelProbeError
+			if errors.As(err, &probeErr) {
+				return nil, selectGroup, channelProbeSelectionError(probeErr)
+			}
 			showGroup := usingGroup
 			if usingGroup == "auto" {
 				showGroup = fmt.Sprintf("auto(%s)", selectGroup)
@@ -367,13 +398,29 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		}
 	}
 	if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+		if kind == dto.FilterChannelBalance {
+			if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
+				return nil, selectGroup, channelProbeSelectionError(probeErr)
+			}
+		}
 		return nil, selectGroup, &ChannelSelectError{
 			StatusCode: http.StatusServiceUnavailable, Code: types.ErrorCodeModelNotFound, MessageID: i18n.MsgDistributorNoAvailableChannel,
 			Params:     map[string]any{"Group": common.GetContextKeyString(c, constant.ContextKeyUsingGroup), "Model": modelName},
 			FilterKind: kind, Channel: channel, NoAvailableChannel: true,
 		}
 	}
+	if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
+		return nil, selectGroup, channelProbeSelectionError(probeErr)
+	}
 	return channel, selectGroup, nil
+}
+
+func channelProbeSelectionError(err *model.ChannelProbeError) *ChannelSelectError {
+	return &ChannelSelectError{
+		StatusCode: http.StatusServiceUnavailable,
+		Code:       model.ErrorCodeChannelProbeUnavailable,
+		Message:    err.Error(),
+	}
 }
 
 // Origin-task pins report a fixed code so task polling can tell a retired

@@ -99,11 +99,15 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
-		key, _, newAPIError := ch.GetNextRelayKey()
+		key, index, newAPIError := ch.GetNextRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable))
 		if newAPIError != nil {
+			if newAPIError.GetErrorCode() == model.ErrorCodeChannelProbeUnavailable {
+				return service.TaskErrorWrapperLocal(newAPIError, string(newAPIError.GetErrorCode()), newAPIError.StatusCode)
+			}
 			return service.TaskErrorWrapper(newAPIError, "channel_no_available_key", newAPIError.StatusCode)
 		}
 		common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
 		common.SetContextKey(c, constant.ContextKeyChannelType, ch.Type)
 		common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, ch.GetBaseURL())
 		common.SetContextKey(c, constant.ContextKeyChannelId, originTask.ChannelId)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -215,6 +216,25 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 // Administrative queries and probes keep using GetNextEnabledKey.
 func (channel *Channel) GetNextRelayKey(batchRequest ...bool) (string, int, *types.NewAPIError) {
 	return channel.nextEnabledKey(channelNegativeBalanceKeysForRelay(channel, len(batchRequest) > 0 && batchRequest[0]))
+}
+
+// GetNextRelayKeyForModel excludes failed probes as well as known debt without
+// changing the key status or preventing administrative tests from recovering it.
+func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest bool) (string, int, *types.NewAPIError) {
+	negativeKeys := channelNegativeBalanceKeysForRelay(channel, batchRequest)
+	if batchRequest {
+		return channel.nextEnabledKey(negativeKeys)
+	}
+	failures := channel.probeKeyFailures(modelName)
+	if failure := channel.relayProbeError(failures, negativeKeys); failure != nil {
+		return "", 0, failure.NewAPIError()
+	}
+	excluded := make(map[int]bool, len(negativeKeys)+len(failures))
+	maps.Copy(excluded, negativeKeys)
+	for index := range failures {
+		excluded[index] = true
+	}
+	return channel.nextEnabledKey(excluded)
 }
 
 func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, *types.NewAPIError) {

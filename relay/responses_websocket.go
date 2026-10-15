@@ -664,6 +664,9 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 			return types.NewErrorWithStatusCode(errors.New("the connection channel is no longer allowed for this group and model"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
 	}
+	if probeErr := channel.RelayCredentialProbeError(model, s.lockedKey); probeErr != nil {
+		return probeErr.NewAPIError()
+	}
 	for key, value := range s.lockedContext {
 		c.Set(string(key), value)
 	}
