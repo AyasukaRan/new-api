@@ -22,15 +22,18 @@ import {
   QUOTA_TYPES,
   QUOTA_TYPE_VALUES,
   ENDPOINT_TYPES,
+  type SortOption,
 } from '../constants'
 import type { PricingModel } from '../types'
 import { getChannelPricingVariants } from './channel-pricing'
 import {
+  getCardExamplePrice,
   getDynamicPricingSummary,
   hasTaskUsageSchema,
   isUnconfiguredTaskUsageModel,
 } from './dynamic-price'
-import { getDisplayGroupRatio } from './model-helpers'
+import { getDisplayGroupRatio, isTokenBasedModel } from './model-helpers'
+import { calculateTokenPrice } from './price'
 
 // ----------------------------------------------------------------------------
 // Filter Utilities
@@ -120,11 +123,27 @@ export function filterByEndpointType(
   )
 }
 
+type SortPriceKind = 'input' | 'output' | 'request'
+
+const PRICE_SORTS: Partial<
+  Record<SortOption, { kind: SortPriceKind; dir: 1 | -1 }>
+> = {
+  [SORT_OPTIONS.INPUT_PRICE_LOW]: { kind: 'input', dir: 1 },
+  [SORT_OPTIONS.INPUT_PRICE_HIGH]: { kind: 'input', dir: -1 },
+  [SORT_OPTIONS.OUTPUT_PRICE_LOW]: { kind: 'output', dir: 1 },
+  [SORT_OPTIONS.OUTPUT_PRICE_HIGH]: { kind: 'output', dir: -1 },
+  [SORT_OPTIONS.REQUEST_PRICE_LOW]: { kind: 'request', dir: 1 },
+  [SORT_OPTIONS.REQUEST_PRICE_HIGH]: { kind: 'request', dir: -1 },
+}
+
 /**
- * Get model price for sorting
+ * Base USD price shown on the model card: input/output per 1M tokens, request
+ * per call (task models use their first usage example). Undefined when the
+ * model has no price of that kind.
  */
-function getModelPrice(
+function getSortPrice(
   model: PricingModel,
+  kind: SortPriceKind,
   selectedGroup?: string,
   now?: Date
 ): number | undefined {
@@ -135,26 +154,52 @@ function getModelPrice(
     return undefined
   }
   const ratio = getDisplayGroupRatio(model, selectedGroup)
-  const summary = getDynamicPricingSummary(model, {
-    tokenUnit: 'M',
-    selectedGroup: selectedGroup ?? FILTER_ALL,
+  const options = {
+    tokenUnit: 'M' as const,
+    selectedGroup,
     now,
     groupRatioMultiplier: ratio,
-  })
+  }
+  if (kind === 'request') {
+    const example = getCardExamplePrice(model, options)
+    if (example) {
+      const variants = getChannelPricingVariants(model, selectedGroup)
+      const exampleRatio =
+        variants.length === 1
+          ? getDisplayGroupRatio(variants[0], selectedGroup)
+          : ratio
+      return example.total * exampleRatio
+    }
+  }
+  const summary = getDynamicPricingSummary(model, options)
   if (summary) {
     if (summary.isSpecialExpression) return undefined
-    const entry =
-      summary.primaryEntries.find((item) => item.field === 'inputPrice') ??
-      summary.primaryEntries[0]
+    const entry = summary.entries.find((entry) => {
+      if (kind === 'request') {
+        return (
+          (entry.field === 'fixedPrice' || entry.field === 'modelPrice') &&
+          entry.unit === 'request'
+        )
+      }
+      return (
+        entry.field === (kind === 'input' ? 'inputPrice' : 'outputPrice') &&
+        entry.unit === 'token'
+      )
+    })
     if (!entry) return undefined
     return entry.value * (model.channel_pricing_variants?.length ? 1 : ratio)
   }
   if (isUnconfiguredTaskUsageModel(model)) return undefined
-  const price =
-    model.quota_type === 0 ? model.model_ratio * 2 : model.model_price
-  return typeof price === 'number' && Number.isFinite(price)
-    ? price * ratio
-    : undefined
+  if (kind === 'request') {
+    return !isTokenBasedModel(model) &&
+      model.model_price != null &&
+      Number.isFinite(model.model_price)
+      ? model.model_price * ratio
+      : undefined
+  }
+  if (!isTokenBasedModel(model)) return undefined
+  const price = calculateTokenPrice(model, kind, ratio)
+  return Number.isFinite(price) ? price : undefined
 }
 
 /**
@@ -168,26 +213,35 @@ export function sortModels(
 ): PricingModel[] {
   const sorted = [...models]
 
+  // Preserve a saved selection from the former combined price sort.
+  const normalizedSort = sortBy.replace(/^price-/, 'input-price-')
+  const priceSort = PRICE_SORTS[normalizedSort as SortOption]
+  if (priceSort) {
+    // Extracting the price parses the billing expression, so compute once
+    const price = new Map(
+      sorted.map((m) => [
+        m,
+        getSortPrice(m, priceSort.kind, selectedGroup, now),
+      ])
+    )
+    // Models without this kind of price stay last in both directions
+    sorted.sort((a, b) => {
+      const priceA = price.get(a)
+      const priceB = price.get(b)
+      if (priceA === undefined || priceB === undefined) {
+        return Number(priceA === undefined) - Number(priceB === undefined)
+      }
+      return priceSort.dir * (priceA - priceB)
+    })
+    return sorted
+  }
+
   switch (sortBy) {
     case SORT_OPTIONS.NAME:
       sorted.sort((a, b) =>
         (a.model_name || '').localeCompare(b.model_name || '')
       )
       break
-    case SORT_OPTIONS.PRICE_LOW:
-    case SORT_OPTIONS.PRICE_HIGH: {
-      const prices = new Map(
-        models.map((model) => [model, getModelPrice(model, selectedGroup, now)])
-      )
-      sorted.sort((a, b) => {
-        const left = prices.get(a)
-        const right = prices.get(b)
-        if (left === undefined) return right === undefined ? 0 : 1
-        if (right === undefined) return -1
-        return sortBy === SORT_OPTIONS.PRICE_LOW ? left - right : right - left
-      })
-      break
-    }
   }
 
   return sorted

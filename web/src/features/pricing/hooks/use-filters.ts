@@ -72,7 +72,10 @@ export function useFilters(models: PricingModel[]) {
 
   const searchInput = filterState.search || ''
   const debouncedSearchInput = useDebounce(searchInput, 200)
-  const sortBy = filterState.sort || SORT_OPTIONS.NAME
+  const sortBy = (filterState.sort || SORT_OPTIONS.NAME).replace(
+    /^price-/,
+    'input-price-'
+  )
   const billingTime = useBillingTime(
     models.flatMap(getModelBillingExpressions),
     sortBy !== SORT_OPTIONS.NAME

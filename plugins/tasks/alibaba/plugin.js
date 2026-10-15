@@ -280,7 +280,7 @@ export const meta = {
   fetchMode: "per_task",
   upstreams: ["vendor", "new_api"],
   submitResponseTypes: ["json", "sse"],
-  requiredCapabilities: ["json-clone@1", "submit-sse-delta@1"],
+  requiredCapabilities: ["duration-auto@1"],
   usageSchema: { ...WAN_IMAGE_USAGE_SCHEMA, ...wanVideoUsageSchema(WAN_VIDEO_RESOLUTIONS, false) },
   usageProfiles: [
     {
@@ -706,8 +706,9 @@ function objectValue(value, name) {
   return value;
 }
 
-// The host rejects negative canonical duration/seconds facts before any hook
-// runs, so wan3.0's "-1 = smart duration" sentinel travels as a boolean marker.
+// Decoders fold wan3.0's "-1 = smart duration" sentinel, wherever the client
+// put it, into one boolean marker; convert sends -1 upstream and extractUsage
+// reserves 30 seconds, the longest wan3.0 output, for it.
 function normalizeRequest(value) {
   const req = Object.assign({}, value);
   const metadata = objectValue(req.metadata, "metadata");

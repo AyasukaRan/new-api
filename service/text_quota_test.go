@@ -230,9 +230,9 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 					if tc.realtime {
 						PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{
 							InputTokens: tc.usage.PromptTokens, OutputTokens: tc.usage.CompletionTokens, TotalTokens: tc.usage.TotalTokens,
-						}, "")
+						}, nil)
 					} else if tc.audio {
-						PostAudioConsumeQuota(ctx, info, tc.usage, "")
+						PostAudioConsumeQuota(ctx, info, tc.usage, nil)
 					} else {
 						PostTextConsumeQuota(ctx, info, tc.usage, nil)
 					}
@@ -241,7 +241,7 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 					require.NoError(t, logDB.Where("user_id = ?", user.Id).Take(&log).Error)
 					assert.Equal(t, tc.want, log.Quota)
 					assert.Equal(t, tc.stream, log.IsStream)
-					assert.NotContains(t, log.Content, "无法扣费")
+					assert.NotContains(t, log.Content, "nothing was charged")
 					var other map[string]any
 					require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
 					assert.Equal(t, string(tc.unit), other["billing_unit"])
@@ -1330,6 +1330,40 @@ func TestCalculateTextQuotaSummaryZeroTokensStillBillsToolSurcharge(t *testing.T
 	assert.Equal(t, expected, summary.Quota)
 }
 
+func TestClaudeCacheOnlyUsageRemainsBillable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name      string
+		usage     dto.ClaudeUsage
+		wantQuota int
+	}{
+		{name: "one-hour cache write", usage: dto.ClaudeUsage{CacheCreationInputTokens: 20000, CacheCreation: &dto.ClaudeCacheCreationUsage{Ephemeral1hInputTokens: 20000}}, wantQuota: 100000},
+		{name: "five-minute cache write", usage: dto.ClaudeUsage{CacheCreationInputTokens: 100, CacheCreation: &dto.ClaudeCacheCreationUsage{Ephemeral5mInputTokens: 100}}, wantQuota: 313},
+		{name: "cache read", usage: dto.ClaudeUsage{CacheReadInputTokens: 100}, wantQuota: 25},
+		{name: "no usage", usage: dto.ClaudeUsage{}, wantQuota: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{
+				RelayFormat:     types.RelayFormatClaude,
+				OriginModelName: "claude-opus-4-8",
+				PriceData: hosttypes.PriceData{
+					ModelRatio: 2.5, CompletionRatio: 5, CacheRatio: 0.1,
+					CacheCreationRatio: 1.25, CacheCreation5mRatio: 1.25, CacheCreation1hRatio: 2,
+					GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1},
+				},
+			}
+			usage := &dto.Usage{UsageSemantic: dto.BillingUsageSemanticAnthropic, BillingUsage: dto.NewClaudeMessagesBillingUsage(&tc.usage)}
+			summary := calculateTextQuotaSummary(ctx, info, effectiveBillingUsage(usage))
+			assert.Zero(t, summary.PromptTokens)
+			assert.Zero(t, summary.CompletionTokens)
+			assert.Equal(t, tc.wantQuota, summary.Quota)
+			assert.Equal(t, tc.wantQuota > 0, summary.hasBillableUsage())
+			t.Logf("input=%d output=%d quota=%d", summary.PromptTokens, summary.CompletionTokens, summary.Quota)
+		})
+	}
+}
+
 func TestCalculateTextQuotaSummaryDoesNotApplyRequestMultipliersToToolSurcharge(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -1361,14 +1395,14 @@ func TestCalculateTextToolCallSurchargeGeminiGoogleSearch(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 
 	relayInfo := &relaycommon.RelayInfo{
-		OriginModelName: "gemini-2.5-flash",
+		OriginModelName: "gemini-3.7-flash",
 		ResponsesUsageInfo: &relaycommon.ResponsesUsageInfo{
 			BuiltInTools: map[string]*relaycommon.BuildInToolInfo{
 				dto.BuildInToolGoogleSearch: {ToolName: dto.BuildInToolGoogleSearch, CallCount: 1},
 			},
 		},
 	}
-	summary := &textQuotaSummary{ModelName: "gemini-2.5-flash", GroupRatio: 1}
+	summary := &textQuotaSummary{ModelName: "gemini-3.7-flash", GroupRatio: 1}
 
 	surcharge := calculateTextToolCallSurcharge(ctx, relayInfo, summary)
 	expected := decimal.NewFromFloat(14.0 / 1000).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
@@ -1578,6 +1612,7 @@ func TestPrepareChannelBillingCreatesAndRefundsReservationAfterFreeAttempt(t *te
 	const userID = 741
 	seedUser(t, userID, 500000)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	info := &relaycommon.RelayInfo{
 		UserId: userID, OriginModelName: "channel-fixed-price", IsPlayground: true, ForcePreConsume: true,
 		UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
@@ -1626,7 +1661,7 @@ func TestChannelRealtimeExpressionUsesAudioAndCacheTokens(t *testing.T) {
 		InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500,
 		InputTokenDetails:  dto.InputTokenDetails{AudioTokens: 100, CachedTokens: 200, TextTokens: 900},
 		OutputTokenDetails: dto.OutputTokenDetails{AudioTokens: 50, TextTokens: 450},
-	}, "")
+	}, nil)
 	quota, err := model.GetUserQuota(userID, false)
 	require.NoError(t, err)
 	// (700*2 + 450*4 + 100*6 + 50*10 + 200) * .5 = 2250.
@@ -1655,9 +1690,9 @@ func TestChannelFixedPriceAudioAndRealtimeSettlement(t *testing.T) {
 			input := dto.InputTokenDetails{AudioTokens: 1000}
 			output := dto.OutputTokenDetails{AudioTokens: 500}
 			if realtime {
-				PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500, InputTokenDetails: input, OutputTokenDetails: output}, "")
+				PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500, InputTokenDetails: input, OutputTokenDetails: output}, nil)
 			} else {
-				PostAudioConsumeQuota(ctx, info, &dto.Usage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, PromptTokensDetails: input, CompletionTokenDetails: output}, "")
+				PostAudioConsumeQuota(ctx, info, &dto.Usage{PromptTokens: 1000, CompletionTokens: 500, TotalTokens: 1500, PromptTokensDetails: input, CompletionTokenDetails: output}, nil)
 			}
 			quota, err := model.GetUserQuota(userID, false)
 			require.NoError(t, err)
@@ -1693,4 +1728,37 @@ func TestChannelCachedAudioAndImagesArePricedOnce(t *testing.T) {
 			assert.Equal(t, float64(test.audio), withoutCacheLane.AI, "an expression that does not price cache retains the full audio input")
 		})
 	}
+}
+
+// A request whose upstream returns no usage is logged without a charge. The
+// reason is stored as content_parts, which the web console renders in the
+// viewer's language; content keeps the English text.
+func TestPostTextConsumeQuotaLogsMissingUsageAsStructuredContent(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 62, 62
+	seedUser(t, userID, 10_000)
+	seedChannel(t, channelID)
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{
+		UserId:          userID,
+		OriginModelName: "missing-usage-model",
+		UsingGroup:      "default",
+		StartTime:       time.Now(),
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: channelID},
+		PriceData:       hosttypes.PriceData{ModelRatio: 1, CompletionRatio: 1, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
+	}
+
+	PostTextConsumeQuota(ctx, info, &dto.Usage{}, nil)
+
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	assert.Zero(t, log.Quota)
+	assert.Equal(t, "Upstream returned no usage, so nothing was charged (possibly an upstream timeout)", log.Content)
+	var other map[string]any
+	require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+	assert.Equal(t, []any{
+		map[string]any{"key": "Upstream returned no usage, so nothing was charged (possibly an upstream timeout)"},
+	}, other["content_parts"])
 }

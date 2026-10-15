@@ -124,11 +124,13 @@ export interface ChannelSettings {
   batch_base_url?: string
   /** The credential the batch API accepts when it is not the channel key. */
   batch_key?: string
+  tls_insecure_skip_verify?: boolean
 }
 
 export interface ChannelOtherSettings {
   azure_responses_version?: string
   vertex_key_type?: 'json' | 'api_key'
+  vertex_project_id?: string
   openrouter_enterprise?: boolean
   aws_key_type?: 'ak_sk' | 'api_key'
   allow_service_tier?: boolean

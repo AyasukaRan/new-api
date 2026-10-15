@@ -88,7 +88,7 @@ func TestChannelTestLogsAreSeparatedFromUsage(t *testing.T) {
 			// metadata differ from the historical probe signature.
 			model.RecordConsumeLog(ctx, user.Id, model.RecordConsumeLogParams{
 				ChannelId: channel.Id, ModelName: "test-log-model", Group: user.Group,
-				TokenId: 7, TokenName: "renamed-test", Content: "probe", IsChannelTest: true,
+				TokenId: 7, TokenName: "renamed-test", Content: []*common.Message{common.NewMessage("probe")}, IsChannelTest: true,
 				Quota: 500, PromptTokens: 50, CompletionTokens: 5,
 			})
 			var newLog model.Log
@@ -698,7 +698,7 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
-	require.Contains(t, recorder.Body.String(), "已有通道测试任务正在运行或等待中")
+	require.Contains(t, recorder.Body.String(), "A channel test task is already running or queued")
 }
 
 func TestChannelTestPublishesModelMonitoring(t *testing.T) {

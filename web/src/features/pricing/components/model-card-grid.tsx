@@ -53,6 +53,7 @@ export const ModelCardGrid = memo(function ModelCardGrid(
   const perfQuery = useQuery({
     queryKey: ['perf-metrics-summary', 24],
     queryFn: async () => requireServerSuccess(await getPerfMetricsSummary(24)),
+    enabled: props.models.length > 0,
     staleTime: 60 * 1000,
     refetchInterval: 60 * 1000,
     retry: false,

@@ -218,7 +218,7 @@ function sumUsage(body) {
       if (!text) continue;
       try {
         parsed = JSON.parse(text);
-      } catch (_) {
+      } catch {
         continue;
       }
     }

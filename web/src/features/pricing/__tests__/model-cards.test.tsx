@@ -384,6 +384,12 @@ describe('model cards', () => {
       expected: 'No data',
     },
     {
+      name: 'missing availability with unrelated legacy request history',
+      availability: undefined,
+      history: 100,
+      expected: 'No data',
+    },
+    {
       name: 'zero availability with a different legacy rate',
       availability: 0,
       history: 84,
@@ -508,6 +514,68 @@ describe('model cards', () => {
     )
   })
 
+  it('shows the cache read price of an expression model after its input and output prices', () => {
+    render(
+      <ModelCard
+        model={pricingModel({
+          billing_mode: 'tiered_expr',
+          billing_expr: 'tier("base", p * 0.15 + c * 0.6 + cr * 0.003)',
+        })}
+        onClick={vi.fn()}
+        tokenUnit='M'
+        selectedGroup='default'
+      />
+    )
+    expect(screen.getByText('Input').parentElement).toHaveTextContent(
+      /\$0.15\s*\/\s*1M/
+    )
+    expect(screen.getByText('Output').parentElement).toHaveTextContent(
+      /\$0.6\s*\/\s*1M/
+    )
+    expect(screen.getByText('Cache Read').parentElement).toHaveTextContent(
+      /\$0.003\s*\/\s*1M/
+    )
+  })
+
+  it('shows the cache read price once when a plugin provider already lists it as a main price', () => {
+    render(
+      <ModelCard
+        model={pricingModel({
+          billing_plugin_variants: [
+            {
+              plugin_key: 'alpha',
+              plugin_name: 'Alpha',
+              billing_mode: 'tiered_expr',
+              billing_expr: 'tier("base", p * 1 + c * 2 + cr * 0.5)',
+              billing_usage_schema: {},
+            },
+          ],
+        })}
+        onClick={vi.fn()}
+        tokenUnit='M'
+        selectedGroup='default'
+      />
+    )
+    expect(screen.getAllByText('Cache Read')).toHaveLength(1)
+  })
+
+  it('shows the cache read price of an expression model that prices nothing else', () => {
+    render(
+      <ModelCard
+        model={pricingModel({
+          billing_mode: 'tiered_expr',
+          billing_expr: 'tier("base", cr * 0.5)',
+        })}
+        onClick={vi.fn()}
+        tokenUnit='M'
+        selectedGroup='default'
+      />
+    )
+    expect(screen.getByText('Cache Read').parentElement).toHaveTextContent(
+      /\$0.5\s*\/\s*1M/
+    )
+  })
+
   it('keeps task price ranges in their actual usage unit instead of the selected token unit', () => {
     render(
       <ModelCard
@@ -602,7 +670,8 @@ describe('model cards', () => {
       ).toBe('error')
     )
     expect(request).toHaveBeenCalledWith('/api/perf-metrics/summary', {
-      params: { hours: 24 },
+      params: { hours: 24, recent_model: undefined },
+      paramsSerializer: { indexes: null },
     })
     expect(
       within(
@@ -614,10 +683,9 @@ describe('model cards', () => {
     expect(onModelClick).toHaveBeenCalledWith('example-model')
   })
 
-  it('paginates the model cards and disables navigation at both boundaries', async () => {
-    queryClient.setQueryData(['perf-metrics-summary', 24], {
-      success: true,
-      data: { models: [] },
+  it('paginates model cards using one shared availability request and disables navigation at both boundaries', async () => {
+    const request = vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: { models: [] } },
     })
     const models = Array.from({ length: 21 }, (_, index) =>
       pricingModel({ id: index + 1, model_name: `model-${index + 1}` })
@@ -630,9 +698,14 @@ describe('model cards', () => {
     )
     expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled()
     expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(20)
+    expect(request).toHaveBeenCalledWith('/api/perf-metrics/summary', {
+      params: { hours: 24, recent_model: undefined },
+      paramsSerializer: { indexes: null },
+    })
     await user.click(screen.getByRole('button', { name: 'Next page' }))
     expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(1)
     expect(screen.getByRole('heading', { name: 'model-21' })).toBeVisible()
+    expect(request).toHaveBeenCalledTimes(1)
     expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Previous page' }))
     expect(screen.getByRole('heading', { name: 'model-1' })).toBeVisible()

@@ -28,6 +28,11 @@ var metricsMu sync.RWMutex
 // hiding fields or making response-only privacy hardening changes.
 const seriesSchema = "dbcd0a3c01b55203"
 
+// MaxRecentModels bounds the historical lookups made by one summary request.
+const MaxRecentModels = 50
+const recentSuccessSampleLimit = 24
+const recentSuccessHistoryHours = 7 * 24
+
 func Init() {
 	go flushLoop()
 }
@@ -263,8 +268,13 @@ func Query(params QueryParams) (QueryResult, error) {
 	return result, nil
 }
 
-func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
-	startTs, endTs := queryWindow(time.Now(), hours)
+func QuerySummaryAll(hours int, groups []string, recentModels ...string) (SummaryAllResult, error) {
+	if len(recentModels) > MaxRecentModels {
+		return SummaryAllResult{}, common.NewMessage("Invalid parameters")
+	}
+	now := time.Now()
+	startTs, endTs := queryWindow(now, hours)
+	recentStartTs, _ := queryWindow(now, recentSuccessHistoryHours)
 	allowedGroups := allowedGroupSet(groups)
 
 	metricsMu.RLock()
@@ -274,6 +284,27 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 		return SummaryAllResult{}, err
 	}
 
+	recentBuckets := make(map[string]map[int64]counters, len(recentModels))
+	for _, name := range recentModels {
+		if name == "" {
+			continue
+		}
+		if _, exists := recentBuckets[name]; exists {
+			continue
+		}
+		recentBuckets[name] = map[int64]counters{}
+		buckets, err := model.GetRecentPerfMetricSuccessBuckets(name, recentStartTs, endTs, groups, recentSuccessSampleLimit)
+		if err != nil {
+			metricsMu.RUnlock()
+			return SummaryAllResult{}, err
+		}
+		for _, bucket := range buckets {
+			mergeModelBucket(recentBuckets, name, bucket.BucketTs, counters{
+				requestCount: bucket.RequestCount,
+				successCount: bucket.SuccessCount,
+			})
+		}
+	}
 	modelBuckets := map[string]map[int64]counters{}
 	for _, row := range rows {
 		value := counters{
@@ -288,7 +319,7 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 
 	hotBuckets.Range(func(key, value any) bool {
 		k := key.(bucketKey)
-		if k.bucketTs < startTs || k.bucketTs > endTs {
+		if k.bucketTs > endTs {
 			return true
 		}
 		if allowedGroups != nil {
@@ -298,6 +329,12 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 		}
 		snap := value.(*atomicBucket).snapshot()
 		if snap.requestCount == 0 {
+			return true
+		}
+		if _, requested := recentBuckets[k.model]; requested && k.bucketTs >= recentStartTs {
+			mergeModelBucket(recentBuckets, k.model, k.bucketTs, snap)
+		}
+		if k.bucketTs < startTs {
 			return true
 		}
 		mergeModelBucket(modelBuckets, k.model, k.bucketTs, snap)
@@ -320,7 +357,15 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 		return models[i].RequestCount > models[j].RequestCount
 	})
 
-	result := SummaryAllResult{Summary: summarize(all), WindowStart: startTs, WindowEnd: endTs, Models: models}
+	recentSeries := make(map[string][]SuccessRatePoint, len(recentBuckets))
+	for name, buckets := range recentBuckets {
+		points := recentSuccessSeries(buckets)
+		if len(points) == 0 {
+			continue
+		}
+		recentSeries[name] = points[max(0, len(points)-recentSuccessSampleLimit):]
+	}
+	result := SummaryAllResult{Summary: summarize(all), WindowStart: startTs, WindowEnd: endTs, Models: models, RecentSuccessSeries: recentSeries}
 	if err := attachSummaryAvailability(&result, hours, groups, modelBuckets, startTs); err != nil {
 		return SummaryAllResult{}, err
 	}

@@ -47,7 +47,10 @@ import {
 } from '@/lib/admin-permissions'
 import { formatCurrencyFromUSD } from '@/lib/currency'
 import { handleServerError } from '@/lib/handle-server-error'
-import { requireServerSuccess } from '@/lib/server-error-message'
+import {
+  getServerMessage,
+  requireServerSuccess,
+} from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
 import {
@@ -219,7 +222,7 @@ function MultiKeyManageContent({
       // Refresh related views even if this dialog was closed during the write.
       await refreshChannelStatusQueries(queryClient)
       if (!mounted.current) return
-      toast.success(response.message || t('Operation successful'))
+      toast.success(getServerMessage(response) || t('Operation successful'))
       if (
         type.includes('all') ||
         type === 'delete-disabled' ||
@@ -246,7 +249,7 @@ function MultiKeyManageContent({
       await refreshChannelStatusQueries(queryClient)
       requireServerSuccess(response)
       if (mounted.current) {
-        toast.success(response.message || t('Operation successful'))
+        toast.success(getServerMessage(response) || t('Operation successful'))
       }
     } catch (error) {
       if (mounted.current) handleServerError(error, t('Operation failed'))

@@ -97,11 +97,18 @@ const OPERATIONS_SECTIONS = [
     titleKey: 'Log Maintenance',
     build: (settings: OperationsSettings) => (
       <LogSettingsSection
-        defaultEnabled={Boolean(settings.LogConsumeEnabled)}
-        defaultRequestBodyEnabled={Boolean(settings.LogRequestBodyEnabled)}
-        defaultRequestTraceEnabled={Boolean(settings.RequestTraceEnabled)}
-        defaultRequestTraceRetentionDays={settings.RequestTraceRetentionDays}
-        defaultRequestTraceMaxBytes={settings.RequestTraceMaxBytes}
+        defaultValues={{
+          LogConsumeEnabled: Boolean(settings.LogConsumeEnabled),
+          LogRequestBodyEnabled: settings.LogRequestBodyEnabled,
+          RequestTraceEnabled: settings.RequestTraceEnabled,
+          RequestTraceRetentionDays: settings.RequestTraceRetentionDays,
+          RequestTraceMaxBytes: settings.RequestTraceMaxBytes,
+
+          'log_setting.user_export_enabled':
+            settings['log_setting.user_export_enabled'] ?? true,
+          'log_setting.max_range_days':
+            settings['log_setting.max_range_days'] ?? 365,
+        }}
       />
     ),
   },

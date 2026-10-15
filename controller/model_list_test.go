@@ -280,12 +280,27 @@ func TestListModelsIncludesTieredBillingModel(t *testing.T) {
 	})
 
 	db := setupModelListControllerTestDB(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+
 	require.NoError(t, db.Create(&model.User{
 		Id:       1001,
 		Username: "model-list-user",
 		Password: "password",
 		Group:    "default",
 		Status:   common.UserStatusEnabled,
+	}).Error)
+	// Public pricing only lists models backed by an enabled channel, not
+	// orphaned ability rows.
+	require.NoError(t, db.Create(&model.Channel{
+		Id:     1,
+		Type:   constant.ChannelTypeOpenAI,
+		Status: common.ChannelStatusEnabled,
+		Name:   "tiered-model-list-channel",
+		Group:  "default",
+		Key:    "test-key",
+		Models: "zz-tiered-visible-model,zz-tiered-empty-expr-model,zz-tiered-missing-expr-model,zz-unpriced-model",
 	}).Error)
 	require.NoError(t, db.Create(&[]model.Ability{
 		{Group: "default", Model: "zz-tiered-visible-model", ChannelId: 1, Enabled: true},

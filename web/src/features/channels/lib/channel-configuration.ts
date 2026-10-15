@@ -90,6 +90,7 @@ const CONFIGURATION_BLOCKS = {
       'batch_enabled',
       'batch_base_url',
       'batch_key',
+      'tls_insecure_skip_verify',
       'disable_task_polling_sleep',
     ],
   },
@@ -187,6 +188,7 @@ export function getChannelConfigurationState(
       values.proxy?.trim() ||
       (values.http_protocol && values.http_protocol !== 'auto') ||
       (values.http2_connection_shards ?? 1) > 1 ||
+      values.tls_insecure_skip_verify ||
       values.disable_task_polling_sleep
     ),
     upstreamModelDetection:
