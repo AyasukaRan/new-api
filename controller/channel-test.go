@@ -104,6 +104,30 @@ func isImageChannelTest(channel *model.Channel, name, endpointType string) bool 
 	return false
 }
 
+// Tool API routing names are not chat models. Automatic chat probes would
+// manufacture failures and block real Search/Fetch calls; real requests still
+// feed monitoring, and manual diagnosis remains available.
+func shouldSkipChannelTest(ctx context.Context, channel *model.Channel, name, endpointType string) bool {
+	if isImageChannelTest(channel, name, endpointType) {
+		return true
+	}
+	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); !scheduled {
+		return false
+	}
+	if constant.EndpointType(endpointType) == constant.EndpointTypeDeepSeekToolsSearch || constant.EndpointType(endpointType) == constant.EndpointTypeDeepSeekToolsFetch {
+		return true
+	}
+	names := []string{name}
+	if channel != nil {
+		if mapped, changed, err := helper.ResolveMappedModel(channel.GetModelMapping(), name); err == nil && changed {
+			names = append(names, mapped)
+		}
+	}
+	return slices.ContainsFunc(names, func(candidate string) bool {
+		return candidate == constant.DeepSeekSearchModel || candidate == constant.DeepSeekFetchModel
+	})
+}
+
 func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	if c != nil {
 		if userID := c.GetInt("id"); userID > 0 {
@@ -148,7 +172,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	var nextProbeAt time.Time
 models:
 	for _, name := range models {
-		if isImageChannelTest(channel, name, endpointType) {
+		if shouldSkipChannelTest(ctx, channel, name, endpointType) {
 			result.summary.Skipped++
 			continue
 		}
@@ -244,7 +268,7 @@ func scheduledChannelTestAllowed(ctx context.Context, channelID int) (bool, erro
 }
 
 func testChannelModel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
-	if isImageChannelTest(channel, testModel, endpointType) {
+	if shouldSkipChannelTest(ctx, channel, testModel, endpointType) {
 		return testResult{summary: channelTestSummary{Skipped: 1}}
 	}
 	_, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration)
@@ -254,7 +278,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		if err := model.DB.WithContext(ctx).First(&current, channel.Id).Error; err != nil {
 			return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
 		}
-		if current.Status != common.ChannelStatusEnabled || isImageChannelTest(&current, testModel, endpointType) ||
+		if current.Status != common.ChannelStatusEnabled || shouldSkipChannelTest(ctx, &current, testModel, endpointType) ||
 			!slices.ContainsFunc(current.GetModels(), func(name string) bool { return strings.TrimSpace(name) == testModel }) {
 			return testResult{summary: channelTestSummary{Skipped: 1}}
 		}
@@ -308,7 +332,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 			// Never apply an index from the old ordered keys to a replacement
 			// configuration. Retry that configuration in the next monitoring round.
 			if current.Status != common.ChannelStatusEnabled || current.Key != channel.Key || current.ChannelInfo.IsMultiKey != channel.ChannelInfo.IsMultiKey ||
-				isImageChannelTest(&current, testModel, endpointType) ||
+				shouldSkipChannelTest(ctx, &current, testModel, endpointType) ||
 				!slices.ContainsFunc(current.GetModels(), func(name string) bool { return strings.TrimSpace(name) == testModel }) {
 				return testResult{summary: channelTestSummary{Skipped: 1}}
 			}
@@ -1488,7 +1512,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 // through here). It honors ctx cancellation so a runner that loses its lease
 // stops promptly. The legacy mode argument is accepted for queued tasks but no
 // longer restricts monitoring to channels eligible for automatic status changes.
-// When notify is set the root user is notified on completion. Cross-instance execution is
+// When notify is set the channel watchers are notified on completion. Cross-instance execution is
 // guarded by the system task per-type lock, so no process-local guard is needed.
 func runChannelTestTask(ctx context.Context, _ string, notify bool, report func(processed, total int), scheduled ...bool) (channelTestSummary, error) {
 	if ctx == nil {
@@ -1512,8 +1536,9 @@ func runChannelTestTask(ctx context.Context, _ string, notify bool, report func(
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
 	summary := performChannelTests(ctx, selected, testUserID, concurrency, report)
 	if notify && (ctx == nil || ctx.Err() == nil) {
-		lang := service.RootUserLanguage()
-		service.NotifyRootUser(dto.NotifyTypeChannelTest, i18n.Translate(lang, i18n.MsgChannelTestCompletedSubject), i18n.Translate(lang, i18n.MsgChannelTestCompletedContent))
+		service.NotifyChannelWatchers(dto.NotifyTypeChannelTest, func(lang string) (string, string) {
+			return i18n.Translate(lang, i18n.MsgChannelTestCompletedSubject), i18n.Translate(lang, i18n.MsgChannelTestCompletedContent)
+		})
 	}
 	return summary, nil
 }

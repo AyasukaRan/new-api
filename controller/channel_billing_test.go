@@ -22,6 +22,9 @@ func TestGetDeepSeekBalanceCNY(t *testing.T) {
 	}{
 		{"CNY before USD keeps historical unit", `{"balance_infos":[{"currency":"CNY","total_balance":"73"},{"currency":"USD","total_balance":"12.5"}]}`, 7.3, 73, ""},
 		{"CNY after USD keeps historical unit", `{"balance_infos":[{"currency":"USD","total_balance":"12.5"},{"currency":"CNY","total_balance":"73"}]}`, 7.3, 73, ""},
+		{"zero USD before CNY uses funded CNY", `{"balance_infos":[{"currency":"USD","total_balance":"0"},{"currency":"CNY","total_balance":"73"}]}`, 7.3, 73, ""},
+		{"zero USD after CNY uses funded CNY", `{"balance_infos":[{"currency":"CNY","total_balance":"73"},{"currency":"USD","total_balance":"0"}]}`, 7.3, 73, ""},
+		{"zero USD alone stays zero", `{"balance_infos":[{"currency":"USD","total_balance":"0"}]}`, 7.3, 0, ""},
 		{"USD only converts to CNY", `{"balance_infos":[{"currency":"USD","total_balance":"10"}]}`, 7.3, 73, ""},
 		{"negative CNY preserves exhausted key", `{"balance_infos":[{"currency":"CNY","total_balance":"-7.3"}]}`, 7.3, -7.3, ""},
 		{"negative USD preserves exhausted key", `{"balance_infos":[{"currency":"USD","total_balance":"-1"}]}`, 7.3, -7.3, ""},

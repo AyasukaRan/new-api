@@ -274,7 +274,7 @@ func TestSourceQuotaDataMigrationAndAggregation(t *testing.T) {
 					CacheQuotaDataLock.Lock()
 					CacheQuotaData = make(map[string]*QuotaData)
 					CacheQuotaDataLock.Unlock()
-					params := QuotaDataLogParams{UserID: 1, Username: "alice", ModelName: "model", CreatedAt: 3601, UseGroup: "default", TokenID: 2, ChannelID: 3, NodeName: "node", ClientTool: "DeepSeek Harness", TokenUsed: 15, Quota: 100}
+					params := QuotaDataLogParams{UserID: 1, Username: "alice", ModelName: "model", CreatedAt: 3601, UseGroup: "default", TokenID: 2, ChannelID: 3, NodeName: "node", ClientTool: "DeepSeek Harness", TokenUsed: 15, Quota: 100, CacheReadTokens: 4, CacheCreationTokens: 2}
 					LogQuotaData(params)
 					LogQuotaData(params)
 					SaveQuotaDataCache()
@@ -288,6 +288,19 @@ func TestSourceQuotaDataMigrationAndAggregation(t *testing.T) {
 					params.CreatedAt = 7201
 					LogQuotaData(params)
 					SaveQuotaDataCache()
+					var sourceUsage QuotaData
+					require.NoError(t, db.Where("client_tool = ?", "DeepSeek Harness").First(&sourceUsage).Error)
+					assert.Equal(t, int64(12), sourceUsage.CacheReadTokens)
+					assert.Equal(t, int64(6), sourceUsage.CacheCreationTokens)
+					modelUsage, err := GetAllQuotaDates(3600, 7199, "")
+					require.NoError(t, err)
+					var cacheReads, cacheWrites int64
+					for _, row := range modelUsage {
+						cacheReads += row.CacheReadTokens
+						cacheWrites += row.CacheCreationTokens
+					}
+					assert.Equal(t, int64(20), cacheReads, "the model chart includes every source within its window")
+					assert.Equal(t, int64(10), cacheWrites)
 					rows, err := GetSourceQuotaData(3600, 7199, "", 0, common.RoleAdminUser, false)
 					require.NoError(t, err)
 					assert.Equal(t, []SourceQuotaData{{ClientTool: "DeepSeek Harness", Count: 3, TokenUsed: 45, Quota: 300}, {ClientTool: "", Count: 2, TokenUsed: 50, Quota: 500}, {ClientTool: "OpenAI Python SDK", Count: 2, TokenUsed: 50, Quota: 400}}, rows)
@@ -405,6 +418,8 @@ func TestSourceQuotaRecordingExcludesProbesAndErrors(t *testing.T) {
 	ctx.Set("username", user.Username)
 	other := NewLogOther()
 	other.SetPublic("client_tool", "curl")
+	other.SetPublic("cache_tokens", 4)
+	other.SetPublic("cache_write_tokens", 2)
 	other.SetAdmin("secret", "never-in-source-response")
 	params := RecordConsumeLogParams{ModelName: "model", Quota: 20, PromptTokens: 7, CompletionTokens: 3, Other: other}
 	RecordConsumeLog(ctx, user.Id, params)
@@ -416,6 +431,10 @@ func TestSourceQuotaRecordingExcludesProbesAndErrors(t *testing.T) {
 	params.IsChannelTest, params.Other = false, nil
 	RecordConsumeLog(ctx, user.Id, params)
 	SaveQuotaDataCache()
+	var usage QuotaData
+	require.NoError(t, DB.Where("user_id = ? AND client_tool = ? AND model_name = ?", user.Id, "curl", "model").First(&usage).Error)
+	assert.Equal(t, int64(4), usage.CacheReadTokens, "probe usage is excluded from the source/model charts")
+	assert.Equal(t, int64(2), usage.CacheCreationTokens)
 	rows, err := GetSourceQuotaData(1, time.Now().Unix(), "", user.Id, common.RoleCommonUser, false)
 	require.NoError(t, err)
 	assert.Equal(t, []SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 10, Quota: 50}, {ClientTool: "", Count: 1, TokenUsed: 10, Quota: 20}}, rows)

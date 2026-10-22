@@ -576,6 +576,24 @@ export const protocols={openai_image:{decodeRequest(ctx){return ctx;},render(ctx
 		})
 	}
 	assert.False(t, isImageChannelTest(&model.Channel{}, "gemini-3.8-flash", ""))
+	for _, test := range []struct{ name, mapping, endpoint string }{
+		{name: constant.DeepSeekSearchModel},
+		{name: constant.DeepSeekFetchModel},
+		{name: "search-alias", mapping: `{"search-alias":"deepseek-search"}`},
+		{name: "fetch-alias", endpoint: string(constant.EndpointTypeDeepSeekToolsFetch)},
+	} {
+		t.Run("scheduled tool "+test.name, func(t *testing.T) {
+			channel := &model.Channel{Id: 42, Type: constant.ChannelTypeDeepSeek, Models: test.name, ModelMapping: &test.mapping}
+			ctx := context.WithValue(context.Background(), channelIdleProbeIntervalKey{}, time.Minute)
+			result := testChannel(ctx, channel, 1, "", test.endpoint, true)
+			require.NoError(t, result.localErr)
+			assert.Equal(t, channelTestSummary{Skipped: 1}, result.summary)
+			assert.Nil(t, result.sample)
+			assert.Equal(t, channelTestSummary{Skipped: 1}, testChannelModel(ctx, channel, 1, test.name, test.endpoint, true).summary)
+			assert.False(t, shouldSkipChannelTest(context.Background(), channel, test.name, test.endpoint), "manual diagnosis remains available")
+		})
+	}
+
 }
 
 func TestRunChannelTestWorkersHonorsConfiguredConcurrency(t *testing.T) {

@@ -119,7 +119,7 @@ func GetChannel(
 	}
 	abilities, probeError := filterRelayAbilities(abilities, model, filters)
 	if len(abilities) == 0 {
-		if normalized := ratio_setting.RoutingMatchModelName(model); normalized != model {
+		if normalized := ratio_setting.RoutingMatchModelName(model); normalized != "" && normalized != model {
 			if err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, normalized, true).Order("priority DESC, weight DESC").Find(&abilities).Error; err != nil {
 				return nil, err
 			}

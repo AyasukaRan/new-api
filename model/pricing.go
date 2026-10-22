@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/types"
@@ -218,6 +219,10 @@ func ResolveBillingModelName(origin string, channelID int) string {
 	}
 	candidates = append(candidates, hostreasoning.CanonicalBillingModelNames(origin)...)
 	base := hostreasoning.BaseModelName(origin)
+	// DeepSeek thinking suffixes share the base model price unless preserved.
+	if deepSeekBase, _, _, ok := reasoning.ParseDeepSeekV4ThinkingSuffix(base); ok && !model_setting.ShouldPreserveThinkingSuffix(base) {
+		candidates = append(candidates, deepSeekBase)
+	}
 	candidates = append(candidates, base)
 	seen := make(map[string]struct{}, len(candidates))
 	for _, name := range candidates {
