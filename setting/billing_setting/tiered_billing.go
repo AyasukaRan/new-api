@@ -23,22 +23,27 @@ const (
 	BillingModeField        = "billing_mode"
 	BillingExprField        = "billing_expr"
 	PluginBillingExprOption = "billing_setting.plugin_billing_expr"
+	DeletedModelsOption     = "billing_setting.deleted_models"
 	maxTaskExprSmokeTests   = 64
 )
 
 // BillingSetting is managed by config.GlobalConfig.Register.
 // DB keys: billing_setting.billing_mode, billing_setting.billing_expr,
-// billing_setting.plugin_billing_expr
+// billing_setting.plugin_billing_expr, billing_setting.deleted_models
 type BillingSetting struct {
 	BillingMode       map[string]string `json:"billing_mode"`
 	BillingExpr       map[string]string `json:"billing_expr"`
 	PluginBillingExpr map[string]string `json:"plugin_billing_expr"`
+	// DeletedModels records explicit global price removal, including legacy
+	// models that may gain built-in expressions in a later release.
+	DeletedModels map[string]bool `json:"deleted_models"`
 }
 
 var billingSetting = BillingSetting{
 	BillingMode:       make(map[string]string),
 	BillingExpr:       make(map[string]string),
 	PluginBillingExpr: make(map[string]string),
+	DeletedModels:     make(map[string]bool),
 }
 
 func init() {
@@ -50,6 +55,9 @@ func init() {
 // ---------------------------------------------------------------------------
 
 func GetBillingMode(model string) string {
+	if billingSetting.DeletedModels[model] {
+		return BillingModeRatio
+	}
 	if mode, ok := billingSetting.BillingMode[model]; ok {
 		return mode
 	}
@@ -68,6 +76,9 @@ func GetBillingMode(model string) string {
 }
 
 func GetBillingExpr(model string) (string, bool) {
+	if billingSetting.DeletedModels[model] {
+		return "", false
+	}
 	if expr, ok := billingSetting.BillingExpr[model]; ok {
 		return expr, true
 	}
@@ -177,6 +188,11 @@ func GetBuiltinBillingExprCopy() map[string]string {
 
 func GetBillingModeCopy() map[string]string {
 	modes := lo.Assign(billingSetting.BillingMode)
+	for model, deleted := range billingSetting.DeletedModels {
+		if deleted {
+			delete(modes, model)
+		}
+	}
 	for model := range builtinBillingExpr {
 		if _, configured := modes[model]; !configured && GetBillingMode(model) == BillingModeTieredExpr {
 			modes[model] = BillingModeTieredExpr
@@ -187,6 +203,11 @@ func GetBillingModeCopy() map[string]string {
 
 func GetBillingExprCopy() map[string]string {
 	expressions := lo.Assign(billingSetting.BillingExpr)
+	for model, deleted := range billingSetting.DeletedModels {
+		if deleted {
+			delete(expressions, model)
+		}
+	}
 	for model := range builtinBillingExpr {
 		if _, configured := expressions[model]; configured {
 			continue

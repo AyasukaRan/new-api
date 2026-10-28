@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -240,6 +241,9 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == billing_setting.DeletedModelsOption {
+		return fmt.Errorf("unsupported pricing field: %s", key)
+	}
 	if key == legacyAccessTokenRetireAtKey {
 		return errLegacyRetireAtReadOnly
 	}

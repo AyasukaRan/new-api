@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
@@ -68,7 +69,7 @@ func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
 	for _, value := range restoreRatios {
 		require.NoError(t, value.restore("{}"))
 	}
-	config.UpdateConfigFromMap(config.GlobalConfig.Get("billing_setting"), map[string]string{"billing_mode": "{}", "billing_expr": "{}", "plugin_billing_expr": "{}"})
+	require.NoError(t, config.UpdateConfigFromMap(config.GlobalConfig.Get("billing_setting"), map[string]string{"billing_mode": "{}", "billing_expr": "{}", "plugin_billing_expr": "{}", "deleted_models": "{}"}))
 	var version string
 	query := "SELECT version()"
 	if kind == "sqlite" {
@@ -80,7 +81,7 @@ func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
 		for _, value := range restoreRatios {
 			require.NoError(t, value.restore(value.value))
 		}
-		config.UpdateConfigFromMap(config.GlobalConfig.Get("billing_setting"), map[string]string{"billing_mode": previousConfig["billing_setting.billing_mode"], "billing_expr": previousConfig["billing_setting.billing_expr"], "plugin_billing_expr": previousConfig[billing_setting.PluginBillingExprOption]})
+		require.NoError(t, config.UpdateConfigFromMap(config.GlobalConfig.Get("billing_setting"), map[string]string{"billing_mode": previousConfig["billing_setting.billing_mode"], "billing_expr": previousConfig["billing_setting.billing_expr"], "plugin_billing_expr": previousConfig[billing_setting.PluginBillingExprOption], "deleted_models": previousConfig[billing_setting.DeletedModelsOption]}))
 		common.OptionMap = previousOptions
 		common.IsMasterNode, common.SQLitePath = previousMaster, previousSQLite
 		common.RedisEnabled, common.MemoryCacheEnabled = previousRedis, previousMemory
@@ -107,6 +108,203 @@ func modelManagementRequest(t *testing.T, handler gin.HandlerFunc, method, path 
 		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), output), recorder.Body.String())
 	}
 	return recorder
+}
+
+func TestDeletedModelPricingDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			const name = "gpt-6-astra"
+			const expression = `tier("base", p * 2 + c * 8)`
+			builtin, exists := billing_setting.GetBuiltinBillingExpr(name)
+			require.True(t, exists)
+			previousChannels := ratio_setting.ChannelModelPricing2JSONString()
+			t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(previousChannels)) })
+			channelPrices, err := common.Marshal(map[string]map[int]ratio_setting.ChannelModelPricing{
+				name: {7: {BillingMode: billing_setting.BillingModeTieredExpr, BillingExpr: expression}},
+			})
+			require.NoError(t, err)
+			require.NoError(t, model.UpdateOption("ChannelModelPricing", string(channelPrices)))
+			before, err := model.GetModelPricingSnapshot([]string{name, "gpt-4"})
+			require.NoError(t, err)
+			require.Len(t, before.Entries, 2)
+			assert.NotEqual(t, before.EmptyVersion, before.Entries[1].Version, "an inherited built-in is not an unpriced model")
+			changes := make([]model.ModelPricingChange, 0, 2)
+			for _, entry := range before.Entries {
+				changes = append(changes, model.ModelPricingChange{ModelName: entry.ModelName, ExpectedVersion: entry.Version, Pricing: model.PricingValues{}})
+			}
+			preview, err := model.PreviewModelPricing(name, model.PricingValues{})
+			require.NoError(t, err)
+			assert.NotContains(t, preview, "billing_setting.billing_expr")
+			// Failed writes must not publish a deletion or partially erase prices.
+			writes := 0
+			require.NoError(t, db.Callback().Update().Before("gorm:update").Register("fail_pricing_delete", func(tx *gorm.DB) {
+				if tx.Statement.Table == "options" {
+					writes++
+					if writes == 3 {
+						tx.AddError(errors.New("injected deletion failure"))
+					}
+				}
+			}))
+			err = model.UpdateModelPricing(changes)
+			require.NoError(t, db.Callback().Update().Remove("fail_pricing_delete"))
+			require.Error(t, err)
+			afterFailure, err := model.GetModelPricingSnapshot([]string{name, "gpt-4"})
+			require.NoError(t, err)
+			assert.Equal(t, before.Entries, afterFailure.Entries)
+			runtimeExpr, ok := billing_setting.GetBillingExpr(name)
+			assert.True(t, ok)
+			assert.Equal(t, builtin, runtimeExpr)
+
+			var response struct{ Success bool }
+			recorder := modelManagementRequest(t, UpdateModelPricingConfig, http.MethodPatch, "/api/option/model_pricing", gin.H{"changes": changes}, &response)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.True(t, response.Success)
+			var persisted []model.Option
+			require.NoError(t, db.Order(clause.OrderByColumn{Column: clause.Column{Name: "key"}}).Find(&persisted).Error)
+			// Exercise normal startup loading twice, including initialization of the
+			// legacy defaults that must not repopulate deleted model prices.
+			for range 2 {
+				ratio_setting.InitRatioSettings()
+				require.NoError(t, config.UpdateConfigFromMap(config.GlobalConfig.Get("billing_setting"), map[string]string{"billing_mode": "{}", "billing_expr": "{}", "plugin_billing_expr": "{}", "deleted_models": "{}"}))
+				model.InitOptionMap()
+				listed, err := model.GetModelPricingSnapshot(nil)
+				require.NoError(t, err)
+				for _, entry := range listed.Entries {
+					assert.NotContains(t, []string{name, "gpt-4"}, entry.ModelName)
+				}
+				assert.NotContains(t, listed.Options, billing_setting.DeletedModelsOption)
+				for _, raw := range listed.Options {
+					var prices map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(raw, &prices))
+					assert.NotContains(t, prices, name)
+					assert.NotContains(t, prices, "gpt-4")
+				}
+				deleted, err := model.GetModelPricingSnapshot([]string{name, "gpt-4"})
+				require.NoError(t, err)
+				for _, entry := range deleted.Entries {
+					assert.Empty(t, entry.Configured)
+					assert.NotContains(t, entry.Effective, "billing_setting.billing_expr")
+					assert.NotContains(t, entry.Effective, "ModelPrice")
+					assert.NotContains(t, entry.Effective, "ModelRatio")
+					assert.Equal(t, deleted.EmptyVersion, entry.Version)
+				}
+				_, ok = billing_setting.GetBillingExpr(name)
+				assert.False(t, ok)
+				assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode(name))
+				assert.NotContains(t, billing_setting.GetBillingModeCopy(), name)
+				assert.NotContains(t, billing_setting.GetBillingExprCopy(), name)
+				syncData := billing_setting.GetPricingSyncData(nil)
+				assert.NotContains(t, syncData[billing_setting.BillingExprField], name)
+				channelExpr, ok := billing_setting.GetChannelBillingExpr(name, 7)
+				assert.True(t, ok)
+				assert.Equal(t, expression, channelExpr, "deleting global prices must preserve channel overrides")
+				var options struct {
+					Success bool
+					Data    []model.Option
+				}
+				modelManagementRequest(t, GetOptions, http.MethodGet, "/api/option/", nil, &options)
+				require.True(t, options.Success)
+				for _, option := range options.Data {
+					assert.NotEqual(t, billing_setting.DeletedModelsOption, option.Key)
+				}
+				var reloaded []model.Option
+				require.NoError(t, db.Order(clause.OrderByColumn{Column: clause.Column{Name: "key"}}).Find(&reloaded).Error)
+				assert.Equal(t, persisted, reloaded, "startup must preserve persisted prices and deletion state")
+			}
+			assert.Error(t, model.UpdateOption(billing_setting.DeletedModelsOption, "{}"))
+			assert.Error(t, model.UpdateOptionsBulk(map[string]string{billing_setting.DeletedModelsOption: "{}"}))
+			assert.ErrorIs(t, model.UpdateModelPricing(changes), model.ErrModelPricingConflict)
+
+			// The existing editor creates missing rows with empty_version.
+			recreate := model.ModelPricingChange{ModelName: name, ExpectedVersion: before.EmptyVersion, Pricing: model.PricingValues{
+				"billing_setting.billing_mode": billing_setting.BillingModeTieredExpr, "billing_setting.billing_expr": expression,
+			}}
+			require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{recreate}))
+			runtimeExpr, ok = billing_setting.GetBillingExpr(name)
+			assert.True(t, ok)
+			assert.Equal(t, expression, runtimeExpr)
+			custom, err := model.GetModelPricingSnapshot([]string{name})
+			require.NoError(t, err)
+			require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{{ModelName: name, ExpectedVersion: custom.Entries[0].Version, Pricing: model.PricingValues{}}}))
+			resetChanges := []model.ModelPricingChange{
+				{ModelName: name, ExpectedVersion: before.EmptyVersion, Reset: true},
+				{ModelName: "gpt-4", ExpectedVersion: before.EmptyVersion, Reset: true},
+			}
+			require.NoError(t, model.UpdateModelPricing(resetChanges))
+			reset, err := model.GetModelPricingSnapshot([]string{name, "gpt-4"})
+			require.NoError(t, err)
+			assert.Equal(t, before.Entries, reset.Entries)
+			assert.ErrorIs(t, model.UpdateModelPricing([]model.ModelPricingChange{recreate}), model.ErrModelPricingConflict)
+
+			// A delete and save opened on the same inherited price cannot both win.
+			var wg sync.WaitGroup
+			results := make(chan error, 2)
+			for _, pricing := range []model.PricingValues{{}, recreate.Pricing} {
+				wg.Go(func() {
+					results <- model.UpdateModelPricing([]model.ModelPricingChange{{ModelName: name, ExpectedVersion: reset.Entries[1].Version, Pricing: pricing}})
+				})
+			}
+			wg.Wait()
+			close(results)
+			successes, conflicts := 0, 0
+			for err := range results {
+				if err == nil {
+					successes++
+				} else {
+					require.ErrorIs(t, err, model.ErrModelPricingConflict)
+					conflicts++
+				}
+			}
+			assert.Equal(t, 1, successes)
+			assert.Equal(t, 1, conflicts)
+			metadata := model.Model{ModelName: name, Status: 1}
+			require.NoError(t, metadata.Insert())
+			_, err = model.DeleteModelMetadata([]int{metadata.Id}, false, true)
+			require.NoError(t, err)
+			deleted, err := model.GetModelPricingSnapshot([]string{name})
+			require.NoError(t, err)
+			assert.NotContains(t, deleted.Entries[0].Effective, "billing_setting.billing_expr", "metadata deletion with prices must also suppress built-ins")
+			channelExpr, ok := billing_setting.GetChannelBillingExpr(name, 7)
+			assert.True(t, ok)
+			assert.Equal(t, expression, channelExpr)
+
+			// An exact deletion must not suppress a separately configured legacy
+			// wildcard: snapshots and previews must agree with relay's lookup.
+			const aliasName = "gpt-4-gizmo-deletion"
+			const wildcard = "gpt-4-gizmo-*"
+			for _, tc := range []struct {
+				field string
+				value float64
+				fixed bool
+			}{{"ModelRatio", 2, false}, {"ModelPrice", 0.125, true}} {
+				wildcardBefore, err := model.GetModelPricingSnapshot([]string{wildcard})
+				require.NoError(t, err)
+				require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{{ModelName: wildcard, ExpectedVersion: wildcardBefore.Entries[0].Version, Pricing: model.PricingValues{tc.field: tc.value}}}))
+				aliasBefore, err := model.GetModelPricingSnapshot([]string{aliasName})
+				require.NoError(t, err)
+				require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{{ModelName: aliasName, ExpectedVersion: aliasBefore.Entries[0].Version, Pricing: recreate.Pricing}}))
+				preview, err := model.PreviewModelPricing(aliasName, model.PricingValues{})
+				require.NoError(t, err)
+				assert.Equal(t, tc.value, preview[tc.field])
+				aliasBefore, err = model.GetModelPricingSnapshot([]string{aliasName})
+				require.NoError(t, err)
+				require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{{ModelName: aliasName, ExpectedVersion: aliasBefore.Entries[0].Version, Pricing: model.PricingValues{}}}))
+				aliasAfter, err := model.GetModelPricingSnapshot([]string{aliasName})
+				require.NoError(t, err)
+				assert.Empty(t, aliasAfter.Entries[0].Configured)
+				assert.Equal(t, preview, aliasAfter.Entries[0].Effective)
+				price, fixed, found := ratio_setting.GetModelRatioOrPrice(aliasName)
+				assert.True(t, found)
+				assert.Equal(t, tc.fixed, fixed)
+				assert.Equal(t, tc.value, price)
+				assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode(aliasName))
+			}
+		})
+	}
 }
 
 func TestModelPricingConversionDatabaseMatrix(t *testing.T) {

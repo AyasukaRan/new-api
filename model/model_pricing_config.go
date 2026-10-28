@@ -67,17 +67,31 @@ var modelPricingOptionKeys = []string{
 	"AudioCompletionRatio", "AudioRatio", "CacheRatio", "CompletionRatio",
 	"CreateCacheRatio", "ImageRatio", "ModelPrice", "ModelRatio",
 	"billing_setting.billing_expr", "billing_setting.billing_mode", billing_setting.PluginBillingExprOption,
+	billing_setting.DeletedModelsOption,
 }
 
 var modelPricingMutationMu sync.Mutex
 
 func IsModelPricingOption(key string) bool {
-	return slices.Contains(modelPricingOptionKeys, key)
+	return key != billing_setting.DeletedModelsOption && slices.Contains(modelPricingOptionKeys, key)
 }
 
 func ModelPricingVersion(values PricingValues) string {
 	encoded, _ := common.Marshal(values)
 	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func modelPricingVersion(values map[string]map[string]any, name string) string {
+	configured := modelPricingValues(values, name)
+	// An inherited built-in is a real price, distinct from an empty/deleted
+	// draft. Keep empty_version usable for recreating a deleted model while
+	// rejecting a stale save opened before that built-in was deleted.
+	if len(configured) == 0 && values[billing_setting.DeletedModelsOption][name] != true {
+		if expression, ok := billing_setting.GetBuiltinBillingExpr(name); ok {
+			return ModelPricingVersion(PricingValues{"billing_setting.billing_mode": billing_setting.BillingModeTieredExpr, "billing_setting.billing_expr": expression})
+		}
+	}
+	return ModelPricingVersion(configured)
 }
 
 func defaultPricingMaps() map[string]map[string]any {
@@ -109,6 +123,13 @@ func readModelPricingMaps(db *gorm.DB) (map[string]map[string]any, map[string]bo
 		if entries == nil {
 			return nil, nil, nil, fmt.Errorf("%s must be a JSON object", row.Key)
 		}
+		if row.Key == billing_setting.DeletedModelsOption {
+			for name, value := range entries {
+				if _, ok := value.(bool); !ok {
+					return nil, nil, nil, fmt.Errorf("%s: %s must be a boolean", row.Key, name)
+				}
+			}
+		}
 		values[row.Key] = entries
 		existing[row.Key] = true
 		counts[row.Key]++
@@ -125,6 +146,9 @@ func readModelPricingMaps(db *gorm.DB) (map[string]map[string]any, map[string]bo
 func modelPricingValues(values map[string]map[string]any, name string) PricingValues {
 	result := make(PricingValues)
 	for _, key := range modelPricingOptionKeys {
+		if key == billing_setting.DeletedModelsOption {
+			continue
+		}
 		if key == billing_setting.PluginBillingExprOption {
 			variants := make(map[string]any)
 			for variant, expression := range values[key] {
@@ -148,6 +172,9 @@ func modelPricingValues(values map[string]map[string]any, name string) PricingVa
 // Plugin expressions are grouped in the draft and flattened only in storage.
 func replaceModelPricing(values map[string]map[string]any, name string, draft PricingValues) {
 	for _, key := range modelPricingOptionKeys {
+		if key == billing_setting.DeletedModelsOption {
+			continue
+		}
 		if key == billing_setting.PluginBillingExprOption {
 			for variant := range values[key] {
 				if _, model, ok := billing_setting.SplitPluginBillingExprKey(variant); ok && model == name {
@@ -165,6 +192,11 @@ func replaceModelPricing(values map[string]map[string]any, name string, draft Pr
 			values[key][name] = value
 		}
 	}
+	if len(draft) == 0 {
+		values[billing_setting.DeletedModelsOption][name] = true
+	} else {
+		delete(values[billing_setting.DeletedModelsOption], name)
+	}
 }
 
 func effectiveModelPricing(values map[string]map[string]any, name string) PricingValues {
@@ -178,7 +210,7 @@ func effectiveModelPricing(values map[string]map[string]any, name string) Pricin
 		}
 	}
 	mode, _ := result["billing_setting.billing_mode"].(string)
-	if mode == "" {
+	if mode == "" && values[billing_setting.DeletedModelsOption][name] != true {
 		_, hasPrice := result["ModelPrice"]
 		_, hasRatio := result["ModelRatio"]
 		if _, builtin := billing_setting.GetBuiltinBillingExpr(name); builtin && !hasPrice && !hasRatio {
@@ -248,6 +280,9 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 	if len(names) == 0 {
 		nameSet := make(map[string]bool)
 		for key, entries := range values {
+			if key == billing_setting.DeletedModelsOption {
+				continue
+			}
 			for name := range entries {
 				if key == billing_setting.PluginBillingExprOption {
 					_, model, ok := billing_setting.SplitPluginBillingExprKey(name)
@@ -263,7 +298,9 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 			nameSet[name] = true
 		}
 		for name := range nameSet {
-			names = append(names, name)
+			if values[billing_setting.DeletedModelsOption][name] != true {
+				names = append(names, name)
+			}
 		}
 	}
 	sort.Strings(names)
@@ -271,7 +308,7 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 	generation := jsplugin.DefaultRegistry.Generation()
 	for _, name := range names {
 		configured := modelPricingValues(values, name)
-		entry := ModelPricingEntry{ModelName: name, Version: ModelPricingVersion(configured), Configured: configured,
+		entry := ModelPricingEntry{ModelName: name, Version: modelPricingVersion(values, name), Configured: configured,
 			ModelPricingDescription: ModelPricingDescription{Effective: effectiveModelPricing(values, name)}}
 		entry.CacheWriteMode = ResolveCacheWriteMode(name, configured)
 		entry.BillingDetails = ResolveLegacyBillingDetails(name, entry.Effective, configured)
@@ -339,6 +376,9 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 		}
 	}
 	for key, entries := range values {
+		if key == billing_setting.DeletedModelsOption {
+			continue
+		}
 		encoded, err := common.Marshal(entries)
 		if err != nil {
 			return nil, err
@@ -493,7 +533,7 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 		defaults := defaultPricingMaps()
 		for _, change := range changes {
 			previous := modelPricingValues(values, change.ModelName)
-			if ModelPricingVersion(previous) != change.ExpectedVersion {
+			if modelPricingVersion(values, change.ModelName) != change.ExpectedVersion {
 				return fmt.Errorf("%w: %s", ErrModelPricingConflict, change.ModelName)
 			}
 			pricing := change.Pricing
@@ -504,6 +544,9 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 				return err
 			}
 			replaceModelPricing(values, change.ModelName, pricing)
+			if change.Reset {
+				delete(values[billing_setting.DeletedModelsOption], change.ModelName)
+			}
 		}
 		return nil
 	})
@@ -541,8 +584,14 @@ func UpdateModelPricingOptions(updates map[string]string) error {
 			values[key] = entries
 		}
 		for name := range names {
-			if err := validateModelPricing(name, modelPricingValues(values, name), modelPricingValues(previous, name)); err != nil {
+			pricing, before := modelPricingValues(values, name), modelPricingValues(previous, name)
+			if err := validateModelPricing(name, pricing, before); err != nil {
 				return err
+			}
+			if len(pricing) > 0 {
+				delete(values[billing_setting.DeletedModelsOption], name)
+			} else if len(before) > 0 {
+				values[billing_setting.DeletedModelsOption][name] = true
 			}
 		}
 		return nil
