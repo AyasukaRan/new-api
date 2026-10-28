@@ -318,7 +318,7 @@ func DeleteModelMetadata(ids []int, removeFromChannels, removePricing bool) (Mod
 			var channels []Channel
 			// Read only routing fields. Lock channels in a consistent order, then
 			// update models and abilities in the same transaction as metadata.
-			if err := lockForUpdate(tx).Select("id", "models", "status", "group", "priority", "weight", "tag").Order("id").Find(&channels).Error; err != nil {
+			if err := lockForUpdate(tx).Select("id", "models", "status", "group", "priority", "weight", "tag", "setting").Order("id").Find(&channels).Error; err != nil {
 				return err
 			}
 			for _, channel := range channels {
@@ -333,7 +333,10 @@ func DeleteModelMetadata(ids []int, removeFromChannels, removePricing bool) (Mod
 					continue
 				}
 				channel.Models = strings.Join(remaining, ",")
-				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", channel.Models).Error; err != nil {
+				if err := channel.PruneGroupModels(); err != nil {
+					return err
+				}
+				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{"models": channel.Models, "setting": channel.Setting}).Error; err != nil {
 					return err
 				}
 				if err := channel.UpdateAbilities(tx); err != nil {

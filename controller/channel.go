@@ -541,6 +541,10 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 
 	// 校验 channel settings
 	if err := channel.ValidateSettings(); err != nil {
+		var message *common.Message
+		if errors.As(err, &message) {
+			return message
+		}
 		return common.NewMessage("Invalid channel settings format: {{error}}", map[string]any{"error": err.Error()})
 	}
 	if channel.Type == constant.ChannelTypeTaskPlugin {
@@ -1107,16 +1111,49 @@ func UpdateChannel(c *gin.Context) {
 
 	baseURLFromPluginDefault := channel.Type == constant.ChannelTypeTaskPlugin &&
 		(channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "")
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
 	originChannel, err := model.GetChannelById(channel.Id, true)
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	// Match the non-zero fields that the ORM persists for partial edits. Keep
+	// inherited validation context separate from the patch (especially keys).
+	validationChannel := channel.Channel
+	if validationChannel.Type == 0 {
+		validationChannel.Type = originChannel.Type
+	}
+	if validationChannel.BaseURL == nil && !baseURLFromPluginDefault {
+		validationChannel.BaseURL = originChannel.BaseURL
+	}
+	if validationChannel.Other == "" {
+		validationChannel.Other = originChannel.Other
+	}
+	if validationChannel.OtherSettings == "" {
+		validationChannel.OtherSettings = originChannel.OtherSettings
+	}
+	if validationChannel.Setting == nil {
+		validationChannel.Setting = originChannel.Setting
+	}
+	if validationChannel.Models == "" {
+		validationChannel.Models = originChannel.Models
+	}
+	if validationChannel.Group == "" {
+		validationChannel.Group = originChannel.Group
+	}
+	if channel.Setting == nil && (validationChannel.Models != originChannel.Models || validationChannel.Group != originChannel.Group) {
+		if err := validationChannel.PruneGroupModels(); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		channel.Setting = validationChannel.Setting
+	}
+	// 使用统一的校验函数
+	if err := validateChannel(&validationChannel, false); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if baseURLFromPluginDefault {
+		channel.BaseURL = validationChannel.BaseURL
 	}
 	originProxy := originChannel.GetSetting().Proxy
 	proxyChanged := false

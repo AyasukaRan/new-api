@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -56,10 +55,12 @@ func InitChannelCache() {
 		if channel.Status != common.ChannelStatusEnabled {
 			continue // skip disabled channels
 		}
-		groups := strings.SplitSeq(channel.Group, ",")
-		for group := range groups {
-			models := channel.GetModels()
+		for _, group := range channel.GetGroups() {
+			models := channel.GetModelsForGroup(group)
 			for _, model := range models {
+				if newGroup2model2channels[group] == nil {
+					newGroup2model2channels[group] = make(map[string][]int)
+				}
 				if _, ok := newGroup2model2channels[group][model]; !ok {
 					newGroup2model2channels[group][model] = make([]int, 0)
 				}

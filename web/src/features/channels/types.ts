@@ -101,6 +101,8 @@ export type Channel = z.infer<typeof channelSchema>
 // ============================================================================
 
 export interface ChannelSettings {
+  /** Missing groups include all models; an empty array explicitly excludes all. */
+  group_models?: Record<string, string[]>
   task_plugin_key?: string
   task_extend_plugin_keys?: string[]
   force_format?: boolean

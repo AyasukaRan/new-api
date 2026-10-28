@@ -229,6 +229,7 @@ export const channelFormSchema = z
     openai_organization: z.string().optional(),
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
     group: z.array(z.string()).min(1, ERROR_MESSAGES.REQUIRED_GROUP),
+    group_models: z.record(z.string(), z.array(z.string())).optional(),
     model_mapping: z
       .string()
       .optional()
@@ -467,6 +468,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   openai_organization: '',
   models: '',
   group: ['default'],
+  group_models: {},
   model_mapping: '',
   priority: 0,
   weight: 0,
@@ -537,6 +539,7 @@ export function transformChannelToFormDefaults(
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
   let extraSettings = {
+    group_models: {} as Record<string, string[]>,
     task_plugin_key: '',
     task_extend_plugin_keys: [] as string[],
     force_format: false,
@@ -565,6 +568,7 @@ export function transformChannelToFormDefaults(
         parsed.http2_connection_shards
       )
       extraSettings = {
+        group_models: parsed.group_models || {},
         task_plugin_key: parsed.task_plugin_key || '',
         task_extend_plugin_keys: readTaskExtendPluginKeys(channel.type, parsed),
         force_format: parsed.force_format || false,
@@ -724,6 +728,15 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
       formData.responses_websocket_enabled === true,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
+  }
+
+  const groupModels = normalizeChannelGroupModels(
+    formData.group_models,
+    formData.group,
+    parseModels(formData.models)
+  )
+  if (Object.keys(groupModels).length > 0) {
+    settingObj.group_models = groupModels
   }
 
   const protocol = normalizeHttpProtocol(formData.http_protocol)
@@ -1075,6 +1088,24 @@ export function parseModels(models: string): string[] {
     .split(',')
     .map((m) => m.trim())
     .filter((m) => m.length > 0)
+}
+
+/** Keep group restrictions within the current channel without reopening empty scopes. */
+export function normalizeChannelGroupModels(
+  groupModels: Record<string, string[]> | undefined,
+  groups: string[],
+  models: string[]
+): Record<string, string[]> {
+  const groupNames = new Set(groups)
+  const modelNames = new Set(models)
+  return Object.fromEntries(
+    Object.entries(groupModels ?? {})
+      .filter(([group]) => groupNames.has(group))
+      .map(([group, selected]) => [
+        group,
+        [...new Set(selected)].filter((model) => modelNames.has(model)),
+      ])
+  )
 }
 
 /**

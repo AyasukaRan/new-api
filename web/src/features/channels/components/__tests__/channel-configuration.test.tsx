@@ -47,6 +47,10 @@ import {
   CHANNEL_TYPE_SGLANG,
   CHANNEL_TYPE_VLLM,
 } from '../../constants'
+import {
+  buildSettingJSON,
+  transformChannelToFormDefaults,
+} from '../../lib/channel-form'
 import { channelSchema, type Channel } from '../../types'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelsProvider } from '../channels-provider'
@@ -2991,4 +2995,145 @@ test('AWS interface selection is disabled without sensitive channel write permis
   expect(
     await screen.findByRole('combobox', { name: 'AWS API' })
   ).toBeDisabled()
+})
+
+test('model group scopes select separate models while an unrestricted group keeps all models', async () => {
+  editingChannel = {
+    ...editingChannel,
+    models: 'gpt-5,gemini-flash',
+    group: 'GPT,Gemini,All',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  const section = within(
+    await screen.findByRole('region', { name: 'Models by group' })
+  )
+  for (const [group, model] of [
+    ['GPT', 'gpt-5'],
+    ['Gemini', 'gemini-flash'],
+  ]) {
+    const scope = within(section.getByRole('group', { name: group }))
+    const allModels = scope.getByRole('switch', { name: 'All channel models' })
+    expect(allModels).toBeChecked()
+    await user.click(allModels)
+    expect(allModels).not.toBeChecked()
+    const selector = scope.getByRole('combobox', {
+      name: `Select models for ${group}`,
+    })
+    await user.click(selector)
+    await user.click(screen.getByRole('option', { name: model }))
+    await user.keyboard('{Escape}')
+  }
+  expect(
+    within(section.getByRole('group', { name: 'All' })).getByRole('switch', {
+      name: 'All channel models',
+    })
+  ).toBeChecked()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1] as { setting: string }
+  expect(JSON.parse(payload.setting).group_models).toEqual({
+    GPT: ['gpt-5'],
+    Gemini: ['gemini-flash'],
+  })
+})
+
+test('model group scopes preserve an empty restriction and restore all models by keyboard', async () => {
+  editingChannel = {
+    ...editingChannel,
+    models: 'gpt-5,gemini-flash',
+    group: 'GPT,Gemini',
+    setting: JSON.stringify({
+      group_models: { GPT: [], Gemini: ['gemini-flash'] },
+    }),
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  const section = within(
+    await screen.findByRole('region', { name: 'Models by group' })
+  )
+  const emptyGroup = within(section.getByRole('group', { name: 'GPT' }))
+  expect(
+    emptyGroup.getByText('This group has no available models on this channel.')
+  ).toBeVisible()
+  expect(
+    JSON.parse(buildSettingJSON(transformChannelToFormDefaults(editingChannel)))
+      .group_models.GPT
+  ).toEqual([])
+  const allModels = emptyGroup.getByRole('switch', {
+    name: 'All channel models',
+  })
+  expect(allModels).not.toBeChecked()
+  allModels.focus()
+  await user.keyboard(' ')
+  expect(allModels).toBeChecked()
+  expect(emptyGroup.queryByRole('combobox')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1] as { setting: string }
+  expect(JSON.parse(payload.setting).group_models).toEqual({
+    Gemini: ['gemini-flash'],
+  })
+})
+
+test('model group scopes prune removed models and groups without opening an empty restriction', () => {
+  const defaults = transformChannelToFormDefaults({
+    ...editingChannel,
+    models: 'gpt-5,gemini-flash',
+    group: 'GPT,Gemini,All',
+    setting: JSON.stringify({
+      group_models: { GPT: ['gpt-5'], Gemini: ['gemini-flash'] },
+    }),
+  })
+  const saved = JSON.parse(
+    buildSettingJSON({ ...defaults, models: 'gpt-5', group: ['Gemini', 'All'] })
+  )
+  expect(saved.group_models).toEqual({ Gemini: [] })
+})
+
+test('model group scopes are disabled without sensitive channel write permission', async () => {
+  editingChannel = {
+    ...editingChannel,
+    setting: JSON.stringify({ group_models: { default: ['custom-model'] } }),
+  }
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: { read: true, write: true } },
+        },
+      },
+    },
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  const section = within(
+    await screen.findByRole('region', { name: 'Models by group' })
+  )
+  const allModels = section.getByRole('switch', {
+    name: 'All channel models',
+  })
+  expect(allModels).toHaveAttribute('aria-disabled', 'true')
+  expect(allModels).not.toBeChecked()
+  await user.click(allModels)
+  allModels.focus()
+  await user.keyboard(' ')
+  expect(allModels).not.toBeChecked()
+  expect(section.getByRole('combobox')).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0][1]).not.toHaveProperty('setting')
 })

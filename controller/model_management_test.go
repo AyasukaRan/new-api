@@ -15,14 +15,17 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	hostdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -108,6 +111,243 @@ func modelManagementRequest(t *testing.T, handler gin.HandlerFunc, method, path 
 		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), output), recorder.Body.String())
 	}
 	return recorder
+}
+
+func TestChannelGroupModelScopesSettings(t *testing.T) {
+	for _, test := range []struct {
+		name, setting, errorKey string
+	}{
+		{"legacy", `{}`, ""},
+		{"limited and empty", `{"group_models":{"GPT":["gpt-test","gpt-4-gizmo-*"],"Gemini":[]}}`, ""},
+		{"unknown group", `{"group_models":{"Missing":[]}}`, "Group model scope contains an unknown group: {{group}}"},
+		{"unknown model", `{"group_models":{"GPT":["gpt-other"]}}`, "Group model scope contains an unknown model: {{model}}"},
+		{"no implicit wildcards", `{"group_models":{"GPT":["gpt-*"]}}`, "Group model scope contains an unknown model: {{model}}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			channel := model.Channel{Group: "GPT,Gemini", Models: "gpt-test,gemini-test,gpt-4-gizmo-*", Setting: &test.setting}
+			err := validateChannel(&channel, false)
+			if test.errorKey == "" {
+				require.NoError(t, err)
+				return
+			}
+			var message *common.Message
+			require.ErrorAs(t, err, &message)
+			assert.Equal(t, test.errorKey, message.Key)
+		})
+	}
+	malformed := `{"group_models":`
+	channel := model.Channel{Group: "GPT", Models: "gpt-test", Setting: &malformed}
+	assert.Empty(t, channel.GetModelsForGroup("GPT"))
+	assert.True(t, channel.HasGroupModelLimits())
+	assert.Equal(t, malformed, *channel.Setting, "reading routing settings must not clear invalid configuration")
+}
+
+func TestChannelGroupModelScopesDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			previousGroups, previousRatios := setting.UserUsableGroups2JSONString(), ratio_setting.GroupRatio2JSONString()
+			previousMaxGroups := setting.GetMaxTokenAutoGroups()
+			previousSelfUse := operation_setting.SelfUseModeEnabled
+			affinity := operation_setting.GetChannelAffinitySetting()
+			previousAffinity := *affinity
+			t.Cleanup(func() {
+				require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousGroups))
+				require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousRatios))
+				require.NoError(t, setting.UpdateMaxTokenAutoGroups(strconv.Itoa(previousMaxGroups)))
+				operation_setting.SelfUseModeEnabled = previousSelfUse
+				*affinity = previousAffinity
+				model.InvalidatePricingCache()
+			})
+			require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"GPT":"GPT","Gemini":"Gemini","Everyone":"Everyone","Empty":"Empty"}`))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"GPT":1,"Gemini":1,"Everyone":1,"Empty":1}`))
+			require.NoError(t, setting.UpdateMaxTokenAutoGroups("2"))
+			operation_setting.SelfUseModeEnabled = true
+			affinity.Enabled = false
+			const gptModel, geminiModel, wildcard = "gpt-scope-test", "gemini-scope-test", "gpt-4-gizmo-*"
+			channel := model.Channel{Name: "Scoped", Key: "scope-fixture", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Group: "GPT,Gemini,Everyone,Empty", Models: gptModel + "," + geminiModel + "," + wildcard, Tag: common.GetPointer("scoped")}
+			channel.SetSetting(dto.ChannelSettings{GroupModels: map[string][]string{"GPT": {gptModel, wildcard}, "Gemini": {geminiModel}, "Empty": {}}})
+			require.NoError(t, db.Create(&channel).Error)
+			require.NoError(t, channel.AddAbilities(db))
+			require.NoError(t, channel.UpdateAbilities(db))
+			var abilities []model.Ability
+			require.NoError(t, db.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+			assert.Len(t, abilities, 6, "rebuilding abilities must not reintroduce the full cross product")
+			legacy := model.Channel{Name: "Legacy", Key: "legacy-fixture", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Group: "Legacy", Models: "legacy-model"}
+			require.NoError(t, db.Create(&legacy).Error)
+			require.NoError(t, legacy.AddAbilities(db))
+			for _, cached := range []bool{false, true} {
+				t.Run(fmt.Sprintf("cache=%t", cached), func(t *testing.T) {
+					common.MemoryCacheEnabled = cached
+					model.InitChannelCache()
+					for _, scope := range []struct {
+						group  string
+						models []string
+					}{
+						{"GPT", []string{gptModel, wildcard}},
+						{"Gemini", []string{geminiModel}},
+						{"Everyone", []string{gptModel, geminiModel, wildcard}},
+						{"Empty", []string{}},
+					} {
+						assert.ElementsMatch(t, scope.models, model.GetGroupEnabledModels(scope.group))
+						pricing := model.FilterPricingByUsableGroups(model.GetPricing(), map[string]string{scope.group: scope.group})
+						visible := make([]string, 0, len(pricing))
+						for _, entry := range pricing {
+							visible = append(visible, entry.ModelName)
+						}
+						assert.ElementsMatch(t, scope.models, visible, "model square: %s", scope.group)
+						recorder := httptest.NewRecorder()
+						context, _ := gin.CreateTestContext(recorder)
+						context.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+						common.SetContextKey(context, constant.ContextKeyTokenGroup, scope.group)
+						ListModels(context, constant.ChannelTypeOpenAI)
+						var response listModelsResponse
+						require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+						require.True(t, response.Success, recorder.Body.String())
+						listed := make([]string, 0, len(response.Data))
+						for _, entry := range response.Data {
+							listed = append(listed, entry.Id)
+						}
+						assert.ElementsMatch(t, scope.models, listed, "API model list: %s", scope.group)
+					}
+					for _, route := range []struct {
+						group, model string
+						allowed      bool
+					}{
+						{"GPT", gptModel, true}, {"GPT", geminiModel, false}, {"Gemini", geminiModel, true},
+						{"Gemini", gptModel, false}, {"Empty", gptModel, false}, {"Everyone", geminiModel, true},
+						{"GPT", "gpt-4-gizmo-123", true}, {"Gemini", "gpt-4-gizmo-123", false},
+						{"GPT", gptModel + "@effort:high", true}, {"GPT", geminiModel + "@effort:high", false},
+					} {
+						assert.Equal(t, route.allowed, model.IsChannelEnabledForGroupModel(route.group, route.model, channel.Id))
+						selected, _ := model.GetRandomSatisfiedChannel(route.group, route.model, 0, nil)
+						if route.allowed {
+							require.NotNil(t, selected, "%+v", route)
+							assert.Equal(t, channel.Id, selected.Id)
+						} else {
+							assert.Nil(t, selected, "%+v", route)
+						}
+					}
+					for _, pin := range []struct {
+						name, group, model, selectedGroup string
+						channelID                         int
+						allowed                           bool
+					}{
+						{"allowed", "GPT", gptModel, "GPT", channel.Id, true},
+						{"excluded", "GPT", geminiModel, "", channel.Id, false},
+						{"auto skips excluded group", "auto", geminiModel, "Gemini", channel.Id, true},
+						{"model-less lifecycle", "GPT", "", "", channel.Id, true},
+						{"legacy pin", "GPT", "unconfigured-model", "", legacy.Id, true},
+					} {
+						context, _ := gin.CreateTestContext(httptest.NewRecorder())
+						context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+						common.SetContextKey(context, constant.ContextKeyUsingGroup, pin.group)
+						common.SetContextKey(context, constant.ContextKeyUserGroup, "GPT")
+						common.SetContextKey(context, constant.ContextKeyTokenAutoGroups, []string{"GPT", "Gemini"})
+						service.GetChannelConstraints(context).AddPin(hostdto.ChannelPin{ChannelId: pin.channelID, Source: hostdto.PinSourceToken, Rank: hostdto.PinRankToken, RetryMode: hostdto.PinRetrySingleAttempt})
+						selected, group, selectErr := service.SelectChannelForRequest(context, pin.model, &service.RetryParam{Ctx: context, ModelName: pin.model, TokenGroup: pin.group})
+						if !pin.allowed {
+							assert.Nil(t, selected, pin.name)
+							require.NotNil(t, selectErr, pin.name)
+							assert.Equal(t, http.StatusForbidden, selectErr.StatusCode)
+							continue
+						}
+						require.Nil(t, selectErr, pin.name)
+						require.NotNil(t, selected, pin.name)
+						assert.Equal(t, pin.channelID, selected.Id)
+						assert.Equal(t, pin.selectedGroup, group, pin.name)
+					}
+				})
+			}
+			var response struct {
+				Success    bool
+				MessageKey string `json:"message_key"`
+			}
+			// An explicitly invalid scope is rejected without altering routes.
+			recorder := modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel/", gin.H{"id": channel.Id, "setting": `{"group_models":{"GPT":["not-configured"]}}`}, &response)
+			assert.False(t, response.Success, recorder.Body.String())
+			assert.Equal(t, "Group model scope contains an unknown model: {{model}}", response.MessageKey)
+			assert.True(t, model.IsChannelEnabledForGroupModel("GPT", gptModel, channel.Id))
+			// A non-sensitive catalog edit inherits and narrows saved restrictions.
+			recorder = modelManagementRequest(t, func(c *gin.Context) { c.Set("role", common.RoleAdminUser); UpdateChannel(c) }, http.MethodPut, "/api/channel/", gin.H{"id": channel.Id, "models": gptModel + "," + wildcard}, &response)
+			require.True(t, response.Success, recorder.Body.String())
+			var updated model.Channel
+			require.NoError(t, db.First(&updated, channel.Id).Error)
+			assert.Equal(t, []string{}, updated.GetSetting().GroupModels["Gemini"])
+			assert.Empty(t, model.GetGroupEnabledModels("Gemini"))
+			// Metadata deletion narrows its scope and preserves other empty scopes.
+			metadata := model.Model{ModelName: gptModel, NameRule: model.NameRuleExact, Status: 1}
+			require.NoError(t, metadata.Insert())
+			_, err := model.DeleteModelMetadata([]int{metadata.Id}, true, false)
+			require.NoError(t, err)
+			require.NoError(t, db.First(&updated, channel.Id).Error)
+			assert.Equal(t, []string{wildcard}, updated.GetSetting().GroupModels["GPT"])
+			assert.Equal(t, []string{}, updated.GetSetting().GroupModels["Gemini"])
+			// Bulk edits discard removed groups and do not allow new models into [] scopes.
+			recorder = modelManagementRequest(t, EditTagChannels, http.MethodPut, "/api/channel/tag", gin.H{"tag": "scoped", "models": "new-model", "groups": "GPT,Everyone,Empty"}, &response)
+			require.True(t, response.Success, recorder.Body.String())
+			require.NoError(t, db.First(&updated, channel.Id).Error)
+			assert.NotContains(t, updated.GetSetting().GroupModels, "Gemini")
+			assert.Equal(t, []string{}, updated.GetSetting().GroupModels["GPT"])
+			assert.Empty(t, model.GetGroupEnabledModels("GPT"))
+			assert.Equal(t, []string{"new-model"}, model.GetGroupEnabledModels("Everyone"))
+			// Explicitly removing the restriction restores the legacy cross product immediately.
+			recorder = modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel/", gin.H{"id": channel.Id, "setting": `{}`}, &response)
+			require.True(t, response.Success, recorder.Body.String())
+			assert.Equal(t, []string{"new-model"}, model.GetGroupEnabledModels("GPT"))
+			assert.True(t, model.IsChannelEnabledForGroupModel("GPT", "new-model", channel.Id))
+			t.Run("partial_edit_preserves_typed_configuration", func(t *testing.T) {
+				const pluginKey = "group-scope-partial"
+				_, err := jsplugin.DefaultRegistry.Register(`
+export const meta = {apiVersion: 1, key: "group-scope-partial", name: "Partial edit fixture", version: "1.0.0", author: {name: "Test"}, models: ["partial-doc"], baseUrl: "https://plugin-default.example", fetchMode: "per_task", upstreams: ["vendor", "new_api"]};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+`, jsplugin.Options{})
+				require.NoError(t, err)
+				t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister(pluginKey) })
+				for _, channelType := range []int{constant.ChannelTypeNewAPI, constant.ChannelTypeVertexAi, constant.ChannelTypeAdvancedCustom, constant.ChannelTypeTaskPlugin} {
+					original := model.Channel{Name: "Partial edit", Type: channelType, Status: common.ChannelStatusEnabled, Key: "partial-edit-private-key", BaseURL: common.GetPointer("https://existing.example"), Group: "Partial", Models: "partial-doc"}
+					settings := dto.ChannelSettings{GroupModels: map[string][]string{"Partial": {"partial-doc"}}}
+					switch channelType {
+					case constant.ChannelTypeNewAPI:
+						settings.TaskExtendPluginKeys = []string{pluginKey}
+					case constant.ChannelTypeVertexAi:
+						original.Other = `{"default":"us-central1"}`
+					case constant.ChannelTypeAdvancedCustom:
+						original.SetOtherSettings(dto.ChannelOtherSettings{AdvancedCustom: &dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/chat/completions", UpstreamPath: "/v1/chat/completions", Converter: "none"}}}})
+					case constant.ChannelTypeTaskPlugin:
+						settings.TaskPluginKey = pluginKey
+					}
+					original.SetSetting(settings)
+					require.NoError(t, validateChannel(&original, false))
+					require.NoError(t, original.Insert())
+					recorder := modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel/", gin.H{"id": original.Id, "weight": 17}, &response)
+					require.True(t, response.Success, "type=%d: %s", channelType, recorder.Body.String())
+					assert.NotContains(t, recorder.Body.String(), original.Key)
+					var updated model.Channel
+					require.NoError(t, db.First(&updated, original.Id).Error)
+					assert.EqualValues(t, 17, updated.GetWeight())
+					assert.Equal(t, original.Type, updated.Type)
+					assert.Equal(t, original.BaseURL, updated.BaseURL)
+					assert.Equal(t, original.Other, updated.Other)
+					assert.Equal(t, original.OtherSettings, updated.OtherSettings)
+					assert.Equal(t, original.Setting, updated.Setting)
+					assert.Equal(t, original.Key, updated.Key)
+					if channelType == constant.ChannelTypeTaskPlugin {
+						recorder = modelManagementRequest(t, UpdateChannel, http.MethodPut, "/api/channel/", gin.H{"id": original.Id, "type": channelType, "base_url": ""}, &response)
+						require.True(t, response.Success, recorder.Body.String())
+						require.NoError(t, db.First(&updated, original.Id).Error)
+						assert.Equal(t, "https://plugin-default.example", updated.GetBaseURL(), "an explicit empty plugin URL still persists the declared default")
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestDeletedModelPricingDatabaseMatrix(t *testing.T) {

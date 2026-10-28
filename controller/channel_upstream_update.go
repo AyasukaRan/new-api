@@ -509,7 +509,11 @@ func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.Cha
 		"settings": channel.OtherSettings,
 	}
 	if updateModels {
+		if err := channel.PruneGroupModels(); err != nil {
+			return err
+		}
 		updates["models"] = channel.Models
+		updates["setting"] = channel.Setting
 	}
 	return model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
 }

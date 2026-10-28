@@ -305,6 +305,35 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		if channel.Status != common.ChannelStatusEnabled {
 			return nil, "", pinnedChannelUnavailable(pin, http.StatusForbidden, i18n.MsgDistributorChannelDisabled)
 		}
+		selectGroup := ""
+		// Existing unscoped pins and model-less lifecycle operations retain their
+		// behavior. A model request cannot use a pin to bypass an explicit scope.
+		if modelName != "" && channel.HasGroupModelLimits() {
+			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+			if retry != nil && retry.TokenGroup != "" {
+				usingGroup = retry.TokenGroup
+			}
+			groups := []string{usingGroup}
+			if usingGroup == "auto" {
+				groups = GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+			}
+			for _, group := range groups {
+				if model.IsChannelEnabledForGroupModel(group, modelName, channel.Id) {
+					selectGroup = group
+					break
+				}
+			}
+			if selectGroup == "" {
+				return nil, "", &ChannelSelectError{
+					StatusCode: http.StatusForbidden, Code: types.ErrorCodeModelNotFound,
+					MessageID: i18n.MsgDistributorNoAvailableChannel,
+					Params:    map[string]any{"Group": usingGroup, "Model": modelName},
+				}
+			}
+			if usingGroup == "auto" {
+				common.SetContextKey(c, constant.ContextKeyAutoGroup, selectGroup)
+			}
+		}
 		if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
 			if kind == dto.FilterChannelBalance {
 				if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
@@ -320,7 +349,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
 			return nil, "", channelProbeSelectionError(probeErr)
 		}
-		return channel, "", nil
+		return channel, selectGroup, nil
 	}
 
 	usingGroup := retry.TokenGroup

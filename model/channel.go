@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math/rand"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -354,6 +355,76 @@ func (channel *Channel) GetGroups() []string {
 		groups[i] = strings.TrimSpace(group)
 	}
 	return groups
+}
+
+// GetModelsForGroup is the shared route and catalog view. Intersecting with
+// Models keeps stale saved scopes from resurrecting a removed model.
+func (channel *Channel) GetModelsForGroup(group string) []string {
+	if !slices.Contains(channel.GetGroups(), group) {
+		return nil
+	}
+	setting := dto.ChannelSettings{}
+	if channel.Setting != nil && *channel.Setting != "" {
+		if err := common.UnmarshalJsonStr(*channel.Setting, &setting); err != nil {
+			return nil
+		}
+	}
+	models := channel.GetModels()
+	allowed, limited := setting.GroupModels[group]
+	if !limited {
+		return models
+	}
+	result := make([]string, 0, len(allowed))
+	for _, name := range models {
+		if slices.Contains(allowed, name) && !slices.Contains(result, name) {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
+// HasGroupModelLimits also fails closed for malformed settings on pinned
+// requests; reading routing settings must never clear them in the database.
+func (channel *Channel) HasGroupModelLimits() bool {
+	if channel.Setting == nil || *channel.Setting == "" {
+		return false
+	}
+	setting := dto.ChannelSettings{}
+	if err := common.UnmarshalJsonStr(*channel.Setting, &setting); err != nil {
+		return true
+	}
+	return len(setting.GroupModels) > 0
+}
+
+// PruneGroupModels keeps explicit empty scopes when a catalog operation
+// removes models, while discarding scopes for groups removed from the channel.
+func (channel *Channel) PruneGroupModels() error {
+	if channel.Setting == nil || *channel.Setting == "" {
+		return nil
+	}
+	setting := dto.ChannelSettings{}
+	if err := common.UnmarshalJsonStr(*channel.Setting, &setting); err != nil {
+		return err
+	}
+	if len(setting.GroupModels) == 0 {
+		return nil
+	}
+	groups, models := channel.GetGroups(), channel.GetModels()
+	for group, scoped := range setting.GroupModels {
+		if !slices.Contains(groups, group) {
+			delete(setting.GroupModels, group)
+			continue
+		}
+		kept := make([]string, 0, len(scoped))
+		for _, name := range scoped {
+			if slices.Contains(models, name) && !slices.Contains(kept, name) {
+				kept = append(kept, name)
+			}
+		}
+		setting.GroupModels[group] = kept
+	}
+	channel.SetSetting(setting)
+	return nil
 }
 
 func (channel *Channel) GetOtherInfo() map[string]any {
@@ -914,11 +985,9 @@ func DisableChannelByTag(tag string) error {
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
-	updatedTag := tag
 	// 如果 newTag 不为空且不等于 tag，则更新 tag
 	if newTag != nil && *newTag != tag {
 		updateData.Tag = newTag
-		updatedTag = *newTag
 	}
 	if modelMapping != nil {
 		updateData.ModelMapping = modelMapping
@@ -944,27 +1013,36 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
-	if err != nil {
-		return err
-	}
 	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
+		return DB.Transaction(func(tx *gorm.DB) error {
+			var channels []Channel
+			if err := lockForUpdate(tx).Where("tag = ?", tag).Order("id").Find(&channels).Error; err != nil {
+				return err
+			}
 			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
-				if err != nil {
-					common.SysLog(common.LogText("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
+				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updateData).Error; err != nil {
+					return err
+				}
+				if err := tx.First(&channel, channel.Id).Error; err != nil {
+					return err
+				}
+				if err := channel.PruneGroupModels(); err != nil {
+					return err
+				}
+				if err := tx.Model(&Channel{}).Where("id = ?", channel.Id).Update("setting", channel.Setting).Error; err != nil {
+					return err
+				}
+				if err := channel.UpdateAbilities(tx); err != nil {
+					return err
 				}
 			}
-		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
-			return err
-		}
+			return nil
+		})
 	}
-	return nil
+	if err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error; err != nil {
+		return err
+	}
+	return UpdateAbilityByTag(tag, newTag, priority, weight)
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {
@@ -1058,6 +1136,17 @@ func (channel *Channel) ValidateSettings() error {
 		err := common.Unmarshal([]byte(*channel.Setting), channelParams)
 		if err != nil {
 			return err
+		}
+	}
+	groups, models := channel.GetGroups(), channel.GetModels()
+	for group, scoped := range channelParams.GroupModels {
+		if !slices.Contains(groups, group) {
+			return common.NewMessage("Group model scope contains an unknown group: {{group}}", map[string]any{"group": group})
+		}
+		for _, name := range scoped {
+			if !slices.Contains(models, name) {
+				return common.NewMessage("Group model scope contains an unknown model: {{model}}", map[string]any{"model": name})
+			}
 		}
 	}
 	if _, err := common.ParseProxyURLStrict(channelParams.Proxy); err != nil {

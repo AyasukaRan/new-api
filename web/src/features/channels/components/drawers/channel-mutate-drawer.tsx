@@ -207,6 +207,7 @@ import {
 } from '../../lib/task-plugin-base-url'
 import type { Channel } from '../../types'
 import { ChannelBalanceSettings } from '../channel-balance-settings'
+import { ChannelGroupModelsSettings } from '../channel-group-models-settings'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
@@ -298,6 +299,7 @@ const SENSITIVE_FORM_FIELDS = [
   'aws_api_type',
   'azure_responses_version',
   'force_format',
+  'group_models',
   'thinking_to_content',
   'proxy',
   'http_protocol',
@@ -3530,7 +3532,7 @@ export function ChannelMutateDrawer({
             </div>
           </div>
 
-          <div className='border-border/60 rounded-lg border p-4'>
+          <div className='border-border/60 space-y-4 rounded-lg border p-4'>
             <FormField
               control={form.control}
               name='group'
@@ -3557,6 +3559,10 @@ export function ChannelMutateDrawer({
                   <FormMessage />
                 </FormItem>
               )}
+            />
+            <ChannelGroupModelsSettings
+              control={form.control}
+              disabled={sensitiveLocked}
             />
           </div>
         </div>
