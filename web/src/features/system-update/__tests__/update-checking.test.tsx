@@ -23,6 +23,12 @@ import {
   type QueryClient,
 } from '@tanstack/react-query'
 import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router'
+import {
   act,
   cleanup,
   render,
@@ -32,11 +38,16 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import i18next from 'i18next'
 import type { ReactNode } from 'react'
 import { toast } from 'sonner'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
+import { AppHeader } from '@/components/layout/components/app-header'
+import { PublicHeader } from '@/components/layout/components/public-header'
+import { SidebarProvider } from '@/components/ui/sidebar'
 import { UpdateCheckerSection } from '@/features/system-settings/maintenance/update-checker-section'
+import { getOperationsSectionNavItems } from '@/features/system-settings/operations/section-registry'
 import { api } from '@/lib/api'
 import { createAppQueryClient } from '@/lib/query-client'
 import { ROLE } from '@/lib/roles'
@@ -103,6 +114,74 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+})
+
+describe('application without system updates', () => {
+  test.each([ROLE.ADMIN, ROLE.SUPER_ADMIN])(
+    'does not expose or automatically check updates in either header for administrator role %s',
+    async (role) => {
+      useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role })
+      vi.mocked(api.get).mockImplementation(async (url) => ({
+        data: {
+          success: true,
+          data: url === '/api/notice' ? '' : { version: 'v1.0.0-rc.35' },
+        },
+      }))
+      const router = createRouter({
+        routeTree: createRootRoute({
+          component: () => (
+            <SidebarProvider>
+              <AppHeader rightContent={<span />} />
+              <PublicHeader
+                showThemeSwitch={false}
+                showLanguageSwitcher={false}
+                showAuthButtons={false}
+                showNotifications={false}
+              />
+            </SidebarProvider>
+          ),
+        }),
+        history: createMemoryHistory({ initialEntries: ['/'] }),
+      })
+      await router.load()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(<RouterProvider router={router} />, { wrapper: Wrapper })
+      expect(await screen.findAllByRole('banner')).toHaveLength(2)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SYSTEM_UPDATE_INTERVAL)
+        focusManager.setFocused(false)
+        onlineManager.setOnline(false)
+      })
+      await act(async () => {
+        focusManager.setFocused(true)
+        onlineManager.setOnline(true)
+      })
+
+      expect(
+        screen.queryByRole('button', {
+          name: /Check for updates|New version available/,
+        })
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('dialog', { name: 'System updates' })
+      ).not.toBeInTheDocument()
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  test('operations navigation keeps settings without a system update entry', () => {
+    const items = getOperationsSectionNavItems(i18next.t)
+    expect(items).toContainEqual({
+      title: 'System Behavior',
+      url: '/system-settings/operations/behavior',
+    })
+    expect(items).not.toContainEqual(
+      expect.objectContaining({
+        url: '/system-settings/operations/update-checker',
+      })
+    )
+  })
 })
 
 describe('administrator update entry', () => {
