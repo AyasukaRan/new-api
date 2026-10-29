@@ -31,6 +31,7 @@ import { buildChartTimeDomain } from '@/features/dashboard/lib/charts'
 import { getDefaultDays } from '@/features/dashboard/lib/filters'
 import type {
   DashboardChartTimeDomain,
+  DashboardMetric,
   DashboardFilters,
   ModelAnalyticsChartTab,
   QuotaDataItem,
@@ -48,6 +49,7 @@ import { PanelWrapper } from '../ui/panel-wrapper'
 import { ModelCharts } from './model-charts'
 
 interface CallSourcesProps {
+  metric?: DashboardMetric
   filters?: DashboardFilters
   timeDomain?: DashboardChartTimeDomain
   activeTab?: ModelAnalyticsChartTab
@@ -111,11 +113,12 @@ export function CallSources(props: CallSourcesProps) {
           count: row.count,
           token_used: row.token_used,
           quota: row.quota,
+          ...(isAdmin ? { finance: row.finance } : {}),
         })
       }
     }
     return chartData
-  }, [query.data, t])
+  }, [query.data, isAdmin, t])
 
   let content
   if (query.isPending) {
@@ -163,6 +166,7 @@ export function CallSources(props: CallSourcesProps) {
     <section aria-label={t('Call Sources')} aria-busy={query.isFetching}>
       {query.isSuccess && chartData.length > 0 ? (
         <ModelCharts
+          metric={isAdmin ? props.metric : undefined}
           title={t('Call Sources')}
           description={description}
           headerActions={refreshButton}

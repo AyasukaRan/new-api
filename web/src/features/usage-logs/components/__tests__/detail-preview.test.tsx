@@ -522,14 +522,12 @@ test.each([true, false])(
     fireEvent.click(renderPreview(other, isAdmin))
     const dialog = within(await screen.findByRole('dialog'))
     if (isAdmin) {
-      expect(dialog.getByText('Estimated upstream cost')).toBeVisible()
+      expect(dialog.getByText('Upstream cost')).toBeVisible()
       expect(dialog.getByText('$0.013')).toBeVisible()
       expect(dialog.getByText('-$0.003')).toBeVisible()
       expect(dialog.getByText('1.3000x')).toBeVisible()
     } else {
-      expect(
-        dialog.queryByText('Estimated upstream cost')
-      ).not.toBeInTheDocument()
+      expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
       expect(dialog.queryByText('-$0.003')).not.toBeInTheDocument()
     }
   }
@@ -558,7 +556,7 @@ test('test log details never show profit even when metadata contains an estimate
   )
   fireEvent.click(screen.getByRole('button', { name: /Per-call/ }))
   const dialog = within(await screen.findByRole('dialog'))
-  expect(dialog.queryByText('Estimated gross profit')).not.toBeInTheDocument()
+  expect(dialog.queryByText('Gross profit')).not.toBeInTheDocument()
 })
 
 test.each([true, false])(
@@ -581,14 +579,14 @@ test.each([true, false])(
     fireEvent.click(renderPreview(other, isAdmin))
     const dialog = within(await screen.findByRole('dialog'))
     if (isAdmin) {
-      expect(dialog.getByText('Actual upstream cost')).toBeVisible()
+      expect(dialog.getByText('Upstream cost')).toBeVisible()
       expect(dialog.getByText('$0.013')).toBeVisible()
-      expect(dialog.getByText('Actual gross profit')).toBeVisible()
+      expect(dialog.getByText('Gross profit')).toBeVisible()
       expect(dialog.getByText('-$0.003')).toBeVisible()
     } else {
-      expect(dialog.queryByText('Actual upstream cost')).not.toBeInTheDocument()
+      expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
       expect(dialog.queryByText('$0.013')).not.toBeInTheDocument()
-      expect(dialog.queryByText('Actual gross profit')).not.toBeInTheDocument()
+      expect(dialog.queryByText('Gross profit')).not.toBeInTheDocument()
     }
   }
 )

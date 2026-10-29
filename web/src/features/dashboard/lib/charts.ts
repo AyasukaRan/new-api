@@ -21,13 +21,16 @@ import { dataScheme as vchartDefaultDataScheme } from '@visactor/vchart/esm/them
 import { MAX_CHART_TREND_POINTS } from '@/features/dashboard/constants'
 import type {
   DashboardChartTimeDomain,
+  DashboardMetric,
   QuotaDataItem,
   ProcessedChartData,
   ProcessedUserChartData,
 } from '@/features/dashboard/types'
-import { getCurrencyDisplay } from '@/lib/currency'
+import { formatQuotaWithCurrency, getCurrencyDisplay } from '@/lib/currency'
 import dayjs from '@/lib/dayjs'
 import { formatChartTime, type TimeGranularity } from '@/lib/time'
+
+import { getDashboardMetricValue } from './finance'
 
 type TFunction = (key: string) => string
 type TooltipLineItem = {
@@ -127,13 +130,47 @@ export function processChartData(
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
   chartCornerRadius?: number,
-  timeDomain?: DashboardChartTimeDomain
+  timeDomain?: DashboardChartTimeDomain,
+  metric: DashboardMetric = 'requests'
 ): ProcessedChartData {
   const tt: TFunction = t ?? ((x) => x)
   const otherLabel = tt('Other')
+  const monetary = metric !== 'requests'
+  const metricLabel = {
+    requests: tt('Requests'),
+    quota: tt('Revenue'),
+    cost: tt('Upstream cost'),
+    profit: tt('Gross profit'),
+  }[metric]
+  const trendTitle = monetary
+    ? `${metricLabel} · ${tt('Trend')}`
+    : tt('Call Trend')
+  const distributionTitle = monetary
+    ? metricLabel
+    : tt('Call Count Distribution')
+  const rankingTitle = monetary
+    ? `${metricLabel} · ${tt('Ranking')}`
+    : tt('Call Count Ranking')
+  const missingCostData =
+    metric === 'cost' || metric === 'profit'
+      ? data.filter((item) => getDashboardMetricValue(item, metric) === null)
+      : []
+  if (monetary) {
+    data = data.flatMap((item) => {
+      const value = getDashboardMetricValue(item, metric)
+      if (value === null) return []
+      return [{ ...item, count: value, quota: value }]
+    })
+  }
 
   const formatInt = (value: number) =>
-    Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
+    monetary
+      ? formatQuotaWithCurrency(value, {
+          digitsLarge: 4,
+          digitsSmall: 4,
+          abbreviate: false,
+        })
+      : Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value)
   const formatQuotaValue = (value: number) => renderQuotaCompat(value, 4)
   const formatQuotaTotal = (value: number) => renderQuotaCompat(value, 2)
 
@@ -210,7 +247,7 @@ export function processChartData(
         categoryField: 'type',
         title: {
           visible: true,
-          text: tt('Call Count Distribution'),
+          text: distributionTitle,
           subtext: tt('No data available'),
         },
         legends: { visible: false },
@@ -248,7 +285,7 @@ export function processChartData(
         legends: { visible: true, selectMode: 'single' },
         title: {
           visible: true,
-          text: tt('Call Trend'),
+          text: trendTitle,
         },
       },
       spec_rank_bar: {
@@ -260,11 +297,17 @@ export function processChartData(
         legends: { visible: true, selectMode: 'single' },
         title: {
           visible: true,
-          text: tt('Call Count Ranking'),
+          text: rankingTitle,
         },
       },
-      totalQuotaDisplay: formatQuotaTotal(0),
-      totalCountDisplay: formatInt(0),
+      totalQuotaDisplay:
+        metric === 'cost' || metric === 'profit'
+          ? tt('Not recorded')
+          : formatQuotaTotal(0),
+      totalCountDisplay:
+        metric === 'cost' || metric === 'profit'
+          ? tt('Not recorded')
+          : formatInt(0),
     }
   }
 
@@ -385,6 +428,31 @@ export function processChartData(
     ? timeDomain.buckets.map((bucket) => bucket.label)
     : fillTimePoints(sortedTimes)
 
+  const missingCostBuckets = new Set<string>()
+  for (const item of missingCostData) {
+    const timestamp = Number(item.created_at)
+    const bucket = timeDomain?.buckets.find(
+      (entry) => timestamp >= entry.start && timestamp < entry.end
+    )
+    if (
+      timeDomain &&
+      (!bucket ||
+        timestamp < timeDomain.start_timestamp ||
+        timestamp > timeDomain.end_timestamp)
+    ) {
+      continue
+    }
+    const time = bucket?.label ?? formatChartTime(timestamp, timeGranularity)
+    const model = item.model_name || 'Unknown'
+    if (!timeModelMap.get(time)?.has(model)) {
+      missingCostBuckets.add(`${time}\0${model}`)
+    }
+  }
+
+  const hasOnlyUnrecordedCost = (time: string, models: string[]) =>
+    models.some((model) => missingCostBuckets.has(`${time}\0${model}`)) &&
+    !models.some((model) => timeModelMap.get(time)?.has(model))
+
   const totalTimes = [...modelTotalsMap.values()].reduce(
     (sum, x) => sum + (Number(x.count) || 0),
     0
@@ -407,7 +475,7 @@ export function processChartData(
     Time: string
     Model: string
     rawQuota: number
-    Usage: number
+    Usage: number | null
     TimeSum: number
   }> = []
 
@@ -422,7 +490,7 @@ export function processChartData(
         Time: time,
         Model: model,
         rawQuota,
-        Usage: usage,
+        Usage: missingCostBuckets.has(`${time}\0${model}`) ? null : usage,
         TimeSum: 0,
       }
     })
@@ -445,6 +513,9 @@ export function processChartData(
     rankedQuotaModels.slice(0, MAX_AREA_MODELS).map((m) => m.Model)
   )
 
+  const otherAreaModels = sortedModels.filter(
+    (model) => !topAreaModels.has(model)
+  )
   const areaValues: typeof lineValues = []
   chartTimes.forEach((time) => {
     const buckets = new Map<string, { rawQuota: number; usage: number }>()
@@ -464,11 +535,12 @@ export function processChartData(
       })
     })
     for (const [model, vals] of buckets) {
+      const sourceModels = model === otherLabel ? otherAreaModels : [model]
       areaValues.push({
         Time: time,
         Model: model,
         rawQuota: vals.rawQuota,
-        Usage: vals.usage,
+        Usage: hasOnlyUnrecordedCost(time, sourceModels) ? null : vals.usage,
         TimeSum: timeSum,
       })
     }
@@ -492,7 +564,7 @@ export function processChartData(
   const modelLineValues: Array<{
     Time: string
     Model: string
-    Count: number
+    Count: number | null
   }> = []
   chartTimes.forEach((time) => {
     const timeData = topTrendModels.map((model) => {
@@ -500,7 +572,9 @@ export function processChartData(
       return {
         Time: time,
         Model: model,
-        Count: Number(stats?.count) || 0,
+        Count: missingCostBuckets.has(`${time}\0${model}`)
+          ? null
+          : Number(stats?.count) || 0,
       }
     })
     if (otherTrendModels.length > 0) {
@@ -511,7 +585,9 @@ export function processChartData(
       timeData.push({
         Time: time,
         Model: otherLabel,
-        Count: otherCount,
+        Count: hasOnlyUnrecordedCost(time, otherTrendModels)
+          ? null
+          : otherCount,
       })
     }
     modelLineValues.push(...timeData)
@@ -556,7 +632,7 @@ export function processChartData(
       },
       title: {
         visible: true,
-        text: tt('Call Count Distribution'),
+        text: distributionTitle,
       },
       legends: { visible: true, orient: 'left' },
       label: { visible: true },
@@ -666,13 +742,26 @@ export function processChartData(
       data: [{ id: 'lineData', values: modelLineValues }],
       xField: 'Time',
       yField: 'Count',
+      axes: monetary
+        ? [
+            { orient: 'bottom', type: 'band' },
+            {
+              orient: 'left',
+              type: 'linear',
+              zero: true,
+              label: {
+                formatMethod: (value: number) => formatQuotaWithCurrency(value),
+              },
+            },
+          ]
+        : undefined,
       seriesField: 'Model',
       stack: false,
       legends: { visible: true, selectMode: 'single' },
       color: modelColor,
       title: {
         visible: true,
-        text: tt('Call Trend'),
+        text: trendTitle,
       },
       tooltip: {
         mark: {
@@ -744,12 +833,25 @@ export function processChartData(
       data: [{ id: 'rankData', values: rankValues }],
       xField: 'Model',
       yField: 'Count',
+      axes: monetary
+        ? [
+            { orient: 'bottom', type: 'band' },
+            {
+              orient: 'left',
+              type: 'linear',
+              zero: true,
+              label: {
+                formatMethod: (value: number) => formatQuotaWithCurrency(value),
+              },
+            },
+          ]
+        : undefined,
       seriesField: 'Model',
       legends: { visible: true, selectMode: 'single' },
       color: modelColor,
       title: {
         visible: true,
-        text: tt('Call Count Ranking'),
+        text: rankingTitle,
       },
       bar: {
         state: {
@@ -792,13 +894,40 @@ export function processUserChartData(
   data: QuotaDataItem[],
   timeGranularity: TimeGranularity = 'day',
   t?: TFunction,
-  limit = 10
+  limit = 10,
+  metric: DashboardMetric = 'quota'
 ): ProcessedUserChartData {
   const tt: TFunction = t ?? ((x) => x)
   const { config } = getCurrencyDisplay()
   const quotaPerUnit = config.quotaPerUnit
 
-  const formatVal = (raw: number) => renderQuotaCompat(raw, 2)
+  const formatVal = (raw: number) =>
+    formatQuotaWithCurrency(raw, {
+      digitsLarge: 4,
+      digitsSmall: 4,
+      abbreviate: false,
+    })
+  const metricLabel = {
+    requests: tt('Requests'),
+    quota: tt('Revenue'),
+    cost: tt('Upstream cost'),
+    profit: tt('Gross profit'),
+  }[metric]
+  const rankingTitle =
+    metric === 'quota'
+      ? tt('User Consumption Ranking')
+      : `${metricLabel} · ${tt('Ranking')}`
+  const trendTitle =
+    metric === 'quota'
+      ? tt('User Consumption Trend')
+      : `${metricLabel} · ${tt('Trend')}`
+  const missingCostData = data.filter(
+    (item) => getDashboardMetricValue(item, metric) === null
+  )
+  data = data.flatMap((item) => {
+    const value = getDashboardMetricValue(item, metric)
+    return value === null ? [] : [{ ...item, quota: value }]
+  })
 
   const emptyResult: ProcessedUserChartData = {
     spec_user_rank: {
@@ -810,7 +939,7 @@ export function processUserChartData(
       direction: 'horizontal',
       title: {
         visible: true,
-        text: tt('User Consumption Ranking'),
+        text: rankingTitle,
         subtext: tt('No data available'),
       },
       legends: { visible: false },
@@ -825,7 +954,7 @@ export function processUserChartData(
       seriesField: 'User',
       title: {
         visible: true,
-        text: tt('User Consumption Trend'),
+        text: trendTitle,
         subtext: tt('No data available'),
       },
       legends: { visible: true, selectMode: 'single' },
@@ -880,13 +1009,25 @@ export function processUserChartData(
     map.set(user, (map.get(user) || 0) + (Number(item.quota) || 0))
   })
 
+  const missingCostBuckets = new Set<string>()
+  for (const item of missingCostData) {
+    const user = item.username || 'unknown'
+    if (!topUserSet.has(user)) continue
+    const ts = Number(item.created_at)
+    const time = formatChartTime(ts, timeGranularity)
+    timeTimestamps.set(time, Math.min(timeTimestamps.get(time) ?? ts, ts))
+    if (!timeUserMap.get(time)?.has(user)) {
+      missingCostBuckets.add(`${time}\0${user}`)
+    }
+  }
+
   const sortedTimePoints = [...timeTimestamps]
     .sort((a, b) => a[1] - b[1])
     .map(([time]) => time)
   const trendValues: Array<{
     Time: string
     User: string
-    rawQuota: number
+    rawQuota: number | null
     Usage: number
   }> = []
 
@@ -896,7 +1037,7 @@ export function processUserChartData(
       trendValues.push({
         Time: time,
         User: user,
-        rawQuota: q,
+        rawQuota: missingCostBuckets.has(`${time}\0${user}`) ? null : q,
         Usage: Number((q / quotaPerUnit).toFixed(4)),
       })
     })
@@ -912,7 +1053,7 @@ export function processUserChartData(
       direction: 'horizontal',
       title: {
         visible: true,
-        text: tt('User Consumption Ranking'),
+        text: rankingTitle,
         subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
       },
       legends: { visible: false },
@@ -968,7 +1109,7 @@ export function processUserChartData(
       stack: false,
       title: {
         visible: true,
-        text: tt('User Consumption Trend'),
+        text: trendTitle,
         subtext: `${tt('Total:')} ${formatVal(totalQuota)}`,
       },
       legends: { visible: true, selectMode: 'single' },

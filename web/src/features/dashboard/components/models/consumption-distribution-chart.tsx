@@ -32,6 +32,7 @@ import { processChartData } from '@/features/dashboard/lib'
 import type {
   ConsumptionDistributionChartType,
   DashboardChartTimeDomain,
+  DashboardMetric,
   QuotaDataItem,
 } from '@/features/dashboard/types'
 import { useThemeRadiusPx } from '@/lib/theme-radius'
@@ -43,6 +44,7 @@ let themeManagerPromise: Promise<
 > | null = null
 
 interface ConsumptionDistributionChartProps {
+  metric?: DashboardMetric
   data: QuotaDataItem[]
   loading?: boolean
   timeGranularity?: TimeGranularity
@@ -107,10 +109,12 @@ export function ConsumptionDistributionChart(
         timeGranularity,
         t,
         chartRadius,
-        props.timeDomain
+        props.timeDomain,
+        props.metric
       ),
     [
       props.data,
+      props.metric,
       props.loading,
       props.timeDomain,
       timeGranularity,
@@ -118,10 +122,14 @@ export function ConsumptionDistributionChart(
       chartRadius,
     ]
   )
+  let titleKey = 'Quota Distribution'
+  if (props.metric === 'cost') titleKey = 'Upstream cost'
+  if (props.metric === 'profit') titleKey = 'Gross profit'
   const spec = chartType === 'bar' ? chartData.spec_line : chartData.spec_area
   const specType = typeof spec?.type === 'string' ? spec.type : chartType
   const chartKey = [
     chartType,
+    props.metric,
     specType,
     props.loading ? 'loading' : 'ready',
     props.data.length,
@@ -136,7 +144,7 @@ export function ConsumptionDistributionChart(
           <IconBadge tone='success' size='sm'>
             <WalletCards />
           </IconBadge>
-          <div className='text-sm font-semibold'>{t('Quota Distribution')}</div>
+          <div className='text-sm font-semibold'>{t(titleKey)}</div>
           <span className='text-muted-foreground text-xs'>
             {t('Total:')} {chartData.totalQuotaDisplay}
           </span>

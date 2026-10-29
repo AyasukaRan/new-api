@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type {
+  DashboardFinance,
   DashboardFlowGraph,
   DashboardFlowLink,
   DashboardFlowNode,
@@ -39,6 +40,7 @@ import { getDashboardChartColors } from './charts'
 type VChartSpec = Record<string, any>
 
 type FlowMetrics = {
+  finance?: DashboardFinance
   quota: number
   tokens: number
   requests: number
@@ -49,6 +51,10 @@ type FlowSankeyLabels = {
   tokens: string
   requests: string
   share: string
+  cost?: string
+  profit?: string
+  coverage?: string
+  unrecorded?: string
 }
 
 type FlowPathNode = {
@@ -159,6 +165,7 @@ function isFlowNodeKind(value: unknown): value is FlowNodeKind {
 
 function rowMetrics(row: FlowQuotaDataItem): FlowMetrics {
   return {
+    finance: row.finance,
     quota: numberValue(row.quota),
     tokens: numberValue(row.token_used),
     requests: numberValue(row.count),
@@ -168,7 +175,37 @@ function rowMetrics(row: FlowQuotaDataItem): FlowMetrics {
 function metricValue(metrics: FlowMetrics, metric: FlowMetric): number {
   if (metric === 'requests') return metrics.requests
   if (metric === 'tokens') return metrics.tokens
+  if (metric === 'cost') return metrics.finance?.cost_quota ?? 0
   return metrics.quota
+}
+
+function mergeFlowFinance(
+  previous: FlowMetrics,
+  incoming: FlowMetrics
+): DashboardFinance | undefined {
+  if (!previous.finance && !incoming.finance) return undefined
+  return {
+    cost_quota:
+      (previous.finance?.cost_quota ?? 0) + (incoming.finance?.cost_quota ?? 0),
+    profit_quota:
+      (previous.finance?.profit_quota ?? 0) +
+      (incoming.finance?.profit_quota ?? 0),
+    covered_revenue_quota:
+      (previous.finance?.covered_revenue_quota ?? 0) +
+      (incoming.finance?.covered_revenue_quota ?? 0),
+    recorded_count:
+      (previous.finance?.recorded_count ?? 0) +
+      (incoming.finance?.recorded_count ?? 0),
+    actual_count:
+      (previous.finance?.actual_count ?? 0) +
+      (incoming.finance?.actual_count ?? 0),
+    estimated_count:
+      (previous.finance?.estimated_count ?? 0) +
+      (incoming.finance?.estimated_count ?? 0),
+    unrecorded_count:
+      (previous.finance?.unrecorded_count ?? previous.requests) +
+      (incoming.finance?.unrecorded_count ?? incoming.requests),
+  }
 }
 
 function userNode(row: FlowQuotaDataItem): FlowPathNode {
@@ -433,6 +470,7 @@ function addNode(
     colorKey,
   }
   previous.value += metricValue(metrics, metric)
+  previous.finance = mergeFlowFinance(previous, metrics)
   previous.requests += metrics.requests
   previous.quota += metrics.quota
   previous.tokens += metrics.tokens
@@ -466,6 +504,7 @@ function addLink(
     share: 0,
   }
   previous.value += metricValue(metrics, metric)
+  previous.finance = mergeFlowFinance(previous, metrics)
   previous.requests += metrics.requests
   previous.quota += metrics.quota
   previous.tokens += metrics.tokens
@@ -528,6 +567,7 @@ function buildSummary(rows: FlowQuotaDataItem[]): FlowSummary {
   return rows.reduce<FlowSummary>(
     (summary, row) => {
       const metrics = rowMetrics(row)
+      summary.finance = mergeFlowFinance(summary, metrics)
       summary.quota += metrics.quota
       summary.tokens += metrics.tokens
       summary.requests += metrics.requests
@@ -979,6 +1019,10 @@ export function buildDashboardFlowData(
   options: FlowBuildOptions = {}
 ): ProcessedFlowData {
   const role = options.role ?? DEFAULT_FLOW_ROLE
+  if (role === 'user') {
+    rows = rows.map(({ finance: _finance, ...row }) => row)
+    if (metric === 'cost') metric = 'quota'
+  }
   const palette = options.colorPalette
   const ctx = {
     deletedTokenLabel: options.deletedTokenLabel,
@@ -1093,6 +1137,8 @@ function tooltipMetricLines(
     formatNumber(metricValue(datum, key))
   const hasMetric = (datum: Record<string, unknown>, key: string) =>
     metricValue(datum, key) > 0
+  const finance = (datum: Record<string, unknown>) =>
+    sankeyDatumValue(datum, 'finance') as DashboardFinance | undefined
 
   return [
     {
@@ -1116,6 +1162,50 @@ function tooltipMetricLines(
         `${(metricValue(datum, 'share') * 100).toFixed(1)}%`,
       visible: (datum: Record<string, unknown>) => hasMetric(datum, 'share'),
     },
+    ...(labels.cost
+      ? [
+          {
+            key: labels.cost,
+            value: (datum: Record<string, unknown>) => {
+              const data = finance(datum)
+              return data?.recorded_count
+                ? valueFormatter(data.cost_quota)
+                : (labels.unrecorded ?? '--')
+            },
+            visible: (datum: Record<string, unknown>) =>
+              Boolean(finance(datum)),
+          },
+        ]
+      : []),
+    ...(labels.profit
+      ? [
+          {
+            key: labels.profit,
+            value: (datum: Record<string, unknown>) => {
+              const data = finance(datum)
+              return data?.recorded_count
+                ? valueFormatter(data.profit_quota)
+                : (labels.unrecorded ?? '--')
+            },
+            visible: (datum: Record<string, unknown>) =>
+              Boolean(finance(datum)),
+          },
+        ]
+      : []),
+    ...(labels.coverage
+      ? [
+          {
+            key: labels.coverage,
+            value: (datum: Record<string, unknown>) => {
+              const data = finance(datum)
+              const recorded = data?.recorded_count ?? 0
+              return `${formatNumber(recorded)} / ${formatNumber(recorded + (data?.unrecorded_count ?? 0))}`
+            },
+            visible: (datum: Record<string, unknown>) =>
+              Boolean(finance(datum)),
+          },
+        ]
+      : []),
   ]
 }
 
@@ -1146,6 +1236,7 @@ export function buildFlowSankeySpec(
               requests: node.requests,
               quota: node.quota,
               tokens: node.tokens,
+              finance: node.finance,
               color: node.color,
               colorKey: node.colorKey,
               highlighted: node.highlighted,
@@ -1172,6 +1263,7 @@ export function buildFlowSankeySpec(
                   requests: link.requests,
                   quota: link.quota,
                   tokens: link.tokens,
+                  finance: link.finance,
                   color: link.color,
                   linkColor: link.linkColor,
                   linkAlpha: link.linkAlpha,

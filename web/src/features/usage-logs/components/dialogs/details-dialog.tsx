@@ -184,7 +184,6 @@ function BillingBreakdown(props: {
   const { log, other, isAdmin } = props
   const cost =
     isAdmin && props.showCostEstimate ? getLogCostEstimate(other) : null
-  const actualCost = cost?.estimated === false
   const isPerCall = isPerCallBilling(other.model_price)
   const isClaude = other.claude === true
   const isTieredExpr = other.billing_mode === 'tiered_expr'
@@ -409,31 +408,19 @@ function BillingBreakdown(props: {
             </>
           )}
           <DetailRow
-            label={
-              actualCost
-                ? t('Actual upstream cost')
-                : t('Estimated upstream cost')
-            }
+            label={t('Upstream cost')}
             value={cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
             mono
           />
           <DetailRow
-            label={
-              actualCost
-                ? t('Actual gross profit')
-                : t('Estimated gross profit')
-            }
+            label={t('Gross profit')}
             value={cost ? formatLogQuota(cost.profit_quota) : t('Not recorded')}
             mono
           />
           <p className='text-muted-foreground text-xs'>
-            {actualCost
-              ? t(
-                  'Gross profit is billed usage minus actual upstream cost. Subscription usage is not cash revenue.'
-                )
-              : t(
-                  'Gross profit is billed usage minus estimated upstream cost. Subscription usage is not cash revenue.'
-                )}
+            {t(
+              'Gross profit is billed usage minus upstream cost. Subscription usage is not cash revenue.'
+            )}
           </p>
         </>
       )}

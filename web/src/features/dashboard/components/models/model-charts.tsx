@@ -32,6 +32,7 @@ import {
 import { processChartData } from '@/features/dashboard/lib'
 import type {
   DashboardChartTimeDomain,
+  DashboardMetric,
   ModelAnalyticsChartTab,
   QuotaDataItem,
 } from '@/features/dashboard/types'
@@ -52,6 +53,7 @@ const CHART_SPEC_KEYS: Record<ModelAnalyticsChartTab, ChartSpecKey> = {
 }
 
 interface ModelChartsProps {
+  metric?: DashboardMetric
   data: QuotaDataItem[]
   loading?: boolean
   timeGranularity?: TimeGranularity
@@ -113,10 +115,12 @@ export function ModelCharts(props: ModelChartsProps) {
         timeGranularity,
         t,
         chartRadius,
-        props.timeDomain
+        props.timeDomain,
+        props.metric
       ),
     [
       props.data,
+      props.metric,
       props.loading,
       props.timeDomain,
       timeGranularity,
@@ -125,10 +129,15 @@ export function ModelCharts(props: ModelChartsProps) {
     ]
   )
 
-  const spec = chartData[CHART_SPEC_KEYS[activeTab]]
+  const specKey =
+    props.metric === 'profit' && activeTab === 'proportion'
+      ? 'spec_rank_bar'
+      : CHART_SPEC_KEYS[activeTab]
+  const spec = chartData[specKey]
   const specType = typeof spec?.type === 'string' ? spec.type : activeTab
   const chartKey = [
     activeTab,
+    props.metric,
     specType,
     props.loading ? 'loading' : 'ready',
     props.data.length,
@@ -177,7 +186,15 @@ export function ModelCharts(props: ModelChartsProps) {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {t(tab.labelKey)}
+                {t(
+                  props.metric && props.metric !== 'requests'
+                    ? {
+                        trend: 'Trend',
+                        proportion: 'Distribution',
+                        top: 'Ranking',
+                      }[tab.value]
+                    : tab.labelKey
+                )}
               </Button>
             ))}
           </div>

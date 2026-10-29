@@ -429,6 +429,9 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	if other == nil && (common.LogRequestBodyEnabled || len(params.Content) > 0) {
 		other = NewLogOther()
 	}
+	if other != nil && other.adminInfo["cost"] != nil {
+		other.SetRoot("node_name", common.NodeName)
+	}
 	attachRequestBody(c, other)
 	content := other.setContent(params.Content)
 	otherStr := other.JSONString()

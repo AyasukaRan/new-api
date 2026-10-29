@@ -34,9 +34,12 @@ import type {
 } from '@/features/dashboard/types'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
+import { requireServerSuccess } from '@/lib/server-error-message'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
+
+import { FinancialSummary } from './financial-summary'
 
 interface LogStatCardsProps {
   filters?: DashboardFilters
@@ -66,6 +69,7 @@ export function LogStatCards(props: LogStatCardsProps) {
   const [stats, setStats] = useState<ReturnType<
     typeof calculateDashboardStats
   > | null>(null)
+  const [data, setData] = useState<QuotaDataItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
 
@@ -92,12 +96,14 @@ export function LogStatCards(props: LogStatCardsProps) {
     void getUserQuotaDates(buildQueryParams(timeRange, filters), isAdmin)
       .then((res) => {
         if (abortController.signal.aborted) return
-        const data = res?.data || []
+        const data = requireServerSuccess(res).data || []
+        setData(data)
         setStats(calculateDashboardStats(data))
         onDataUpdate?.(data, false)
       })
       .catch(() => {
         if (abortController.signal.aborted) return
+        setData([])
         setStats(null)
         setError(true)
         onDataUpdate?.([], false)
@@ -144,84 +150,89 @@ export function LogStatCards(props: LogStatCardsProps) {
   })
 
   return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-7'>
-        {items.map((it, idx) => {
-          const Icon = it.icon
-          let valueContent
-          if (loading) {
-            valueContent = (
-              <div className='mt-1 flex flex-col gap-1 sm:mt-2 sm:gap-1.5'>
-                <Skeleton className='h-5 w-16 sm:h-7 sm:w-20' />
-                <Skeleton className='hidden h-3.5 w-28 md:block' />
+    <div className='space-y-3'>
+      {isAdmin && (
+        <FinancialSummary data={data} loading={loading} error={error} />
+      )}
+      <div className='overflow-hidden rounded-lg border'>
+        <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-7'>
+          {items.map((it, idx) => {
+            const Icon = it.icon
+            let valueContent
+            if (loading) {
+              valueContent = (
+                <div className='mt-1 flex flex-col gap-1 sm:mt-2 sm:gap-1.5'>
+                  <Skeleton className='h-5 w-16 sm:h-7 sm:w-20' />
+                  <Skeleton className='hidden h-3.5 w-28 md:block' />
+                </div>
+              )
+            } else if (error) {
+              valueContent = (
+                <>
+                  <div className='text-muted-foreground mt-1 font-mono text-base leading-tight font-bold tracking-tight tabular-nums sm:mt-2 sm:text-2xl sm:leading-normal'>
+                    --
+                  </div>
+                  <div className='text-muted-foreground/40 mt-1 hidden text-xs md:block'>
+                    {it.desc}
+                  </div>
+                </>
+              )
+            } else {
+              valueContent = (
+                <>
+                  <div
+                    className='text-foreground mt-1 max-w-full truncate font-mono text-base leading-tight font-bold tracking-tight tabular-nums sm:mt-2 sm:text-2xl sm:leading-normal'
+                    title={it.fullValue}
+                  >
+                    {it.value}
+                  </div>
+                  <div className='text-muted-foreground/60 mt-1 hidden text-xs md:block'>
+                    {it.desc}
+                  </div>
+                </>
+              )
+            }
+
+            return (
+              <div
+                key={it.key}
+                role='group'
+                aria-label={it.title}
+                aria-busy={loading}
+                className={cn(
+                  'min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-4 xl:px-4',
+                  idx === items.length - 1 &&
+                    items.length % 2 !== 0 &&
+                    'col-span-2 sm:col-span-1'
+                )}
+              >
+                <div className='flex min-w-0 items-center gap-1.5 sm:gap-2'>
+                  <IconBadge
+                    tone={it.iconTone}
+                    size='stat'
+                    className='size-4 rounded-sm sm:size-7 sm:rounded-md [&>svg]:size-2.5 sm:[&>svg]:size-3.5'
+                  >
+                    <Icon />
+                  </IconBadge>
+                  <div
+                    className='text-muted-foreground truncate text-[11px] leading-4 font-medium tracking-wide uppercase sm:text-xs sm:tracking-wider'
+                    title={it.title}
+                  >
+                    {it.title}
+                  </div>
+                </div>
+
+                {valueContent}
               </div>
             )
-          } else if (error) {
-            valueContent = (
-              <>
-                <div className='text-muted-foreground mt-1 font-mono text-base leading-tight font-bold tracking-tight tabular-nums sm:mt-2 sm:text-2xl sm:leading-normal'>
-                  --
-                </div>
-                <div className='text-muted-foreground/40 mt-1 hidden text-xs md:block'>
-                  {it.desc}
-                </div>
-              </>
-            )
-          } else {
-            valueContent = (
-              <>
-                <div
-                  className='text-foreground mt-1 max-w-full truncate font-mono text-base leading-tight font-bold tracking-tight tabular-nums sm:mt-2 sm:text-2xl sm:leading-normal'
-                  title={it.fullValue}
-                >
-                  {it.value}
-                </div>
-                <div className='text-muted-foreground/60 mt-1 hidden text-xs md:block'>
-                  {it.desc}
-                </div>
-              </>
-            )
-          }
-
-          return (
-            <div
-              key={it.key}
-              role='group'
-              aria-label={it.title}
-              aria-busy={loading}
-              className={cn(
-                'min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-4 xl:px-4',
-                idx === items.length - 1 &&
-                  items.length % 2 !== 0 &&
-                  'col-span-2 sm:col-span-1'
-              )}
-            >
-              <div className='flex min-w-0 items-center gap-1.5 sm:gap-2'>
-                <IconBadge
-                  tone={it.iconTone}
-                  size='stat'
-                  className='size-4 rounded-sm sm:size-7 sm:rounded-md [&>svg]:size-2.5 sm:[&>svg]:size-3.5'
-                >
-                  <Icon />
-                </IconBadge>
-                <div
-                  className='text-muted-foreground truncate text-[11px] leading-4 font-medium tracking-wide uppercase sm:text-xs sm:tracking-wider'
-                  title={it.title}
-                >
-                  {it.title}
-                </div>
-              </div>
-
-              {valueContent}
-            </div>
-          )
-        })}
+          })}
+        </div>
+        {/*<p className='text-muted-foreground border-t px-3 py-2 text-xs'>*/}
+        {/*  {t(*/}
+        {/*    'Cache usage is recorded only after the upgrade; historical data is not backfilled.'*/}
+        {/*  )}*/}
+        {/*</p>*/}
       </div>
-      {/*<p className='text-muted-foreground border-t px-3 py-2 text-xs'>*/}
-      {/*  {t(*/}
-      {/*    'Cache usage is recorded only after the upgrade; historical data is not backfilled.'*/}
-      {/*  )}*/}
-      {/*</p>*/}
     </div>
   )
 }

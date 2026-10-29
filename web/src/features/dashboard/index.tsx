@@ -36,6 +36,7 @@ import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { DashboardMetricSelector } from './components/models/dashboard-metric-selector'
 import { ModelsChartPreferences } from './components/models/models-chart-preferences'
 import { ModelsFilter } from './components/models/models-filter-dialog'
 import { OverviewDashboard } from './components/overview/overview-dashboard'
@@ -55,6 +56,7 @@ import {
 } from './section-registry'
 import type {
   DashboardChartPreferences,
+  DashboardMetric,
   DashboardFilters,
   ModelAnalyticsChartTab,
   QuotaDataItem,
@@ -213,6 +215,7 @@ export function Dashboard() {
   const activeSection = (params.section ??
     DASHBOARD_DEFAULT_SECTION) as DashboardSectionId
 
+  const [metric, setMetric] = useState<DashboardMetric>('requests')
   const [modelData, setModelData] = useState<QuotaDataItem[]>([])
   const [dataLoading, setDataLoading] = useState(false)
   const [chartPreferences, setChartPreferences] =
@@ -275,6 +278,7 @@ export function Dashboard() {
 
   const meta = SECTION_META[activeSection] ?? SECTION_META.overview
   const isAdmin = Boolean(userRole && userRole >= ROLE.ADMIN)
+  const effectiveMetric = isAdmin ? metric : 'requests'
   const visibleSections = useMemo(
     () =>
       DASHBOARD_SECTION_IDS.filter(
@@ -347,7 +351,7 @@ export function Dashboard() {
     ) : null
   const sectionActions = modelActions ?? flowActions
 
-  if (activeSection === 'overview') {
+  if (activeSection === 'overview' || (activeSection === 'users' && !isAdmin)) {
     return <OverviewDashboard />
   }
 
@@ -393,9 +397,17 @@ export function Dashboard() {
                   </Suspense>
                 </FadeIn>
               )}
+              {isAdmin && (
+                <DashboardMetricSelector
+                  value={metric}
+                  onChange={setMetric}
+                  includeRequests
+                />
+              )}
               <FadeIn delay={0.1}>
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyCallSources
+                    metric={effectiveMetric}
                     filters={modelFilters}
                     timeDomain={chartTimeDomain}
                     activeTab={analyticsTab}
@@ -406,6 +418,7 @@ export function Dashboard() {
               <FadeIn delay={0.1}>
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyConsumptionDistributionChart
+                    metric={effectiveMetric}
                     data={modelData}
                     loading={dataLoading}
                     timeDomain={chartTimeDomain}
@@ -421,6 +434,7 @@ export function Dashboard() {
               <FadeIn delay={0.15}>
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyModelCharts
+                    metric={effectiveMetric}
                     data={modelData}
                     loading={dataLoading}
                     timeDomain={chartTimeDomain}

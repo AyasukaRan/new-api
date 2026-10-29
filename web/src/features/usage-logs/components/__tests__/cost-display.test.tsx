@@ -248,19 +248,17 @@ describe('log cost display', () => {
       other: { admin_info: { cost: costSnapshot } },
       isAdmin: true,
     })
-    expect(screen.getByText('Estimated upstream cost')).toBeVisible()
+    expect(screen.getByText('Upstream cost')).toBeVisible()
     expect(screen.getByText('$0.013')).toBeVisible()
-    expect(screen.getByText('Estimated gross profit')).toBeVisible()
+    expect(screen.getByText('Gross profit')).toBeVisible()
     expect(screen.getByText('$0.007')).toBeVisible()
   })
 
   test('regular view hides cost estimates even when a response contains admin metadata', () => {
     renderCost({ quota: 10000, other: { admin_info: { cost: costSnapshot } } })
-    expect(
-      screen.queryByText('Estimated upstream cost')
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
     expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
-    expect(screen.queryByText('Estimated gross profit')).not.toBeInTheDocument()
+    expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
   })
 
   test.each([true, false])(
@@ -280,17 +278,13 @@ describe('log cost display', () => {
         isAdmin,
       })
       if (isAdmin) {
-        expect(screen.getByText('Actual upstream cost')).toBeVisible()
-        expect(screen.getByText('Actual gross profit')).toBeVisible()
+        expect(screen.getByText('Upstream cost')).toBeVisible()
+        expect(screen.getByText('Gross profit')).toBeVisible()
         expect(screen.getByText('$0.013')).toBeVisible()
         expect(screen.getByText('$0.007')).toBeVisible()
       } else {
-        expect(
-          screen.queryByText('Actual upstream cost')
-        ).not.toBeInTheDocument()
-        expect(
-          screen.queryByText('Actual gross profit')
-        ).not.toBeInTheDocument()
+        expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
+        expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
         expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
       }
     }

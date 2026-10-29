@@ -39,6 +39,7 @@ import { api } from '@/lib/api'
 import { computeTimeRange } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { UserCharts } from '../../users/user-charts'
 import { CallSources } from '../call-sources'
 import { ModelCharts } from '../model-charts'
 
@@ -379,5 +380,127 @@ it('updates the unidentified source chart label after switching language without
     expect(chart).toHaveTextContent('未识别来源')
     expect(chart).not.toHaveTextContent('Unidentified source')
   })
+  expect(get).toHaveBeenCalledTimes(1)
+})
+
+it('renders source gross profit as signed bars for an administrator, sharing the chosen view', async () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: [
+        {
+          ...rows[0],
+          finance: {
+            cost_quota: 650000,
+            profit_quota: -150000,
+            covered_revenue_quota: 500000,
+            recorded_count: 1,
+            actual_count: 1,
+            estimated_count: 0,
+            unrecorded_count: 0,
+          },
+        },
+      ],
+    },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <CallSources filters={filters} metric='profit' activeTab='proportion' />
+    </QueryClientProvider>
+  )
+  const chart = await screen.findByLabelText('Rendered bar chart')
+  expect(JSON.parse(chart.textContent ?? '[]')[0].values).toEqual([
+    { Model: 'DeepSeek Harness', Count: -150000 },
+  ])
+  expect(screen.getByRole('button', { name: 'Distribution' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+})
+
+it('keeps normal user source charts on request counts even if a financial metric is supplied', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: [
+        {
+          ...rows[0],
+          finance: {
+            cost_quota: 650000,
+            profit_quota: -150000,
+            covered_revenue_quota: 500000,
+            recorded_count: 1,
+            actual_count: 1,
+            estimated_count: 0,
+            unrecorded_count: 0,
+          },
+        },
+      ],
+    },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <CallSources filters={filters} metric='profit' activeTab='top' />
+    </QueryClientProvider>
+  )
+  const chart = await screen.findByLabelText('Rendered bar chart')
+  expect(JSON.parse(chart.textContent ?? '[]')[0].values).toEqual([
+    { Model: 'DeepSeek Harness', Count: 3 },
+  ])
+  expect(
+    screen.getByRole('button', { name: 'Call Count Ranking' })
+  ).toHaveAttribute('aria-pressed', 'true')
+})
+
+it('does not fetch or expose user financial charts after administrator access is removed', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: [
+        {
+          created_at: 1790035200,
+          username: 'fp',
+          count: 1,
+          quota: 500000,
+          finance: {
+            cost_quota: 650000,
+            profit_quota: -150000,
+            covered_revenue_quota: 500000,
+            recorded_count: 1,
+            actual_count: 1,
+            estimated_count: 0,
+            unrecorded_count: 0,
+          },
+        },
+      ],
+    },
+  })
+  const filters = {
+    timeGranularity: 'hour' as const,
+    selectedRange: 1,
+    topUserLimit: 10,
+  }
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
+  render(
+    <QueryClientProvider client={client}>
+      <UserCharts filters={filters} onFiltersChange={() => {}} />
+    </QueryClientProvider>
+  )
+  await screen.findByRole('tab', { name: 'Gross profit' })
+  await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+  act(() =>
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 2, username: 'member', role: 1, quota: 0 })
+  )
+  expect(
+    screen.queryByRole('tab', { name: 'Gross profit' })
+  ).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('Rendered bar chart')).not.toBeInTheDocument()
   expect(get).toHaveBeenCalledTimes(1)
 })

@@ -358,7 +358,7 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		quota                                            int
 		claude, audio, realtime, stream, tool, small     bool
 		unset, missing, local, probe, unknown, zeroUsage bool
-		estimated, settlementFailed                      bool
+		estimated, settlementFailed, interrupted         bool
 	}{
 		{name: "legacy cache base", group: 2, ratio: 1.3, base: 2865, quota: 5730},
 		{name: "expression cache stream", expression: expression, stream: true, group: 2, ratio: 1.3, base: 2865, quota: 5730},
@@ -375,8 +375,9 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		{name: "audio expression", expression: expression, group: 2, ratio: 1.3, audio: true, base: 2865, quota: 5730},
 		{name: "realtime expression", expression: expression, group: 2, ratio: 1.3, realtime: true, base: 2865, quota: 5730},
 		{name: "missing upstream usage", group: 2, ratio: 1.3, missing: true, unknown: true},
-		{name: "local estimate is not an upstream bill", group: 2, ratio: 1.3, local: true, unknown: true, quota: 5730},
-		{name: "billing usage estimate is not an upstream bill", group: 2, ratio: 1.3, estimated: true, unknown: true, quota: 5730},
+		{name: "local estimate records estimated cost", group: 2, ratio: 1.3, local: true, base: 2865, quota: 5730},
+		{name: "billing usage estimate records estimated cost", group: 2, ratio: 1.3, estimated: true, base: 2865, quota: 5730},
+		{name: "disconnected Claude stream records estimated cost", expression: `tier("standard", p * 4 + c * 20 + cr * 0.2 + cc * 5 + cc1h * 8)`, group: 2, ratio: 1.3, local: true, claude: true, stream: true, interrupted: true, base: 254066, quota: 508132},
 		{name: "failed settlement has no known revenue", group: 2, ratio: 1.3, settlementFailed: true, unknown: true, quota: 5730},
 		{name: "probe has no sale or profit", group: 2, ratio: 1.3, probe: true, unknown: true, quota: 5730},
 		{name: "expression failure is unknown", expression: `p == 1000 ? tier("invalid", param("missing") * p) : tier("request", fixed(0.01))`, group: 2, ratio: 1.3, unknown: true, quota: 10000},
@@ -412,6 +413,9 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			usage := &dto.Usage{PromptTokens: 1000, CompletionTokens: 200, TotalTokens: 1200, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 100, TextTokens: 1000}, CompletionTokenDetails: dto.OutputTokenDetails{TextTokens: 200}}
 			if tc.claude {
 				usage.PromptTokens, usage.TotalTokens, usage.UsageSemantic = 900, 1100, "anthropic"
+			}
+			if tc.interrupted {
+				usage = &dto.Usage{PromptTokens: 127033, TotalTokens: 127033, UsageSemantic: "anthropic"}
 			}
 			if tc.small {
 				usage = &dto.Usage{PromptTokens: 1, TotalTokens: 1}

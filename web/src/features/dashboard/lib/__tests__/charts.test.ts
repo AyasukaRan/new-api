@@ -323,3 +323,150 @@ describe.each(cases)('dashboard $granularity chart chronology', (scenario) => {
     }
   })
 })
+
+describe('administrator financial charts', () => {
+  const start = timestamp('2026-10-28T00:00:00')
+  const finance = {
+    cost_quota: 650000,
+    profit_quota: -150000,
+    covered_revenue_quota: 500000,
+    recorded_count: 1,
+    actual_count: 1,
+    estimated_count: 0,
+    unrecorded_count: 0,
+  }
+  const rows: QuotaDataItem[] = [
+    {
+      created_at: start,
+      model_name: 'model-a',
+      username: 'fp',
+      count: 1,
+      quota: 500000,
+      finance,
+    },
+    {
+      created_at: start + 3600,
+      model_name: 'model-a',
+      username: 'fp',
+      count: 1,
+      quota: 900000,
+      finance: {
+        ...finance,
+        cost_quota: 0,
+        profit_quota: 0,
+        covered_revenue_quota: 0,
+        recorded_count: 0,
+        actual_count: 0,
+        unrecorded_count: 1,
+      },
+    },
+  ]
+
+  it('keeps actual cost, negative profit and missing-cost gaps separate from revenue', () => {
+    const domain = buildChartTimeDomain(
+      { start_timestamp: start, end_timestamp: start + 7200 },
+      'hour'
+    )
+    const result = processChartData(
+      rows,
+      'hour',
+      undefined,
+      undefined,
+      domain,
+      'profit'
+    )
+    expect(
+      result.spec_model_line.data[0].values.map(
+        (point: { Count: number | null }) => point.Count
+      )
+    ).toEqual([-150000, null, 0])
+    expect(result.spec_rank_bar.data[0].values).toEqual([
+      { Model: 'model-a', Count: -150000 },
+    ])
+    expect(
+      result.spec_line.data[0].values.map(
+        (point: { Usage: number | null }) => point.Usage
+      )
+    ).toEqual([-0.3, null, 0])
+    const costs = processChartData(
+      rows,
+      'hour',
+      undefined,
+      undefined,
+      domain,
+      'cost'
+    )
+    expect(costs.spec_rank_bar.data[0].values).toEqual([
+      { Model: 'model-a', Count: 650000 },
+    ])
+    const revenue = processChartData(
+      rows,
+      'hour',
+      undefined,
+      undefined,
+      domain,
+      'quota'
+    )
+    expect(revenue.spec_rank_bar.data[0].values).toEqual([
+      { Model: 'model-a', Count: 1400000 },
+    ])
+  })
+
+  it('leaves all-unrecorded financial series empty instead of showing zero cost or full profit', () => {
+    const result = processChartData(
+      [rows[1]],
+      'hour',
+      undefined,
+      undefined,
+      undefined,
+      'cost'
+    )
+    expect(result.spec_model_line.data[0].values).toEqual([])
+    expect(result.totalCountDisplay).toBe('Not recorded')
+  })
+
+  it('uses recorded cost and signed gross profit for user ranks and preserves missing-cost gaps', () => {
+    const result = processUserChartData(rows, 'hour', undefined, 10, 'profit')
+    expect(result.spec_user_rank.data[0].values[0].rawQuota).toBe(-150000)
+    expect(
+      result.spec_user_trend.data[0].values.map(
+        (point: { rawQuota: number | null }) => point.rawQuota
+      )
+    ).toEqual([-150000, null])
+  })
+
+  it('keeps the overflow series unrecorded when all of its costs are missing in a bucket', () => {
+    const complete = Array.from({ length: 20 }, (_, index) => ({
+      ...rows[0],
+      model_name: `model-${index}`,
+      finance: { ...finance, profit_quota: 100000 },
+    }))
+    const data = [
+      ...complete,
+      { ...rows[0], model_name: 'overflow' },
+      { ...rows[1], model_name: 'overflow' },
+    ]
+    const domain = buildChartTimeDomain(
+      { start_timestamp: start, end_timestamp: start + 3600 },
+      'hour'
+    )
+    const result = processChartData(
+      data,
+      'hour',
+      undefined,
+      undefined,
+      domain,
+      'profit'
+    )
+    const trend = result.spec_model_line.data[0].values.filter(
+      (point: { Model: string }) => point.Model === 'Other'
+    )
+    const area = result.spec_area.data[0].values.filter(
+      (point: { Model: string }) => point.Model === 'Other'
+    )
+    expect(trend.map((point: { Count: number | null }) => point.Count)).toEqual(
+      [-150000, null]
+    )
+    expect(area.at(-1).Usage).toBeNull()
+  })
+})

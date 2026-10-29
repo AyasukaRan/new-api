@@ -163,7 +163,7 @@ test('only administrator exports include recorded estimated cost and gross profi
   const row = getLogCsvRow(log, true, t)
   expect(row[header.indexOf('Upstream cost')]).toBe('$0.013')
   expect(row[header.indexOf('Gross profit')]).toBe('-$0.003')
-  expect(row[header.indexOf('Cost source')]).toBe('Estimated upstream cost')
+  expect(header).not.toContain('Cost source')
   expect(getLogCsvHeader(false, t)).not.toContain('Upstream cost')
   expect(getLogCsvRow(log, false, t)).not.toContain('$0.013')
   expect(getLogCsvHeader(true, t, 'test')).not.toContain('Gross profit')
@@ -205,7 +205,7 @@ test.each([3500, -1500])(
     expect(row[header.indexOf('Gross profit')]).toBe(
       profit < 0 ? '-$0.003' : '$0.007'
     )
-    expect(row[header.indexOf('Cost source')]).toBe('Upstream bill')
+    expect(header).not.toContain('Cost source')
     expect(getLogCsvRow(log, false, t)).not.toContain('Upstream bill')
     expect(getLogCsvRow(log, false, t)).not.toContain('$0.013')
   }

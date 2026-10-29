@@ -569,7 +569,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if tieredBillingApplied {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
 	}
-	if settleErr == nil && originUsage != nil && (originUsage.BillingUsage == nil || !originUsage.BillingUsage.Estimated) && !common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
+	// Cost is explicitly an estimate, using the same usage basis as the charge
+	// even when a disconnected stream required local token estimation.
+	if settleErr == nil && originUsage != nil {
 		if snap == nil {
 			appendUpstreamCostInfo(relayInfo, other, summary.BaseQuota.InexactFloat64(), summary.Quota)
 		} else if tieredResult != nil {

@@ -796,3 +796,105 @@ describe('dashboard flow data', () => {
     expect(highlightedLink.zIndex > dimmedLink.zIndex).toBe(true)
   })
 })
+
+describe('administrator flow costs', () => {
+  const costRows: FlowQuotaDataItem[] = [
+    {
+      ...rows[0],
+      count: 1,
+      quota: 100,
+      finance: {
+        cost_quota: 130,
+        profit_quota: -30,
+        covered_revenue_quota: 100,
+        recorded_count: 1,
+        actual_count: 1,
+        estimated_count: 0,
+        unrecorded_count: 0,
+      },
+    },
+    { ...rows[0], count: 1, quota: 900 },
+    {
+      ...rows[2],
+      count: 1,
+      quota: 80,
+      finance: {
+        cost_quota: 50,
+        profit_quota: 30,
+        covered_revenue_quota: 80,
+        recorded_count: 1,
+        actual_count: 0,
+        estimated_count: 1,
+        unrecorded_count: 0,
+      },
+    },
+  ]
+
+  test('cost width and selected user totals preserve negative profit and unknown costs', () => {
+    const data = buildDashboardFlowData(costRows, 'cost', {
+      role: 'admin',
+      selectedUsers: ['user:1'],
+    })
+    expect(data.summary.finance).toEqual({
+      cost_quota: 130,
+      profit_quota: -30,
+      covered_revenue_quota: 100,
+      recorded_count: 1,
+      actual_count: 1,
+      estimated_count: 0,
+      unrecorded_count: 1,
+    })
+    expect(data.summary.quota).toBe(1000)
+    expect(data.flow.links.every((link) => link.value === 130)).toBe(true)
+    expect(
+      data.flow.links.every((link) => link.finance?.profit_quota === -30)
+    ).toBe(true)
+    expect(
+      data.filterOptions.users.find((user) => user.value === 'user:1')?.valueRaw
+    ).toBe(130)
+  })
+
+  test('cost tooltips show signed profit and covered request count', () => {
+    const data = buildDashboardFlowData(costRows, 'cost', {
+      role: 'admin',
+      selectedUsers: ['user:1'],
+    })
+    const spec = buildFlowSankeySpec(data.flow, 'Flow', String, {
+      quota: 'Revenue',
+      tokens: 'Tokens',
+      requests: 'Requests',
+      share: 'Share',
+      cost: 'Cost',
+      profit: 'Profit',
+      coverage: 'Coverage',
+      unrecorded: 'Unknown',
+    })
+    const datum = { datum: spec.data[0].values[0].links[0] }
+    const content = spec.tooltip.mark.content as {
+      key: string
+      value: (datum: unknown) => string
+      visible?: (datum: unknown) => boolean
+    }[]
+    expect(content.find((line) => line.key === 'Cost')?.value(datum)).toBe(
+      '130'
+    )
+    expect(content.find((line) => line.key === 'Profit')?.value(datum)).toBe(
+      '-30'
+    )
+    expect(content.find((line) => line.key === 'Coverage')?.value(datum)).toBe(
+      '1 / 2'
+    )
+  })
+
+  test('ordinary-user flows discard financial fields and cannot use cost width', () => {
+    const data = buildDashboardFlowData(costRows, 'cost', { role: 'user' })
+    expect(data.summary.finance).toBeUndefined()
+    expect(data.flow.nodes.every((node) => node.finance === undefined)).toBe(
+      true
+    )
+    expect(data.flow.links.every((link) => link.finance === undefined)).toBe(
+      true
+    )
+    expect(data.flow.links.some((link) => link.value === 1000)).toBe(true)
+  })
+})

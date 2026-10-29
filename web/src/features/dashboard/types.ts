@@ -22,7 +22,20 @@ import type { TimeGranularity } from '@/lib/time'
 // Quota & Usage Data Types
 // ============================================================================
 
+export interface DashboardFinance {
+  cost_quota: number
+  profit_quota: number
+  covered_revenue_quota: number
+  recorded_count: number
+  actual_count: number
+  estimated_count: number
+  unrecorded_count: number
+}
+
+export type DashboardMetric = 'requests' | 'quota' | 'cost' | 'profit'
+
 export interface QuotaDataItem {
+  finance?: DashboardFinance
   id?: number
   user_id?: number
   username?: string
@@ -36,6 +49,7 @@ export interface QuotaDataItem {
 }
 
 export interface SourceQuotaDataItem {
+  finance?: DashboardFinance
   client_tool: string
   created_at?: number
   count: number
@@ -44,6 +58,7 @@ export interface SourceQuotaDataItem {
 }
 
 export interface FlowQuotaDataItem {
+  finance?: DashboardFinance
   user_id?: number
   username?: string
   node_name?: string
@@ -58,7 +73,7 @@ export interface FlowQuotaDataItem {
   quota?: number
 }
 
-export type FlowMetric = 'quota' | 'tokens' | 'requests'
+export type FlowMetric = 'quota' | 'tokens' | 'requests' | 'cost'
 
 export type FlowOverflowMode = 'aggregate' | 'hide'
 
@@ -103,6 +118,7 @@ export interface FlowBuildOptions {
 }
 
 export interface DashboardFlowNode {
+  finance?: DashboardFinance
   id: string
   label: string
   kind: FlowNodeKind
@@ -117,6 +133,7 @@ export interface DashboardFlowNode {
 }
 
 export interface DashboardFlowLink {
+  finance?: DashboardFinance
   source: string
   target: string
   value: number
@@ -163,6 +180,7 @@ export interface FlowFilterOptions {
 }
 
 export interface FlowSummary {
+  finance?: DashboardFinance
   quota: number
   tokens: number
   requests: number

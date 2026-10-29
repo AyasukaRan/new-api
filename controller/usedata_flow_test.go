@@ -21,7 +21,10 @@ type flowQuotaResponse struct {
 func setupFlowControllerTestDB(t *testing.T) {
 	t.Helper()
 	db := setupModelListControllerTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.QuotaData{}))
+	previousLogDB := model.LOG_DB
+	model.LOG_DB = db
+	t.Cleanup(func() { model.LOG_DB = previousLogDB })
+	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.QuotaData{}, &model.Log{}))
 	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "east"}).Error)
 	require.NoError(t, model.DB.Create(&model.Token{Id: 11, UserId: 1, Key: "sk-primary", Name: "primary"}).Error)
 	require.NoError(t, model.DB.Create(&model.Token{Id: 22, UserId: 2, Key: "sk-backup", Name: "backup"}).Error)
@@ -145,8 +148,8 @@ func TestSourceQuotaEndpointsScopeAndTimeRange(t *testing.T) {
 		want    []model.SourceQuotaData
 		message string
 	}{
-		{name: "admin all", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100}, {ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70}}},
-		{name: "admin username", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob", want: []model.SourceQuotaData{{ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70}}},
+		{name: "admin all", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100, Finance: &model.DashboardFinance{UnrecordedCount: 2}}, {ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70, Finance: &model.DashboardFinance{UnrecordedCount: 1}}}},
+		{name: "admin username", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob", want: []model.SourceQuotaData{{ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70, Finance: &model.DashboardFinance{UnrecordedCount: 1}}}},
 		{name: "self ignores another user and test selector", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob&user_id=2&source=test", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100}}},
 		{name: "empty range is array", handler: GetUserSourceQuotaDates, query: "start_timestamp=2001&end_timestamp=2002", want: []model.SourceQuotaData{}},
 		{name: "invalid start", handler: GetAllSourceQuotaDates, query: "start_timestamp=bad&end_timestamp=2000", message: "invalid start_timestamp"},

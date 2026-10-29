@@ -42,7 +42,6 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { SectionPageLayout } from '@/components/layout'
-import { currentBaseUrl } from '@/lib/base-path'
 import {
   CardStaggerContainer,
   CardStaggerItem,
@@ -53,6 +52,7 @@ import { fetchTokenKey, getApiKeys } from '@/features/keys/api'
 import type { ApiKey } from '@/features/keys/types'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { getUserModels } from '@/lib/api'
+import { currentBaseUrl } from '@/lib/base-path'
 import { handleServerError } from '@/lib/handle-server-error'
 import { MOTION_TRANSITION } from '@/lib/motion'
 import { ROLE } from '@/lib/roles'
@@ -64,6 +64,7 @@ import {
   useApiInfo,
   useDashboardContentVisibility,
 } from '../../hooks/use-status-data'
+import { OverviewFinancialSummary } from '../models/financial-summary'
 import { AnnouncementsPanel } from './announcements-panel'
 import { ApiInfoPanel } from './api-info-panel'
 import { FAQPanel } from './faq-panel'
@@ -788,6 +789,7 @@ export function OverviewDashboard() {
           )}
 
           <SummaryCards />
+          {isAdmin && <OverviewFinancialSummary />}
 
           {showContentPanels && (
             <CardStaggerContainer
