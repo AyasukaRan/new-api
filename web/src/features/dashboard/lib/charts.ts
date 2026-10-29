@@ -122,6 +122,37 @@ function renderQuotaCompat(rawQuota: number, digits = 4): string {
   return symbol + fixed
 }
 
+// Preserve visible observations when a series has gaps or only one point.
+function sparseTrendPoints(
+  values: Array<Record<string, unknown>>,
+  seriesField: string,
+  valueField: string
+) {
+  const counts = new Map<unknown, number>()
+  const gaps = new Set<unknown>()
+  for (const value of values) {
+    const series = value[seriesField]
+    if (Number.isFinite(value[valueField])) {
+      counts.set(series, (counts.get(series) ?? 0) + 1)
+    } else {
+      gaps.add(series)
+    }
+  }
+  const visibleSeries = new Set(
+    [...counts]
+      .filter(([series, count]) => count === 1 || gaps.has(series))
+      .map(([series]) => series)
+  )
+  return {
+    visible: visibleSeries.size > 0,
+    style: {
+      visible: (datum: Record<string, unknown>) =>
+        Number.isFinite(datum[valueField]) &&
+        visibleSeries.has(datum[seriesField]),
+    },
+  }
+}
+
 /**
  * Process and aggregate chart data
  */
@@ -687,7 +718,8 @@ export function processChartData(
         },
       },
       background: { fill: 'transparent' },
-      animation: true,
+      // Animated layout changes can leave bar marks at the previous zero position.
+      animation: false,
     },
     spec_area: {
       type: 'area',
@@ -733,9 +765,9 @@ export function processChartData(
           curveType: 'monotone',
         },
       },
-      point: { visible: false },
+      point: sparseTrendPoints(areaValues, 'Model', 'Usage'),
       background: { fill: 'transparent' },
-      animation: true,
+      animation: false,
     },
     spec_model_line: {
       type: 'area',
@@ -824,9 +856,9 @@ export function processChartData(
           curveType: 'monotone',
         },
       },
-      point: { visible: false },
+      point: sparseTrendPoints(modelLineValues, 'Model', 'Count'),
       background: { fill: 'transparent' },
-      animation: true,
+      animation: false,
     },
     spec_rank_bar: {
       type: 'bar',
@@ -870,7 +902,8 @@ export function processChartData(
         },
       },
       background: { fill: 'transparent' },
-      animation: true,
+      // Keep bar marks aligned with the current scale after changing chart tabs.
+      animation: false,
     },
     totalQuotaDisplay: formatQuotaTotal(totalQuotaRaw),
     totalCountDisplay: formatInt(totalTimes),
@@ -1098,7 +1131,8 @@ export function processUserChartData(
       },
       color: { specified: userColorMap },
       background: { fill: 'transparent' },
-      animation: true,
+      // Keep bar marks aligned with the current scale after changing chart tabs.
+      animation: false,
     },
     spec_user_trend: {
       type: 'area',
@@ -1176,10 +1210,10 @@ export function processUserChartData(
           curveType: 'monotone',
         },
       },
-      point: { visible: false },
+      point: sparseTrendPoints(trendValues, 'User', 'rawQuota'),
       color: { specified: userColorMap },
       background: { fill: 'transparent' },
-      animation: true,
+      animation: false,
     },
   }
 }

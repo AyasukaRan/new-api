@@ -435,6 +435,88 @@ describe('administrator financial charts', () => {
     ).toEqual([-150000, null])
   })
 
+  it('shows a point for a single time bucket in model and user trends', () => {
+    const domain = buildChartTimeDomain(
+      { start_timestamp: start, end_timestamp: start + 86399 },
+      'day'
+    )
+    for (const metric of ['requests', 'profit'] as const) {
+      const charts = processChartData(
+        [rows[0]],
+        'day',
+        undefined,
+        undefined,
+        domain,
+        metric
+      )
+      const users = processUserChartData(
+        [rows[0]],
+        'day',
+        undefined,
+        10,
+        metric
+      )
+      for (const spec of [
+        charts.spec_model_line,
+        charts.spec_area,
+        users.spec_user_trend,
+      ]) {
+        expect(spec.point.visible).toBe(true)
+        expect(spec.point.style.visible(spec.data[0].values[0])).toBe(true)
+      }
+    }
+  })
+
+  it.each([2, 3])(
+    'shows known points in a %i-bucket series with a gap without marking nulls or continuous series',
+    (buckets) => {
+      const data = [
+        ...rows,
+        ...(buckets === 3 ? [{ ...rows[0], created_at: start + 7200 }] : []),
+        ...Array.from({ length: buckets }, (_, index) => ({
+          ...rows[0],
+          created_at: start + index * 3600,
+          model_name: 'model-b',
+          username: 'other',
+        })),
+      ]
+      const domain = buildChartTimeDomain(
+        { start_timestamp: start, end_timestamp: start + (buckets - 1) * 3600 },
+        'hour'
+      )
+      const charts = processChartData(
+        data,
+        'hour',
+        undefined,
+        undefined,
+        domain,
+        'profit'
+      )
+      const users = processUserChartData(data, 'hour', undefined, 10, 'profit')
+      for (const spec of [
+        charts.spec_model_line,
+        charts.spec_area,
+        users.spec_user_trend,
+      ]) {
+        expect(spec.point.visible).toBe(true)
+        const points = spec.data[0].values as Array<Record<string, unknown>>
+        const sparse = points.filter(
+          (point) => point.Model === 'model-a' || point.User === 'fp'
+        )
+        const continuous = points.filter(
+          (point) => point.Model === 'model-b' || point.User === 'other'
+        )
+        expect(sparse.map(spec.point.style.visible)).toEqual(
+          buckets === 3 ? [true, false, true] : [true, false]
+        )
+        expect(continuous.map(spec.point.style.visible)).toEqual(
+          Array.from({ length: buckets }, () => false)
+        )
+        expect(sparse[1][spec.yField]).toBeNull()
+      }
+    }
+  )
+
   it('keeps the overflow series unrecorded when all of its costs are missing in a bucket', () => {
     const complete = Array.from({ length: 20 }, (_, index) => ({
       ...rows[0],
