@@ -162,6 +162,7 @@ func TestChannelTestLogsAreSeparatedFromUsage(t *testing.T) {
 					recorder := httptest.NewRecorder()
 					ctx, _ := gin.CreateTestContext(recorder)
 					ctx.Request = httptest.NewRequest(http.MethodGet, "/api/log/stat"+query+test.params, nil)
+					ctx.Set("id", user.Id)
 					ctx.Set("username", user.Username)
 					test.handler(ctx)
 					var response struct {

@@ -55,6 +55,33 @@ type dashboardCostSnapshot struct {
 	Source       string   `json:"source"`
 }
 
+// recordedLogFinance validates a stored cost against the fee actually recorded
+// on that request. Reports never infer missing costs from today's prices.
+func recordedLogFinance(quota int, cost *dashboardCostSnapshot) (DashboardFinance, bool) {
+	if cost == nil || cost.Estimated == nil || (!*cost.Estimated && cost.Source != "upstream_bill") {
+		return DashboardFinance{}, false
+	}
+	for _, amount := range []*float64{cost.CostRatio, cost.BaseQuota, cost.CostQuota, cost.RevenueQuota} {
+		if amount == nil || math.IsNaN(*amount) || math.IsInf(*amount, 0) || *amount < 0 || *amount > common.MaxQuota {
+			return DashboardFinance{}, false
+		}
+	}
+	if *cost.CostRatio > 10000 || quota < 0 || quota > common.MaxQuota || *cost.RevenueQuota != float64(quota) {
+		return DashboardFinance{}, false
+	}
+	profit := float64(quota) - *cost.CostQuota
+	if cost.ProfitQuota == nil || math.IsNaN(*cost.ProfitQuota) || math.IsInf(*cost.ProfitQuota, 0) || math.Abs(*cost.ProfitQuota-profit) > 0.000001 {
+		return DashboardFinance{}, false
+	}
+	finance := DashboardFinance{CostQuota: *cost.CostQuota, ProfitQuota: profit, CoveredRevenueQuota: float64(quota), RecordedCount: 1}
+	if *cost.Estimated {
+		finance.EstimatedCount = 1
+	} else {
+		finance.ActualCount = 1
+	}
+	return finance, true
+}
+
 var dashboardFinanceCache = hot.NewHotCache[string, map[dashboardFinanceKey]DashboardFinance](hot.LRU, 8).
 	WithTTL(15 * time.Second).Build()
 var dashboardFinanceLoads singleflight.Group
@@ -119,22 +146,8 @@ func getDashboardFinance(ctx context.Context, startTime, endTime int64, username
 				if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
 					continue
 				}
-				cost := metadata.AdminInfo.Cost
-				if cost == nil || cost.Estimated == nil || (!*cost.Estimated && cost.Source != "upstream_bill") {
-					continue
-				}
-				valid := true
-				for _, amount := range []*float64{cost.CostRatio, cost.BaseQuota, cost.CostQuota, cost.RevenueQuota} {
-					if amount == nil || math.IsNaN(*amount) || math.IsInf(*amount, 0) || *amount < 0 || *amount > common.MaxQuota {
-						valid = false
-						break
-					}
-				}
-				if !valid || *cost.CostRatio > 10000 || log.Quota < 0 || log.Quota > common.MaxQuota || *cost.RevenueQuota != float64(log.Quota) {
-					continue
-				}
-				profit := float64(log.Quota) - *cost.CostQuota
-				if cost.ProfitQuota == nil || math.IsNaN(*cost.ProfitQuota) || math.IsInf(*cost.ProfitQuota, 0) || math.Abs(*cost.ProfitQuota-profit) > 0.000001 {
+				recorded, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost)
+				if !valid {
 					continue
 				}
 				other := NewLogOther()
@@ -144,12 +157,7 @@ func getDashboardFinance(ctx context.Context, startTime, endTime int64, username
 					key.NodeName = *metadata.RootInfo.NodeName
 				}
 				finance := costs[key]
-				finance.add(DashboardFinance{CostQuota: *cost.CostQuota, CoveredRevenueQuota: float64(log.Quota), RecordedCount: 1})
-				if *cost.Estimated {
-					finance.EstimatedCount++
-				} else {
-					finance.ActualCount++
-				}
+				finance.add(recorded)
 				costs[key] = finance
 			}
 			if len(logs) < 128 {

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 /**
  * Type definitions for usage logs
  */
+import type { DashboardFinance } from '@/features/dashboard/types'
 import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
 import type { PolicyEvent } from '@/features/system-settings/request-policies/api'
 
@@ -310,6 +311,7 @@ export interface LogStatistics {
   quota: number
   rpm: number
   tpm: number
+  finance?: DashboardFinance
 }
 
 // ============================================================================

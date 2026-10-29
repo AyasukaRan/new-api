@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -788,74 +789,79 @@ func streamLogs(tx *gorm.DB, order string, fn func(*Log) error) error {
 }
 
 type Stat struct {
-	Quota int `json:"quota"`
-	Rpm   int `json:"rpm"`
-	Tpm   int `json:"tpm"`
+	Quota   int               `json:"quota"`
+	Rpm     int               `json:"rpm"`
+	Tpm     int               `json:"tpm"`
+	Finance *DashboardFinance `json:"finance,omitempty" gorm:"-"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, sources ...LogSource) (stat Stat, err error) {
-	tx := applyLogSourceFilter(LOG_DB.Table("logs"), sources...).Select("COALESCE(sum(quota), 0) quota")
-
-	// 为rpm和tpm创建单独的查询
-	rpmTpmQuery := applyLogSourceFilter(LOG_DB.Table("logs"), sources...).Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
-
-	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
-		return stat, err
-	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
-		return stat, err
-	}
-	if tokenName != "" {
-		tx = tx.Where("token_name = ?", tokenName)
-		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("created_at <= ?", endTimestamp)
-	}
-	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if channel != 0 {
-		tx = tx.Where("channel_id = ?", channel)
-		rpmTpmQuery = rpmTpmQuery.Where("channel_id = ?", channel)
-	}
-	if group != "" {
-		tx = tx.Where(logGroupCol+" = ?", group)
-		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
-	}
-
+// SumUsedQuota uses the same search as the log list. Rates keep their rolling
+// sixty-second window; quota and finance use the exact selected time range.
+func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFinance bool) (Stat, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	stat := Stat{}
 	consumeTypes := []int{LogTypeConsume}
-	if len(sources) > 0 && sources[0] == LogSourceTest {
+	if filter.Source == LogSourceTest {
 		consumeTypes = append(consumeTypes, LogTypeTestConsume)
 	}
-	tx = tx.Where("type IN ?", consumeTypes)
-	rpmTpmQuery = rpmTpmQuery.Where("type IN ?", consumeTypes)
-
-	// 只统计最近60秒的rpm和tpm
-	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
-
-	// 执行查询
-	if err := tx.Scan(&stat).Error; err != nil {
-		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
-		return stat, common.NewMessage("Failed to query statistics")
+	base := LOG_DB.WithContext(ctx).Model(&Log{}).Where("logs.type IN ?", consumeTypes)
+	if userID != nil {
+		base = base.Where("logs.user_id = ?", *userID)
 	}
-	var rateStat struct {
+	tx, err := filter.apply(base.Session(&gorm.Session{}))
+	if err != nil {
+		return stat, err
+	}
+	if includeFinance && filter.Source != LogSourceTest {
+		stat.Finance = &DashboardFinance{}
+		var count int64
+		// Keep memory bounded and read quota/cost from the same cursor snapshot.
+		// Rows without a cost candidate need not transfer captured request bodies.
+		err = streamLogs(tx.Select("quota, CASE WHEN other LIKE ? THEN other ELSE '' END AS other", `%"cost"%`), "logs.created_at desc, logs.id desc", func(log *Log) error {
+			if (log.Quota > 0 && stat.Quota > math.MaxInt-log.Quota) || (log.Quota < 0 && stat.Quota < math.MinInt-log.Quota) {
+				return common.NewMessage("Failed to query statistics")
+			}
+			stat.Quota += log.Quota
+			count++
+			var metadata struct {
+				AdminInfo struct {
+					Cost *dashboardCostSnapshot `json:"cost"`
+				} `json:"admin_info"`
+			}
+			if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
+				return nil
+			}
+			if finance, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost); valid {
+				stat.Finance.add(finance)
+			}
+			return nil
+		})
+		stat.Finance.UnrecordedCount = count - stat.Finance.RecordedCount
+	} else {
+		err = tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error
+	}
+	if err != nil {
+		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
+		return Stat{}, common.NewMessage("Failed to query statistics")
+	}
+	rateFilter := filter
+	rateFilter.EndTimestamp = common.GetTimestamp()
+	rateFilter.StartTimestamp = rateFilter.EndTimestamp - 60
+	rateQuery, err := rateFilter.apply(base.Session(&gorm.Session{}))
+	if err != nil {
+		return Stat{}, err
+	}
+	var rates struct {
 		Rpm int
 		Tpm int
 	}
-	if err := rpmTpmQuery.Scan(&rateStat).Error; err != nil {
+	err = rateQuery.Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm").Scan(&rates).Error
+	if err != nil {
 		common.SysError(common.LogText("failed to query rpm/tpm stat: %s", err.Error()))
-		return stat, common.NewMessage("Failed to query statistics")
+		return Stat{}, common.NewMessage("Failed to query statistics")
 	}
-	stat.Rpm = rateStat.Rpm
-	stat.Tpm = rateStat.Tpm
-
+	stat.Rpm, stat.Tpm = rates.Rpm, rates.Tpm
 	return stat, nil
 }
 
