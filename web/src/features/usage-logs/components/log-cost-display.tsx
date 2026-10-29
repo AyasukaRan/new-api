@@ -83,6 +83,7 @@ function ToolSurchargeMarker() {
 export function LogCostDisplay(props: LogCostDisplayProps) {
   const { t } = useTranslation()
   const cost = props.isAdmin ? getLogCostEstimate(props.other) : null
+  const actualCost = cost?.estimated === false
   const isSubscription = props.other?.billing_source === 'subscription'
   const showToolSurcharge = hasToolSurcharge(props.other)
   const quota = isSubscription
@@ -147,11 +148,19 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
         </div>
         {props.isAdmin && (
           <dl className='text-muted-foreground grid grid-cols-[auto_auto] gap-x-2 gap-y-0.5 text-[11px]'>
-            <dt>{t('Estimated upstream cost')}</dt>
+            <dt>
+              {actualCost
+                ? t('Actual upstream cost')
+                : t('Estimated upstream cost')}
+            </dt>
             <dd className='text-right font-mono whitespace-nowrap tabular-nums'>
               {cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
             </dd>
-            <dt>{t('Estimated gross profit')}</dt>
+            <dt>
+              {actualCost
+                ? t('Actual gross profit')
+                : t('Estimated gross profit')}
+            </dt>
             <dd
               className={cn(
                 'text-right font-mono whitespace-nowrap tabular-nums',

@@ -59,7 +59,7 @@ export function getLogCsvHeader(
     t('Cache Write'),
     t('Cost'),
     ...(isAdmin && source !== 'test'
-      ? [t('Estimated upstream cost'), t('Estimated gross profit')]
+      ? [t('Upstream cost'), t('Gross profit'), t('Cost source')]
       : []),
     t('Duration'),
     t('IP'),
@@ -93,11 +93,18 @@ export function getLogCsvRow(
   }
   let costCells: string[] = []
   if (showCost) {
-    costCells = ['', '']
+    costCells = ['', '', '']
     if (billable) {
+      let provenance = t('Not recorded')
+      if (cost) {
+        provenance = cost.estimated
+          ? t('Estimated upstream cost')
+          : t('Upstream bill')
+      }
       costCells = [
         cost ? formatLogQuota(cost.cost_quota) : t('Not recorded'),
         cost ? formatLogQuota(cost.profit_quota) : t('Not recorded'),
+        provenance,
       ]
     }
   }

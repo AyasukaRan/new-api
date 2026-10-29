@@ -156,6 +156,24 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			userProbes := callLogHandler(t, ExportUserLogs, 1, common.RoleCommonUser, query+"&source=test")
 			require.Len(t, userProbes, 3)
 			assert.Equal(t, []any{"a-2", "a-1"}, exportedRequestIds(userProbes), "user exports always retain usage isolation")
+
+			for _, log := range []model.Log{
+				{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "backfill-tie"},
+				{UserId: 1, Username: "alice", CreatedAt: now - 7200, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "backfill-older"},
+			} {
+				require.NoError(t, model.LOG_DB.Create(&log).Error)
+			}
+			filter := model.LogFilter{StartTimestamp: now - 2*24*3600, EndTimestamp: now + 3600}
+			page, total, err := model.GetUserLogs(1, filter, 0, 2)
+			require.NoError(t, err)
+			assert.EqualValues(t, 4, total)
+			require.Len(t, page, 2)
+			assert.Equal(t, []string{"a-2", "backfill-tie"}, []string{page[0].RequestId, page[1].RequestId}, "backfilled records must not displace newer activity")
+			page, total, err = model.GetUserLogs(1, filter, 2, 2)
+			require.NoError(t, err)
+			assert.EqualValues(t, 4, total)
+			require.Len(t, page, 2)
+			assert.Equal(t, []string{"a-1", "backfill-older"}, []string{page[0].RequestId, page[1].RequestId}, "equal timestamps use a stable tie-breaker across pages")
 		})
 	}
 }

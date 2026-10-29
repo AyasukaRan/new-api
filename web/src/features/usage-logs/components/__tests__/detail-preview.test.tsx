@@ -560,3 +560,35 @@ test('test log details never show profit even when metadata contains an estimate
   const dialog = within(await screen.findByRole('dialog'))
   expect(dialog.queryByText('Estimated gross profit')).not.toBeInTheDocument()
 })
+
+test.each([true, false])(
+  'upstream bill details hide private costs outside administrator view: %s',
+  async (isAdmin) => {
+    const other: LogOtherData = {
+      model_price: 0.25,
+      admin_info: {
+        cost: {
+          cost_ratio: 1.3,
+          base_quota: 5000,
+          cost_quota: 6500,
+          revenue_quota: 5000,
+          profit_quota: -1500,
+          estimated: false,
+          source: 'upstream_bill',
+        },
+      },
+    }
+    fireEvent.click(renderPreview(other, isAdmin))
+    const dialog = within(await screen.findByRole('dialog'))
+    if (isAdmin) {
+      expect(dialog.getByText('Actual upstream cost')).toBeVisible()
+      expect(dialog.getByText('$0.013')).toBeVisible()
+      expect(dialog.getByText('Actual gross profit')).toBeVisible()
+      expect(dialog.getByText('-$0.003')).toBeVisible()
+    } else {
+      expect(dialog.queryByText('Actual upstream cost')).not.toBeInTheDocument()
+      expect(dialog.queryByText('$0.013')).not.toBeInTheDocument()
+      expect(dialog.queryByText('Actual gross profit')).not.toBeInTheDocument()
+    }
+  }
+)

@@ -263,9 +263,43 @@ describe('log cost display', () => {
     expect(screen.queryByText('Estimated gross profit')).not.toBeInTheDocument()
   })
 
+  test.each([true, false])(
+    'upstream bill cost and gross profit require administrator view: %s',
+    (isAdmin) => {
+      renderCost({
+        quota: 10000,
+        other: {
+          admin_info: {
+            cost: {
+              ...costSnapshot,
+              estimated: false,
+              source: 'upstream_bill',
+            },
+          },
+        },
+        isAdmin,
+      })
+      if (isAdmin) {
+        expect(screen.getByText('Actual upstream cost')).toBeVisible()
+        expect(screen.getByText('Actual gross profit')).toBeVisible()
+        expect(screen.getByText('$0.013')).toBeVisible()
+        expect(screen.getByText('$0.007')).toBeVisible()
+      } else {
+        expect(
+          screen.queryByText('Actual upstream cost')
+        ).not.toBeInTheDocument()
+        expect(
+          screen.queryByText('Actual gross profit')
+        ).not.toBeInTheDocument()
+        expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
+      }
+    }
+  )
+
   test.each([
     null,
     { admin_info: { cost: { ...costSnapshot, cost_quota: Number.NaN } } },
+    { admin_info: { cost: { ...costSnapshot, estimated: false } } },
   ])(
     'administrator sees missing cost as unrecorded instead of zero',
     (other) => {

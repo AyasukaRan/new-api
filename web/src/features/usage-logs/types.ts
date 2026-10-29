@@ -121,7 +121,8 @@ export interface LogCostEstimate {
   cost_quota: number
   revenue_quota: number
   profit_quota: number
-  estimated: true
+  estimated: boolean
+  source?: 'upstream_bill'
 }
 
 export interface LogOtherData {

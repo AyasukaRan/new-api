@@ -32,12 +32,15 @@ import { buildQuotaAuditOperation } from './quota-audit-operation'
 
 export { normalizeTierLabel }
 
-/** Only recorded, finite estimates can be shown as financial amounts. */
+/** Only recorded, finite costs with a known provenance can be displayed. */
 export function getLogCostEstimate(
   other: LogOtherData | null
 ): LogCostEstimate | null {
   const cost = other?.admin_info?.cost
-  if (!cost || cost.estimated !== true) return null
+  if (!cost) return null
+  const fromUpstreamBill =
+    cost.estimated === false && cost.source === 'upstream_bill'
+  if (cost.estimated !== true && !fromUpstreamBill) return null
   if (!Number.isFinite(cost.profit_quota)) return null
   if (
     [

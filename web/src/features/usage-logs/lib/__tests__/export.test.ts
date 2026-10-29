@@ -161,13 +161,12 @@ test('only administrator exports include recorded estimated cost and gross profi
   }
   const header = getLogCsvHeader(true, t)
   const row = getLogCsvRow(log, true, t)
-  expect(row[header.indexOf('Estimated upstream cost')]).toBe('$0.013')
-  expect(row[header.indexOf('Estimated gross profit')]).toBe('-$0.003')
-  expect(getLogCsvHeader(false, t)).not.toContain('Estimated upstream cost')
+  expect(row[header.indexOf('Upstream cost')]).toBe('$0.013')
+  expect(row[header.indexOf('Gross profit')]).toBe('-$0.003')
+  expect(row[header.indexOf('Cost source')]).toBe('Estimated upstream cost')
+  expect(getLogCsvHeader(false, t)).not.toContain('Upstream cost')
   expect(getLogCsvRow(log, false, t)).not.toContain('$0.013')
-  expect(getLogCsvHeader(true, t, 'test')).not.toContain(
-    'Estimated gross profit'
-  )
+  expect(getLogCsvHeader(true, t, 'test')).not.toContain('Gross profit')
   expect(getLogCsvRow(log, true, t, 'test')).not.toContain('-$0.003')
 })
 
@@ -175,6 +174,39 @@ test('administrator export distinguishes missing historical costs from zero cost
   const t = await chineseTranslator()
   const header = getLogCsvHeader(true, t)
   const row = getLogCsvRow(consumeLog, true, t)
-  expect(row[header.indexOf('Estimated upstream cost')]).toBe('Not recorded')
-  expect(row[header.indexOf('Estimated gross profit')]).toBe('Not recorded')
+  expect(row[header.indexOf('Upstream cost')]).toBe('Not recorded')
+  expect(row[header.indexOf('Gross profit')]).toBe('Not recorded')
 })
+
+test.each([3500, -1500])(
+  'administrator export labels upstream bill costs and preserves recorded profit: %s',
+  async (profit) => {
+    const t = await chineseTranslator()
+    const log = {
+      ...consumeLog,
+      other: JSON.stringify({
+        admin_info: {
+          cost: {
+            cost_ratio: 1.3,
+            base_quota: 5000,
+            cost_quota: 6500,
+            revenue_quota: 6500 + profit,
+            profit_quota: profit,
+            estimated: false,
+            source: 'upstream_bill',
+          },
+        },
+      }),
+    }
+    const header = getLogCsvHeader(true, t)
+    const row = getLogCsvRow(log, true, t)
+    expect(row).toHaveLength(header.length)
+    expect(row[header.indexOf('Upstream cost')]).toBe('$0.013')
+    expect(row[header.indexOf('Gross profit')]).toBe(
+      profit < 0 ? '-$0.003' : '$0.007'
+    )
+    expect(row[header.indexOf('Cost source')]).toBe('Upstream bill')
+    expect(getLogCsvRow(log, false, t)).not.toContain('Upstream bill')
+    expect(getLogCsvRow(log, false, t)).not.toContain('$0.013')
+  }
+)
