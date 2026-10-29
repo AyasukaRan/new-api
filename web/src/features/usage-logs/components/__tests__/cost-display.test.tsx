@@ -115,7 +115,9 @@ describe('log cost display', () => {
 
     expect(screen.getByText('$0.025')).toBeVisible()
     expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
-    expect(screen.queryByRole('img', { name: 'Wallet' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('img', { name: 'Wallet' })
+    ).not.toBeInTheDocument()
   })
 
   test('keeps legacy cost visible without inventing a funding source', () => {
@@ -229,5 +231,93 @@ describe('log cost display', () => {
     expect(
       screen.getByRole('img', { name: 'Includes tool-call surcharge' })
     ).toHaveAttribute('data-tool-surcharge-indicator', 'true')
+  })
+
+  const costSnapshot = {
+    cost_ratio: 1.3,
+    base_quota: 5000,
+    cost_quota: 6500,
+    revenue_quota: 10000,
+    profit_quota: 3500,
+    estimated: true as const,
+  }
+
+  test('administrator sees the recorded estimated upstream cost and gross profit', () => {
+    renderCost({
+      quota: 10000,
+      other: { admin_info: { cost: costSnapshot } },
+      isAdmin: true,
+    })
+    expect(screen.getByText('Estimated upstream cost')).toBeVisible()
+    expect(screen.getByText('$0.013')).toBeVisible()
+    expect(screen.getByText('Estimated gross profit')).toBeVisible()
+    expect(screen.getByText('$0.007')).toBeVisible()
+  })
+
+  test('regular view hides cost estimates even when a response contains admin metadata', () => {
+    renderCost({ quota: 10000, other: { admin_info: { cost: costSnapshot } } })
+    expect(
+      screen.queryByText('Estimated upstream cost')
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
+    expect(screen.queryByText('Estimated gross profit')).not.toBeInTheDocument()
+  })
+
+  test.each([
+    null,
+    { admin_info: { cost: { ...costSnapshot, cost_quota: Number.NaN } } },
+  ])(
+    'administrator sees missing cost as unrecorded instead of zero',
+    (other) => {
+      renderCost({ quota: 10000, other, isAdmin: true })
+      expect(screen.getAllByText('Not recorded')).toHaveLength(2)
+      expect(screen.queryByText('$0')).not.toBeInTheDocument()
+    }
+  )
+
+  test('administrator sees a negative gross profit and an explicit zero cost correctly', () => {
+    const { rerender } = renderCost({
+      quota: 5000,
+      other: {
+        admin_info: {
+          cost: { ...costSnapshot, revenue_quota: 5000, profit_quota: -1500 },
+        },
+      },
+      isAdmin: true,
+    })
+    expect(screen.getByText('-$0.003')).toBeVisible()
+    rerender(
+      <LogCostDisplay
+        quota={10000}
+        other={{
+          admin_info: {
+            cost: {
+              ...costSnapshot,
+              cost_ratio: 0,
+              cost_quota: 0,
+              profit_quota: 10000,
+            },
+          },
+        }}
+        isAdmin
+      />
+    )
+    expect(screen.getByText('$0')).toBeVisible()
+    expect(screen.queryByText('Not recorded')).not.toBeInTheDocument()
+  })
+
+  test('subscription cost estimate remains based on the recorded billed usage', () => {
+    renderCost({
+      quota: 10000,
+      other: {
+        billing_source: 'subscription',
+        subscription_consumed: 10000,
+        admin_info: { cost: costSnapshot },
+      },
+      isAdmin: true,
+    })
+    expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
+    expect(screen.getByText('$0.007')).toBeVisible()
+    expect(screen.queryByText('Revenue')).not.toBeInTheDocument()
   })
 })

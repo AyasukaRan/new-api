@@ -49,6 +49,7 @@ import {
 } from '../../constants'
 import {
   buildSettingJSON,
+  channelFormSchema,
   transformChannelToFormDefaults,
 } from '../../lib/channel-form'
 import { channelSchema, type Channel } from '../../types'
@@ -3136,4 +3137,79 @@ test('model group scopes are disabled without sensitive channel write permission
   await user.click(screen.getByRole('button', { name: 'Update Channel' }))
   await waitFor(() => expect(put).toHaveBeenCalled())
   expect(put.mock.calls[0][1]).not.toHaveProperty('setting')
+})
+
+test('upstream cost multiplier saves independently of the channel group', async () => {
+  editingChannel = {
+    ...editingChannel,
+    setting: JSON.stringify({ upstream_cost_ratio: 1.3 }),
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue(editingChannel.name)
+  await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
+  const multiplier = screen.getByRole('spinbutton', {
+    name: 'Upstream cost multiplier',
+  })
+  expect(multiplier).toHaveValue(1.3)
+  await user.clear(multiplier)
+  await user.type(multiplier, '0')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1] as { setting: string; group: string }
+  expect(JSON.parse(payload.setting).upstream_cost_ratio).toBe(0)
+  expect(payload.group).toBe(editingChannel.group)
+})
+
+test('clearing the upstream cost multiplier removes the saved estimate configuration', () => {
+  const defaults = transformChannelToFormDefaults({
+    ...editingChannel,
+    setting: JSON.stringify({ upstream_cost_ratio: 1.3 }),
+  })
+  expect(defaults.upstream_cost_ratio).toBe(1.3)
+  const saved = JSON.parse(
+    buildSettingJSON({ ...defaults, upstream_cost_ratio: null })
+  )
+  expect(saved).not.toHaveProperty('upstream_cost_ratio')
+})
+
+test.each([-1, 10001, Number.NaN, Number.POSITIVE_INFINITY])(
+  'invalid upstream cost multiplier %s cannot be submitted',
+  (ratio) => {
+    const values = {
+      ...transformChannelToFormDefaults(editingChannel),
+      upstream_cost_ratio: ratio,
+    }
+    expect(channelFormSchema.safeParse(values).success).toBe(false)
+  }
+)
+
+test('upstream cost multiplier cannot be changed without sensitive channel permission', async () => {
+  editingChannel = {
+    ...editingChannel,
+    setting: JSON.stringify({ upstream_cost_ratio: 1.3 }),
+  }
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'operator',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: { channel: { read: true, write: true } },
+        },
+      },
+    },
+  })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue(editingChannel.name)
+  await user.click(screen.getByRole('tab', { name: /Other Settings/ }))
+  expect(
+    screen.getByRole('spinbutton', { name: 'Upstream cost multiplier' })
+  ).toBeDisabled()
 })

@@ -76,6 +76,7 @@ import {
   parseAuditLine,
   decodeBillingExprB64,
   getTieredBillingSummary,
+  getLogCostEstimate,
   hasAnyCacheTokens,
   isViolationFeeLog,
   getFirstResponseTimeColor,
@@ -177,9 +178,12 @@ function BillingBreakdown(props: {
   log: UsageLog
   other: LogOtherData
   isAdmin: boolean
+  showCostEstimate: boolean
 }) {
   const { t } = useTranslation()
   const { log, other, isAdmin } = props
+  const cost =
+    isAdmin && props.showCostEstimate ? getLogCostEstimate(other) : null
   const isPerCall = isPerCallBilling(other.model_price)
   const isClaude = other.claude === true
   const isTieredExpr = other.billing_mode === 'tiered_expr'
@@ -387,6 +391,39 @@ function BillingBreakdown(props: {
         value={formatLogQuota(log.quota)}
         mono
       />
+      {isAdmin && props.showCostEstimate && (
+        <>
+          {cost && (
+            <>
+              <DetailRow
+                label={t('Base model amount')}
+                value={formatLogQuota(cost.base_quota)}
+                mono
+              />
+              <DetailRow
+                label={t('Upstream cost multiplier')}
+                value={`${formatRatio(cost.cost_ratio)}x`}
+                mono
+              />
+            </>
+          )}
+          <DetailRow
+            label={t('Estimated upstream cost')}
+            value={cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
+            mono
+          />
+          <DetailRow
+            label={t('Estimated gross profit')}
+            value={cost ? formatLogQuota(cost.profit_quota) : t('Not recorded')}
+            mono
+          />
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'Gross profit is billed usage minus estimated upstream cost. Subscription usage is not cash revenue.'
+            )}
+          </p>
+        </>
+      )}
     </DetailSection>
   )
 }
@@ -1223,6 +1260,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
             log={props.log}
             other={other}
             isAdmin={props.isAdmin}
+            showCostEstimate={props.source !== 'test' && props.log.type === 2}
           />
         )}
 

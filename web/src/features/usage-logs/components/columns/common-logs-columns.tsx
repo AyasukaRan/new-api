@@ -53,7 +53,7 @@ import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
-import { LOG_TYPE_ALL_VALUE } from '../../constants'
+import { LOG_TYPE_ALL_VALUE, LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import {
   formatModelName,
@@ -781,6 +781,12 @@ export function useCommonLogsColumns(
               quota={quota}
               other={other}
               showBillingSource={showBillingSource}
+              isAdmin={
+                isAdmin &&
+                source !== 'test' &&
+                log.type === LOG_TYPE_ENUM.CONSUME &&
+                !isViolationFeeLog(other)
+              }
             />
           )
         },

@@ -90,6 +90,7 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
 			t.Logf("database: %s", version)
 			runFixedPriceAccountingCases(t, db, logDB)
+			runUpstreamCostAccountingCases(t, db, logDB)
 		})
 	}
 }
@@ -306,6 +307,192 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			if !tc.refund && !tc.insufficient {
 				assert.Equal(t, 1, user.RequestCount)
 			}
+		})
+	}
+}
+
+func TestUpstreamCostEstimateBounds(t *testing.T) {
+	for _, value := range []float64{-1, 10001, math.Inf(1), math.Inf(-1), math.NaN()} {
+		settings := dto.ChannelSettings{UpstreamCostRatio: &value}
+		assert.Error(t, settings.ValidateUpstreamCostRatio())
+	}
+	for _, value := range []float64{0, 1.3, 10000} {
+		settings := dto.ChannelSettings{UpstreamCostRatio: &value}
+		require.NoError(t, settings.ValidateUpstreamCostRatio())
+		channel := model.Channel{}
+		channel.SetSetting(settings)
+		require.NoError(t, channel.ValidateSettings())
+		assert.Equal(t, value, *channel.GetSetting().UpstreamCostRatio)
+	}
+	for _, value := range []string{`{"upstream_cost_ratio":-1}`, `{"upstream_cost_ratio":10001}`} {
+		channel := model.Channel{Setting: &value}
+		assert.Error(t, channel.ValidateSettings())
+	}
+	for _, tc := range []struct {
+		base, ratio float64
+		revenue     int
+	}{
+		{base: -1, ratio: 1.3}, {base: math.NaN(), ratio: 1.3}, {base: math.Inf(1), ratio: 1.3},
+		{base: common.MaxQuota + 1, ratio: 0}, {base: common.MaxQuota, ratio: 2},
+		{base: 1, ratio: math.NaN()}, {base: 1, ratio: -1}, {base: 1, ratio: 10001}, {base: 1, ratio: 1.3, revenue: -1},
+	} {
+		other := model.NewLogOther()
+		appendUpstreamCostInfo(&relaycommon.RelayInfo{UpstreamCostRatio: &tc.ratio}, other, tc.base, tc.revenue)
+		assert.NotContains(t, other.JSONString(), "cost_quota", "invalid cost must remain unknown")
+	}
+}
+
+type failedCostSettlement struct{ relaycommon.BillingSettler }
+
+func (failedCostSettlement) Settle(int) error { return fmt.Errorf("test settlement failure") }
+
+func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
+	t.Helper()
+	const startingQuota = 2_000_000
+	const expression = `tier("base", p * 3 + c * 15 + cr * 0.3)`
+	operation_setting.SetToolPriceForTest("cost_test_tool", 4)
+	t.Cleanup(func() { operation_setting.DeleteToolPriceForTest("cost_test_tool") })
+	for index, tc := range []struct {
+		name, expression                                 string
+		group, ratio, base                               float64
+		quota                                            int
+		claude, audio, realtime, stream, tool, small     bool
+		unset, missing, local, probe, unknown, zeroUsage bool
+		estimated, settlementFailed                      bool
+	}{
+		{name: "legacy cache base", group: 2, ratio: 1.3, base: 2865, quota: 5730},
+		{name: "expression cache stream", expression: expression, stream: true, group: 2, ratio: 1.3, base: 2865, quota: 5730},
+		{name: "Claude cache input", expression: expression, claude: true, group: 2, ratio: 1.3, base: 2865, quota: 5730},
+		{name: "free group retains upstream cost", expression: expression, group: 0, ratio: 1.3, base: 2865},
+		{name: "legacy free group retains upstream cost", group: 0, ratio: 1.3, base: 2865},
+		{name: "explicit free upstream", expression: expression, group: 2, ratio: 0, base: 2865, quota: 5730},
+		{name: "unconfigured cost stays unknown", group: 2, quota: 5730, unset: true, unknown: true},
+		{name: "tiny request preserves fractional cost", group: 2, ratio: 1.3, small: true, base: 0.1, quota: 1},
+		{name: "request price and tool surcharge", expression: `tier("request", fixed(0.01))`, group: 2, ratio: 1.3, tool: true, base: 7000, quota: 14000},
+		{name: "free group tool-only request retains cost", group: 0, ratio: 1.3, tool: true, zeroUsage: true, base: 2000},
+		{name: "audio actual usage", group: 2, ratio: 1.3, audio: true, base: 3000, quota: 6000},
+		{name: "realtime actual usage", group: 2, ratio: 1.3, realtime: true, base: 3000, quota: 6000},
+		{name: "audio expression", expression: expression, group: 2, ratio: 1.3, audio: true, base: 2865, quota: 5730},
+		{name: "realtime expression", expression: expression, group: 2, ratio: 1.3, realtime: true, base: 2865, quota: 5730},
+		{name: "missing upstream usage", group: 2, ratio: 1.3, missing: true, unknown: true},
+		{name: "local estimate is not an upstream bill", group: 2, ratio: 1.3, local: true, unknown: true, quota: 5730},
+		{name: "billing usage estimate is not an upstream bill", group: 2, ratio: 1.3, estimated: true, unknown: true, quota: 5730},
+		{name: "failed settlement has no known revenue", group: 2, ratio: 1.3, settlementFailed: true, unknown: true, quota: 5730},
+		{name: "probe has no sale or profit", group: 2, ratio: 1.3, probe: true, unknown: true, quota: 5730},
+		{name: "expression failure is unknown", expression: `p == 1000 ? tier("invalid", param("missing") * p) : tier("request", fixed(0.01))`, group: 2, ratio: 1.3, unknown: true, quota: 10000},
+	} {
+		t.Run("cost "+tc.name, func(t *testing.T) {
+			user := model.User{Username: fmt.Sprintf("upstream_cost_%d", index), Quota: startingQuota, Status: common.UserStatusEnabled}
+			require.NoError(t, db.Create(&user).Error)
+			token := model.Token{UserId: user.Id, Key: fmt.Sprintf("upstream-cost-%d", index), RemainQuota: startingQuota, Status: common.TokenStatusEnabled}
+			require.NoError(t, db.Create(&token).Error)
+			channel := model.Channel{Name: "upstream-cost", Key: "unused", Status: common.ChannelStatusEnabled}
+			channel.SetSetting(dto.ChannelSettings{UpstreamCostRatio: &tc.ratio})
+			require.NoError(t, channel.ValidateSettings())
+			require.NoError(t, db.Create(&channel).Error)
+			t.Cleanup(func() {
+				require.NoError(t, logDB.Where("user_id = ?", user.Id).Delete(&model.Log{}).Error)
+				require.NoError(t, db.Unscoped().Delete(&token).Error)
+				require.NoError(t, db.Unscoped().Delete(&user).Error)
+				require.NoError(t, db.Unscoped().Delete(&channel).Error)
+			})
+			var persisted model.Channel
+			require.NoError(t, db.First(&persisted, channel.Id).Error)
+			frozenRatio := *persisted.GetSetting().UpstreamCostRatio
+			info := &relaycommon.RelayInfo{
+				UserId: user.Id, TokenId: token.Id, TokenKey: token.Key, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id},
+				OriginModelName: "upstream-cost-test", UsingGroup: "default", UserGroup: "default", UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
+				ForcePreConsume: true, StartTime: time.Now(), IsStream: tc.stream, IsChannelTest: tc.probe, RelayFormat: types.RelayFormatOpenAI,
+				PriceData:         hosttypes.PriceData{ModelRatio: 1.5, CompletionRatio: 5, CacheRatio: 0.1, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: tc.group}},
+				UpstreamCostRatio: &frozenRatio,
+			}
+			if tc.unset {
+				info.UpstreamCostRatio = nil
+			}
+			usage := &dto.Usage{PromptTokens: 1000, CompletionTokens: 200, TotalTokens: 1200, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 100, TextTokens: 1000}, CompletionTokenDetails: dto.OutputTokenDetails{TextTokens: 200}}
+			if tc.claude {
+				usage.PromptTokens, usage.TotalTokens, usage.UsageSemantic = 900, 1100, "anthropic"
+			}
+			if tc.small {
+				usage = &dto.Usage{PromptTokens: 1, TotalTokens: 1}
+				info.PriceData.ModelRatio = 0.1
+			}
+			if tc.zeroUsage {
+				usage = &dto.Usage{}
+			}
+			if tc.estimated {
+				usage.BillingUsage = dto.NewOpenAIChatBillingUsage(usage)
+				usage.BillingUsage.Estimated = true
+			}
+			reservation := 0
+			if tc.expression != "" {
+				snap := makeSnapshot(tc.expression, tc.group, 0, 0)
+				cost, trace, err := billingexpr.RunExpr(tc.expression, billingexpr.TokenParams{})
+				require.NoError(t, err)
+				reservation = billingexpr.QuotaRound(cost / 1_000_000 * common.QuotaPerUnit * tc.group)
+				snap.EstimatedQuotaAfterGroup, snap.EstimatedTier, snap.EstimatedBillingUnit = reservation, trace.MatchedTier, trace.BillingUnit
+				info.TieredBillingSnapshot = snap
+			}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			ctx.Set("username", user.Username)
+			require.Nil(t, PreConsumeBilling(ctx, reservation, info))
+			if tc.settlementFailed {
+				info.Billing = failedCostSettlement{info.Billing}
+			}
+			// Editing the channel after reservation must not rewrite this request's cost.
+			persisted.SetSetting(dto.ChannelSettings{UpstreamCostRatio: common.GetPointer(9.0)})
+			require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("setting", persisted.Setting).Error)
+			if tc.tool {
+				info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{BuiltInTools: map[string]*relaycommon.BuildInToolInfo{"cost_test_tool": {CallCount: 1}}}
+			}
+			if tc.local {
+				common.SetContextKey(ctx, constant.ContextKeyLocalCountTokens, true)
+			}
+			if tc.missing {
+				usage = nil
+			}
+			switch {
+			case tc.realtime:
+				PostWssConsumeQuota(ctx, info, info.OriginModelName, &dto.RealtimeUsage{InputTokens: usage.PromptTokens, OutputTokens: usage.CompletionTokens, TotalTokens: usage.TotalTokens, InputTokenDetails: usage.PromptTokensDetails, OutputTokenDetails: usage.CompletionTokenDetails}, nil)
+			case tc.audio:
+				PostAudioConsumeQuota(ctx, info, usage, nil)
+			default:
+				PostTextConsumeQuota(ctx, info, usage, nil)
+			}
+			var log model.Log
+			require.NoError(t, logDB.Where("user_id = ?", user.Id).Take(&log).Error)
+			assert.Equal(t, tc.quota, log.Quota)
+			require.NoError(t, db.First(&user, user.Id).Error)
+			charged := tc.quota
+			if tc.settlementFailed {
+				charged = reservation
+			}
+			assert.Equal(t, startingQuota-charged, user.Quota, "cost must never alter the user charge")
+			var other map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+			admin, _ := other["admin_info"].(map[string]any)
+			if tc.unknown {
+				assert.NotContains(t, admin, "cost")
+			} else {
+				cost, ok := admin["cost"].(map[string]any)
+				require.True(t, ok)
+				assert.InDelta(t, tc.base, cost["base_quota"], 1e-9)
+				assert.InDelta(t, tc.base*tc.ratio, cost["cost_quota"], 1e-9)
+				assert.InDelta(t, float64(tc.quota)-tc.base*tc.ratio, cost["profit_quota"], 1e-9)
+				assert.Equal(t, float64(tc.quota), cost["revenue_quota"])
+				assert.Equal(t, tc.ratio, cost["cost_ratio"])
+				assert.Equal(t, true, cost["estimated"])
+			}
+			userLogs, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 10)
+			require.NoError(t, err)
+			require.Len(t, userLogs, 1)
+			assert.NotContains(t, userLogs[0].Other, "cost_quota")
+			assert.NotContains(t, userLogs[0].Other, "profit_quota")
+			tokenLogs, err := model.GetLogByTokenId(token.Id)
+			require.NoError(t, err)
+			require.Len(t, tokenLogs, 1)
+			assert.NotContains(t, tokenLogs[0].Other, "cost_quota")
 		})
 	}
 }
@@ -1615,7 +1802,7 @@ func TestChannelPricingZeroLanesStayFree(t *testing.T) {
 			assert.Zero(t, calculateTextQuotaSummary(ctx, info, &test.usage).Quota, "explicit zero must not become a one-quota minimum or a global Gemini audio price")
 		})
 	}
-	quota, clamp := calculateAudioQuota(QuotaInfo{ChannelPricing: true, ModelRatio: 2, GroupRatio: 1, InputDetails: TokenDetails{AudioTokens: 1000}})
+	quota, clamp, _ := calculateAudioQuota(QuotaInfo{ChannelPricing: true, ModelRatio: 2, GroupRatio: 1, InputDetails: TokenDetails{AudioTokens: 1000}})
 	assert.Zero(t, quota)
 	assert.Nil(t, clamp)
 }

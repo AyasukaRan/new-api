@@ -141,3 +141,40 @@ describe('usage log CSV export', () => {
     ).toBe(`"'=HYPERLINK(""x"")","-12.5","'+cmd","a""b","two\nlines"\r\n`)
   })
 })
+
+test('only administrator exports include recorded estimated cost and gross profit', async () => {
+  const t = await chineseTranslator()
+  const log = {
+    ...consumeLog,
+    other: JSON.stringify({
+      admin_info: {
+        cost: {
+          cost_ratio: 1.3,
+          base_quota: 5000,
+          cost_quota: 6500,
+          revenue_quota: 5000,
+          profit_quota: -1500,
+          estimated: true,
+        },
+      },
+    }),
+  }
+  const header = getLogCsvHeader(true, t)
+  const row = getLogCsvRow(log, true, t)
+  expect(row[header.indexOf('Estimated upstream cost')]).toBe('$0.013')
+  expect(row[header.indexOf('Estimated gross profit')]).toBe('-$0.003')
+  expect(getLogCsvHeader(false, t)).not.toContain('Estimated upstream cost')
+  expect(getLogCsvRow(log, false, t)).not.toContain('$0.013')
+  expect(getLogCsvHeader(true, t, 'test')).not.toContain(
+    'Estimated gross profit'
+  )
+  expect(getLogCsvRow(log, true, t, 'test')).not.toContain('-$0.003')
+})
+
+test('administrator export distinguishes missing historical costs from zero costs', async () => {
+  const t = await chineseTranslator()
+  const header = getLogCsvHeader(true, t)
+  const row = getLogCsvRow(consumeLog, true, t)
+  expect(row[header.indexOf('Estimated upstream cost')]).toBe('Not recorded')
+  expect(row[header.indexOf('Estimated gross profit')]).toBe('Not recorded')
+})

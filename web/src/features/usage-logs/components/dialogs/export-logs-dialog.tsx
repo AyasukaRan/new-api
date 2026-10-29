@@ -100,7 +100,7 @@ export function ExportLogsDialog() {
     if (!range.start || !range.end) return
     const controller = new AbortController()
     abortRef.current = controller
-    const lines = [toCsvLine(getLogCsvHeader(isAdminView, t))]
+    const lines = [toCsvLine(getLogCsvHeader(isAdminView, t, logSource))]
     setExportedCount(0)
     try {
       const count = await exportLogs(
@@ -121,7 +121,7 @@ export function ExportLogsDialog() {
         {
           signal: controller.signal,
           onLog: (log) => {
-            lines.push(toCsvLine(getLogCsvRow(log, isAdminView, t)))
+            lines.push(toCsvLine(getLogCsvRow(log, isAdminView, t, logSource)))
             if (lines.length % 500 === 0) setExportedCount(lines.length - 1)
           },
         }

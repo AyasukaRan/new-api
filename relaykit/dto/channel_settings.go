@@ -12,6 +12,9 @@ import (
 )
 
 type ChannelSettings struct {
+	// UpstreamCostRatio estimates upstream spend from the effective model price
+	// before the user's group multiplier. It never changes the user's charge.
+	UpstreamCostRatio *float64 `json:"upstream_cost_ratio,omitempty"`
 	// GroupModels restricts a configured group to a subset of this channel's
 	// client-facing model names. Missing groups inherit all models; an explicit
 	// empty list provides no models to that group.
@@ -64,6 +67,14 @@ type ChannelSettings struct {
 	// TLSInsecureSkipVerify accepts upstream certificates that fail
 	// verification, such as self-signed ones, for this channel only.
 	TLSInsecureSkipVerify bool `json:"tls_insecure_skip_verify,omitempty"`
+}
+
+// ValidateUpstreamCostRatio accepts an explicit zero but not invalid or unbounded costs.
+func (s *ChannelSettings) ValidateUpstreamCostRatio() error {
+	if s != nil && s.UpstreamCostRatio != nil && !(*s.UpstreamCostRatio >= 0 && *s.UpstreamCostRatio <= 10000) {
+		return fmt.Errorf("Upstream cost multiplier must be between 0 and 10000")
+	}
+	return nil
 }
 
 // ValidateBatch checks the save-time shape of the batch inference override.

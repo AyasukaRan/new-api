@@ -84,6 +84,7 @@ const CONFIGURATION_BLOCKS = {
       'proxy',
       'http_protocol',
       'http2_connection_shards',
+      'upstream_cost_ratio',
       'balance_query_disabled',
       'balance_query_type',
       'balance_query_base_url',
@@ -179,6 +180,7 @@ export function getChannelConfigurationState(
           (values.type === 14 && values.claude_beta_query)))
     ),
     extraSettings: Boolean(
+      values.upstream_cost_ratio != null ||
       values.balance_query_disabled ||
       values.balance_query_type?.trim() ||
       values.balance_query_base_url?.trim() ||

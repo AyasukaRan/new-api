@@ -300,6 +300,7 @@ const SENSITIVE_FORM_FIELDS = [
   'azure_responses_version',
   'force_format',
   'group_models',
+  'upstream_cost_ratio',
   'thinking_to_content',
   'proxy',
   'http_protocol',
@@ -4815,6 +4816,39 @@ export function ChannelMutateDrawer({
                 {proxyFields}
                 {httpProtocolFields}
                 {httpShardsFields}
+                <FormField
+                  control={form.control}
+                  name='upstream_cost_ratio'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Upstream cost multiplier')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          {...field}
+                          type='number'
+                          min={0}
+                          max={10000}
+                          step='any'
+                          value={field.value ?? ''}
+                          placeholder={t('Not configured')}
+                          onChange={(event) =>
+                            field.onChange(
+                              event.target.value === ''
+                                ? null
+                                : event.target.valueAsNumber
+                            )
+                          }
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {t(
+                          'Estimates upstream cost from model pricing before the group multiplier. Does not change user charges. Leave empty for unknown cost; 0 means free.'
+                        )}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
                 <ChannelBalanceSettings control={form.control} />
 
                 <FormField

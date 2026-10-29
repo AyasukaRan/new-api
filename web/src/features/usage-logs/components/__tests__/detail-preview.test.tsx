@@ -35,7 +35,7 @@ import {
 } from '@/stores/system-config-store'
 
 import type { UsageLog } from '../../data/schema'
-import type { LogOtherData } from '../../types'
+import type { LogOtherData, LogSource } from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 
 vi.mock('@lobehub/icons', () => ({}))
@@ -78,10 +78,11 @@ function DetailPreview(props: {
   other: LogOtherData
   isAdmin: boolean
   type?: number
+  source?: LogSource
 }) {
   const table = useReactTable({
     data: [makeLog(props.other, props.type)],
-    columns: useCommonLogsColumns(props.isAdmin, false),
+    columns: useCommonLogsColumns(props.isAdmin, false, props.source),
     getCoreRowModel: getCoreRowModel(),
   })
   const cell = table
@@ -501,3 +502,61 @@ test.each(['missing schema', 'unsupported expression', 'unknown tier'])(
     )
   }
 )
+
+test.each([true, false])(
+  'recorded cost and gross profit in log details require administrator view: %s',
+  async (isAdmin) => {
+    const other: LogOtherData = {
+      model_price: 0.25,
+      admin_info: {
+        cost: {
+          cost_ratio: 1.3,
+          base_quota: 5000,
+          cost_quota: 6500,
+          revenue_quota: 5000,
+          profit_quota: -1500,
+          estimated: true,
+        },
+      },
+    }
+    fireEvent.click(renderPreview(other, isAdmin))
+    const dialog = within(await screen.findByRole('dialog'))
+    if (isAdmin) {
+      expect(dialog.getByText('Estimated upstream cost')).toBeVisible()
+      expect(dialog.getByText('$0.013')).toBeVisible()
+      expect(dialog.getByText('-$0.003')).toBeVisible()
+      expect(dialog.getByText('1.3000x')).toBeVisible()
+    } else {
+      expect(
+        dialog.queryByText('Estimated upstream cost')
+      ).not.toBeInTheDocument()
+      expect(dialog.queryByText('-$0.003')).not.toBeInTheDocument()
+    }
+  }
+)
+
+test('test log details never show profit even when metadata contains an estimate', async () => {
+  const other: LogOtherData = {
+    model_price: 0.25,
+    admin_info: {
+      cost: {
+        cost_ratio: 1.3,
+        base_quota: 5000,
+        cost_quota: 6500,
+        revenue_quota: 5000,
+        profit_quota: -1500,
+        estimated: true,
+      },
+    },
+  }
+  render(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>
+        <DetailPreview other={other} isAdmin source='test' />
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+  fireEvent.click(screen.getByRole('button', { name: /Per-call/ }))
+  const dialog = within(await screen.findByRole('dialog'))
+  expect(dialog.queryByText('Estimated gross profit')).not.toBeInTheDocument()
+})

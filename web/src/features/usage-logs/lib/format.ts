@@ -27,10 +27,30 @@ import {
 import { translateServerText } from '@/lib/server-error-message'
 
 import type { UsageLog } from '../data/schema'
-import type { LogOtherData } from '../types'
+import type { LogCostEstimate, LogOtherData } from '../types'
 import { buildQuotaAuditOperation } from './quota-audit-operation'
 
 export { normalizeTierLabel }
+
+/** Only recorded, finite estimates can be shown as financial amounts. */
+export function getLogCostEstimate(
+  other: LogOtherData | null
+): LogCostEstimate | null {
+  const cost = other?.admin_info?.cost
+  if (!cost || cost.estimated !== true) return null
+  if (!Number.isFinite(cost.profit_quota)) return null
+  if (
+    [
+      cost.cost_ratio,
+      cost.base_quota,
+      cost.cost_quota,
+      cost.revenue_quota,
+    ].some((value) => !Number.isFinite(value) || value < 0)
+  ) {
+    return null
+  }
+  return cost
+}
 
 const PARAM_OVERRIDE_ACTION_MAP: Record<string, string> = {
   set: 'Set',

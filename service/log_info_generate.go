@@ -15,7 +15,32 @@ import (
 	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 )
+
+// appendUpstreamCostInfo records a configured cost estimate, never an upstream
+// invoice or a second user charge. Fractional quota preserves small-call costs.
+func appendUpstreamCostInfo(info *relaycommon.RelayInfo, other *model.LogOther, base float64, revenue int) {
+	if info == nil || other == nil || info.IsChannelTest || info.TaskRelayInfo != nil || info.UpstreamCostRatio == nil || info.QuotaClamp != nil {
+		return
+	}
+	ratio := *info.UpstreamCostRatio
+	if !(ratio >= 0 && ratio <= 10000) || !(base >= 0 && base <= common.MaxQuota) || revenue < 0 || revenue > common.MaxQuota {
+		return
+	}
+	cost := decimal.NewFromFloat(base).Mul(decimal.NewFromFloat(ratio))
+	if cost.GreaterThan(decimal.NewFromInt(common.MaxQuota)) {
+		return
+	}
+	other.SetAdmin("cost", map[string]any{
+		"cost_ratio":    ratio,
+		"base_quota":    base,
+		"cost_quota":    cost.InexactFloat64(),
+		"revenue_quota": revenue,
+		"profit_quota":  decimal.NewFromInt(int64(revenue)).Sub(cost).InexactFloat64(),
+		"estimated":     true,
+	})
+}
 
 // attachQuotaSaturationToOther nests a quota saturation marker under
 // other.admin_info.quota_saturation. Nesting under admin_info makes it

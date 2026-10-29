@@ -164,6 +164,14 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hostty
 
 func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) (hosttypes.PriceData, error) {
 	if info != nil {
+		info.UpstreamCostRatio = nil
+		if c != nil {
+			settings, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+			if ok && settings.UpstreamCostRatio != nil && settings.ValidateUpstreamCostRatio() == nil {
+				ratio := *settings.UpstreamCostRatio
+				info.UpstreamCostRatio = &ratio
+			}
+		}
 		info.BillingModelName = ""
 		if matched := resolveBillingModelName(info.GetOriginModelName(), servingChannelId(c, info)); matched != "" && matched != info.OriginModelName {
 			info.BillingModelName = matched

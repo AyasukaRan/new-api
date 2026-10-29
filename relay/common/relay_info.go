@@ -168,6 +168,8 @@ type RelayInfo struct {
 	ParamOverrideAudit        []string
 
 	PriceData hosttypes.PriceData
+	// Frozen per selected attempt, independently of the user's selling price.
+	UpstreamCostRatio *float64
 	// Retry pricing reuses the original request estimates and image multipliers.
 	PricingTokenCountMeta *types.TokenCountMeta
 

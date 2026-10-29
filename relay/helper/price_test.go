@@ -1070,13 +1070,29 @@ func TestChannelPricingRetryRebuildsModesAndReservesBeforeSending(t *testing.T) 
 		OriginModelName: "retry-complete-pricing", UserGroup: "default", UsingGroup: "default",
 		BillingRequestInput: &billingexpr.RequestInput{Body: []byte(`{"service_tier":"fast"}`)},
 	}
-	_, err := ModelPriceHelper(channelPricingContext(t, 1), info, 100, &types.TokenCountMeta{MaxTokens: 50, ImagePriceRatio: 2, BillingRatios: map[string]float64{"n": 3}})
+	ctx := channelPricingContext(t, 1)
+	costRatio := 1.3
+	common.SetContextKey(ctx, constant.ContextKeyChannelSetting, dto.ChannelSettings{UpstreamCostRatio: &costRatio})
+	_, err := ModelPriceHelper(ctx, info, 100, &types.TokenCountMeta{MaxTokens: 50, ImagePriceRatio: 2, BillingRatios: map[string]float64{"n": 3}})
 	require.NoError(t, err)
+	costRatio = 8
+	require.NotNil(t, info.UpstreamCostRatio)
+	assert.Equal(t, 1.3, *info.UpstreamCostRatio, "a channel edit cannot change a frozen request cost")
 	assert.InDelta(t, 0.2, info.PriceData.ModelPrice, 0.000001)
 	reservation := &channelPricingReservation{quota: info.PriceData.QuotaToPreConsume}
 	info.Billing = reservation
 	for _, channel := range []int{2, 3, 1, 4} {
-		require.NoError(t, RefreshPricingForSelectedChannel(channelPricingContext(t, channel), info))
+		ctx := channelPricingContext(t, channel)
+		if channel == 2 || channel == 3 {
+			common.SetContextKey(ctx, constant.ContextKeyChannelSetting, dto.ChannelSettings{UpstreamCostRatio: common.GetPointer(1.8)})
+		}
+		require.NoError(t, RefreshPricingForSelectedChannel(ctx, info))
+		if channel == 2 || channel == 3 {
+			require.NotNil(t, info.UpstreamCostRatio)
+			assert.Equal(t, 1.8, *info.UpstreamCostRatio)
+		} else {
+			assert.Nil(t, info.UpstreamCostRatio, "retry cannot inherit the failed channel's cost")
+		}
 		previousReservation := reservation.quota
 		require.Nil(t, service.PrepareBillingForSelectedChannel(nil, info))
 		assert.GreaterOrEqual(t, reservation.quota, previousReservation)

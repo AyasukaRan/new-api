@@ -230,6 +230,11 @@ export const channelFormSchema = z
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
     group: z.array(z.string()).min(1, ERROR_MESSAGES.REQUIRED_GROUP),
     group_models: z.record(z.string(), z.array(z.string())).optional(),
+    upstream_cost_ratio: z
+      .number({ error: 'Upstream cost multiplier must be between 0 and 10000' })
+      .min(0, 'Upstream cost multiplier must be between 0 and 10000')
+      .max(10000, 'Upstream cost multiplier must be between 0 and 10000')
+      .nullish(),
     model_mapping: z
       .string()
       .optional()
@@ -469,6 +474,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   models: '',
   group: ['default'],
   group_models: {},
+  upstream_cost_ratio: null,
   model_mapping: '',
   priority: 0,
   weight: 0,
@@ -540,6 +546,7 @@ export function transformChannelToFormDefaults(
   // Parse channel extra settings from setting field
   let extraSettings = {
     group_models: {} as Record<string, string[]>,
+    upstream_cost_ratio: null as number | null,
     task_plugin_key: '',
     task_extend_plugin_keys: [] as string[],
     force_format: false,
@@ -569,6 +576,7 @@ export function transformChannelToFormDefaults(
       )
       extraSettings = {
         group_models: parsed.group_models || {},
+        upstream_cost_ratio: parsed.upstream_cost_ratio ?? null,
         task_plugin_key: parsed.task_plugin_key || '',
         task_extend_plugin_keys: readTaskExtendPluginKeys(channel.type, parsed),
         force_format: parsed.force_format || false,
@@ -728,6 +736,10 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
       formData.responses_websocket_enabled === true,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
+  }
+
+  if (formData.upstream_cost_ratio != null) {
+    settingObj.upstream_cost_ratio = formData.upstream_cost_ratio
   }
 
   const groupModels = normalizeChannelGroupModels(

@@ -19,7 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
-import { logTokenName, parseLogOther, renderLogContent } from './format'
+import type { LogSource } from '../types'
+import {
+  getLogCostEstimate,
+  isViolationFeeLog,
+  logTokenName,
+  parseLogOther,
+  renderLogContent,
+} from './format'
 import {
   getLogTypeConfig,
   isDisplayableLogType,
@@ -32,7 +39,11 @@ type Translate = (key: string, options?: Record<string, unknown>) => string
  * Column titles of the exported log file. User and channel columns are only
  * in the administrator view, matching the log table.
  */
-export function getLogCsvHeader(isAdmin: boolean, t: Translate): string[] {
+export function getLogCsvHeader(
+  isAdmin: boolean,
+  t: Translate,
+  source: LogSource = 'usage'
+): string[] {
   return [
     t('Time'),
     t('Type'),
@@ -47,6 +58,9 @@ export function getLogCsvHeader(isAdmin: boolean, t: Translate): string[] {
     t('Cache Read'),
     t('Cache Write'),
     t('Cost'),
+    ...(isAdmin && source !== 'test'
+      ? [t('Estimated upstream cost'), t('Estimated gross profit')]
+      : []),
     t('Duration'),
     t('IP'),
     t('Request ID'),
@@ -58,10 +72,14 @@ export function getLogCsvHeader(isAdmin: boolean, t: Translate): string[] {
 export function getLogCsvRow(
   log: UsageLog,
   isAdmin: boolean,
-  t: Translate
+  t: Translate,
+  source: LogSource = 'usage'
 ): string[] {
   const other = parseLogOther(log.other ?? '')
   const usage = isDisplayableLogType(log.type)
+  const showCost = isAdmin && source !== 'test'
+  const billable = log.type === 2 && !isViolationFeeLog(other)
+  const cost = showCost && billable ? getLogCostEstimate(other) : null
   const cacheWrite =
     (other?.cache_creation_tokens_5m ?? 0) +
       (other?.cache_creation_tokens_1h ?? 0) ||
@@ -72,6 +90,16 @@ export function getLogCsvRow(
     channel = log.channel_name
       ? `#${log.channel} ${log.channel_name}`
       : `#${log.channel}`
+  }
+  let costCells: string[] = []
+  if (showCost) {
+    costCells = ['', '']
+    if (billable) {
+      costCells = [
+        cost ? formatLogQuota(cost.cost_quota) : t('Not recorded'),
+        cost ? formatLogQuota(cost.profit_quota) : t('Not recorded'),
+      ]
+    }
   }
   return [
     formatTimestampToDate(log.created_at),
@@ -87,6 +115,7 @@ export function getLogCsvRow(
     usage ? String(other?.cache_tokens ?? 0) : '',
     usage ? String(cacheWrite) : '',
     usage ? formatLogQuota(log.quota ?? 0) : '',
+    ...costCells,
     isTimingLogType(log.type) ? `${log.use_time ?? 0}s` : '',
     log.ip ?? '',
     log.request_id ?? '',

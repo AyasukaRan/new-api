@@ -115,8 +115,18 @@ export interface ToolSurchargeItem {
   price: number
 }
 
+export interface LogCostEstimate {
+  cost_ratio: number
+  base_quota: number
+  cost_quota: number
+  revenue_quota: number
+  profit_quota: number
+  estimated: true
+}
+
 export interface LogOtherData {
   admin_info?: {
+    cost?: LogCostEstimate
     request_policy?: PolicyEvent[]
     is_multi_key?: boolean
     multi_key_index?: number

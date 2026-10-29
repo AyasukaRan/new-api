@@ -1138,6 +1138,9 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
+	if err := channelParams.ValidateUpstreamCostRatio(); err != nil {
+		return common.NewMessage(err.Error())
+	}
 	groups, models := channel.GetGroups(), channel.GetModels()
 	for group, scoped := range channelParams.GroupModels {
 		if !slices.Contains(groups, group) {

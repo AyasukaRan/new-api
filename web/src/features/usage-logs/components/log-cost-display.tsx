@@ -33,14 +33,16 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { formatLogQuota } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
-import { hasToolSurcharge } from '../lib/format'
+import { getLogCostEstimate, hasToolSurcharge } from '../lib/format'
 import type { LogOtherData } from '../types'
 
 interface LogCostDisplayProps {
   quota: number
   other: LogOtherData | null
   showBillingSource?: boolean
+  isAdmin?: boolean
 }
 
 function ToolSurchargeMarker() {
@@ -80,6 +82,7 @@ function ToolSurchargeMarker() {
 
 export function LogCostDisplay(props: LogCostDisplayProps) {
   const { t } = useTranslation()
+  const cost = props.isAdmin ? getLogCostEstimate(props.other) : null
   const isSubscription = props.other?.billing_source === 'subscription'
   const showToolSurcharge = hasToolSurcharge(props.other)
   const quota = isSubscription
@@ -102,39 +105,63 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
 
   return (
     <TooltipProvider>
-      <div className='inline-flex w-fit items-center gap-1.5'>
-        <StatusBadge
-          type='badge'
-          variant='neutral'
-          size='lg'
-          copyable={false}
-          className='border-border/80 bg-muted/60 text-foreground rounded-md border font-semibold tabular-nums'
-        >
-          {source ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    className='inline-flex shrink-0 cursor-help items-center'
-                    role='img'
-                    aria-label={source}
-                    tabIndex={0}
-                  >
-                    <HugeiconsIcon
-                      icon={isSubscription ? CrownIcon : Wallet01Icon}
-                      className='size-3.5'
-                      strokeWidth={2}
-                      aria-hidden='true'
-                    />
-                  </span>
-                }
-              />
-              <TooltipContent>{source}</TooltipContent>
-            </Tooltip>
-          ) : null}
-          <span className='whitespace-nowrap'>{formatLogQuota(quota)}</span>
-        </StatusBadge>
-        {showToolSurcharge ? <ToolSurchargeMarker /> : null}
+      <div
+        className={cn(
+          'inline-flex w-fit',
+          props.isAdmin ? 'flex-col items-start gap-1' : 'items-center gap-1.5'
+        )}
+      >
+        <div className='inline-flex items-center gap-1.5'>
+          <StatusBadge
+            type='badge'
+            variant='neutral'
+            size='lg'
+            copyable={false}
+            className='border-border/80 bg-muted/60 text-foreground rounded-md border font-semibold tabular-nums'
+          >
+            {source ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span
+                      className='inline-flex shrink-0 cursor-help items-center'
+                      role='img'
+                      aria-label={source}
+                      tabIndex={0}
+                    >
+                      <HugeiconsIcon
+                        icon={isSubscription ? CrownIcon : Wallet01Icon}
+                        className='size-3.5'
+                        strokeWidth={2}
+                        aria-hidden='true'
+                      />
+                    </span>
+                  }
+                />
+                <TooltipContent>{source}</TooltipContent>
+              </Tooltip>
+            ) : null}
+            <span className='whitespace-nowrap'>{formatLogQuota(quota)}</span>
+          </StatusBadge>
+          {showToolSurcharge ? <ToolSurchargeMarker /> : null}
+        </div>
+        {props.isAdmin && (
+          <dl className='text-muted-foreground grid grid-cols-[auto_auto] gap-x-2 gap-y-0.5 text-[11px]'>
+            <dt>{t('Estimated upstream cost')}</dt>
+            <dd className='text-right font-mono whitespace-nowrap tabular-nums'>
+              {cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
+            </dd>
+            <dt>{t('Estimated gross profit')}</dt>
+            <dd
+              className={cn(
+                'text-right font-mono whitespace-nowrap tabular-nums',
+                cost && cost.profit_quota < 0 && 'text-destructive'
+              )}
+            >
+              {cost ? formatLogQuota(cost.profit_quota) : t('Not recorded')}
+            </dd>
+          </dl>
+        )}
       </div>
     </TooltipProvider>
   )

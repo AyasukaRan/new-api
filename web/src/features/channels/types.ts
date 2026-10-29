@@ -101,6 +101,8 @@ export type Channel = z.infer<typeof channelSchema>
 // ============================================================================
 
 export interface ChannelSettings {
+  /** Upstream estimate before the sales group multiplier; absent means unknown. */
+  upstream_cost_ratio?: number | null
   /** Missing groups include all models; an empty array explicitly excludes all. */
   group_models?: Record<string, string[]>
   task_plugin_key?: string
