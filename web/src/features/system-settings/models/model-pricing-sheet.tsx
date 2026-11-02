@@ -84,8 +84,15 @@ import {
 } from '@/features/model-pricing/pricing-conversion-dialog'
 import { PricingCurrencySelector } from '@/features/model-pricing/pricing-currency-selector'
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
-import { combineBillingExpr } from '@/features/pricing/lib/billing-expr'
-import { pluginExpressionsEqual } from '@/features/pricing/lib/plugin-pricing'
+import {
+  combineBillingExpr,
+  splitBillingExprAndRequestRules,
+} from '@/features/pricing/lib/billing-expr'
+import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
+import {
+  pluginExpressionsEqual,
+  taskExpressionCompatible,
+} from '@/features/pricing/lib/plugin-pricing'
 import {
   createDefaultTaskVisualConfig,
   generateTaskExprFromConfig,
@@ -115,6 +122,7 @@ import {
 } from './model-pricing-core'
 import { PriceInput, PriceLane } from './model-pricing-inputs'
 import { formatPricingNumber } from './pricing-format'
+import type { ModelPricingIssue } from './pricing-issues'
 import { TaskPluginPricingEditor } from './task-plugin-pricing-editor'
 import { TaskUsagePricingEditor } from './task-usage-pricing-editor'
 import { TieredPricingEditor } from './tiered-pricing-editor'
@@ -135,7 +143,7 @@ type ModelPricingSheetProps = {
   globalEffectiveDataLoading?: boolean
   globalEffectiveDataError?: string
   onReloadGlobalEffectiveData?: () => void | Promise<unknown>
-  initialChannelId?: number
+  initialIssue?: ModelPricingIssue
   onScopeChange?: (channelId: string | null) => void
 }
 
@@ -153,9 +161,11 @@ type ModelPricingFieldsHandle = {
 }
 
 export type ModelPricingEditorPanelHandle = ModelPricingFieldsHandle & {
-  selectScope: (value: string) => void
+  readonly providerPriceKey?: string
+  selectScope: (value: string, issue?: ModelPricingIssue) => void
 }
 
+const EMPTY_USAGE_SCHEMA: BillingUsageSchema = {}
 const DEFAULT_TOKEN_BILLING_EXPR = 'tier("base", p * 0 + c * 0)'
 
 export const ModelPricingSheet = forwardRef<
@@ -223,13 +233,18 @@ const ModelPricingScopeEditor = forwardRef<
   ModelPricingEditorPanelProps
 >(function ModelPricingScopeEditor(props, ref) {
   const { t } = useTranslation()
-  const [scope, setScope] = useState(
-    props.initialChannelId ? String(props.initialChannelId) : 'global'
-  )
+  const [{ value: scope, issue }, setScope] = useState({
+    value: props.initialIssue?.channel_id
+      ? String(props.initialIssue.channel_id)
+      : 'global',
+    issue: props.initialIssue,
+  })
   const [dirty, setDirty] = useState(false)
   const [fieldsRevision, setFieldsRevision] = useState(0)
   const [pendingChange, setPendingChange] = useState<
-    { type: 'scope'; value: string } | { type: 'reset' } | null
+    | { type: 'scope'; value: string; issue?: ModelPricingIssue }
+    | { type: 'reload' | 'reset' }
+    | null
   >(null)
   const fieldsRef = useRef<ModelPricingFieldsHandle>(null)
   const channels = useModelChannelPricing(props.editData?.name)
@@ -242,22 +257,55 @@ const ModelPricingScopeEditor = forwardRef<
     props.globalEffectiveData === undefined
       ? props.editData
       : props.globalEffectiveData
+  const providerPriceKey = isGlobal ? issue?.plugin_key : undefined
+  const providerVariant = issue?.plugin_key
+    ? props.pluginVariants?.find(
+        (variant) => variant.plugin_key === issue.plugin_key && !variant.stale
+      )
+    : undefined
+  const issueChannelUnavailable = Boolean(
+    issue?.channel_id &&
+    !channels.isLoading &&
+    !channels.loadError &&
+    !channels.isActiveChannel(issue.channel_id)
+  )
+  const displayedVariants =
+    providerPriceKey && providerVariant
+      ? [providerVariant]
+      : props.pluginVariants
   const effectiveError =
     !isGlobal &&
     (props.globalEffectiveDataError ||
-      (!channels.isLoading &&
-      !channels.loadError &&
-      !channels.channelOptions.some((option) => option.value === scope)
-        ? t('Unavailable channel')
-        : '') ||
+      (issueChannelUnavailable ? t('Unavailable channel') : '') ||
       (!props.globalEffectiveDataLoading && !effectivePricing
         ? t('Failed to load model pricing')
         : ''))
   const scopedData = useMemo(() => {
     if (isGlobal) return props.editData
     if (!effectivePricing) return null
+    if (issue?.reason === 'unconfigured') {
+      return getEditorData(scope, {
+        name: effectivePricing.name,
+        billingMode: 'tiered_expr',
+      })
+    }
+    if (issue?.plugin_key && providerVariant?.effective) {
+      return getEditorData(scope, {
+        ...effectivePricing,
+        billingMode: 'tiered_expr',
+        ...splitBillingExprAndRequestRules(providerVariant.effective),
+      })
+    }
     return getEditorData(scope, effectivePricing)
-  }, [isGlobal, scope, props.editData, effectivePricing, getEditorData])
+  }, [
+    isGlobal,
+    scope,
+    props.editData,
+    effectivePricing,
+    getEditorData,
+    providerVariant,
+    issue,
+  ])
   const scopeOptions = useMemo(
     () => [{ value: 'global', label: t('Global') }, ...channels.channelOptions],
     [channels.channelOptions, t]
@@ -273,18 +321,19 @@ const ModelPricingScopeEditor = forwardRef<
   }, [isGlobal, scope, onScopeChange])
 
   const selectScope = useCallback(
-    (value: string | null) => {
-      if (!value || value === scope) return
-      if (dirty) setPendingChange({ type: 'scope', value })
-      else setScope(value)
+    (value: string | null, nextIssue?: ModelPricingIssue) => {
+      if (!value || (value === scope && nextIssue === issue)) return
+      if (dirty) setPendingChange({ type: 'scope', value, issue: nextIssue })
+      else setScope({ value, issue: nextIssue })
     },
-    [dirty, scope]
+    [dirty, scope, issue]
   )
 
   useImperativeHandle(
     ref,
     () => ({
       selectScope,
+      providerPriceKey,
       commitDraft: async () => {
         if (!isGlobal) {
           toast.error(
@@ -295,12 +344,26 @@ const ModelPricingScopeEditor = forwardRef<
         return (await fieldsRef.current?.commitDraft()) ?? null
       },
     }),
-    [isGlobal, selectScope, t]
+    [isGlobal, selectScope, providerPriceKey, t]
   )
 
   const saveChannel = async () => {
     const draft = await fieldsRef.current?.commitDraft()
-    if (!draft) return
+    if (!draft || issueChannelUnavailable || issue?.channel_shared_by_plugins) {
+      return
+    }
+    if (issue && draft.billingMode === 'tiered_expr') {
+      const expression = draft.billingExpr ?? ''
+      const compiled = compileBillingExpression(expression)
+      const invalid = issue.plugin_key
+        ? taskExpressionCompatible(expression, issue.usage_schema ?? {}) ===
+          false
+        : compiled.status === 'ready' && compiled.functions.has('u')
+      if (invalid) {
+        toast.error(t('Invalid billing expression'))
+        return
+      }
+    }
     if (await channels.save(scope, draft, scopedData ?? undefined)) {
       setFieldsRevision((revision) => revision + 1)
       setDirty(false)
@@ -313,16 +376,20 @@ const ModelPricingScopeEditor = forwardRef<
       setFieldsRevision((revision) => revision + 1)
       setDirty(false)
     }
-    if (effectiveError) await props.onReloadGlobalEffectiveData?.()
+    if (effectiveError || providerPriceKey) {
+      await props.onReloadGlobalEffectiveData?.()
+    }
   }
 
   let pricingContent = (
     <ModelPricingFields
-      key={`${scope}:${fieldsRevision}`}
+      key={`${scope}:${issue?.plugin_key ?? (issue ? 'ordinary' : '')}:${fieldsRevision}`}
       ref={fieldsRef}
       editData={scopedData}
       usageSchema={props.usageSchema}
-      pluginVariants={isGlobal ? props.pluginVariants : undefined}
+      channelIssue={isGlobal ? undefined : issue}
+      providerPriceKey={providerPriceKey}
+      pluginVariants={isGlobal ? displayedVariants : undefined}
       embedded={props.embedded}
       scrollHeader={props.scrollHeader}
       onDirtyChange={setDirty}
@@ -342,12 +409,67 @@ const ModelPricingScopeEditor = forwardRef<
   )
   if (!isGlobal && (channels.isLoading || props.globalEffectiveDataLoading)) {
     pricingContent = <LoadingState />
-  } else if (effectiveError) {
+  } else if (
+    issueChannelUnavailable ||
+    effectiveError ||
+    (providerPriceKey && !providerVariant)
+  ) {
     pricingContent = (
       <ErrorState
-        description={effectiveError}
+        description={
+          issueChannelUnavailable
+            ? t('Unavailable channel')
+            : effectiveError ||
+              t('This provider is unavailable for this model.')
+        }
         onRetry={() => void reloadChannel()}
       />
+    )
+  } else if (
+    !isGlobal &&
+    issue?.channel_shared_by_plugins &&
+    !channels.loadError
+  ) {
+    const maskingModel = [
+      props.editData?.name,
+      issue.channel_billing_override_model,
+    ].find(
+      (name) =>
+        name &&
+        issue.channel_id &&
+        channels.hasBillingOverride(name, issue.channel_id)
+    )
+    pricingContent = (
+      <Alert className='m-4 w-auto'>
+        <AlertDescription className='items-start'>
+          <p>
+            {t(
+              'This channel shares one model price across its plugins. Set different prices in each provider’s global pricing.'
+            )}
+          </p>
+          {maskingModel && (
+            <p>
+              {t(
+                'Use global pricing on this channel before a provider price can take effect.'
+              )}{' '}
+              <code>{maskingModel}</code>
+            </p>
+          )}
+          {providerVariant && (
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={Boolean(maskingModel)}
+              onClick={() => selectScope('global', issue)}
+            >
+              {t('Edit global pricing for {{provider}}', {
+                provider: providerVariant.plugin_name,
+              })}
+            </Button>
+          )}
+        </AlertDescription>
+      </Alert>
     )
   }
 
@@ -379,6 +501,16 @@ const ModelPricingScopeEditor = forwardRef<
                 onValueChange={selectScope}
               />
             </Field>
+            {issue && (issue.plugin_name || issue.plugin_key) && (
+              <p className='text-muted-foreground text-xs'>
+                {providerPriceKey
+                  ? t(
+                      'This provider price applies across channels that inherit it.'
+                    )
+                  : t('Provider')}{' '}
+                · {issue.plugin_name || issue.plugin_key}
+              </p>
+            )}
             {!isGlobal && (
               <div className='flex flex-wrap items-center justify-between gap-2'>
                 <p className='text-muted-foreground text-xs'>
@@ -421,7 +553,7 @@ const ModelPricingScopeEditor = forwardRef<
                     disabled={isSaving}
                     onClick={() => {
                       if (dirty) {
-                        setPendingChange({ type: 'scope', value: scope })
+                        setPendingChange({ type: 'reload' })
                       } else {
                         void reloadChannel()
                       }
@@ -461,11 +593,11 @@ const ModelPricingScopeEditor = forwardRef<
         isLoading={channels.isSaving}
         handleConfirm={() => {
           if (pendingChange?.type === 'scope') {
-            if (pendingChange.value === scope) void reloadChannel()
-            else {
-              setScope(pendingChange.value)
-              setDirty(false)
-            }
+            setScope({ value: pendingChange.value, issue: pendingChange.issue })
+            setDirty(false)
+            setPendingChange(null)
+          } else if (pendingChange?.type === 'reload') {
+            void reloadChannel()
             setPendingChange(null)
           } else if (pendingChange?.type === 'reset') {
             void channels.reset(scope).then((success) => {
@@ -484,6 +616,8 @@ const ModelPricingScopeEditor = forwardRef<
 
 type ModelPricingFieldsProps = ModelPricingEditorPanelProps & {
   saveLabel: string
+  channelIssue?: ModelPricingIssue
+  providerPriceKey?: string
   saveDisabled?: boolean
   inheritDisabledLanes?: boolean
 }
@@ -499,6 +633,8 @@ const ModelPricingFields = forwardRef<
     usageSchema,
     onDirtyChange,
     saveLabel,
+    channelIssue,
+    providerPriceKey,
     saveDisabled,
     inheritDisabledLanes,
     pluginVariants,
@@ -635,16 +771,23 @@ const ModelPricingFields = forwardRef<
       ),
     [pricingModels]
   )
-  const taskUsageSchema =
+  let taskUsageSchema =
     usageSchema ??
     pluginVariants?.find((variant) => !variant.stale)?.usage_schema ??
     usageSchemaByModel.get(watchedValues.name.trim())
-  const taskUsageExamples =
-    usageExamplesByModel.get(watchedValues.name.trim()) ??
-    pluginVariants?.find((variant) => !variant.stale)?.usage_examples
-  const usesTaskPricing =
-    ordinaryPricingModel !== watchedValues.name &&
-    usesTaskModelPricing(editData, taskUsageSchema, pluginVariants)
+  if (channelIssue) {
+    taskUsageSchema = channelIssue.plugin_key
+      ? (channelIssue.usage_schema ?? EMPTY_USAGE_SCHEMA)
+      : undefined
+  }
+  const taskUsageExamples = channelIssue
+    ? channelIssue.usage_examples
+    : (usageExamplesByModel.get(watchedValues.name.trim()) ??
+      pluginVariants?.find((variant) => !variant.stale)?.usage_examples)
+  const usesTaskPricing = channelIssue
+    ? Boolean(channelIssue.plugin_key)
+    : ordinaryPricingModel !== watchedValues.name &&
+      usesTaskModelPricing(editData, taskUsageSchema, pluginVariants)
   const defaultTaskBillingExpr = useMemo(
     () =>
       taskUsageSchema
@@ -1120,12 +1263,22 @@ const ModelPricingFields = forwardRef<
         if (amounts && [...amounts].some((input) => !input.reportValidity())) {
           return null
         }
+        if (providerPriceKey && editData) {
+          return { ...editData, pluginBillingExpr: pluginExpressions }
+        }
         const isValid = await form.trigger()
         if (!isValid || !validatePricingValues()) return null
         return buildSubmitData(form.getValues())
       },
     }),
-    [form, validatePricingValues, buildSubmitData]
+    [
+      form,
+      validatePricingValues,
+      buildSubmitData,
+      providerPriceKey,
+      editData,
+      pluginExpressions,
+    ]
   )
 
   const configureOrdinaryPricing = () => {
@@ -1199,7 +1352,13 @@ const ModelPricingFields = forwardRef<
             {scrollHeader && (
               <div className='mb-4 space-y-3'>{scrollHeader}</div>
             )}
-            <div className='grid min-w-0 items-start gap-4 @min-[960px]/pricing-editor:grid-cols-[minmax(0,1fr)_260px]'>
+            <div
+              className={cn(
+                'grid min-w-0 items-start gap-4',
+                !providerPriceKey &&
+                  '@min-[960px]/pricing-editor:grid-cols-[minmax(0,1fr)_260px]'
+              )}
+            >
               <FieldGroup className='min-w-0'>
                 {warnings.length > 0 && (
                   <Alert variant='destructive'>
@@ -1243,6 +1402,7 @@ const ModelPricingFields = forwardRef<
 
                 <TaskPluginPricingEditor
                   key={`${editorReloadToken}:${watchedValues.name}`}
+                  onlyProvider={providerPriceKey}
                   variants={pluginVariants ?? []}
                   expressions={pluginExpressions}
                   onChange={setPluginExpressions}
@@ -1487,6 +1647,7 @@ const ModelPricingFields = forwardRef<
               </FieldGroup>
 
               <aside
+                hidden={Boolean(providerPriceKey)}
                 aria-label={t('Preview')}
                 className='bg-muted/20 min-w-0 rounded-lg border @min-[960px]/pricing-editor:sticky @min-[960px]/pricing-editor:top-0'
               >

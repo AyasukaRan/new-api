@@ -46,7 +46,7 @@ const filterBySelectedValues = (
 
 type BuildModelRatioColumnsOptions = {
   onDelete: (name: string) => void
-  onEdit: (model: ModelRow, channelId?: number) => void
+  onEdit: (model: ModelRow, issue?: ModelPricingIssue) => void
   deleteDisabled?: boolean
   taskModelNames?: Set<string>
   /** Pricing issues across enabled channels, grouped by model. */
@@ -157,7 +157,7 @@ export function buildModelRatioColumns({
                   type='button'
                   variant='link'
                   className='text-muted-foreground h-auto max-w-full justify-start self-start p-0 text-start text-xs whitespace-normal'
-                  onClick={() => onEdit(row.original, issue.channel_id)}
+                  onClick={() => onEdit(row.original, issue)}
                 >
                   {label}
                 </Button>

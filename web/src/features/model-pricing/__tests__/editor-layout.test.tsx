@@ -33,6 +33,7 @@ import { SettingsPageProvider } from '@/features/system-settings/components/sett
 import { ModelPricingEditorPanel } from '@/features/system-settings/models/model-pricing-sheet'
 import { ModelRatioForm } from '@/features/system-settings/models/model-ratio-form'
 import { api } from '@/lib/api'
+import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 import { usePricingPreferencesStore } from '@/stores/pricing-preferences-store'
 
@@ -331,13 +332,40 @@ it.each(['default', 'unset'] as const)(
   async (variant) => {
     const user = userEvent.setup()
     const save = vi.fn(async () => undefined)
-    vi.spyOn(api, 'get').mockImplementation(async (url) => ({
-      data: {
-        success: true,
-        data: url === '/api/channel/models_enabled' ? ['example-model'] : [],
-        vendors: [],
-      },
-    }))
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'root', role: ROLE.SUPER_ADMIN })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      let data: unknown = []
+      if (url === '/api/option/model_pricing/issues' && variant === 'unset') {
+        data = [
+          {
+            model_name: 'example-model',
+            channel_id: 8,
+            channel_name: 'Ordinary channel',
+            reason: 'unconfigured',
+          },
+        ]
+      } else if (url === '/api/channel') {
+        data = {
+          items: [
+            {
+              id: 8,
+              name: 'Ordinary channel',
+              models: 'example-model',
+              status: 1,
+            },
+          ],
+          total: 1,
+        }
+      } else if (url === '/api/option/model_pricing') {
+        data = { entries: [{ model_name: 'example-model', effective: {} }] }
+      }
+      return { data: { success: true, data, vendors: [] } }
+    })
     localStorage.removeItem('model-ratio-column-visibility')
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -391,20 +419,35 @@ it.each(['default', 'unset'] as const)(
     }
     await user.click(await screen.findByRole('button', { name: 'Edit' }))
     await user.click(
-      screen.getByRole('tab', { name: 'Per-request (deprecated)' })
+      await screen.findByRole('tab', { name: 'Per-request (deprecated)' })
     )
     const price = screen.getByRole('textbox', { name: 'Fixed price' })
     await user.clear(price)
     await user.type(price, '0.25')
     const region = screen.getByRole('region', { name: 'Edit model pricing' })
-    const button = screen.getByRole('button', { name: 'Save model prices' })
+    const button = screen.getByRole('button', {
+      name: variant === 'unset' ? 'Save channel pricing' : 'Save model prices',
+    })
     expect(region).not.toContainElement(button)
     expect(button.parentElement?.parentElement).toHaveClass('shrink-0')
     await user.click(button)
-    await waitFor(() => expect(save).toHaveBeenCalledOnce())
-    expect(save).toHaveBeenCalledWith(
-      expect.objectContaining({ ExposeRatioEnabled: variant === 'default' }),
-      undefined
-    )
+    if (variant === 'unset') {
+      await waitFor(() => expect(put).toHaveBeenCalledOnce())
+      const request = put.mock.calls[0][1] as { key: string; value: string }
+      expect(request.key).toBe('ChannelModelPricing')
+      expect(JSON.parse(request.value)).toEqual({
+        'example-model': {
+          '8': { billing_mode: 'per_request', model_price: 0.25 },
+        },
+      })
+      expect(save).not.toHaveBeenCalled()
+    } else {
+      await waitFor(() => expect(save).toHaveBeenCalledOnce())
+      expect(save).toHaveBeenCalledWith(
+        expect.objectContaining({ ExposeRatioEnabled: true }),
+        undefined
+      )
+      expect(put).not.toHaveBeenCalled()
+    }
   }
 )

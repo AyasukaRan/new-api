@@ -241,6 +241,15 @@ func ResolveBillingModelName(origin string, channelID int) string {
 	return base
 }
 
+func taskChannelBillingMode(name, mapped string, channelID int) (string, string, string, bool) {
+	for _, candidate := range []string{name, mapped} {
+		if mode, expr, ok := ratio_setting.ChannelBillingMode(candidate, channelID); ok {
+			return candidate, mode, expr, true
+		}
+	}
+	return "", "", "", false
+}
+
 // resolveChannelPricing describes the same channel override precedence used by
 // relay, without evaluating a request or changing any stored billing settings.
 func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.LoadedPlugin, mappedModel string, sharedModel bool) (Pricing, string) {
@@ -277,11 +286,8 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 		if found || billing_setting.GetBillingMode(name) == billing_setting.BillingModeTieredExpr {
 			mode = billing_setting.BillingModeTieredExpr
 		}
-		for _, candidate := range []string{name, mappedModel} {
-			if pinnedMode, pinnedExpr, pinned := ratio_setting.ChannelBillingMode(candidate, channelID); pinned {
-				name, mode, expression = candidate, pinnedMode, pinnedExpr
-				break
-			}
+		if target, pinnedMode, pinnedExpr, pinned := taskChannelBillingMode(name, mappedModel, channelID); pinned {
+			name, mode, expression = target, pinnedMode, pinnedExpr
 		}
 	}
 	pricing.BillingMode = mode

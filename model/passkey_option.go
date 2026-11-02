@@ -100,6 +100,10 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 	defer requestPolicyOptionMutex.Unlock()
 	passkeyOptionMutex.Lock()
 	defer passkeyOptionMutex.Unlock()
+	if _, updatesChannelPricing := values["ChannelModelPricing"]; updatesChannelPricing {
+		modelPricingMutationMu.Lock()
+		defer modelPricingMutationMu.Unlock()
+	}
 	values = maps.Clone(values)
 	for key, value := range values {
 		if err := validateOptionValue(key, value); err != nil {
@@ -239,6 +243,11 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 			return err
 		}
 		change.RemovalConfirmation = common.GenerateHMACWithKey([]byte("passkey-domains-v1:"+common.SessionSecret), string(payload))
+		if value, present := values["ChannelModelPricing"]; present {
+			if err := saveChannelModelPricing(tx, value); err != nil {
+				return err
+			}
+		}
 		if preview {
 			return errPasskeyDomainPreview
 		}
@@ -249,6 +258,9 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 		values["ServerAddress"] = serverAddress
 		keys := slices.Sorted(maps.Keys(values))
 		for _, key := range keys {
+			if key == "ChannelModelPricing" {
+				continue // already validated and saved in this transaction
+			}
 			if err := tx.Save(&Option{Key: key, Value: values[key]}).Error; err != nil {
 				return err
 			}

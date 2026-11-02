@@ -217,6 +217,8 @@ func loadOptionsFromDatabase() {
 	}()
 	passkeyOptionMutex.Lock()
 	defer passkeyOptionMutex.Unlock()
+	modelPricingMutationMu.Lock()
+	defer modelPricingMutationMu.Unlock()
 	options, _ := AllOption()
 	passkeyOptions := make(map[string]string)
 	for _, option := range options {
@@ -286,23 +288,6 @@ func validateOptionValue(key string, value string) error {
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
 	}
-	if key == "ChannelModelPricing" {
-		if err := ratio_setting.ValidateChannelModelPricingJSONString(value); err != nil {
-			return err
-		}
-		generation := jsplugin.DefaultRegistry.Generation()
-		return billing_setting.ValidateChannelBillingExpressionsWithSchema(value, func(name string) (map[string]jsplugin.UsageFieldSchema, bool) {
-			target, resolved := ResolveTaskModelAlias(generation, name)
-			if !resolved {
-				return nil, false
-			}
-			plugin, found := generation.Get(target.PluginKey)
-			if !found {
-				return nil, false
-			}
-			return plugin.Meta.UsageSchema, true
-		})
-	}
 	// Both bounds protect the log database rather than the caller: a retention
 	// of zero would purge traces as fast as they are written, and an unbounded
 	// payload cap would push single rows past MySQL's max_allowed_packet.
@@ -322,6 +307,9 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
+	if key == "ChannelModelPricing" {
+		return UpdateOptionsBulk(map[string]string{key: value})
+	}
 	if IsRequestPolicyOption(key) {
 		return UpdateRequestPolicyOptions(map[string]string{key: value})
 	}
@@ -390,8 +378,19 @@ func UpdateOptionsBulk(values map[string]string) error {
 		}
 	}
 
+	// Serialize local publication with other price writes and option reloads.
+	if _, updatesChannelPricing := values["ChannelModelPricing"]; updatesChannelPricing {
+		modelPricingMutationMu.Lock()
+		defer modelPricingMutationMu.Unlock()
+	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {
+			if k == "ChannelModelPricing" {
+				if err := saveChannelModelPricing(tx, v); err != nil {
+					return err
+				}
+				continue
+			}
 			option := Option{Key: k}
 			if err := tx.FirstOrCreate(&option, Option{Key: k}).Error; err != nil {
 				return err
@@ -723,7 +722,7 @@ func updateOptionMap(key string, value string) (err error) {
 	case "GroupGroupRatio":
 		err = ratio_setting.UpdateGroupGroupRatioByJSONString(value)
 	case "ChannelModelPricing":
-		err = ratio_setting.UpdateChannelModelPricingByJSONString(value)
+		err = ratio_setting.LoadStoredChannelModelPricing(value)
 	case "UserUsableGroups":
 		err = setting.UpdateUserUsableGroupsByJSONString(value)
 	case "CompletionRatio":

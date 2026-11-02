@@ -158,7 +158,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorInSheet, setEditorInSheet] = useState(false)
   const [editData, setEditData] = useState<ModelRatioData | null>(null)
-  const [initialChannelId, setInitialChannelId] = useState<number>()
+  const [initialIssue, setInitialIssue] = useState<ModelPricingIssue>()
   const [editorDirty, setEditorDirty] = useState(false)
   const [pendingEditorAction, setPendingEditorAction] = useState<
     (() => void) | null
@@ -381,24 +381,27 @@ const ModelRatioVisualEditorComponent = forwardRef<
     return counts
   }, [models, taskModelNames])
   const handleEdit = useCallback(
-    (model: ModelRow, channelId?: number) => {
-      const targetChannelId =
-        channelId ??
+    (model: ModelRow, issue?: ModelPricingIssue) => {
+      const target =
+        issue ??
         (filterMode === 'unset'
-          ? pricingIssues.get(model.name)?.[0]?.channel_id
+          ? pricingIssues.get(model.name)?.[0]
           : undefined)
       if (
         editorStateRef.current.open &&
         editorStateRef.current.name === model.name
       ) {
-        if (targetChannelId) {
-          editorPanelRef.current?.selectScope(String(targetChannelId))
+        if (target) {
+          editorPanelRef.current?.selectScope(
+            target.channel_id ? String(target.channel_id) : 'global',
+            target
+          )
         }
         if (editorStateRef.current.inSheet) setSheetOpen(true)
         return
       }
       requestEditorChange(() => {
-        setInitialChannelId(targetChannelId)
+        setInitialIssue(target)
         const editableModel = model.draft ?? model.saved ?? model
         let editBillingMode: PricingMode = 'per-token'
         if (editableModel.billingMode === 'tiered_expr') {
@@ -431,7 +434,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
   const handleAdd = useCallback(() => {
     requestEditorChange(() => {
-      setInitialChannelId(undefined)
+      setInitialIssue(undefined)
       setEditData(null)
       setEditorOpen(true)
       setEditorInSheet(isMobile)
@@ -659,6 +662,12 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
     let sourceData = editData
     if (editorOpen && editorPanelRef.current) {
+      if (editorPanelRef.current.providerPriceKey) {
+        toast.error(
+          t('Provider prices can only be saved for the selected model.')
+        )
+        return
+      }
       const committed = await editorPanelRef.current.commitDraft()
       if (!committed) return
       sourceData = committed
@@ -694,14 +703,44 @@ const ModelRatioVisualEditorComponent = forwardRef<
       requestEditorChange,
       commitOpenEditor: async () => {
         if (!editorOpen || !editorPanelRef.current) return true
-        const data = await editorPanelRef.current.commitDraft()
+        const panel = editorPanelRef.current
+        const data = await panel.commitDraft()
         if (!data) return false
-        persistPricingData(data)
-        setEditData(data)
+        const provider = panel.providerPriceKey
+        if (provider) {
+          const prices = JSON.parse(pluginBillingExpr) as Record<string, string>
+          const key = `${provider}::${data.name}`
+          if (
+            data.pluginBillingExpr &&
+            Object.hasOwn(data.pluginBillingExpr, provider)
+          ) {
+            prices[key] = data.pluginBillingExpr[provider]
+          } else {
+            delete prices[key]
+          }
+          onChange(
+            'billing_setting.plugin_billing_expr',
+            JSON.stringify(prices)
+          )
+          setEditData((current) =>
+            current
+              ? { ...current, pluginBillingExpr: data.pluginBillingExpr }
+              : current
+          )
+        } else {
+          persistPricingData(data)
+          setEditData(data)
+        }
         return true
       },
     }),
-    [editorOpen, persistPricingData, requestEditorChange]
+    [
+      editorOpen,
+      persistPricingData,
+      requestEditorChange,
+      pluginBillingExpr,
+      onChange,
+    ]
   )
 
   const hasRows = table.getRowModel().rows.length > 0
@@ -860,7 +899,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
             <ModelPricingEditorPanel
               ref={editorPanelRef}
               editData={editData}
-              initialChannelId={initialChannelId}
+              initialIssue={initialIssue}
               globalEffectiveData={globalEffectiveData}
               globalEffectiveDataLoading={pricingConfig.isPending}
               globalEffectiveDataError={pricingConfig.error?.message}
@@ -941,7 +980,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
             }
           }}
           editData={editData}
-          initialChannelId={initialChannelId}
+          initialIssue={initialIssue}
           globalEffectiveData={globalEffectiveData}
           globalEffectiveDataLoading={pricingConfig.isPending}
           globalEffectiveDataError={pricingConfig.error?.message}

@@ -1989,12 +1989,14 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
 			for _, spec := range []struct{ key, field, unit string }{{"matrix-alpha", "seconds", "second"}, {"matrix-beta", "credits", "credit"}} {
 				source := fmt.Sprintf(`
-		export const meta = {apiVersion:1,key:%q,name:%q,version:"1.0.0",author:{name:"Test"},models:[%q],fetchMode:"per_task",upstreams:["new_api"],usageSchema:{%s:{type:"number",unit:%q}}};
+		export const meta = {apiVersion:1,key:%q,name:%q,version:"1.0.0",author:{name:"Test"},models:[%q],fetchMode:"per_task",upstreams:["new_api"],
+			usageSchema:{%s:{type:"number",unit:%q},fallback:{type:"number",unit:"count"}},
+			usageProfiles:[{models:[%q],schema:{%s:{type:"number",unit:%q}},examples:[{label:%q,facts:{%s:2}}]}]};
 		export function buildSubmitRequest(){return {};}
 		export function parseSubmitResponse(){return {};}
 		export function buildQueryRequest(){return {};}
 		export function parseTaskResult(){return {};}
-		`, spec.key, spec.key, name, spec.field, spec.unit)
+		`, spec.key, spec.key, name, spec.field, spec.unit, name, spec.field, spec.unit, spec.key, spec.field)
 				_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
 				require.NoError(t, err)
 				t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister(spec.key) })
@@ -2043,6 +2045,7 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 				require.Empty(t, issueAPI(), "registered plugins alone are not channel pricing issues")
 
 				bindBeta := `{"task_extend_plugin_keys":["matrix-beta"]}`
+				bindBoth := `{"task_extend_plugin_keys":["matrix-alpha","matrix-beta"]}`
 				mapping := fmt.Sprintf(`{"route-alias":"mid","mid":%q}`, name)
 				channels := []model.Channel{
 					{Id: 71, Type: constant.ChannelTypeOpenAI, Name: "Text", Models: "route-missing,globally-free,lane-free," + name, Group: "one,two"},
@@ -2051,6 +2054,7 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 					{Id: 74, Type: constant.ChannelTypeNewAPI, Name: "Bound", Models: "route-alias", Setting: &bindBeta, ModelMapping: &mapping},
 					{Id: 75, Type: constant.ChannelTypeTaskPlugin, Name: "Unbound", Models: name},
 					{Id: 76, Type: constant.ChannelTypeNewAPI, Name: "Native only, unbound", Models: name},
+					{Id: 77, Type: constant.ChannelTypeNewAPI, Name: "Shared", Models: "route-alias", Setting: &bindBoth, ModelMapping: &mapping},
 				}
 				for i := range channels {
 					channel := &channels[i]
@@ -2064,8 +2068,16 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 				textMissing := model.ModelPricingIssue{ModelName: "route-missing", ChannelID: 71, ChannelName: "Text", Reason: model.ModelPricingIssueUnconfigured}
 				backupMissing := model.ModelPricingIssue{ModelName: "route-missing", ChannelID: 72, ChannelName: "Backup", Reason: model.ModelPricingIssueUnconfigured}
 				ordinaryTaskPrice := model.ModelPricingIssue{ModelName: name, ChannelID: 71, ChannelName: "Text", Reason: model.ModelPricingIssueInvalidExpression}
-				taskAlias := model.ModelPricingIssue{ModelName: "route-alias", ChannelID: 74, ChannelName: "Bound", PluginKey: "matrix-beta", PluginName: "matrix-beta", Reason: model.ModelPricingIssueIncompatible}
-				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, taskAlias}, issueAPI())
+				taskAlias := model.ModelPricingIssue{
+					ModelName: "route-alias", ChannelID: 74, ChannelName: "Bound", PluginKey: "matrix-beta", PluginName: "matrix-beta", Reason: model.ModelPricingIssueIncompatible,
+					UsageSchema:   map[string]jsplugin.UsageFieldSchema{"credits": {Type: "number", Unit: "credit"}},
+					UsageExamples: []jsplugin.UsageExample{{Label: "matrix-beta", Facts: map[string]any{"credits": float64(2)}}},
+				}
+				// Alpha already has a compatible price on the shared channel. Beta
+				// must still warn that editing its channel price also affects Alpha.
+				sharedAlias := taskAlias
+				sharedAlias.ChannelID, sharedAlias.ChannelName, sharedAlias.ChannelSharedByPlugins = 77, "Shared", true
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, taskAlias, sharedAlias}, issueAPI())
 
 				// A mapped channel override is a valid free task price. An explicit
 				// alias override wins even when it is the wrong kind of expression.
@@ -2076,13 +2088,46 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 				raw, err := common.Marshal(overrides)
 				require.NoError(t, err)
 				require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(string(raw)))
-				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice}, issueAPI())
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, sharedAlias}, issueAPI())
 				overrides["route-alias"] = map[int]ratio_setting.ChannelModelPricing{74: {BillingMode: "tiered_expr", BillingExpr: `tier("request", fixed(0.1))`}}
 				raw, err = common.Marshal(overrides)
 				require.NoError(t, err)
 				require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(string(raw)))
 				taskAlias.Reason = model.ModelPricingIssueInvalidTaskPrice
-				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, taskAlias}, issueAPI())
+				taskAlias.ChannelBillingOverrideModel = "route-alias"
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, taskAlias, sharedAlias}, issueAPI())
+
+				// An old channel price that only works on Alpha, and a retired
+				// malformed expression, must not block an independent repair.
+				overrides[name][77] = ratio_setting.ChannelModelPricing{BillingMode: "tiered_expr", BillingExpr: base}
+				overrides["retired"] = map[int]ratio_setting.ChannelModelPricing{78: {BillingMode: "tiered_expr", BillingExpr: "incomplete("}}
+				raw, err = common.Marshal(overrides)
+				require.NoError(t, err)
+				require.NoError(t, db.Create(&model.Option{Key: "ChannelModelPricing", Value: string(raw)}).Error)
+
+				overrides["route-alias"][74] = ratio_setting.ChannelModelPricing{BillingMode: "tiered_expr", BillingExpr: variant}
+				overrides[name][71] = ratio_setting.ChannelModelPricing{BillingMode: "tiered_expr", BillingExpr: `tier("request", fixed(0.05))`}
+				repaired, err := common.Marshal(overrides)
+				require.NoError(t, err)
+				save := modelManagementRequest(t, UpdateOption, http.MethodPut, "/api/option/", OptionUpdateRequest{Key: "ChannelModelPricing", Value: string(repaired)}, nil)
+				require.Contains(t, save.Body.String(), `"success":true`, save.Body.String())
+				sharedAlias.ChannelBillingOverrideModel = name
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, sharedAlias}, issueAPI())
+				retired, found := ratio_setting.GetChannelModelPricing("retired", 78)
+				assert.True(t, found)
+				assert.Equal(t, "tiered_expr", retired.BillingMode)
+				assert.Empty(t, retired.BillingExpr, "an invalid stored price cannot fall through to a global charge")
+
+				// A new shared channel price must work on both bound plugins.
+				overrides[name][77] = ratio_setting.ChannelModelPricing{BillingMode: "tiered_expr", BillingExpr: variant}
+				raw, err = common.Marshal(overrides)
+				require.NoError(t, err)
+				rejected := modelManagementRequest(t, UpdateOption, http.MethodPut, "/api/option/", OptionUpdateRequest{Key: "ChannelModelPricing", Value: string(raw)}, nil)
+				assert.Contains(t, rejected.Body.String(), `"success":false`)
+				assert.Contains(t, rejected.Body.String(), "matrix-alpha")
+				var stored model.Option
+				require.NoError(t, db.Where(&model.Option{Key: "ChannelModelPricing"}).First(&stored).Error)
+				assert.Equal(t, string(repaired), stored.Value)
 			})
 			before, err := model.GetModelPricingSnapshot([]string{name})
 			require.NoError(t, err)

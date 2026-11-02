@@ -3,6 +3,7 @@ package ratio_setting
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -149,48 +150,99 @@ func GetChannelModelPricingCopy() map[string]map[int]ChannelModelPricing {
 // path would otherwise silently ignore, so an operator sees the mistake instead
 // of wondering why the override never applied.
 func ValidateChannelModelPricingJSONString(jsonStr string) error {
-	if jsonStr == "" {
-		return nil
+	_, err := ChangedChannelBillingExpressions("", jsonStr)
+	return err
+}
+
+// ChangedChannelBillingExpressions validates newly added or modified overrides.
+// Persisted prices may have outlived their plugin or its usage schema.
+func ChangedChannelBillingExpressions(previous, current string) ([]ChannelBillingExprEntry, error) {
+	var old, proposed map[string]map[int]ChannelModelPricing
+	if previous != "" {
+		// An unreadable old payload cannot exempt any proposed override.
+		if err := common.UnmarshalJsonStr(previous, &old); err != nil {
+			old = nil
+		}
 	}
-	var parsed map[string]map[int]ChannelModelPricing
-	if err := common.UnmarshalJsonStr(jsonStr, &parsed); err != nil {
+	if current == "" {
+		return nil, nil
+	}
+	if err := common.UnmarshalJsonStr(current, &proposed); err != nil {
+		return nil, err
+	}
+	var entries []ChannelBillingExprEntry
+	for model, byChannel := range proposed {
+		if _, retained := old[model]; model == "" && len(byChannel) == 0 && !retained {
+			return nil, fmt.Errorf("channel pricing contains an empty model name")
+		}
+		for id, price := range byChannel {
+			if saved, ok := old[model][id]; ok && reflect.DeepEqual(saved, price) {
+				continue
+			}
+			if err := validateChannelPrice(model, id, price); err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(price.BillingMode) == ChannelBillingModeTieredExpr {
+				entries = append(entries, ChannelBillingExprEntry{Model: model, ChannelId: id, Expr: strings.TrimSpace(price.BillingExpr)})
+			}
+		}
+	}
+	return entries, nil
+}
+
+func validateChannelPrice(modelName string, channelId int, pricing ChannelModelPricing) error {
+	if modelName == "" {
+		return fmt.Errorf("channel pricing contains an empty model name")
+	}
+	if channelId <= 0 {
+		return fmt.Errorf("invalid channel id %d for model %s", channelId, modelName)
+	}
+	for lane, value := range map[string]*float64{
+		"model_ratio":            pricing.ModelRatio,
+		"completion_ratio":       pricing.CompletionRatio,
+		"cache_ratio":            pricing.CacheRatio,
+		"create_cache_ratio":     pricing.CreateCacheRatio,
+		"image_ratio":            pricing.ImageRatio,
+		"audio_ratio":            pricing.AudioRatio,
+		"audio_completion_ratio": pricing.AudioCompletionRatio,
+	} {
+		if value == nil {
+			continue
+		}
+		if math.IsNaN(*value) || !isValidChannelPricingRatio(*value) {
+			return fmt.Errorf("invalid %s for model %s on channel %d: %v (must be between 0 and %d)",
+				lane, modelName, channelId, *value, MaxChannelPricingRatio)
+		}
+	}
+	if price := pricing.ModelPrice; price != nil && !(*price >= 0 && *price <= MaxChannelModelPrice) {
+		return fmt.Errorf("invalid model_price for model %s on channel %d: %v (must be between 0 and %d)",
+			modelName, channelId, *price, MaxChannelModelPrice)
+	}
+	return validateChannelBillingMode(modelName, channelId, pricing)
+}
+
+// LoadStoredChannelModelPricing applies a persisted option on startup or after
+// a save. An invalid legacy override must fail closed for its own route while
+// the remaining channels keep their prices. Its original JSON stays editable.
+func LoadStoredChannelModelPricing(raw string) error {
+	prices := make(map[string]map[int]ChannelModelPricing)
+	if raw != "" {
+		if err := common.UnmarshalJsonStr(raw, &prices); err != nil {
+			return err
+		}
+	}
+	for model, byChannel := range prices {
+		for id, price := range byChannel {
+			if err := validateChannelPrice(model, id, price); err != nil {
+				byChannel[id] = ChannelModelPricing{BillingMode: ChannelBillingModeTieredExpr}
+			}
+		}
+	}
+	encoded, err := common.Marshal(prices)
+	if err != nil {
 		return err
 	}
-	for modelName, byChannel := range parsed {
-		if modelName == "" {
-			return fmt.Errorf("channel pricing contains an empty model name")
-		}
-		for channelId, pricing := range byChannel {
-			if channelId <= 0 {
-				return fmt.Errorf("invalid channel id %d for model %s", channelId, modelName)
-			}
-			for lane, value := range map[string]*float64{
-				"model_ratio":            pricing.ModelRatio,
-				"completion_ratio":       pricing.CompletionRatio,
-				"cache_ratio":            pricing.CacheRatio,
-				"create_cache_ratio":     pricing.CreateCacheRatio,
-				"image_ratio":            pricing.ImageRatio,
-				"audio_ratio":            pricing.AudioRatio,
-				"audio_completion_ratio": pricing.AudioCompletionRatio,
-			} {
-				if value == nil {
-					continue
-				}
-				if math.IsNaN(*value) || !isValidChannelPricingRatio(*value) {
-					return fmt.Errorf("invalid %s for model %s on channel %d: %v (must be between 0 and %d)",
-						lane, modelName, channelId, *value, MaxChannelPricingRatio)
-				}
-			}
-			if price := pricing.ModelPrice; price != nil && !(*price >= 0 && *price <= MaxChannelModelPrice) {
-				return fmt.Errorf("invalid model_price for model %s on channel %d: %v (must be between 0 and %d)",
-					modelName, channelId, *price, MaxChannelModelPrice)
-			}
-			if err := validateChannelBillingMode(modelName, channelId, pricing); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return types.LoadFromJsonStringWithCallback(channelModelPricingMap, string(encoded), InvalidateExposedDataCache)
 }
 
 // ChannelBillingMode reports how a channel prices a model: the override when

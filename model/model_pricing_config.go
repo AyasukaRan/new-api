@@ -399,12 +399,16 @@ const (
 )
 
 type ModelPricingIssue struct {
-	ChannelID   int    `json:"channel_id,omitempty"`
-	ChannelName string `json:"channel_name,omitempty"`
-	ModelName   string `json:"model_name"`
-	PluginKey   string `json:"plugin_key"`
-	PluginName  string `json:"plugin_name"`
-	Reason      string `json:"reason"`
+	ChannelBillingOverrideModel string                               `json:"channel_billing_override_model,omitempty"`
+	UsageSchema                 map[string]jsplugin.UsageFieldSchema `json:"usage_schema,omitempty"`
+	UsageExamples               []jsplugin.UsageExample              `json:"usage_examples,omitempty"`
+	ChannelSharedByPlugins      bool                                 `json:"channel_shared_by_plugins,omitempty"`
+	ChannelID                   int                                  `json:"channel_id,omitempty"`
+	ChannelName                 string                               `json:"channel_name,omitempty"`
+	ModelName                   string                               `json:"model_name"`
+	PluginKey                   string                               `json:"plugin_key"`
+	PluginName                  string                               `json:"plugin_name"`
+	Reason                      string                               `json:"reason"`
 }
 
 // GetRoutedModelPricingIssues reports the effective prices of enabled routes.
@@ -475,13 +479,16 @@ func GetRoutedModelPricingIssues() ([]ModelPricingIssue, error) {
 				if provider != nil && direct {
 					billingName = declared
 				}
-				_, reason := resolveChannelPricing(Pricing{ModelName: billingName}, channel.Id, provider, mapped, generation.SharedModel(billingName) || generation.SharedModel(mapped))
+				pricing, reason := resolveChannelPricing(Pricing{ModelName: billingName}, channel.Id, provider, mapped, generation.SharedModel(billingName) || generation.SharedModel(mapped))
 				if reason == "" {
 					continue
 				}
 				issue := ModelPricingIssue{ModelName: name, ChannelID: channel.Id, ChannelName: channel.Name, Reason: reason}
 				if provider != nil {
 					issue.PluginKey, issue.PluginName = provider.Meta.Key, provider.Meta.Name
+					issue.UsageSchema, issue.UsageExamples = pricing.BillingUsageSchema, pricing.BillingUsageExamples
+					issue.ChannelSharedByPlugins = len(providers) > 1
+					issue.ChannelBillingOverrideModel, _, _, _ = taskChannelBillingMode(billingName, mapped, channel.Id)
 				}
 				issues = append(issues, issue)
 			}
@@ -497,6 +504,68 @@ func GetRoutedModelPricingIssues() ([]ModelPricingIssue, error) {
 		return issues[i].PluginKey < issues[j].PluginKey
 	})
 	return issues, nil
+}
+
+// saveChannelModelPricing validates only changed channel prices against the
+// providers that will actually charge them, using the persisted option as its
+// baseline. Holding the row lock through the write keeps concurrent saves
+// from exempting an override that is no longer present.
+func saveChannelModelPricing(tx *gorm.DB, value string) error {
+	row := Option{Key: "ChannelModelPricing"}
+	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+		return err
+	}
+	if err := lockForUpdate(tx).Where(&Option{Key: row.Key}).First(&row).Error; err != nil {
+		return err
+	}
+	entries, err := ratio_setting.ChangedChannelBillingExpressions(row.Value, value)
+	if err != nil {
+		return err
+	}
+	ids := make(map[int]struct{}, len(entries))
+	for _, entry := range entries {
+		ids[entry.ChannelId] = struct{}{}
+	}
+	if len(ids) > 0 {
+		var channels []Channel
+		if err = tx.Select("id", "type", "setting", "model_mapping").Where("id IN ?", slices.Collect(maps.Keys(ids))).Find(&channels).Error; err != nil {
+			return err
+		}
+		byID := make(map[int]*Channel, len(channels))
+		for i := range channels {
+			byID[channels[i].Id] = &channels[i]
+		}
+		generation := jsplugin.DefaultRegistry.Generation()
+		for _, entry := range entries {
+			var providers []*jsplugin.LoadedPlugin
+			mapped := entry.Model
+			if channel := byID[entry.ChannelId]; channel != nil {
+				var mapping map[string]string
+				if raw := channel.GetModelMapping(); raw != "" {
+					if err := common.UnmarshalJsonStr(raw, &mapping); err != nil {
+						return fmt.Errorf("invalid model mapping on channel %d: %w", channel.Id, err)
+					}
+					var cyclic bool
+					if mapped, cyclic = followChannelModelMapping(mapping, entry.Model); cyclic {
+						return fmt.Errorf("cyclic model mapping for model %s on channel %d", entry.Model, channel.Id)
+					}
+				}
+				providers = pricingChannelProviders(generation, channel, entry.Model, mapped)
+			}
+			if len(providers) == 0 {
+				if err := billing_setting.SmokeTestExpr(entry.Expr); err != nil {
+					return fmt.Errorf("billing expression for model %s on channel %d: %w", entry.Model, entry.ChannelId, err)
+				}
+			}
+			for _, provider := range providers {
+				schema, _ := provider.Meta.UsageForModels(mapped, entry.Model)
+				if err := billing_setting.SmokeTestTaskExpr(entry.Expr, schema); err != nil {
+					return fmt.Errorf("billing expression for model %s on channel %d, plugin %s: %w", entry.Model, entry.ChannelId, provider.Meta.Key, err)
+				}
+			}
+		}
+	}
+	return tx.Model(&row).Update("value", value).Error
 }
 
 // GetModelPricingIssues reads the provider variants of the pricing snapshot for

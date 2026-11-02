@@ -109,9 +109,10 @@ func TestChannelModelPricingOptionDatabaseRoundTrip(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, jsplugin.DefaultRegistry.Unregister("pricing-usage-probe")) })
 			mapping := `{"pricing-alias":"pricing-usage-model"}`
+			binding := `{"task_plugin_key":"pricing-usage-probe"}`
 			require.NoError(t, DB.Create(&Channel{
 				Id: 901, Type: constant.ChannelTypeTaskPlugin, Key: "test-only", Status: common.ChannelStatusEnabled,
-				Name: "pricing-alias", Models: "pricing-alias,pricing-usage-model", ModelMapping: &mapping,
+				Name: "pricing-alias", Models: "pricing-alias,pricing-usage-model", ModelMapping: &mapping, Setting: &binding,
 			}).Error)
 			rebuildTaskAliasView()
 

@@ -147,6 +147,14 @@ describe('shared model pricing', () => {
 it('tracks nested provider prices by model, preserves :: in model names, and ignores key order', () => {
   const key = 'billing_setting.plugin_billing_expr'
   const before = pricingOptions({
+    // The options view includes effective built-ins for display, but a provider-only
+    // save must not pin that built-in as a new model-level override.
+    'billing_setting.billing_mode': JSON.stringify({
+      'shared::model': 'tiered_expr',
+    }),
+    'billing_setting.billing_expr': JSON.stringify({
+      'shared::model': 'tier("base", p * 4)',
+    }),
     [key]: JSON.stringify({
       'alpha::shared::model': 'u("seconds")',
       'beta::shared::model': 'u("credits")',

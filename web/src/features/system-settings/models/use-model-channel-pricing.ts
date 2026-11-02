@@ -23,7 +23,10 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { getChannels } from '@/features/channels/api'
-import { CHANNEL_STATUS_LABELS } from '@/features/channels/constants'
+import {
+  CHANNEL_STATUS,
+  CHANNEL_STATUS_LABELS,
+} from '@/features/channels/constants'
 import type { Channel } from '@/features/channels/types'
 
 import { getSystemOptions, updateSystemOption } from '../api'
@@ -152,7 +155,11 @@ export function useModelChannelPricing(modelName?: string) {
   const channelOptions = useMemo(() => {
     const options = new Map<string, ChannelOption>()
     for (const channel of channelsQuery.data ?? []) {
-      if (!channel.models?.split(',').includes(modelName ?? '')) continue
+      if (
+        !channel.models?.split(',').some((name) => name.trim() === modelName)
+      ) {
+        continue
+      }
       const status =
         CHANNEL_STATUS_LABELS[
           channel.status as keyof typeof CHANNEL_STATUS_LABELS
@@ -323,6 +330,24 @@ export function useModelChannelPricing(modelName?: string) {
     pricingQuery.error?.message || channelsQuery.error?.message || ''
 
   return {
+    hasBillingOverride: (name: string, id: number) => {
+      const model = pricingQuery.data?.[name]
+      const override = isPricingRecord(model) ? model[String(id)] : undefined
+      return (
+        isPricingRecord(override) &&
+        typeof override.billing_mode === 'string' &&
+        Boolean(override.billing_mode.trim())
+      )
+    },
+    isActiveChannel: (id: number) =>
+      Boolean(
+        channelsQuery.data?.some(
+          (channel) =>
+            channel.id === id &&
+            channel.status === CHANNEL_STATUS.ENABLED &&
+            channel.models?.split(',').some((name) => name.trim() === modelName)
+        )
+      ),
     channelOptions,
     isLoading:
       Boolean(modelName) && (pricingQuery.isPending || channelsQuery.isPending),

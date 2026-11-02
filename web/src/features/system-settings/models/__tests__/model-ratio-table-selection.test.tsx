@@ -25,13 +25,19 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { createRef } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import type { ModelPricingEntry } from '@/features/model-pricing/api'
+import type { BillingUsageSchema } from '@/features/pricing/types'
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { ModelRatioVisualEditor } from '../model-ratio-visual-editor'
+import {
+  ModelRatioVisualEditor,
+  type ModelRatioVisualEditorHandle,
+} from '../model-ratio-visual-editor'
 import type { ModelPricingIssue } from '../pricing-issues'
 
 let client: QueryClient | undefined
@@ -48,6 +54,9 @@ type EditorFixture = {
   issues?: ModelPricingIssue[]
   filterMode?: 'unset'
   removedChannelId?: number
+  entry?: Partial<ModelPricingEntry>
+  channelPrices?: Record<string, unknown>
+  disabledChannelId?: number
   taskModels?: string[]
   billingMode?: string
   billingExpr?: string
@@ -78,6 +87,7 @@ async function renderEditor(fixture: EditorFixture = {}) {
                   'billing_setting.billing_mode': 'tiered_expr',
                   'billing_setting.billing_expr': 'tier("base", p * 1 + c * 2)',
                 },
+                ...fixture.entry,
               },
             ],
           },
@@ -85,7 +95,17 @@ async function renderEditor(fixture: EditorFixture = {}) {
       }
     }
     if (url === '/api/option/') {
-      return { data: { success: true, data: [] } }
+      return {
+        data: {
+          success: true,
+          data: [
+            {
+              key: 'ChannelModelPricing',
+              value: JSON.stringify(fixture.channelPrices ?? {}),
+            },
+          ],
+        },
+      }
     }
     if (url === '/api/channel') {
       const items = (fixture.issues ?? [])
@@ -97,7 +117,7 @@ async function renderEditor(fixture: EditorFixture = {}) {
           id: issue.channel_id,
           name: issue.channel_name,
           models: issue.model_name,
-          status: 1,
+          status: issue.channel_id === fixture.disabledChannelId ? 2 : 1,
         }))
       return { data: { success: true, data: { items, total: items.length } } }
     }
@@ -119,9 +139,12 @@ async function renderEditor(fixture: EditorFixture = {}) {
     defaultOptions: { queries: { retry: false } },
   })
   client = queryClient
+  const editor = createRef<ModelRatioVisualEditorHandle>()
+  const onChange = vi.fn()
   const view = render(
     <QueryClientProvider client={client}>
       <ModelRatioVisualEditor
+        ref={editor}
         savedModelPrice='{}'
         savedModelRatio={modelRatio}
         savedCacheRatio='{}'
@@ -144,8 +167,10 @@ async function renderEditor(fixture: EditorFixture = {}) {
         billingMode={billingMode}
         billingExpr={billingExpr}
         pluginBillingExpr={pluginBillingExpr}
-        onChange={vi.fn()}
-        onSave={vi.fn()}
+        onChange={onChange}
+        onSave={async () => {
+          await editor.current?.commitOpenEditor()
+        }}
         filterMode={fixture.filterMode}
         isSaving={false}
       />
@@ -154,7 +179,7 @@ async function renderEditor(fixture: EditorFixture = {}) {
   // The real page has pricing metadata loaded long before the user drags over
   // a model name, so settle the pricing query before interacting.
   await waitFor(() => expect(queryClient.isFetching()).toBe(0))
-  return view
+  return { ...view, onChange }
 }
 
 // A drag-select ends with mousedown/mouseup inside the row and the browser
@@ -339,27 +364,232 @@ it('lists one row per affected model and opens each affected channel without tou
   expect(patch).not.toHaveBeenCalled()
 })
 
-it('does not create an override from a stale alert when the channel has since disappeared', async () => {
+it.each(['removed', 'disabled'])(
+  'blocks a stale alert for a %s channel even if it retains a saved price',
+  async (state) => {
+    await renderEditor({
+      filterMode: 'unset',
+      removedChannelId: state === 'removed' ? 7 : undefined,
+      disabledChannelId: state === 'disabled' ? 7 : undefined,
+      channelPrices: {
+        'gpt-4.1-mini': {
+          '7': { billing_mode: 'per_request', model_price: 1 },
+        },
+      },
+      issues: [
+        {
+          model_name: 'gpt-4.1-mini',
+          channel_id: 7,
+          channel_name: 'Removed',
+          reason: 'unconfigured',
+        },
+      ],
+    })
+    fireEvent.click(
+      await screen.findByRole('button', { name: '#7 Removed: No price set' })
+    )
+    expect(await screen.findByText('Unavailable channel')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Save channel pricing' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Save model prices' })
+    ).not.toBeInTheDocument()
+  }
+)
+
+const sharedModel = 'gpt-4.1-mini'
+const alphaSchema: BillingUsageSchema = {
+  seconds: {
+    type: 'number',
+    unit: 'second',
+    description: { en: 'Alpha duration price' },
+  },
+}
+const betaSchema: BillingUsageSchema = {
+  clips: {
+    type: 'number',
+    unit: 'count',
+    description: { en: 'Beta clip price' },
+  },
+}
+const providers = [
+  {
+    plugin_key: 'alpha',
+    plugin_name: 'Alpha',
+    usage_schema: alphaSchema,
+    configured: '',
+    effective: '',
+    compatible: false,
+  },
+  {
+    plugin_key: 'beta',
+    plugin_name: 'Beta',
+    usage_schema: betaSchema,
+    configured: '',
+    effective: '',
+    compatible: false,
+  },
+]
+const betaIssue: ModelPricingIssue = {
+  model_name: sharedModel,
+  channel_id: 12,
+  channel_name: 'Beta channel',
+  plugin_key: 'beta',
+  plugin_name: 'Beta',
+  usage_schema: betaSchema,
+  reason: 'unconfigured',
+}
+it('uses the executing plugin schema for a channel price and ordinary token fields for its namesake', async () => {
+  const user = userEvent.setup()
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
   await renderEditor({
     filterMode: 'unset',
-    removedChannelId: 7,
+    taskModels: [sharedModel],
+    entry: {
+      effective: {},
+      usage_schema: alphaSchema,
+      plugin_variants: providers,
+    },
     issues: [
+      betaIssue,
       {
-        model_name: 'gpt-4.1-mini',
+        model_name: sharedModel,
         channel_id: 7,
-        channel_name: 'Removed',
+        channel_name: 'Ordinary',
         reason: 'unconfigured',
       },
     ],
   })
-  fireEvent.click(
-    await screen.findByRole('button', { name: '#7 Removed: No price set' })
+  await user.click(
+    screen.getByRole('button', {
+      name: '#12 Beta channel · Beta: No price set',
+    })
   )
-  expect(await screen.findByText('Unavailable channel')).toBeVisible()
+  expect((await screen.findAllByText('Beta clip price'))[0]).toBeVisible()
+  expect(screen.queryByText('Alpha duration price')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Save channel pricing' }))
+  await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
   expect(
-    screen.queryByRole('button', { name: 'Save channel pricing' })
-  ).not.toBeInTheDocument()
+    JSON.parse((put.mock.calls[0][1] as { value: string }).value)[sharedModel][
+      '12'
+    ].billing_expr
+  ).toContain('u("clips")')
+  await user.click(
+    screen.getByRole('button', { name: '#7 Ordinary: No price set' })
+  )
+  await user.click(
+    await screen.findByRole('button', { name: 'Save channel pricing' })
+  )
+  await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
   expect(
-    screen.queryByRole('button', { name: 'Save model prices' })
-  ).not.toBeInTheDocument()
+    JSON.parse((put.mock.calls[1][1] as { value: string }).value)[sharedModel][
+      '7'
+    ].billing_expr
+  ).not.toContain('u(')
 })
+it.each(['direct', 'mapped', 'inherit'] as const)(
+  'keeps plugin prices separate when the channel override is %s',
+  async (mode) => {
+    const hasOverride = mode !== 'inherit'
+    const overrideModel = mode === 'mapped' ? 'upstream-model' : sharedModel
+    const user = userEvent.setup()
+    const put = vi.spyOn(api, 'put')
+    const { onChange } = await renderEditor({
+      filterMode: 'unset',
+      entry: {
+        effective: {},
+        usage_schema: alphaSchema,
+        plugin_variants: providers,
+      },
+      issues: [
+        {
+          ...betaIssue,
+          plugin_key: 'alpha',
+          plugin_name: 'Alpha',
+          usage_schema: alphaSchema,
+          channel_shared_by_plugins: true,
+          channel_billing_override_model: hasOverride
+            ? overrideModel
+            : undefined,
+        },
+        {
+          ...betaIssue,
+          channel_shared_by_plugins: true,
+          channel_billing_override_model: hasOverride
+            ? overrideModel
+            : undefined,
+        },
+      ],
+      pluginBillingExpr: JSON.stringify({
+        'alpha::gpt-4.1-mini': 'u("seconds") * 2',
+      }),
+      channelPrices: hasOverride
+        ? {
+            [overrideModel]: {
+              '12': {
+                billing_mode: 'tiered_expr',
+                billing_expr: 'u("seconds")',
+              },
+            },
+          }
+        : {},
+    })
+    await user.click(
+      screen.getByRole('button', {
+        name: '#12 Beta channel · Beta: No price set',
+      })
+    )
+    await user.click(
+      screen.getByRole('button', {
+        name: '#12 Beta channel · Alpha: No price set',
+      })
+    )
+    expect(
+      await screen.findByRole('button', {
+        name: 'Edit global pricing for Alpha',
+      })
+    ).toBeVisible()
+    await user.click(
+      screen.getByRole('button', {
+        name: '#12 Beta channel · Beta: No price set',
+      })
+    )
+    const open = await screen.findByRole('button', {
+      name: 'Edit global pricing for Beta',
+    })
+    expect(
+      screen.queryByRole('button', { name: 'Save channel pricing' })
+    ).not.toBeInTheDocument()
+    if (hasOverride) {
+      expect(open).toBeDisabled()
+      expect(
+        screen.getByText(overrideModel, { selector: 'code' })
+      ).toBeVisible()
+      if (mode === 'direct') {
+        expect(
+          screen.getByRole('button', { name: 'Use global pricing' })
+        ).toBeVisible()
+      }
+    } else {
+      await user.click(open)
+      expect(
+        await screen.findByRole('tab', { name: 'Beta', selected: true })
+      ).toBeVisible()
+      await user.click(
+        screen.getByRole('switch', { name: /Set separately for this provider/ })
+      )
+      await user.click(
+        screen.getByRole('button', { name: 'Save model prices' })
+      )
+      await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1))
+      const [field, value] = onChange.mock.calls[0]
+      expect(field).toBe('billing_setting.plugin_billing_expr')
+      expect(JSON.parse(value)['alpha::gpt-4.1-mini']).toBe('u("seconds") * 2')
+      expect(JSON.parse(value)['beta::gpt-4.1-mini']).toContain('u("clips")')
+    }
+    expect(put).not.toHaveBeenCalled()
+  }
+)

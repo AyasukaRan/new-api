@@ -21,6 +21,10 @@ import { t } from 'i18next'
 import { useTranslation } from 'react-i18next'
 
 import { useCanEditModelPricing } from '@/features/model-pricing/api'
+import type {
+  BillingUsageSchema,
+  BillingUsageExample,
+} from '@/features/pricing/types'
 import { toIntlLocale } from '@/i18n/languages'
 import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
@@ -33,6 +37,10 @@ export type ModelPricingIssue = {
   channel_name?: string
   plugin_key?: string
   plugin_name?: string
+  usage_schema?: BillingUsageSchema
+  usage_examples?: BillingUsageExample[]
+  channel_shared_by_plugins?: boolean
+  channel_billing_override_model?: string
   reason:
     | 'unconfigured'
     | 'incompatible'

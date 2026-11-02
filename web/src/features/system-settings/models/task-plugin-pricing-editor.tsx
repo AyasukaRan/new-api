@@ -45,6 +45,7 @@ import { SettingsSwitchField } from '../components/settings-form-layout'
 import { TaskUsagePricingEditor } from './task-usage-pricing-editor'
 
 type TaskPluginPricingEditorProps = {
+  onlyProvider?: string
   variants: ModelPricingPluginVariant[]
   expressions: Record<string, string>
   onChange: Dispatch<SetStateAction<Record<string, string>>>
@@ -81,19 +82,25 @@ export function TaskPluginPricingEditor(props: TaskPluginPricingEditorProps) {
 
   return (
     <Tabs
-      value={selected}
+      value={props.onlyProvider ?? selected}
       onValueChange={(value) => setSelected(String(value))}
     >
       <TabsList
         aria-label={t('Provider')}
         className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'
       >
-        <TabsTrigger value='__model__'>
-          {props.ordinaryPricing ? t('Ordinary OpenAI') : t('Default')}
-        </TabsTrigger>
-        {!props.ordinaryPricing && props.onConfigureOrdinaryPricing && (
-          <TabsTrigger value='__ordinary__'>{t('Ordinary OpenAI')}</TabsTrigger>
+        {!props.onlyProvider && (
+          <TabsTrigger value='__model__'>
+            {props.ordinaryPricing ? t('Ordinary OpenAI') : t('Default')}
+          </TabsTrigger>
         )}
+        {!props.onlyProvider &&
+          !props.ordinaryPricing &&
+          props.onConfigureOrdinaryPricing && (
+            <TabsTrigger value='__ordinary__'>
+              {t('Ordinary OpenAI')}
+            </TabsTrigger>
+          )}
         {props.variants.map((variant) => (
           <TabsTrigger
             key={variant.plugin_key}
@@ -114,7 +121,11 @@ export function TaskPluginPricingEditor(props: TaskPluginPricingEditorProps) {
           </TabsTrigger>
         ))}
       </TabsList>
-      <TabsContent value='__model__' keepMounted className='space-y-3'>
+      <TabsContent
+        value='__model__'
+        keepMounted={!props.onlyProvider}
+        className='space-y-3'
+      >
         {incompatible.length > 0 && (
           <Alert>
             <AlertDescription>
@@ -146,24 +157,26 @@ export function TaskPluginPricingEditor(props: TaskPluginPricingEditorProps) {
         )}
         {props.children}
       </TabsContent>
-      {!props.ordinaryPricing && props.onConfigureOrdinaryPricing && (
-        <TabsContent value='__ordinary__' className='space-y-3'>
-          <Alert>
-            <AlertDescription>
-              {t(
-                'Set ordinary OpenAI prices without changing plugin prices. Changes take effect when you save.'
-              )}
-            </AlertDescription>
-          </Alert>
-          <Button
-            type='button'
-            variant='outline'
-            onClick={props.onConfigureOrdinaryPricing}
-          >
-            {t('Configure ordinary OpenAI pricing')}
-          </Button>
-        </TabsContent>
-      )}
+      {!props.onlyProvider &&
+        !props.ordinaryPricing &&
+        props.onConfigureOrdinaryPricing && (
+          <TabsContent value='__ordinary__' className='space-y-3'>
+            <Alert>
+              <AlertDescription>
+                {t(
+                  'Set ordinary OpenAI prices without changing plugin prices. Changes take effect when you save.'
+                )}
+              </AlertDescription>
+            </Alert>
+            <Button
+              type='button'
+              variant='outline'
+              onClick={props.onConfigureOrdinaryPricing}
+            >
+              {t('Configure ordinary OpenAI pricing')}
+            </Button>
+          </TabsContent>
+        )}
       {props.variants.map((variant) => {
         const key = variant.plugin_key
         const separate = Object.hasOwn(props.expressions, key)
