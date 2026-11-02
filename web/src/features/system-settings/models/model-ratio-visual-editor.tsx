@@ -723,7 +723,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
             JSON.stringify(prices)
           )
           setEditData((current) =>
-            current
+            current?.name === data.name
               ? { ...current, pluginBillingExpr: data.pluginBillingExpr }
               : current
           )

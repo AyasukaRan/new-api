@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	"gorm.io/gorm"
 )
 
 // TaskAliasTarget is one mapping-derived alias after cross-channel aggregation.
@@ -100,6 +101,15 @@ type taskAliasDraft struct {
 }
 
 func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
+	view, err := readTaskAliasView(generation, DB)
+	if err != nil {
+		common.SysError(common.LogText("rebuild task alias view: %s", err.Error()))
+	}
+	return view
+}
+
+// A pricing write uses its existing transaction when checking shared aliases.
+func readTaskAliasView(generation *jsplugin.RoutingGeneration, db *gorm.DB) (*taskAliasView, error) {
 	genNum := uint64(0)
 	if generation != nil {
 		genNum = generation.Number
@@ -109,17 +119,16 @@ func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
 		expiresAt:  time.Now().Add(taskAliasViewTTL),
 		byFold:     make(map[string]TaskAliasTarget),
 	}
-	if DB == nil {
-		return view
+	if db == nil {
+		return view, nil
 	}
 
 	var channels []Channel
-	err := DB.Select("id", "type", "models", "model_mapping").
+	err := db.Select("id", "type", "models", "model_mapping").
 		Where("status = ?", common.ChannelStatusEnabled).
 		Find(&channels).Error
 	if err != nil {
-		common.SysError(common.LogText("rebuild task alias view: %s", err.Error()))
-		return view
+		return view, err
 	}
 
 	drafts := make(map[string]*taskAliasDraft)
@@ -207,7 +216,7 @@ func buildTaskAliasView(generation *jsplugin.RoutingGeneration) *taskAliasView {
 			PluginKey: pluginKey,
 		}
 	}
-	return view
+	return view, nil
 }
 
 // followChannelModelMapping walks one channel's mapping the same way

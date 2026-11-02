@@ -28,7 +28,11 @@ import userEvent from '@testing-library/user-event'
 import { createRef } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
-import type { ModelPricingEntry } from '@/features/model-pricing/api'
+import {
+  buildPricingChanges,
+  type ModelPricingEntry,
+} from '@/features/model-pricing/api'
+import { pricingOptions } from '@/features/model-pricing/pricing'
 import type { BillingUsageSchema } from '@/features/pricing/types'
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
@@ -55,6 +59,7 @@ type EditorFixture = {
   filterMode?: 'unset'
   removedChannelId?: number
   entry?: Partial<ModelPricingEntry>
+  targetEntry?: ModelPricingEntry
   channelPrices?: Record<string, unknown>
   disabledChannelId?: number
   taskModels?: string[]
@@ -64,7 +69,7 @@ type EditorFixture = {
 }
 
 async function renderEditor(fixture: EditorFixture = {}) {
-  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     if (url === '/api/pricing') {
       const data = (fixture.taskModels ?? []).map((name) => ({
         model_name: name,
@@ -76,6 +81,15 @@ async function renderEditor(fixture: EditorFixture = {}) {
       return { data: { success: true, data: fixture.issues ?? [] } }
     }
     if (url === '/api/option/model_pricing') {
+      const params = config?.params as URLSearchParams | undefined
+      if (
+        fixture.targetEntry &&
+        params?.get('model') === fixture.targetEntry.model_name
+      ) {
+        return {
+          data: { success: true, data: { entries: [fixture.targetEntry] } },
+        }
+      }
       return {
         data: {
           success: true,
@@ -593,3 +607,87 @@ it.each(['direct', 'mapped', 'inherit'] as const)(
     expect(put).not.toHaveBeenCalled()
   }
 )
+
+it('opens a shared alias provider price on its declared model and changes only that provider', async () => {
+  const user = userEvent.setup()
+  const alias = 'public-alias'
+  const target = 'declared-video'
+  const siblings = {
+    [`alpha::${target}`]: 'u("seconds") * 4',
+    [`alpha::${alias}`]: 'u("seconds") * 2',
+  }
+  const targetEntry: ModelPricingEntry = {
+    model_name: target,
+    version: 'target-v1',
+    configured: {
+      'billing_setting.plugin_billing_expr': {
+        alpha: siblings[`alpha::${target}`],
+      },
+    },
+    effective: {},
+    plugin_variants: providers,
+  }
+  const put = vi.spyOn(api, 'put')
+  const { onChange } = await renderEditor({
+    filterMode: 'unset',
+    entry: { model_name: alias, effective: {}, plugin_variants: [] },
+    targetEntry,
+    issues: [
+      {
+        ...betaIssue,
+        model_name: alias,
+        plugin_billing_model: target,
+        channel_shared_by_plugins: true,
+      },
+    ],
+    pluginBillingExpr: JSON.stringify(siblings),
+  })
+  await user.click(
+    screen.getByRole('button', {
+      name: '#12 Beta channel · Beta: No price set',
+    })
+  )
+  await user.click(
+    await screen.findByRole('button', {
+      name: 'Edit global pricing for Beta declared-video',
+    })
+  )
+  expect(
+    await screen.findByRole('tab', { name: 'Beta', selected: true })
+  ).toBeVisible()
+  expect(screen.getByRole('textbox', { name: 'Model name' })).toHaveValue(
+    target
+  )
+  await user.click(
+    screen.getByRole('switch', { name: /Set separately for this provider/ })
+  )
+  await user.click(screen.getByRole('button', { name: 'Save model prices' }))
+  await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1))
+  const [field, serialized] = onChange.mock.calls[0]
+  expect(field).toBe('billing_setting.plugin_billing_expr')
+  const prices = JSON.parse(serialized)
+  expect(prices).toEqual({
+    ...siblings,
+    [`beta::${target}`]: expect.stringContaining('u("clips")'),
+  })
+  const before = pricingOptions({ [field]: JSON.stringify(siblings) })
+  expect(
+    buildPricingChanges(
+      { entries: [targetEntry], empty_version: 'empty', options: before },
+      before,
+      { ...before, [field]: serialized }
+    )
+  ).toEqual([
+    {
+      model_name: target,
+      expected_version: targetEntry.version,
+      pricing: {
+        [field]: {
+          alpha: siblings[`alpha::${target}`],
+          beta: prices[`beta::${target}`],
+        },
+      },
+    },
+  ])
+  expect(put).not.toHaveBeenCalled()
+})

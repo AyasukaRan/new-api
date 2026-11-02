@@ -2069,7 +2069,7 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 				backupMissing := model.ModelPricingIssue{ModelName: "route-missing", ChannelID: 72, ChannelName: "Backup", Reason: model.ModelPricingIssueUnconfigured}
 				ordinaryTaskPrice := model.ModelPricingIssue{ModelName: name, ChannelID: 71, ChannelName: "Text", Reason: model.ModelPricingIssueInvalidExpression}
 				taskAlias := model.ModelPricingIssue{
-					ModelName: "route-alias", ChannelID: 74, ChannelName: "Bound", PluginKey: "matrix-beta", PluginName: "matrix-beta", Reason: model.ModelPricingIssueIncompatible,
+					ModelName: "route-alias", ChannelID: 74, ChannelName: "Bound", PluginKey: "matrix-beta", PluginName: "matrix-beta", Reason: model.ModelPricingIssueIncompatible, PluginBillingModel: name,
 					UsageSchema:   map[string]jsplugin.UsageFieldSchema{"credits": {Type: "number", Unit: "credit"}},
 					UsageExamples: []jsplugin.UsageExample{{Label: "matrix-beta", Facts: map[string]any{"credits": float64(2)}}},
 				}
@@ -2128,6 +2128,90 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 				var stored model.Option
 				require.NoError(t, db.Where(&model.Option{Key: "ChannelModelPricing"}).First(&stored).Error)
 				assert.Equal(t, string(repaired), stored.Value)
+
+				t.Run("repair_existing_alias_provider_price", func(t *testing.T) {
+					// An existing provider price keyed by the client alias wins over the declared model.
+					aliasPrices := map[string]string{"matrix-alpha::route-alias": base, "matrix-beta::route-alias": base}
+					initial, err := common.Marshal(aliasPrices)
+					require.NoError(t, err)
+					require.NoError(t, db.Save(&model.Option{Key: billing_setting.PluginBillingExprOption, Value: string(initial)}).Error)
+					require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{billing_setting.PluginBillingExprOption: string(initial)}))
+					t.Cleanup(func() {
+						require.NoError(t, db.Where(&model.Option{Key: billing_setting.PluginBillingExprOption}).Delete(&model.Option{}).Error)
+						require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{billing_setting.PluginBillingExprOption: "{}"}))
+					})
+					delete(overrides[name], 77)
+					raw, err := common.Marshal(overrides)
+					require.NoError(t, err)
+					require.NoError(t, model.UpdateOption("ChannelModelPricing", string(raw)))
+					want := sharedAlias
+					want.ChannelBillingOverrideModel, want.PluginBillingModel = "", "route-alias"
+					require.Contains(t, issueAPI(), want)
+					snapshot, err := model.GetModelPricingSnapshot([]string{"route-alias"})
+					require.NoError(t, err)
+					entry := snapshot.Entries[0]
+					require.Len(t, entry.PluginVariants, 2)
+					for _, provider := range entry.PluginVariants {
+						assert.False(t, provider.Stale)
+					}
+					assert.Contains(t, entry.PluginVariants[1].UsageSchema, "credits")
+					patch := model.ModelPricingChange{ModelName: "route-alias", ExpectedVersion: entry.Version, Pricing: model.PricingValues{
+						billing_setting.PluginBillingExprOption: map[string]any{"matrix-alpha": base, "matrix-beta": variant},
+					}}
+					updated := modelManagementRequest(t, UpdateModelPricingConfig, http.MethodPatch, "/api/option/model_pricing", map[string]any{"changes": []model.ModelPricingChange{patch}}, nil)
+					require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
+					aliasPrices["matrix-beta::route-alias"] = variant
+					assert.Equal(t, aliasPrices, billing_setting.GetPluginBillingExprCopy())
+					assert.NotContains(t, issueAPI(), want)
+				})
+
+				t.Run("ordinary_channel_on_shared_host_protocol", func(t *testing.T) {
+					const hostModel = "matrix-image"
+					const providerKey = "matrix-image-host"
+					const tokenPrice = "tier(\"tok\", p * 2)"
+					_, err := jsplugin.DefaultRegistry.Register(`
+export const meta = {apiVersion:1,key:"matrix-image-host",name:"Image",version:"1.0.0",author:{name:"Test"},
+	models:["matrix-image"],fetchMode:"per_task",protocols:["openai_image"],usageSchema:{seconds:{type:"number",unit:"second"}}};
+export function buildSubmitRequest(){return {};}
+export function parseSubmitResponse(){return {};}
+export function buildQueryRequest(){return {};}
+export function parseTaskResult(){return {};}
+export const protocols = {openai_image:{decodeRequest(){return {}},render(){return {data:[]}}}};
+`, jsplugin.Options{})
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, jsplugin.DefaultRegistry.Unregister(providerKey)) })
+					channel := model.Channel{Id: 79, Type: constant.ChannelTypeOpenAI, Name: "Ordinary image", Models: hostModel + ",other-image"}
+					require.NoError(t, db.Create(&channel).Error)
+					require.NoError(t, channel.AddAbilities(db))
+					setGlobal := func(values model.PricingValues) {
+						snap, err := model.GetModelPricingSnapshot([]string{hostModel})
+						require.NoError(t, err)
+						require.NoError(t, model.UpdateModelPricing([]model.ModelPricingChange{
+							{ModelName: hostModel, ExpectedVersion: snap.Entries[0].Version, Pricing: values},
+						}))
+					}
+					global := model.PricingValues{"billing_setting.billing_mode": "tiered_expr", "billing_setting.billing_expr": base}
+					setGlobal(global)
+					t.Cleanup(func() { setGlobal(model.PricingValues{}) })
+					var persisted model.Option
+					require.NoError(t, db.Where(&model.Option{Key: "ChannelModelPricing"}).First(&persisted).Error)
+					var prices map[string]map[int]ratio_setting.ChannelModelPricing
+					require.NoError(t, common.UnmarshalJsonStr(persisted.Value, &prices))
+					save := func(modelName, expr string) bool {
+						prices[modelName] = map[int]ratio_setting.ChannelModelPricing{79: {BillingMode: "tiered_expr", BillingExpr: expr}}
+						raw, err := common.Marshal(prices)
+						require.NoError(t, err)
+						var response struct{ Success bool }
+						modelManagementRequest(t, UpdateOption, http.MethodPut, "/api/option/", OptionUpdateRequest{Key: "ChannelModelPricing", Value: string(raw)}, &response)
+						return response.Success
+					}
+					require.True(t, save("other-image", tokenPrice))
+					require.False(t, save(hostModel, tokenPrice), "ordinary and task prices have different units")
+					require.True(t, save(hostModel, `tier("request", fixed(0.2))`))
+					global[billing_setting.PluginBillingExprOption] = map[string]any{providerKey: base}
+					setGlobal(global)
+					require.True(t, save(hostModel, tokenPrice), "a separate provider price frees the ordinary channel to use token pricing")
+				})
 			})
 			before, err := model.GetModelPricingSnapshot([]string{name})
 			require.NoError(t, err)

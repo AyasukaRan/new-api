@@ -41,6 +41,7 @@ export type ModelPricingIssue = {
   usage_examples?: BillingUsageExample[]
   channel_shared_by_plugins?: boolean
   channel_billing_override_model?: string
+  plugin_billing_model?: string
   reason:
     | 'unconfigured'
     | 'incompatible'

@@ -69,6 +69,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   previewModelPricing,
   previewModelPricingConversion,
+  useModelPricing,
   type ModelPricingPluginVariant,
 } from '@/features/model-pricing/api'
 import {
@@ -258,8 +259,25 @@ const ModelPricingScopeEditor = forwardRef<
       ? props.editData
       : props.globalEffectiveData
   const providerPriceKey = isGlobal ? issue?.plugin_key : undefined
+  const priceTarget =
+    issue?.channel_shared_by_plugins &&
+    issue.plugin_billing_model !== props.editData?.name
+      ? issue.plugin_billing_model
+      : undefined
+  const targetPricing = useModelPricing(
+    priceTarget ? [priceTarget] : [],
+    Boolean(priceTarget)
+  )
+  const targetEntry = priceTarget
+    ? targetPricing.data?.entries.find(
+        (entry) => entry.model_name === priceTarget
+      )
+    : undefined
+  const variants = priceTarget
+    ? targetEntry?.plugin_variants
+    : props.pluginVariants
   const providerVariant = issue?.plugin_key
-    ? props.pluginVariants?.find(
+    ? variants?.find(
         (variant) => variant.plugin_key === issue.plugin_key && !variant.stale
       )
     : undefined
@@ -281,7 +299,15 @@ const ModelPricingScopeEditor = forwardRef<
         ? t('Failed to load model pricing')
         : ''))
   const scopedData = useMemo(() => {
-    if (isGlobal) return props.editData
+    if (isGlobal) {
+      if (!priceTarget) return props.editData
+      if (!targetEntry) return null
+      return {
+        ...pricingRow(targetEntry.model_name, targetEntry.effective),
+        pluginBillingExpr:
+          targetEntry.configured['billing_setting.plugin_billing_expr'],
+      }
+    }
     if (!effectivePricing) return null
     if (issue?.reason === 'unconfigured') {
       return getEditorData(scope, {
@@ -305,6 +331,8 @@ const ModelPricingScopeEditor = forwardRef<
     getEditorData,
     providerVariant,
     issue,
+    priceTarget,
+    targetEntry,
   ])
   const scopeOptions = useMemo(
     () => [{ value: 'global', label: t('Global') }, ...channels.channelOptions],
@@ -407,8 +435,21 @@ const ModelPricingScopeEditor = forwardRef<
       inheritDisabledLanes={!isGlobal}
     />
   )
-  if (!isGlobal && (channels.isLoading || props.globalEffectiveDataLoading)) {
+  if (
+    (priceTarget && targetPricing.isPending) ||
+    (!isGlobal && (channels.isLoading || props.globalEffectiveDataLoading))
+  ) {
     pricingContent = <LoadingState />
+  } else if (priceTarget && (targetPricing.isError || !providerVariant)) {
+    pricingContent = (
+      <ErrorState
+        description={
+          targetPricing.error?.message ??
+          t('This provider is unavailable for this model.')
+        }
+        onRetry={() => void targetPricing.refetch()}
+      />
+    )
   } else if (
     issueChannelUnavailable ||
     effectiveError ||
@@ -466,6 +507,12 @@ const ModelPricingScopeEditor = forwardRef<
               {t('Edit global pricing for {{provider}}', {
                 provider: providerVariant.plugin_name,
               })}
+              {priceTarget && (
+                <>
+                  {' '}
+                  <code>{priceTarget}</code>
+                </>
+              )}
             </Button>
           )}
         </AlertDescription>

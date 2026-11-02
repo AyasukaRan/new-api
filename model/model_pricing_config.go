@@ -266,11 +266,53 @@ func PreviewModelPricing(name string, draft PricingValues) (PricingValues, error
 	if err != nil {
 		return nil, err
 	}
-	if err := validateModelPricing(name, draft, modelPricingValues(values, name)); err != nil {
+	if err := validateModelPricing(DB, name, draft, modelPricingValues(values, name)); err != nil {
 		return nil, err
 	}
 	replaceModelPricing(values, name, draft)
 	return effectiveModelPricing(values, name), nil
+}
+
+// pluginPricingModels returns the declared usage profiles a provider-specific
+// price must support. An alias is editable only where enabled channel abilities
+// actually bind its plugin. Several channels may map it to different profiles.
+func pluginPricingModels(db *gorm.DB, g *jsplugin.RoutingGeneration, name string) (map[string][]string, error) {
+	targets := make(map[string][]string)
+	if declared, ok := g.CanonicalModel(name); ok {
+		for _, plugin := range g.PluginsByModel(declared) {
+			targets[plugin.Meta.Key] = []string{declared}
+		}
+		return targets, nil
+	}
+	if db == nil {
+		return targets, nil
+	}
+	ids := db.Model(&Ability{}).Select("channel_id").Where("model = ? AND enabled = ?", name, true)
+	var channels []Channel
+	if err := db.Select("id", "type", "setting", "model_mapping").Where("status = ? AND id IN (?) AND model_mapping IS NOT NULL", common.ChannelStatusEnabled, ids).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	for _, channel := range channels {
+		var mapping map[string]string
+		if common.UnmarshalJsonStr(channel.GetModelMapping(), &mapping) != nil {
+			continue
+		}
+		mapped, cyclic := followChannelModelMapping(mapping, name)
+		declared, found := g.CanonicalModel(mapped)
+		if cyclic || !found {
+			continue
+		}
+		for _, plugin := range pricingChannelProviders(g, &channel, name, mapped) {
+			key := plugin.Meta.Key
+			if !slices.Contains(targets[key], declared) {
+				targets[key] = append(targets[key], declared)
+			}
+		}
+	}
+	for _, models := range targets {
+		slices.Sort(models)
+	}
+	return targets, nil
 }
 
 func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
@@ -323,6 +365,10 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 		plugins := generation.PluginsByModel(name)
 		configuredVariants, _ := configured[billing_setting.PluginBillingExprOption].(map[string]any)
 		if len(plugins) > 0 || len(configuredVariants) > 0 {
+			targets, err := pluginPricingModels(DB, generation, name)
+			if err != nil {
+				return nil, err
+			}
 			keys := make(map[string]bool, len(plugins)+len(configuredVariants))
 			for _, plugin := range plugins {
 				keys[plugin.Meta.Key] = true
@@ -334,7 +380,7 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 				configuredValue, overridden := configuredVariants[key]
 				configuredExpr, _ := configuredValue.(string)
 				plugin, exists := generation.Get(key)
-				if !exists || !slices.Contains(plugin.Meta.Models, name) {
+				if !exists || len(targets[key]) == 0 {
 					variant := ModelPricingPluginVariant{
 						PluginKey: key, PluginName: key, Configured: configuredExpr,
 						UsageSchema: map[string]jsplugin.UsageFieldSchema{}, Stale: true,
@@ -345,7 +391,7 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 					entry.PluginVariants = append(entry.PluginVariants, variant)
 					continue
 				}
-				schema, examples := plugin.Meta.UsageForModel(name)
+				schema, examples := plugin.Meta.UsageForModel(targets[key][0])
 				if schema == nil {
 					schema = map[string]jsplugin.UsageFieldSchema{}
 				}
@@ -353,10 +399,14 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 				if !overridden && entry.Effective["billing_setting.billing_mode"] == billing_setting.BillingModeTieredExpr {
 					expression, _ = entry.Effective["billing_setting.billing_expr"].(string)
 				}
+				compatible := !slices.ContainsFunc(targets[key], func(declared string) bool {
+					profile, _ := plugin.Meta.UsageForModel(declared)
+					return !billing_setting.TaskExprCompatible(expression, profile)
+				})
 				entry.PluginVariants = append(entry.PluginVariants, ModelPricingPluginVariant{
 					PluginKey: plugin.Meta.Key, PluginName: plugin.Meta.Name, Icon: plugin.Meta.Icon,
 					UsageSchema: schema, UsageExamples: examples, Configured: configuredExpr, Effective: expression,
-					Compatible: billing_setting.TaskExprCompatible(expression, schema),
+					Compatible: compatible,
 				})
 			}
 		}
@@ -399,6 +449,7 @@ const (
 )
 
 type ModelPricingIssue struct {
+	PluginBillingModel          string                               `json:"plugin_billing_model,omitempty"`
 	ChannelBillingOverrideModel string                               `json:"channel_billing_override_model,omitempty"`
 	UsageSchema                 map[string]jsplugin.UsageFieldSchema `json:"usage_schema,omitempty"`
 	UsageExamples               []jsplugin.UsageExample              `json:"usage_examples,omitempty"`
@@ -487,6 +538,16 @@ func GetRoutedModelPricingIssues() ([]ModelPricingIssue, error) {
 				if provider != nil {
 					issue.PluginKey, issue.PluginName = provider.Meta.Key, provider.Meta.Name
 					issue.UsageSchema, issue.UsageExamples = pricing.BillingUsageSchema, pricing.BillingUsageExamples
+					issue.PluginBillingModel = billingName
+					if _, pinsClient := billing_setting.GetPluginBillingExpr(provider.Meta.Key, billingName); !pinsClient {
+						if tail, ok := generation.CanonicalModel(mapped); ok && slices.Contains(provider.Meta.Models, tail) {
+							if _, pinsMapped := billing_setting.GetPluginBillingExpr(provider.Meta.Key, mapped); pinsMapped {
+								issue.PluginBillingModel = mapped
+							} else if !direct {
+								issue.PluginBillingModel = tail
+							}
+						}
+					}
 					issue.ChannelSharedByPlugins = len(providers) > 1
 					issue.ChannelBillingOverrideModel, _, _, _ = taskChannelBillingMode(billingName, mapped, channel.Id)
 				}
@@ -536,6 +597,7 @@ func saveChannelModelPricing(tx *gorm.DB, value string) error {
 			byID[channels[i].Id] = &channels[i]
 		}
 		generation := jsplugin.DefaultRegistry.Generation()
+		var aliases *taskAliasView
 		for _, entry := range entries {
 			var providers []*jsplugin.LoadedPlugin
 			mapped := entry.Model
@@ -553,6 +615,19 @@ func saveChannelModelPricing(tx *gorm.DB, value string) error {
 				providers = pricingChannelProviders(generation, channel, entry.Model, mapped)
 			}
 			if len(providers) == 0 {
+				if !billingexpr.UsesFixedPricing(entry.Expr) {
+					// Load the alias view through this transaction, including on
+					// SQLite installations with a single database connection.
+					if mapped != entry.Model && aliases == nil {
+						aliases, err = readTaskAliasView(generation, tx)
+						if err != nil {
+							return err
+						}
+					}
+					if ordinaryRouteSharesTaskPrice(entry.Model, mapped, ResolveBillingModelName(entry.Model, entry.ChannelId), aliases) {
+						return fmt.Errorf("billing expression for model %s on channel %d: configure a separate plugin price or use fixed pricing on this shared endpoint", entry.Model, entry.ChannelId)
+					}
+				}
 				if err := billing_setting.SmokeTestExpr(entry.Expr); err != nil {
 					return fmt.Errorf("billing expression for model %s on channel %d: %w", entry.Model, entry.ChannelId, err)
 				}
@@ -677,12 +752,12 @@ func ValidateModelPricing(name string, values PricingValues) error {
 	if expression, ok := billing_setting.GetBillingExpr(name); ok {
 		previous["billing_setting.billing_expr"] = expression
 	}
-	return validateModelPricing(name, values, previous)
+	return validateModelPricing(DB, name, values, previous)
 }
 
 // Writes pass the locked database snapshot here, so allowing an unchanged stale
 // override cannot bypass validation through an out-of-date process-local cache.
-func validateModelPricing(name string, values, previous PricingValues) error {
+func validateModelPricing(db *gorm.DB, name string, values, previous PricingValues) error {
 	if strings.TrimSpace(name) == "" {
 		return errors.New("model name is required")
 	}
@@ -695,26 +770,37 @@ func validateModelPricing(name string, values, previous PricingValues) error {
 		if !ok || variants == nil {
 			return errors.New("plugin billing expressions must be a plugin-to-expression object")
 		}
+		var targets map[string][]string
+		if len(variants) > 0 {
+			var err error
+			targets, err = pluginPricingModels(db, generation, name)
+			if err != nil {
+				return err
+			}
+		}
 		for key, value := range variants {
 			expression, ok := value.(string)
 			if !ok || strings.TrimSpace(expression) == "" {
 				return fmt.Errorf("model %s: plugin %s: billing expression is required", name, key)
 			}
 			plugin, exists := generation.Get(key)
-			declared := exists && slices.Contains(plugin.Meta.Models, name)
+			models := targets[key]
+			declared := exists && len(models) > 0
 			// An unchanged override stays saveable after its plugin disappears or
 			// stops declaring the model. A sole provider also keeps it after
 			// narrowing its usage profile; relay checks shared models against
 			// each profile, so their prices must follow it.
-			if previousVariants[key] == expression && (!declared || !generation.SharedModel(name)) {
+			if previousVariants[key] == expression && (!declared || len(targets) == 1 && !generation.SharedModel(models[0])) {
 				continue
 			}
 			if !declared {
 				return fmt.Errorf("model %s: plugin %s does not declare this model", name, key)
 			}
-			schema, _ := plugin.Meta.UsageForModel(name)
-			if err := billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
-				return fmt.Errorf("model %s: plugin %s: %w", name, key, err)
+			for _, target := range models {
+				schema, _ := plugin.Meta.UsageForModel(target)
+				if err := billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
+					return fmt.Errorf("model %s: plugin %s: %w", name, key, err)
+				}
 			}
 		}
 	}
@@ -807,7 +893,7 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 			return ErrModelPricingConflict
 		}
 	}
-	return mutateModelPricingOptions(func(_ *gorm.DB, values map[string]map[string]any) error {
+	return mutateModelPricingOptions(func(tx *gorm.DB, values map[string]map[string]any) error {
 		defaults := defaultPricingMaps()
 		for _, change := range changes {
 			previous := modelPricingValues(values, change.ModelName)
@@ -818,7 +904,7 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 			if change.Reset {
 				pricing = modelPricingValues(defaults, change.ModelName)
 			}
-			if err := validateModelPricing(change.ModelName, pricing, previous); err != nil {
+			if err := validateModelPricing(tx, change.ModelName, pricing, previous); err != nil {
 				return err
 			}
 			replaceModelPricing(values, change.ModelName, pricing)
@@ -833,7 +919,7 @@ func UpdateModelPricing(changes []ModelPricingChange) error {
 // UpdateModelPricingOptions keeps legacy single-option callers on the same
 // locking, validation and transaction path as the model-level API.
 func UpdateModelPricingOptions(updates map[string]string) error {
-	return mutateModelPricingOptions(func(_ *gorm.DB, values map[string]map[string]any) error {
+	return mutateModelPricingOptions(func(tx *gorm.DB, values map[string]map[string]any) error {
 		previous := maps.Clone(values)
 		names := make(map[string]bool)
 		for key, raw := range updates {
@@ -863,7 +949,7 @@ func UpdateModelPricingOptions(updates map[string]string) error {
 		}
 		for name := range names {
 			pricing, before := modelPricingValues(values, name), modelPricingValues(previous, name)
-			if err := validateModelPricing(name, pricing, before); err != nil {
+			if err := validateModelPricing(tx, name, pricing, before); err != nil {
 				return err
 			}
 			if len(pricing) > 0 {

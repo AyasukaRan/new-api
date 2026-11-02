@@ -301,7 +301,7 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 		case compileErr != nil:
 			return pricing, ModelPricingIssueInvalidExpression
 		case provider == nil && (billingexpr.UsedVars(expression)["u"] ||
-			(!billingexpr.UsesFixedPricing(expression) && ordinaryRouteSharesTaskPrice(base.ModelName, mappedModel, name))):
+			(!billingexpr.UsesFixedPricing(expression) && ordinaryRouteSharesTaskPrice(base.ModelName, mappedModel, name, nil))):
 			pricing.BillingExpr, pricing.PricingConfigured = "", false
 			return pricing, ModelPricingIssueInvalidExpression
 		case provider != nil && billingexpr.UsesFixedPricing(expression):
@@ -381,7 +381,7 @@ func ordinaryEndpointPlugins(g *jsplugin.RoutingGeneration, declared string) []*
 	})
 }
 
-func ordinaryRouteSharesTaskPrice(clientModel, mapped, billingName string) bool {
+func ordinaryRouteSharesTaskPrice(clientModel, mapped, billingName string, aliases *taskAliasView) bool {
 	g := jsplugin.DefaultRegistry.Generation()
 	pin, direct := g.CanonicalModel(clientModel)
 	declared, mappedPin := pin, ""
@@ -389,7 +389,13 @@ func ordinaryRouteSharesTaskPrice(clientModel, mapped, billingName string) bool 
 		if _, known := g.CanonicalModel(mapped); !known || clientModel == mapped {
 			return false
 		}
-		alias, ok := ResolveTaskModelAlias(g, clientModel)
+		var alias TaskAliasTarget
+		var ok bool
+		if aliases != nil {
+			alias, ok = aliases.byFold[jsplugin.ASCIIFold(clientModel)]
+		} else {
+			alias, ok = ResolveTaskModelAlias(g, clientModel)
+		}
 		if !ok || alias.Declared == "" {
 			return false
 		}
