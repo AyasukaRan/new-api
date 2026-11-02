@@ -96,7 +96,8 @@ function renderPricing(
       }
     }
     if (url !== '/api/channel') throw new Error(`Unexpected URL: ${url}`)
-    const page = Number(config?.params?.p ?? 1)
+    const params = config?.params as { p?: number } | undefined
+    const page = Number(params?.p ?? 1)
     return {
       data: {
         success: state.channelsSuccess,

@@ -41,6 +41,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useStatus } from '@/hooks/use-status'
 import { currentBaseUrl } from '@/lib/base-path'
 
+import { ENDPOINT_TYPES, isDeepSeekToolEndpoint } from '../constants'
 import {
   buildRateLimits,
   buildSupportedParameters,
@@ -424,11 +425,55 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
   ].join('\n')
 }
 
+function buildDeepSeekToolSample(lang: Lang, ctx: SampleContext): string {
+  const body = JSON.stringify(
+    ctx.endpointType === ENDPOINT_TYPES.DEEPSEEK_SEARCH
+      ? { query: 'DeepSeek API', count: 3 }
+      : { url: 'https://example.com/' }
+  )
+  const url = JSON.stringify(ctx.baseUrl + ctx.endpointPath)
+  if (lang === 'curl') {
+    return [
+      `curl -X POST ${url} \\`,
+      `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
+      '  -H "Content-Type: application/json" \\',
+      `  -d '${body}'`,
+    ].join('\n')
+  }
+  if (lang === 'python') {
+    return [
+      'import os',
+      'import requests',
+      '',
+      `response = requests.post(${url},`,
+      `    headers={"Authorization": "Bearer " + os.environ["${ctx.apiKeyEnv}"]},`,
+      `    json=${body},`,
+      ')',
+      'response.raise_for_status()',
+      'print(response.json())',
+    ].join('\n')
+  }
+  return [
+    `const response = await fetch(${url}, {`,
+    "  method: 'POST',",
+    '  headers: {',
+    `    Authorization: \`Bearer \${process.env.${ctx.apiKeyEnv}}\`,`,
+    "    'Content-Type': 'application/json',",
+    '  },',
+    `  body: JSON.stringify(${body}),`,
+    '})',
+    'if (!response.ok) throw new Error(await response.text())',
+    'console.log(await response.json())',
+  ].join('\n')
+}
+
 function buildSample(
   lang: Lang,
   endpointType: string,
   ctx: SampleContext
 ): string {
+  if (isDeepSeekToolEndpoint(endpointType))
+    return buildDeepSeekToolSample(lang, ctx)
   if (endpointType === 'anthropic') return buildAnthropicSample(lang, ctx)
   if (endpointType === 'gemini') return buildGeminiSample(lang, ctx)
   if (endpointType === 'embeddings' || endpointType === 'jina-rerank') {
@@ -769,7 +814,9 @@ export function ModelDetailsApi(props: {
       <CodeSamplesSection model={props.model} endpointMap={props.endpointMap} />
       <AuthSection />
       <SupportedParametersSection model={props.model} />
-      <RateLimitsSection model={props.model} />
+      {!props.model.supported_endpoint_types?.some(isDeepSeekToolEndpoint) && (
+        <RateLimitsSection model={props.model} />
+      )}
     </div>
   )
 }

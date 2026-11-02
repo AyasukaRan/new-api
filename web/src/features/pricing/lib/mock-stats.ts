@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ENDPOINT_TYPES } from '../constants'
 import type { PricingModel } from '../types'
 import {
   hashStringToSeed,
@@ -789,6 +790,54 @@ function apiCategoryOf(model: PricingModel): ApiCategory {
 export function buildSupportedParameters(
   model: PricingModel
 ): SupportedParameter[] {
+  if (
+    model.supported_endpoint_types?.includes(ENDPOINT_TYPES.DEEPSEEK_SEARCH)
+  ) {
+    return [
+      {
+        name: 'query',
+        type: 'string',
+        required: true,
+        range: '1–128',
+        descriptionKey: 'Text to search for',
+      },
+      {
+        name: 'count',
+        type: 'integer',
+        defaultValue: 10,
+        range: '1–50',
+        descriptionKey: 'Number of search results to return',
+      },
+      {
+        name: 'ori_question',
+        type: 'string',
+        range: '1–128',
+        descriptionKey: 'Original question that prompted the search',
+      },
+      {
+        name: 'localization',
+        type: 'string',
+        descriptionKey: 'IP address used to localize results',
+      },
+      {
+        name: 'need_content',
+        type: 'boolean',
+        defaultValue: false,
+        descriptionKey: 'Include page content in search results',
+      },
+    ]
+  }
+  if (model.supported_endpoint_types?.includes(ENDPOINT_TYPES.DEEPSEEK_FETCH)) {
+    return [
+      {
+        name: 'url',
+        type: 'string',
+        required: true,
+        range: '≤ 8192',
+        descriptionKey: 'HTTP or HTTPS page URL',
+      },
+    ]
+  }
   const cat = apiCategoryOf(model)
   if (cat === 'reasoning') return REASONING_PARAMS
   if (cat === 'embedding') return EMBEDDING_PARAMS

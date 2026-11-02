@@ -20,6 +20,13 @@ For commercial licensing, please contact support@quantumnous.com
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
   'Model test',
+  'Text to search for',
+  'Number of search results to return',
+  'Original question that prompted the search',
+  'IP address used to localize results',
+  'Include page content in search results',
+  'HTTP or HTTPS page URL',
+
   'The adjusted price is outside the supported range.',
   'This expression cannot be adjusted automatically. Keep the source price or edit it manually.',
   'Task usage metadata is unavailable. Pricing details cannot be displayed.',

@@ -536,7 +536,10 @@ func TestBuiltInPluginRoutesAreServedBesideHostRoutes(t *testing.T) {
 		},
 	))
 	require.NoError(t, registry.SetGenerationPreparer(builder.prepare))
-	outer.NoRoute((&pluginRouteDispatcher{registry: registry}).dispatch, controller.RelayNotFound)
+	previousRegistry := defaultPluginDispatcher.registry
+	defaultPluginDispatcher.registry = registry
+	t.Cleanup(func() { defaultPluginDispatcher.registry = previousRegistry })
+	outer.NoRoute(defaultPluginDispatcher.dispatch, controller.RelayNotFound)
 
 	require.Empty(t, registry.RoutingErrors())
 	require.Empty(t, registry.Generation().SkippedRoutes())
@@ -586,11 +589,10 @@ func TestBuiltInPluginRoutesAreServedBesideHostRoutes(t *testing.T) {
 		recorder := performPluginRequest(outer, request.method, request.path)
 		assert.Equal(t, request.plugin, recorder.Body.String(), request.method+" "+request.path)
 	}
-	// A prefix is never doubled, and GET /v1/files/:id is no longer a host route.
+	// A plugin prefix is never doubled. The ordinary Files route is tested with authentication in the relay router tests.
 	for _, request := range []struct{ method, path string }{
 		{http.MethodPost, "/sunoapi/suno/fetch"},
 		{http.MethodPost, "/alibaba/ali/api/v1/services/aigc/video-generation/video-synthesis"},
-		{http.MethodGet, "/v1/files/file_sample"},
 	} {
 		recorder := performPluginRequest(outer, request.method, request.path)
 		assert.Equal(t, http.StatusNotFound, recorder.Code, request.method+" "+request.path)

@@ -328,6 +328,9 @@ func (b *pluginGenerationBuilder) routeAnsweredByHost(route jsplugin.Route) bool
 			continue
 		}
 		_, offersToPlugins := pluginHandoffRoutes[staticRoute.Method+" "+staticRoute.Path]
+		if staticRoute.Method == http.MethodGet && staticRoute.Path == "/v1/files/:id" && route.Path == "/v1/files/retrieve" && route.Type == jsplugin.RouteTypeQuery && route.TaskIDParam == "file_id" {
+			offersToPlugins = true
+		}
 		if routeIntersectsStaticRoute(route, staticRoute.Path, offersToPlugins) {
 			return true
 		}

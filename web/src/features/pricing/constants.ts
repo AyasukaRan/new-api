@@ -84,8 +84,17 @@ export const ENDPOINT_TYPES = {
   JINA_RERANK: 'jina-rerank',
   IMAGE_GENERATION: 'image-generation',
   EMBEDDINGS: 'embeddings',
+  DEEPSEEK_SEARCH: 'deepseek-tools-search',
+  DEEPSEEK_FETCH: 'deepseek-tools-fetch',
   OPENAI_VIDEO: 'openai-video',
 } as const
+
+export function isDeepSeekToolEndpoint(type: string): boolean {
+  return (
+    type === ENDPOINT_TYPES.DEEPSEEK_SEARCH ||
+    type === ENDPOINT_TYPES.DEEPSEEK_FETCH
+  )
+}
 
 export type EndpointTypeOption =
   (typeof ENDPOINT_TYPES)[keyof typeof ENDPOINT_TYPES]
@@ -103,6 +112,8 @@ export function getEndpointTypeLabels(
     [ENDPOINT_TYPES.JINA_RERANK]: 'Rerank',
     [ENDPOINT_TYPES.IMAGE_GENERATION]: t('Image'),
     [ENDPOINT_TYPES.EMBEDDINGS]: t('Embeddings'),
+    [ENDPOINT_TYPES.DEEPSEEK_SEARCH]: 'DeepSeek Search',
+    [ENDPOINT_TYPES.DEEPSEEK_FETCH]: 'DeepSeek Fetch',
     [ENDPOINT_TYPES.OPENAI_VIDEO]: t('Video'),
   }
 }

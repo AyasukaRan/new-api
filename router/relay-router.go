@@ -1,6 +1,7 @@
 package router
 
 import (
+	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/constant"
@@ -69,6 +70,13 @@ func SetRelayRouter(router *gin.Engine) {
 		playgroundRouter.POST("/chat/completions", controller.Playground)
 	}
 	relayV1Router := router.Group("/v1")
+	// MiniMax retrieves a task artifact at this literal vendor path. Ordinary
+	// Files requests continue through the owner-scoped channel lookup.
+	relayV1Router.Use(func(c *gin.Context) {
+		if c.Request.Method == http.MethodGet && c.Request.URL.Path == "/v1/files/retrieve" && c.Query("file_id") != "" {
+			defaultPluginDispatcher.dispatch(c)
+		}
+	})
 	relayV1Router.Use(middleware.RouteTag("relay"))
 	relayV1Router.Use(middleware.SystemPerformanceCheck())
 	relayV1Router.Use(middleware.TokenAuth())

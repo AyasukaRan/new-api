@@ -158,7 +158,7 @@ func TestFilesAreScopedToTheUserThatUploadedThem(t *testing.T) {
 	})
 }
 
-func TestGeminiRelayHandsLongRunningPredictionToPluginRoute(t *testing.T) {
+func TestRelayHandsVendorEndpointsToPluginRoutes(t *testing.T) {
 	setupRelayRouterTestDB(t)
 	require.NoError(t, i18n.Init())
 	user := model.User{Username: "veo-user", Status: common.UserStatusEnabled, Group: "default", Quota: 100}
@@ -167,11 +167,14 @@ func TestGeminiRelayHandsLongRunningPredictionToPluginRoute(t *testing.T) {
 
 	engine := gin.New()
 	SetRelayRouter(engine)
-	source, err := plugins.Source("google")
-	require.NoError(t, err)
+	require.NoError(t, model.DB.AutoMigrate(&model.RelayFile{}))
 	registry := jsplugin.NewRegistry()
-	_, err = registry.RegisterFactory(source, jsplugin.Options{Key: "google"})
-	require.NoError(t, err)
+	for _, key := range []string{"google", "hailuo"} {
+		source, err := plugins.Source(key)
+		require.NoError(t, err)
+		_, err = registry.RegisterFactory(source, jsplugin.Options{Key: key})
+		require.NoError(t, err)
+	}
 	// The plugin route authenticates as in production, then names itself.
 	handlers := func(generation *jsplugin.RoutingGeneration, group jsplugin.RouteGroup) []gin.HandlerFunc {
 		production := productionPluginRouteHandlers(generation, group)
@@ -187,22 +190,29 @@ func TestGeminiRelayHandsLongRunningPredictionToPluginRoute(t *testing.T) {
 	engine.NoRoute(defaultPluginDispatcher.dispatch)
 
 	for _, testCase := range []struct {
-		method   string
-		path     string
-		toPlugin bool
+		method string
+		path   string
+		plugin string
 	}{
-		{method: http.MethodPost, path: "/v1beta/models/veo-3.1-generate-preview:predictLongRunning", toPlugin: true},
-		{method: http.MethodGet, path: "/v1beta/models/veo-3.1-generate-preview/operations/task_sample", toPlugin: true},
+		{method: http.MethodPost, path: "/v1beta/models/veo-3.1-generate-preview:predictLongRunning", plugin: "google"},
+		{method: http.MethodGet, path: "/v1beta/models/veo-3.1-generate-preview/operations/task_sample", plugin: "google"},
+		{method: http.MethodGet, path: "/v1/files/retrieve?file_id=task_sample", plugin: "hailuo"},
+		{method: http.MethodGet, path: "/v1/files/retrieve"},
+		{method: http.MethodGet, path: "/v1/files/file-other?file_id=task_sample"},
 		{method: http.MethodPost, path: "/v1beta/models/gemini-2.5-flash:generateContent"},
 	} {
 		t.Run(testCase.path, func(t *testing.T) {
 			request := httptest.NewRequest(testCase.method, testCase.path, strings.NewReader(`{}`))
-			request.Header.Set("x-goog-api-key", "veotestkey")
+			request.Header.Set("Authorization", "Bearer veotestkey")
 			recorder := httptest.NewRecorder()
 			engine.ServeHTTP(recorder, request)
 
-			if testCase.toPlugin {
-				assert.Equal(t, fmt.Sprintf("plugin google for user %d", user.Id), recorder.Body.String())
+			if testCase.plugin != "" {
+				assert.Equal(t, fmt.Sprintf("plugin %s for user %d", testCase.plugin, user.Id), recorder.Body.String())
+				return
+			}
+			if strings.HasPrefix(testCase.path, "/v1/files/") {
+				assert.Equal(t, http.StatusNotFound, recorder.Code)
 				return
 			}
 			// The relay looks for a Gemini channel serving the model; there is none.

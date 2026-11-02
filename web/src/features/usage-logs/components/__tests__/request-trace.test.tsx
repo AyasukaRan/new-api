@@ -108,20 +108,20 @@ describe('request trace viewer', () => {
     getRequestTraceObject.mockReset()
     useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
     vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+      const params = config?.params as
+        | { trace_id?: string; seq?: number }
+        | undefined
       if (url === '/api/log/trace/object') {
         return {
-          data: await getRequestTraceObject(
-            config?.params?.trace_id,
-            config?.params?.seq
-          ),
+          data: await getRequestTraceObject(params?.trace_id, params?.seq),
         }
       }
       return {
         data: {
           success: true,
           data: {
-            trace_id: config?.params?.trace_id,
-            legs: await getRequestTrace(config?.params?.trace_id),
+            trace_id: params?.trace_id,
+            legs: await getRequestTrace(params?.trace_id),
           },
         },
       }
