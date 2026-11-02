@@ -9,11 +9,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/smtp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +30,7 @@ type fakeSMTPServer struct {
 	advertiseSTARTTLS bool
 	authMechanisms    []string
 	messages          chan string
+	closeAfterData    atomic.Bool
 	authCommands      chan string
 	startTLSCommands  chan string
 }
@@ -190,7 +193,7 @@ func (s *fakeSMTPServer) serve() {
 				data.WriteString(dataLine)
 			}
 			s.messages <- data.String()
-			if err := writeSMTPLine(rw, "250 2.0.0 Queued"); err != nil {
+			if err := writeSMTPLine(rw, "250 2.0.0 Queued"); err != nil || s.closeAfterData.Load() {
 				return
 			}
 		case upperCommand == "QUIT":
@@ -265,6 +268,72 @@ func withSMTPSettings(t *testing.T) {
 		SMTPToken = originalSMTPToken
 		SystemName = originalSystemName
 	})
+}
+
+func TestSMTPDeadlineBoundsStalledDelivery(t *testing.T) {
+	for _, stage := range []string{"greeting", "implicit TLS handshake", "mail command"} {
+		t.Run(stage, func(t *testing.T) {
+			withSMTPSettings(t)
+			SMTPServer, SMTPPort = "127.0.0.1", 2525
+			SMTPSSLEnabled, SMTPStartTLSEnabled = stage == "implicit TLS handshake", false
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer listener.Close()
+			done := make(chan error, 1)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					done <- err
+					return
+				}
+				defer conn.Close()
+				// A missing client deadline fails the test rather than hanging the suite.
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				if stage == "mail command" {
+					rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+					if err = writeSMTPLine(rw, "220 ready"); err == nil {
+						_, err = rw.ReadString('\n') // EHLO
+					}
+					if err == nil {
+						err = writeSMTPLine(rw, "250 ready")
+					}
+					if err == nil {
+						_, err = rw.ReadString('\n') // MAIL FROM
+					}
+				}
+				if err == nil {
+					_, err = io.Copy(io.Discard, conn) // Wait for the client to close.
+				}
+				done <- err
+			}()
+
+			client, err := newSMTPClient(listener.Addr().String(), 200*time.Millisecond)
+			if stage == "mail command" {
+				require.NoError(t, err)
+				err = client.Mail("sender@example.com")
+				_ = client.Close()
+			}
+			var timeout net.Error
+			require.ErrorAs(t, err, &timeout)
+			require.True(t, timeout.Timeout())
+			require.NoError(t, <-done)
+		})
+	}
+}
+
+func TestSendEmailAcceptedBeforeDisconnectIsSuccessful(t *testing.T) {
+	server := newFakeSMTPServer(t)
+	defer server.close()
+	server.closeAfterData.Store(true)
+	withSMTPSettings(t)
+	SMTPServer, SMTPPort = server.host, server.port
+	SMTPSSLEnabled, SMTPStartTLSEnabled = false, false
+	SMTPFrom, SMTPAccount, SMTPToken = "sender@example.com", "", ""
+
+	err := SendEmail("Balance", "receiver@example.com", "<p>Balance: 5</p>")
+	require.NoError(t, err)
+	require.Contains(t, <-server.messages, "<p>Balance: 5</p>")
 }
 
 func TestSendEmailUsesExplicitStartTLSWithInsecureCertificate(t *testing.T) {
@@ -391,7 +460,7 @@ func TestNewSMTPClientHonorsExplicitStartTLSWhenPortIs465(t *testing.T) {
 	SMTPStartTLSEnabled = true
 	SMTPInsecureSkipVerify = true
 
-	client, err := newSMTPClient(fmt.Sprintf("%s:%d", server.host, server.port))
+	client, err := newSMTPClient(fmt.Sprintf("%s:%d", server.host, server.port), smtpDeliveryTimeout)
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -414,7 +483,7 @@ func TestNewSMTPClientKeepsImplicitTLSForLegacyPort465(t *testing.T) {
 	SMTPStartTLSEnabled = false
 	SMTPInsecureSkipVerify = true
 
-	client, err := newSMTPClient(fmt.Sprintf("%s:%d", server.host, server.port))
+	client, err := newSMTPClient(fmt.Sprintf("%s:%d", server.host, server.port), smtpDeliveryTimeout)
 	require.NoError(t, err)
 	defer client.Close()
 }

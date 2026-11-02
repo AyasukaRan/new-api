@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
@@ -856,6 +858,125 @@ func TestBalanceScheduleIntervalValidation(t *testing.T) {
 // The existing Channel schema is unchanged: BalanceMonitor is gorm:"-".
 // Upgrades start with that released schema and populated channel state; fresh
 // installs create both tables together. Both paths migrate twice with data.
+// The preceding release had the same observation columns/indexes but no mail state.
+type preEmailBalanceSample struct {
+	ID                 int64  `gorm:"primaryKey"`
+	ChannelID          int    `gorm:"index:idx_channel_balance_time,priority:1"`
+	CheckedAt          int64  `gorm:"type:bigint;index:idx_channel_balance_time,priority:2"`
+	StartedAt          int64  `gorm:"type:bigint"`
+	ConfigurationHash  string `gorm:"type:varchar(64)"`
+	Balance            *float64
+	BalanceUpdatedTime int64 `gorm:"type:bigint"`
+	KnownBalance       float64
+	Partial            bool
+	Success            bool
+	UsedQuota          int64
+	KeyBalancesJSON    string `gorm:"type:text"`
+}
+
+func (preEmailBalanceSample) TableName() string { return "channel_balance_samples" }
+
+func TestChannelBalanceEmailNotifications(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	limits := map[string]float64{"a": 7, "b": -3}
+	server := billingServerForKeys(t, limits)
+	channel := multiKeyChannelForBalance(t, server.URL, "a", "b")
+	channel.Name = "A <key>"
+	require.NoError(t, model.DB.Save(channel).Error)
+	require.NoError(t, model.DB.AutoMigrate(&model.User{}, &model.Ability{}))
+	on := true
+	for _, user := range []struct {
+		name       string
+		role       int
+		subscribed *bool
+		address    string
+	}{
+		{"root", common.RoleRootUser, nil, ""},
+		{"admin", common.RoleAdminUser, &on, "notice@example.com"},
+		{"not-watching", common.RoleAdminUser, nil, ""},
+		{"normal", common.RoleCommonUser, &on, ""},
+	} {
+		setting, err := common.Marshal(dto.UserSetting{NotifyType: dto.NotifyTypeWebhook, ChannelNotifyEnabled: user.subscribed, NotificationEmail: user.address, Language: "en"})
+		require.NoError(t, err)
+		require.NoError(t, model.DB.Create(&model.User{Username: user.name, Role: user.role, Status: common.UserStatusEnabled, Email: user.name + "@example.com", AffCode: user.name, Setting: string(setting)}).Error)
+	}
+	configureEmailDelivery(t, map[string]string{"EmailProvider": "resend", "ResendApiKey": "test-key", "ResendFrom": "sender@example.com"})
+	recipients := map[string]int{}
+	failRoot := true
+	original := http.DefaultTransport
+	http.DefaultTransport = emailHTTPTransport(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host != "api.resend.com" {
+			return original.RoundTrip(request)
+		}
+		var body struct {
+			To   []string
+			HTML string
+		}
+		require.NoError(t, common.DecodeJson(request.Body, &body))
+		require.Len(t, body.To, 1)
+		to := body.To[0]
+		recipients[to]++
+		assert.Contains(t, body.HTML, "A &lt;key&gt;")
+		expected := 7.0
+		if limits["a"] <= 0 {
+			expected = 0
+		}
+		if limits["a"] == 0.1 {
+			expected = 0.3
+		}
+		assert.Contains(t, body.HTML, fmt.Sprintf("%v USD", expected))
+		status := 200
+		if failRoot && to == "root@example.com" {
+			status = 503
+		}
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"example"}`))}, nil
+	})
+	run := func(task string, wantSent, wantFailure int) channelBalanceSummary {
+		t.Helper()
+		result, err := refreshChannelBalances(context.Background(), nil, task)
+		require.NoError(t, err)
+		assert.Equal(t, wantSent, result.EmailsSent)
+		assert.Equal(t, wantFailure, result.EmailFailedChannels)
+		return result
+	}
+	save := func(enabled bool, threshold *float64) {
+		t.Helper()
+		channel.Setting = nil
+		channel.SetSetting(dto.ChannelSettings{BalanceEmailEnabled: enabled, BalanceEmailThreshold: threshold})
+		require.NoError(t, channel.Update())
+	}
+	run("opted-out", 0, 0)
+	save(true, common.GetPointer(7.0))
+	run("", 0, 0) // Manual batch does not alert.
+	partial := limits["b"]
+	delete(limits, "b")
+	assert.Equal(t, 1, run("partial", 0, 0).Partial)
+	limits["b"] = partial
+	run("low", 1, 1)
+	failRoot = false
+	run("retry", 1, 0)
+	run("still-low", 0, 0)
+	assert.Equal(t, map[string]int{"root@example.com": 2, "notice@example.com": 1}, recipients)
+	save(false, common.GetPointer(7.0))
+	save(true, common.GetPointer(7.0))
+	run("re-enabled", 2, 0)
+	limits["a"] = 10
+	run("", 0, 0) // A confirmed manual recovery re-arms the threshold.
+	limits["a"] = 7
+	run("low-again", 2, 0)
+	save(true, nil)
+	run("each-A", 2, 0)
+	run("each-A", 0, 0) // A retried scheduled job is still one notification.
+	run("each-B", 2, 0)
+	save(true, common.GetPointer(0.0))
+	run("above-zero", 0, 0)
+	limits["a"] = -10
+	run("depleted", 2, 0) // Multi-key debt does not reduce another key's funds.
+	limits["a"], limits["b"] = 0.1, 0.2
+	save(true, common.GetPointer(0.3))
+	run("decimal-boundary", 2, 0)
+}
+
 func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		for _, upgrade := range []bool{false, true} {
@@ -889,6 +1010,9 @@ func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 				if upgrade {
 					require.NoError(t, database.AutoMigrate(&model.Channel{}))
 					require.False(t, database.Migrator().HasTable(&model.ChannelBalanceSample{}))
+					require.NoError(t, database.AutoMigrate(&preEmailBalanceSample{}))
+					require.NoError(t, database.Create(&preEmailBalanceSample{ChannelID: 9999, StartedAt: 90, CheckedAt: 99, KnownBalance: 4.5, Balance: common.GetPointer(4.5), BalanceUpdatedTime: 99, Success: true, KeyBalancesJSON: `[{"index":0,"balance":4.5}]`}).Error)
+					require.False(t, database.Migrator().HasColumn(&model.ChannelBalanceSample{}, "EmailState"))
 					require.NoError(t, database.Create(channel).Error)
 				}
 				for pass := 0; pass < 2; pass++ {
@@ -896,6 +1020,15 @@ func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 				}
 				if !upgrade {
 					require.NoError(t, database.Create(channel).Error)
+				}
+				require.True(t, database.Migrator().HasColumn(&model.ChannelBalanceSample{}, "EmailState"))
+				if upgrade {
+					var old model.ChannelBalanceSample
+					require.NoError(t, database.Where("channel_id = ?", 9999).First(&old).Error)
+					require.NotNil(t, old.Balance)
+					assert.Equal(t, 4.5, *old.Balance)
+					assert.Nil(t, old.EmailState)
+					assert.Equal(t, `[{"index":0,"balance":4.5}]`, old.KeyBalancesJSON)
 				}
 				var persisted model.Channel
 				require.NoError(t, database.First(&persisted, channel.Id).Error)
@@ -916,6 +1049,19 @@ func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, float64(13), *monitor.Balance)
 				assert.True(t, monitor.Success)
 				assert.False(t, monitor.Partial)
+				channel.SetSetting(dto.ChannelSettings{BalanceEmailEnabled: true, BalanceEmailThreshold: common.GetPointer(13.0)})
+				require.NoError(t, database.Model(channel).Update("setting", channel.Setting).Error)
+				notice, err := queryChannelBalance(context.Background(), channel, "scheduled-a")
+				require.NoError(t, err)
+				delivered, err := notice.sample.DeliverBalanceEmail(2, func(*model.Channel) error { return fmt.Errorf("mail failed") })
+				assert.Error(t, err)
+				assert.False(t, delivered)
+				delivered, err = notice.sample.DeliverBalanceEmail(2, func(*model.Channel) error { return nil })
+				require.NoError(t, err)
+				assert.True(t, delivered)
+				delivered, err = notice.sample.DeliverBalanceEmail(2, func(*model.Channel) error { t.Fatal("duplicate delivery"); return nil })
+				require.NoError(t, err)
+				assert.False(t, delivered)
 				assert.Equal(t, result.KeyBalances, monitor.KeyBalances)
 
 				failed := &model.ChannelBalanceSample{StartedAt: time.Now().UnixNano(), CheckedAt: result.Monitor.CheckedAt + 1, Partial: true, KnownBalance: 5,
@@ -923,11 +1069,11 @@ func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 				require.NoError(t, model.RecordChannelBalanceSample(channel, failed))
 				samples, err := model.ListChannelBalanceSamples(channel.Id, 0, 0, 100)
 				require.NoError(t, err)
-				require.Len(t, samples, 2)
-				assert.Equal(t, channel.UsedQuota, samples[1].UsedQuota)
-				assert.Equal(t, monitor.BalanceUpdatedTime, samples[1].BalanceUpdatedTime)
-				require.NotNil(t, samples[1].Balance)
-				assert.Equal(t, float64(13), *samples[1].Balance)
+				require.Len(t, samples, 3)
+				assert.Equal(t, channel.UsedQuota, samples[2].UsedQuota)
+				assert.Equal(t, notice.Monitor.BalanceUpdatedTime, samples[2].BalanceUpdatedTime)
+				require.NotNil(t, samples[2].Balance)
+				assert.Equal(t, float64(13), *samples[2].Balance)
 				require.NoError(t, database.First(&persisted, channel.Id).Error)
 				assert.Equal(t, common.ChannelStatusManuallyDisabled, persisted.Status)
 				assert.Equal(t, channel.ChannelInfo, persisted.ChannelInfo)

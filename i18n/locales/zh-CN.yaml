@@ -79,6 +79,8 @@ channel.notify_disabled_subject: "通道「{{.Name}}」（#{{.Id}}）已被禁�
 channel.notify_disabled_content: "通道「{{.Name}}」（#{{.Id}}）已被禁用，原因：{{.Reason}}"
 channel.notify_enabled_subject: "通道「{{.Name}}」（#{{.Id}}）已被启用"
 channel.notify_enabled_content: "通道「{{.Name}}」（#{{.Id}}）已被启用"
+channel.balance_email_subject: "渠道余额提醒"
+channel.balance_email_content: "渠道「{{.Name}}」（#{{.Id}}）的当前可用余额为 {{.Amount}}。"
 channel.test_completed_subject: "通道测试完成"
 channel.test_completed_content: "所有通道测试已完成"
 channel.response_time_exceeded: "响应时间 {{.Seconds}}s 超过阈值 {{.Threshold}}s"

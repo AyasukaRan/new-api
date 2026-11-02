@@ -306,6 +306,8 @@ const SENSITIVE_FORM_FIELDS = [
   'http_protocol',
   'http2_connection_shards',
   'balance_query_disabled',
+  'balance_email_enabled',
+  'balance_email_threshold',
   'balance_query_type',
   'balance_query_base_url',
   'batch_enabled',

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -34,19 +35,21 @@ type ChannelBalanceMonitor struct {
 // configuration and routing state. Balance carries the last complete reading;
 // KnownBalance is the sum of the keys that answered this particular check.
 type ChannelBalanceSample struct {
-	ID                 int64               `json:"id" gorm:"primaryKey"`
-	ChannelID          int                 `json:"channel_id" gorm:"index:idx_channel_balance_time,priority:1"`
-	CheckedAt          int64               `json:"checked_at" gorm:"bigint;index:idx_channel_balance_time,priority:2"`
-	StartedAt          int64               `json:"-" gorm:"bigint"`
-	ConfigurationHash  string              `json:"-" gorm:"type:varchar(64)"`
-	Balance            *float64            `json:"balance"`
-	BalanceUpdatedTime int64               `json:"balance_updated_time" gorm:"bigint"`
-	KnownBalance       float64             `json:"known_balance"`
-	Partial            bool                `json:"partial"`
-	Success            bool                `json:"success"`
-	UsedQuota          int64               `json:"used_quota" gorm:"bigint"`
-	KeyBalances        []ChannelKeyBalance `json:"key_balances" gorm:"-"`
-	KeyBalancesJSON    string              `json:"-" gorm:"type:text"`
+	EmailState         *channelBalanceEmailState `json:"-" gorm:"type:text;serializer:json"`
+	ScheduledTask      string                    `json:"-" gorm:"-"`
+	ID                 int64                     `json:"id" gorm:"primaryKey"`
+	ChannelID          int                       `json:"channel_id" gorm:"index:idx_channel_balance_time,priority:1"`
+	CheckedAt          int64                     `json:"checked_at" gorm:"bigint;index:idx_channel_balance_time,priority:2"`
+	StartedAt          int64                     `json:"-" gorm:"bigint"`
+	ConfigurationHash  string                    `json:"-" gorm:"type:varchar(64)"`
+	Balance            *float64                  `json:"balance"`
+	BalanceUpdatedTime int64                     `json:"balance_updated_time" gorm:"bigint"`
+	KnownBalance       float64                   `json:"known_balance"`
+	Partial            bool                      `json:"partial"`
+	Success            bool                      `json:"success"`
+	UsedQuota          int64                     `json:"used_quota" gorm:"bigint"`
+	KeyBalances        []ChannelKeyBalance       `json:"key_balances" gorm:"-"`
+	KeyBalancesJSON    string                    `json:"-" gorm:"type:text"`
 }
 
 var ErrChannelBalanceConfigurationChanged = errors.New("channel balance configuration changed; retry the balance query")
@@ -202,12 +205,125 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 				return err
 			}
 		}
+		sample.EmailState = nextChannelBalanceEmailState(current.GetSetting(), sample, &previous)
 		return tx.Create(sample).Error
 	})
 	if err == nil {
 		InvalidateChannelBalanceRouting(channel.Id)
 	}
 	return err
+}
+
+// The latest observation carries successful recipients across restarts and failed checks.
+// A positive recipient value is a short delivery lease; -1 marks successful delivery.
+type channelBalanceEmailState struct {
+	Generation int64         `json:"generation"`
+	Threshold  *float64      `json:"threshold,omitempty"`
+	Task       string        `json:"task,omitempty"`
+	Recipients map[int]int64 `json:"recipients,omitempty"`
+}
+
+func sameBalanceThreshold(a, b *float64) bool {
+	return a == b || (a != nil && b != nil && *a == *b)
+}
+
+func nextChannelBalanceEmailState(setting dto.ChannelSettings, current, previous *ChannelBalanceSample) *channelBalanceEmailState {
+	if !setting.BalanceEmailEnabled || setting.BalanceQueryDisabled {
+		return nil
+	}
+	threshold := setting.BalanceEmailThreshold
+	state := previous.EmailState
+	if state != nil && (current.ConfigurationHash != previous.ConfigurationHash || !sameBalanceThreshold(state.Threshold, threshold)) {
+		state = nil
+	}
+	if !current.Success || current.Partial {
+		return state
+	}
+	if threshold != nil && current.KnownBalance > *threshold {
+		return nil
+	}
+	if threshold == nil && current.ScheduledTask == "" {
+		return state
+	}
+	if state == nil || (threshold == nil && state.Task != current.ScheduledTask) {
+		state = &channelBalanceEmailState{Generation: current.StartedAt, Threshold: threshold, Task: current.ScheduledTask}
+	}
+	return state
+}
+
+// DeliverBalanceEmail claims one recipient of the latest confirmed reading,
+// sends outside the database lock, and leaves failed deliveries retryable.
+func (sample *ChannelBalanceSample) DeliverBalanceEmail(userID int, send func(*Channel) error) (bool, error) {
+	if sample.EmailState == nil || sample.ScheduledTask == "" || !sample.Success || sample.Partial {
+		return false, nil
+	}
+	var claimed *Channel
+	var lease int64
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var channel Channel
+		if err := lockForUpdate(tx).First(&channel, sample.ChannelID).Error; err != nil {
+			return err
+		}
+		if err := channel.CheckBalanceQueryEnabled(); err != nil {
+			if errors.Is(err, ErrChannelBalanceQueryDisabled) {
+				return nil
+			}
+			return err
+		}
+		setting := channel.GetSetting()
+		if !setting.BalanceEmailEnabled || !sameBalanceThreshold(setting.BalanceEmailThreshold, sample.EmailState.Threshold) {
+			return nil
+		}
+		hash, err := channelBalanceConfigurationHash(&channel)
+		if err != nil || hash != sample.ConfigurationHash {
+			return err
+		}
+		var latest ChannelBalanceSample
+		if err := tx.Where("channel_id = ?", channel.Id).Order("id DESC").First(&latest).Error; err != nil {
+			return err
+		}
+		if latest.ID != sample.ID || latest.EmailState == nil || latest.EmailState.Generation != sample.EmailState.Generation {
+			return nil
+		}
+		now := time.Now()
+		value := latest.EmailState.Recipients[userID]
+		if value == -1 || value > now.UnixNano() {
+			return nil
+		}
+		if latest.EmailState.Recipients == nil {
+			latest.EmailState.Recipients = make(map[int]int64)
+		}
+		lease = now.Add(10 * time.Minute).UnixNano()
+		latest.EmailState.Recipients[userID] = lease
+		claimed = &channel
+		return tx.Model(&latest).Select("EmailState").Updates(&latest).Error
+	})
+	if err != nil || claimed == nil {
+		return false, err
+	}
+
+	sendErr := send(claimed)
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var channel Channel
+		if err := lockForUpdate(tx).Select("id").First(&channel, sample.ChannelID).Error; err != nil {
+			return err
+		}
+		var latest ChannelBalanceSample
+		if err := tx.Where("channel_id = ?", sample.ChannelID).Order("id DESC").First(&latest).Error; err != nil {
+			return err
+		}
+		state := latest.EmailState
+		if state == nil || state.Generation != sample.EmailState.Generation || state.Recipients[userID] != lease {
+			return nil
+		}
+		if sendErr == nil {
+			state.Recipients[userID] = -1
+		} else {
+			delete(state.Recipients, userID)
+		}
+		return tx.Model(&latest).Select("EmailState").Updates(&latest).Error
+	})
+	return sendErr == nil, errors.Join(sendErr, err)
 }
 
 func GetChannelBalanceMonitor(channelID int) (*ChannelBalanceMonitor, error) {

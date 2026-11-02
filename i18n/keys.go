@@ -96,6 +96,8 @@ const (
 // Channel notices sent to administrators who receive them and to model update
 // watchers
 const (
+	MsgChannelBalanceEmailSubject   = "channel.balance_email_subject"
+	MsgChannelBalanceEmailContent   = "channel.balance_email_content"
 	MsgChannelNotifyDisabledSubject = "channel.notify_disabled_subject"
 	MsgChannelNotifyDisabledContent = "channel.notify_disabled_content"
 	MsgChannelNotifyEnabledSubject  = "channel.notify_enabled_subject"

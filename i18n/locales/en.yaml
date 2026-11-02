@@ -78,6 +78,8 @@ channel.notify_disabled_subject: "Channel \"{{.Name}}\" (#{{.Id}}) has been disa
 channel.notify_disabled_content: "Channel \"{{.Name}}\" (#{{.Id}}) has been disabled. Reason: {{.Reason}}"
 channel.notify_enabled_subject: "Channel \"{{.Name}}\" (#{{.Id}}) has been enabled"
 channel.notify_enabled_content: "Channel \"{{.Name}}\" (#{{.Id}}) has been enabled"
+channel.balance_email_subject: "Channel balance update"
+channel.balance_email_content: "Channel “{{.Name}}” (#{{.Id}}) has a remaining balance of {{.Amount}}."
 channel.test_completed_subject: "Channel test completed"
 channel.test_completed_content: "All channel tests have completed"
 channel.response_time_exceeded: "response time {{.Seconds}}s exceeds the threshold of {{.Threshold}}s"

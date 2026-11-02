@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { zodResolver } from '@hookform/resolvers/zod'
 import {
   createMemoryHistory,
   createRootRoute,
@@ -45,6 +46,7 @@ function BalanceSettingsFixture(props: {
   onSave: (setting: Record<string, unknown>) => void
 }) {
   const form = useForm<ChannelFormValues>({
+    resolver: zodResolver(channelFormSchema),
     defaultValues: transformChannelToFormDefaults(
       channelSchema.parse({
         id: 1,
@@ -64,10 +66,9 @@ function BalanceSettingsFixture(props: {
   return (
     <Form {...form}>
       <form
+        noValidate
         onSubmit={form.handleSubmit((values) =>
-          props.onSave(
-            JSON.parse(buildSettingJSON(channelFormSchema.parse(values)))
-          )
+          props.onSave(JSON.parse(buildSettingJSON(values)))
         )}
       >
         <ChannelBalanceSettings control={form.control} />
@@ -149,6 +150,130 @@ describe('channel balance query settings', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(onSave).toHaveBeenCalled())
     expect(onSave.mock.calls[0][0].balance_query_disabled).not.toBe(true)
+  })
+
+  test('balance emails are opt-in and an empty threshold enables updates without changing other channel settings', async () => {
+    const user = userEvent.setup()
+    const onSave = await renderSettings(
+      JSON.stringify({ balance_query_type: 'openai' })
+    )
+    const email = await screen.findByRole('switch', {
+      name: 'Balance email notifications',
+    })
+    expect(email).not.toBeChecked()
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument()
+    email.focus()
+    await user.keyboard(' ')
+    expect(
+      screen.getByRole('spinbutton', { name: 'Low balance threshold' })
+    ).toHaveValue(null)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      balance_email_enabled: true,
+      balance_query_type: 'openai',
+    })
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty(
+      'balance_email_threshold'
+    )
+  })
+
+  test('an existing zero threshold can be cleared to resume regular balance emails', async () => {
+    const user = userEvent.setup()
+    const onSave = await renderSettings(
+      JSON.stringify({
+        balance_email_enabled: true,
+        balance_email_threshold: 0,
+      })
+    )
+    const threshold = await screen.findByRole('spinbutton', {
+      name: 'Low balance threshold',
+    })
+    expect(threshold).toHaveValue(0)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      balance_email_threshold: 0,
+    })
+    await user.clear(threshold)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2))
+    expect(onSave.mock.calls[1][0]).not.toHaveProperty(
+      'balance_email_threshold'
+    )
+  })
+
+  test('a negative alert threshold prevents saving the channel', async () => {
+    const user = userEvent.setup()
+    const onSave = await renderSettings(
+      JSON.stringify({ balance_email_enabled: true })
+    )
+    const threshold = await screen.findByRole('spinbutton', {
+      name: 'Low balance threshold',
+    })
+    await user.type(threshold, '-1')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(
+      await screen.findByText(
+        'Enter a finite balance threshold of zero or more.'
+      )
+    ).toBeVisible()
+    expect(threshold).toHaveAttribute('aria-invalid', 'true')
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  test.each(['Balance email notifications', 'Balance queries'])(
+    'an invalid threshold does not block saving after turning off %s',
+    async (label) => {
+      const user = userEvent.setup()
+      const onSave = await renderSettings(
+        JSON.stringify({ balance_email_enabled: true })
+      )
+      const threshold = await screen.findByRole('spinbutton', {
+        name: 'Low balance threshold',
+      })
+      await user.type(threshold, '-1')
+      const save = screen.getByRole('button', { name: 'Save' })
+      await user.click(save)
+      expect(
+        await screen.findByText(
+          'Enter a finite balance threshold of zero or more.'
+        )
+      ).toBeVisible()
+      await user.click(screen.getByRole('switch', { name: label }))
+      await user.click(save)
+      await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+      expect(onSave.mock.calls[0][0]).not.toHaveProperty(
+        'balance_email_threshold'
+      )
+    }
+  )
+
+  test('disabled balance queries suspend email controls and retain their threshold for re-enabling', async () => {
+    const user = userEvent.setup()
+    const onSave = await renderSettings(
+      JSON.stringify({
+        balance_email_enabled: true,
+        balance_email_threshold: 1.25,
+        balance_query_disabled: true,
+      })
+    )
+    const email = await screen.findByRole('switch', {
+      name: 'Balance email notifications',
+    })
+    expect(email).toBeChecked()
+    expect(email).toHaveAttribute('aria-disabled', 'true')
+    expect(
+      screen.getByRole('spinbutton', { name: 'Low balance threshold' })
+    ).toBeDisabled()
+    await user.click(screen.getByRole('switch', { name: 'Balance queries' }))
+    await user.click(email)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty('balance_email_enabled')
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      balance_email_threshold: 1.25,
+    })
   })
 
   test('super administrators can open the existing global balance refresh settings without leaving their draft', async () => {

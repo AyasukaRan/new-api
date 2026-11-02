@@ -2,6 +2,7 @@ package dto
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"slices"
@@ -42,6 +43,9 @@ type ChannelSettings struct {
 	// BalanceQueryDisabled stops manual and scheduled balance checks while
 	// preserving the last recorded balance. Existing configurations allow checks.
 	BalanceQueryDisabled bool `json:"balance_query_disabled,omitempty"`
+	// Nil threshold sends on each scheduled reading; zero is an explicit threshold.
+	BalanceEmailEnabled   bool     `json:"balance_email_enabled,omitempty"`
+	BalanceEmailThreshold *float64 `json:"balance_email_threshold,omitempty"`
 	// BalanceQueryType names the provider whose balance endpoint this channel
 	// should be queried with, for gateways that speak one provider's relay
 	// protocol while exposing another's billing API — an OpenAI-compatible
@@ -120,6 +124,9 @@ func (s *ChannelSettings) BatchCredentials(baseURL string, key string) (string, 
 func (s *ChannelSettings) ValidateBalanceQuery() error {
 	if s == nil {
 		return nil
+	}
+	if limit := s.BalanceEmailThreshold; limit != nil && (math.IsNaN(*limit) || math.IsInf(*limit, 0) || *limit < 0) {
+		return fmt.Errorf("Enter a finite balance threshold of zero or more.")
 	}
 	s.BalanceQueryType = strings.TrimSpace(s.BalanceQueryType)
 	s.BalanceQueryBaseURL = strings.TrimRight(strings.TrimSpace(s.BalanceQueryBaseURL), "/")

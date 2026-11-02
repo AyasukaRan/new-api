@@ -2,12 +2,16 @@ package service
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -19,12 +23,58 @@ import (
 // and other administrators do not. render builds the subject and content in
 // the recipient's saved language; an empty language means DEFAULT_LANGUAGE.
 func NotifyChannelWatchers(notifyType string, render func(lang string) (subject string, content string)) {
-	notifyAdmins(notifyType, func(role int, setting dto.UserSetting) bool {
-		if setting.ChannelNotifyEnabled != nil {
-			return *setting.ChannelNotifyEnabled
+	notifyAdmins(notifyType, receivesChannelNotices, render)
+}
+
+func receivesChannelNotices(role int, setting dto.UserSetting) bool {
+	if setting.ChannelNotifyEnabled != nil {
+		return *setting.ChannelNotifyEnabled
+	}
+	return role == common.RoleRootUser
+}
+
+// Balance notices explicitly use email and the same channel-watcher audience.
+func SendChannelBalanceEmails(sample *model.ChannelBalanceSample, unit string) (int, error) {
+	var users []model.User
+	if err := model.DB.Select("id", "email", "role", "setting").Where("status = ? AND role >= ?", common.UserStatusEnabled, common.RoleAdminUser).Find(&users).Error; err != nil {
+		return 0, err
+	}
+	var errs []error
+	sent := 0
+	for _, user := range users {
+		setting := user.GetSetting()
+		if !receivesChannelNotices(user.Role, setting) {
+			continue
 		}
-		return role == common.RoleRootUser
-	}, render)
+		to := strings.TrimSpace(setting.NotificationEmail)
+		if to == "" {
+			to = strings.TrimSpace(user.Email)
+		}
+		if to == "" {
+			errs = append(errs, fmt.Errorf("administrator %d has no notification email", user.Id))
+			continue
+		}
+		delivered, err := sample.DeliverBalanceEmail(user.Id, func(channel *model.Channel) error {
+			amount := strconv.FormatFloat(sample.KnownBalance, 'f', -1, 64)
+			if unit != "" {
+				amount += " " + unit
+			}
+			subject := i18n.Translate(setting.Language, i18n.MsgChannelBalanceEmailSubject)
+			body := i18n.Translate(setting.Language, i18n.MsgChannelBalanceEmailContent, map[string]any{"Name": html.EscapeString(channel.Name), "Id": channel.Id, "Amount": amount})
+			if err := common.SendEmail(subject, to, body); err != nil {
+				// Mail providers may echo credentials or recipients in error details.
+				return fmt.Errorf("mail delivery failed for administrator %d", user.Id)
+			}
+			return nil
+		})
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if delivered {
+			sent++
+		}
+	}
+	return sent, errors.Join(errs...)
 }
 
 // NotifyUpstreamModelUpdateWatchers sends the upstream model update notice to

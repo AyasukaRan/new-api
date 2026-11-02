@@ -2281,6 +2281,8 @@ test('editing MaaS keeps its provider identity, batch credentials and disabled b
     batch_base_url: 'https://batch.example',
     batch_key: 'batch-secret',
     balance_query_disabled: true,
+    balance_email_enabled: true,
+    balance_email_threshold: 7.25,
     balance_query_type: 'openai',
     balance_query_base_url: 'https://billing.example',
   }
@@ -2312,6 +2314,12 @@ test('editing MaaS keeps its provider identity, batch credentials and disabled b
   expect(
     screen.getByRole('textbox', { name: 'Balance Query Address' })
   ).toBeDisabled()
+  expect(
+    screen.getByRole('switch', { name: 'Balance email notifications' })
+  ).toBeChecked()
+  expect(
+    screen.getByRole('spinbutton', { name: 'Low balance threshold' })
+  ).toHaveValue(7.25)
   await user.click(screen.getByRole('button', { name: 'Update Channel' }))
   await waitFor(() => expect(put).toHaveBeenCalled())
   const payload = put.mock.calls[0][1] as { type: number; setting: string }

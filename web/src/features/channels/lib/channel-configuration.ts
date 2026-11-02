@@ -86,6 +86,8 @@ const CONFIGURATION_BLOCKS = {
       'http2_connection_shards',
       'upstream_cost_ratio',
       'balance_query_disabled',
+      'balance_email_enabled',
+      'balance_email_threshold',
       'balance_query_type',
       'balance_query_base_url',
       'batch_enabled',
@@ -182,6 +184,7 @@ export function getChannelConfigurationState(
     extraSettings: Boolean(
       values.upstream_cost_ratio != null ||
       values.balance_query_disabled ||
+      values.balance_email_enabled ||
       values.balance_query_type?.trim() ||
       values.balance_query_base_url?.trim() ||
       values.batch_enabled ||

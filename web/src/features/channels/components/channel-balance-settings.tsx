@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { Link } from '@tanstack/react-router'
 import { useMemo } from 'react'
-import { useWatch, type Control } from 'react-hook-form'
+import { useFormContext, useWatch, type Control } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -50,9 +50,23 @@ export function ChannelBalanceSettings(props: {
   control: Control<ChannelFormValues>
 }) {
   const { t } = useTranslation()
+  const { clearErrors, getValues, setValue } =
+    useFormContext<ChannelFormValues>()
+  function discardInvalidThreshold() {
+    const threshold = getValues('balance_email_threshold')
+    if (threshold != null && (!Number.isFinite(threshold) || threshold < 0)) {
+      setValue('balance_email_threshold', null, { shouldDirty: true })
+      clearErrors('balance_email_threshold')
+    }
+  }
+
   const disabled =
     useWatch({ control: props.control, name: 'balance_query_disabled' }) ===
     true
+  const emailEnabled = useWatch({
+    control: props.control,
+    name: 'balance_email_enabled',
+  })
   const isRoot = useAuthStore(
     (state) => state.auth.user?.role === ROLE.SUPER_ADMIN
   )
@@ -87,7 +101,10 @@ export function ChannelBalanceSettings(props: {
             <FormControl>
               <Switch
                 checked={!field.value}
-                onCheckedChange={(checked) => field.onChange(!checked)}
+                onCheckedChange={(checked) => {
+                  if (!checked) discardInvalidThreshold()
+                  field.onChange(!checked)
+                }}
               />
             </FormControl>
           </FormItem>
@@ -158,6 +175,66 @@ export function ChannelBalanceSettings(props: {
             </FormItem>
           )}
         />
+        <FormField
+          control={props.control}
+          name='balance_email_enabled'
+          render={({ field }) => (
+            <FormItem className='flex items-center justify-between gap-4'>
+              <div className='space-y-1'>
+                <FormLabel>{t('Balance email notifications')}</FormLabel>
+                <FormDescription>
+                  {t(
+                    'Email the available balance to administrators subscribed to channel notifications after a successful scheduled refresh.'
+                  )}
+                </FormDescription>
+              </div>
+              <FormControl>
+                <Switch
+                  disabled={disabled}
+                  checked={field.value === true}
+                  onCheckedChange={(checked) => {
+                    if (!checked) discardInvalidThreshold()
+                    field.onChange(checked)
+                  }}
+                />
+              </FormControl>
+            </FormItem>
+          )}
+        />
+        {emailEnabled && (
+          <FormField
+            control={props.control}
+            name='balance_email_threshold'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Low balance threshold')}</FormLabel>
+                <FormControl>
+                  <Input
+                    {...field}
+                    disabled={disabled}
+                    type='number'
+                    min={0}
+                    step='any'
+                    value={field.value ?? ''}
+                    onChange={(event) =>
+                      field.onChange(
+                        event.target.value === ''
+                          ? null
+                          : event.target.valueAsNumber
+                      )
+                    }
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Leave empty to receive every update. Set an amount in the upstream balance unit to receive one email when the balance is at or below it. Alerts resume after the balance rises above it.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
       </fieldset>
       <p className='text-muted-foreground text-xs'>
         {t(

@@ -62,6 +62,7 @@ type channelBalanceResult struct {
 	KeyBalances []model.ChannelKeyBalance
 	Partial     bool
 	Monitor     *model.ChannelBalanceMonitor
+	sample      *model.ChannelBalanceSample
 }
 
 type OpenAIUsageResponse struct {
@@ -597,6 +598,10 @@ func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) 
 }
 
 func updateChannelBalanceWithContext(ctx context.Context, channel *model.Channel) (channelBalanceResult, error) {
+	return queryChannelBalance(ctx, channel, "")
+}
+
+func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduledTask string) (channelBalanceResult, error) {
 	startedAt := time.Now().UnixNano()
 	keys := []string{channel.Key}
 	if channel.ChannelInfo.IsMultiKey {
@@ -604,6 +609,7 @@ func updateChannelBalanceWithContext(ctx context.Context, channel *model.Channel
 	}
 	result := channelBalanceResult{KeyBalances: make([]model.ChannelKeyBalance, 0, len(keys))}
 	succeeded := 0
+	var available decimal.Decimal
 	for index, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return channelBalanceResult{}, err
@@ -648,7 +654,8 @@ func updateChannelBalanceWithContext(ctx context.Context, channel *model.Channel
 			// Each key owns a separate account. An exhausted account cannot
 			// reduce the funds available from another account.
 			if !channel.ChannelInfo.IsMultiKey || balance > 0 {
-				result.Balance += balance
+				available = available.Add(decimal.NewFromFloat(balance))
+				result.Balance = available.InexactFloat64()
 			}
 			succeeded++
 		}
@@ -656,13 +663,14 @@ func updateChannelBalanceWithContext(ctx context.Context, channel *model.Channel
 	}
 	result.Partial = succeeded > 0 && succeeded < len(keys)
 	sample := &model.ChannelBalanceSample{
-		StartedAt: startedAt, CheckedAt: common.GetTimestamp(),
+		ScheduledTask: scheduledTask, StartedAt: startedAt, CheckedAt: common.GetTimestamp(),
 		KnownBalance: result.Balance, Partial: result.Partial,
 		Success: len(keys) > 0 && succeeded == len(keys), KeyBalances: result.KeyBalances,
 	}
 	if err := model.RecordChannelBalanceSample(channel, sample); err != nil {
 		return channelBalanceResult{}, err
 	}
+	result.sample = sample
 	result.Monitor = &model.ChannelBalanceMonitor{
 		CheckedAt: sample.CheckedAt, Balance: sample.Balance,
 		BalanceUpdatedTime: sample.BalanceUpdatedTime, KnownBalance: sample.KnownBalance,
@@ -818,14 +826,20 @@ func UpdateChannelBalance(c *gin.Context) {
 // channelBalanceSummary 记录一轮余额刷新的结果，写进 system task 的 result 里，
 // 管理员在任务列表就能看到这次刷新覆盖了多少渠道、有多少家上游没答复。
 type channelBalanceSummary struct {
-	Total     int `json:"total"`
-	Succeeded int `json:"succeeded"`
-	Partial   int `json:"partial"`
-	Failed    int `json:"failed"`
-	Skipped   int `json:"skipped"`
+	Total               int `json:"total"`
+	Succeeded           int `json:"succeeded"`
+	Partial             int `json:"partial"`
+	Failed              int `json:"failed"`
+	Skipped             int `json:"skipped"`
+	EmailsSent          int `json:"emails_sent,omitempty"`
+	EmailFailedChannels int `json:"email_failed_channels,omitempty"`
 }
 
 func updateAllChannelsBalance(ctx context.Context, report func(processed, total int)) (channelBalanceSummary, error) {
+	return refreshChannelBalances(ctx, report, "")
+}
+
+func refreshChannelBalances(ctx context.Context, report func(processed, total int), scheduledTask string) (channelBalanceSummary, error) {
 	channels, err := model.GetAllChannels(0, 0, true, false)
 	if err != nil {
 		return channelBalanceSummary{}, err
@@ -840,7 +854,7 @@ func updateAllChannelsBalance(ctx context.Context, report func(processed, total 
 		} else {
 			// A disabled channel can still have upstream funds. Balance checks
 			// include every channel and never enable/disable channels or keys.
-			result, err := updateChannelBalanceWithContext(ctx, channel)
+			result, err := queryChannelBalance(ctx, channel, scheduledTask)
 			if errors.Is(err, model.ErrChannelBalanceQueryDisabled) {
 				summary.Skipped++
 			} else if err != nil {
@@ -854,6 +868,28 @@ func updateAllChannelsBalance(ctx context.Context, report func(processed, total 
 				summary.Partial++
 			} else {
 				summary.Succeeded++
+				if scheduledTask != "" && result.sample.EmailState != nil {
+					queryType, _ := resolveBalanceQuery(channel)
+					unit := ""
+					switch queryType {
+					case constant.ChannelTypeDeepSeek, constant.ChannelTypeSiliconFlow:
+						unit = "CNY"
+					case constant.ChannelTypeOpenAI, constant.ChannelTypeCustom, constant.ChannelTypeOpenRouter, constant.ChannelTypeMoonshot, constant.ChannelTypeNewAPI, constant.ChannelTypeSub2API:
+						unit = "USD"
+					case constant.ChannelTypeAIProxy:
+						unit = "points"
+					}
+					// Advanced custom always uses its own balance route, independently of the provider override.
+					if channel.Type == constant.ChannelTypeAdvancedCustom {
+						unit = ""
+					}
+					sent, notifyErr := service.SendChannelBalanceEmails(result.sample, unit)
+					summary.EmailsSent += sent
+					if notifyErr != nil {
+						summary.EmailFailedChannels++
+						common.SysError(fmt.Sprintf("channel %d balance email failed: %v", channel.Id, notifyErr))
+					}
+				}
 			}
 		}
 		if report != nil {

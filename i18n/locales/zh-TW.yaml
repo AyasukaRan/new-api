@@ -79,6 +79,8 @@ channel.notify_disabled_subject: "管道「{{.Name}}」（#{{.Id}}）已被停�
 channel.notify_disabled_content: "管道「{{.Name}}」（#{{.Id}}）已被停用，原因：{{.Reason}}"
 channel.notify_enabled_subject: "管道「{{.Name}}」（#{{.Id}}）已被啟用"
 channel.notify_enabled_content: "管道「{{.Name}}」（#{{.Id}}）已被啟用"
+channel.balance_email_subject: "渠道餘額提醒"
+channel.balance_email_content: "渠道「{{.Name}}」（#{{.Id}}）的目前可用餘額為 {{.Amount}}。"
 channel.test_completed_subject: "管道測試完成"
 channel.test_completed_content: "所有管道測試已完成"
 channel.response_time_exceeded: "回應時間 {{.Seconds}}s 超過閾值 {{.Threshold}}s"

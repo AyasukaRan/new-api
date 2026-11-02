@@ -78,6 +78,8 @@ func channelKeyObservationID(channel *Channel, modelName, key string, legacy boo
 		}
 	}
 	setting.BalanceQueryDisabled = false
+	setting.BalanceEmailEnabled = false
+	setting.BalanceEmailThreshold = nil
 	other := dto.ChannelOtherSettings{}
 	if channel.OtherSettings != "" {
 		if err := common.UnmarshalJsonStr(channel.OtherSettings, &other); err != nil {

@@ -292,6 +292,11 @@ export const channelFormSchema = z
     http_protocol: z.enum(['auto', 'http1']).optional(),
     http2_connection_shards: z.number().int().optional(),
     balance_query_disabled: z.boolean().optional(),
+    balance_email_enabled: z.boolean().optional(),
+    balance_email_threshold: z
+      .number({ error: 'Enter a finite balance threshold of zero or more.' })
+      .min(0, 'Enter a finite balance threshold of zero or more.')
+      .nullish(),
     balance_query_type: z.string().optional(),
     balance_query_base_url: z
       .string()
@@ -500,6 +505,8 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   http_protocol: HTTP_PROTOCOL_AUTO,
   http2_connection_shards: 1,
   balance_query_disabled: false,
+  balance_email_enabled: false,
+  balance_email_threshold: null,
   balance_query_type: '',
   balance_query_base_url: '',
   batch_enabled: false,
@@ -555,6 +562,8 @@ export function transformChannelToFormDefaults(
     http_protocol: HTTP_PROTOCOL_AUTO as 'auto' | 'http1',
     http2_connection_shards: 1,
     balance_query_disabled: false,
+    balance_email_enabled: false,
+    balance_email_threshold: null as number | null,
     balance_query_type: '',
     balance_query_base_url: '',
     batch_enabled: false,
@@ -585,6 +594,8 @@ export function transformChannelToFormDefaults(
         http_protocol: protocol,
         http2_connection_shards: protocol === HTTP_PROTOCOL_HTTP1 ? 1 : shards,
         balance_query_disabled: parsed.balance_query_disabled === true,
+        balance_email_enabled: parsed.balance_email_enabled === true,
+        balance_email_threshold: parsed.balance_email_threshold ?? null,
         balance_query_type: parsed.balance_query_type || '',
         balance_query_base_url: parsed.balance_query_base_url || '',
         batch_enabled: parsed.batch_enabled || false,
@@ -771,6 +782,12 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   // keeps the JSON it had.
   if (formData.balance_query_disabled) {
     settingObj.balance_query_disabled = true
+  }
+  if (formData.balance_email_enabled) {
+    settingObj.balance_email_enabled = true
+  }
+  if (formData.balance_email_threshold != null) {
+    settingObj.balance_email_threshold = formData.balance_email_threshold
   }
   const balanceQueryType = formData.balance_query_type?.trim()
   if (balanceQueryType) {

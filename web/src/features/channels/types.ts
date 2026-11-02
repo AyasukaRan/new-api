@@ -118,6 +118,8 @@ export interface ChannelSettings {
   http2_connection_shards?: number
   /** Opt out of balance queries while retaining recorded balances. */
   balance_query_disabled?: boolean
+  balance_email_enabled?: boolean
+  balance_email_threshold?: number | null
   /** Which provider's billing API to query; empty uses the channel's type. */
   balance_query_type?: string
   /** Where to send the balance request when it is not the relay base URL. */

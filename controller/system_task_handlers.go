@@ -125,10 +125,23 @@ func (channelBalanceHandler) Interval() time.Duration {
 	return time.Duration(operation_setting.GetMonitorSetting().AutoUpdateBalanceMinutes * float64(time.Minute))
 }
 
-func (channelBalanceHandler) NewPayload() any { return nil }
+type channelBalanceTaskPayload struct {
+	Scheduled bool `json:"scheduled,omitempty"`
+}
+
+func (channelBalanceHandler) NewPayload() any { return channelBalanceTaskPayload{Scheduled: true} }
 
 func (channelBalanceHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary, err := updateAllChannelsBalance(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	var payload channelBalanceTaskPayload
+	if err := task.DecodePayload(&payload); err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	scheduledTask := ""
+	if payload.Scheduled {
+		scheduledTask = task.TaskID
+	}
+	summary, err := refreshChannelBalances(ctx, service.NewSystemTaskProgressReporter(task, runnerID), scheduledTask)
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
 		return

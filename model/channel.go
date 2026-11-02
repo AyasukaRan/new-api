@@ -731,14 +731,46 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		resetEmail := false
+		if channel.Setting != nil {
+			var stored Channel
+			if err := lockForUpdate(tx).Select("id", "setting").First(&stored, channel.Id).Error; err != nil {
+				return err
+			}
+			var previous, next dto.ChannelSettings
+			if stored.Setting != nil && *stored.Setting != "" {
+				// A valid edit can repair malformed old settings.
+				_ = common.UnmarshalJsonStr(*stored.Setting, &previous)
+			}
+			if *channel.Setting != "" {
+				if err := common.UnmarshalJsonStr(*channel.Setting, &next); err != nil {
+					return err
+				}
+			}
+			resetEmail = (next.BalanceEmailEnabled || previous.BalanceEmailEnabled) && (next.BalanceEmailEnabled != previous.BalanceEmailEnabled ||
+				next.BalanceQueryDisabled != previous.BalanceQueryDisabled || !sameBalanceThreshold(next.BalanceEmailThreshold, previous.BalanceEmailThreshold))
+		}
+		if err := tx.Model(channel).Updates(channel).Error; err != nil {
+			return err
+		}
+		if resetEmail {
+			// A configuration can be disabled and re-enabled between two observations.
+			var last []ChannelBalanceSample
+			if err := tx.Select("id").Where("channel_id = ?", channel.Id).Order("id desc").Limit(1).Find(&last).Error; err != nil {
+				return err
+			}
+			if len(last) > 0 {
+				return tx.Model(&last[0]).UpdateColumn("email_state", nil).Error
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
-	err = channel.UpdateAbilities(nil)
-	return err
+	return channel.UpdateAbilities(nil)
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {

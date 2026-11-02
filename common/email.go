@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/smtp"
 	"slices"
 	"strings"
@@ -41,26 +42,30 @@ func smtpTLSConfig() *tls.Config {
 	}
 }
 
-func newSMTPClient(addr string) (*smtp.Client, error) {
-	if SMTPSSLEnabled || (SMTPPort == 465 && !SMTPStartTLSEnabled) {
-		conn, err := tls.Dial("tcp", addr, smtpTLSConfig())
-		if err != nil {
-			return nil, err
-		}
-		client, err := smtp.NewClient(conn, SMTPServer)
-		if err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		return client, nil
-	}
+const smtpDeliveryTimeout = 20 * time.Second
 
-	client, err := smtp.Dial(addr)
+func newSMTPClient(addr string, timeout time.Duration) (*smtp.Client, error) {
+	// The same deadline covers dialing, TLS, the greeting and the entire delivery.
+	deadline := time.Now().Add(timeout)
+	dialer := net.Dialer{Deadline: deadline}
+	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-
-	if SMTPStartTLSEnabled {
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	implicitTLS := SMTPSSLEnabled || (SMTPPort == 465 && !SMTPStartTLSEnabled)
+	if implicitTLS {
+		conn = tls.Client(conn, smtpTLSConfig())
+	}
+	client, err := smtp.NewClient(conn, SMTPServer)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if !implicitTLS && SMTPStartTLSEnabled {
 		startTLSSupported, _ := client.Extension("STARTTLS")
 		if !startTLSSupported {
 			_ = client.Close()
@@ -112,7 +117,7 @@ func SendEmail(subject string, receiver string, content string) error {
 	addr := fmt.Sprintf("%s:%d", SMTPServer, SMTPPort)
 	to := strings.Split(receiver, ";")
 	var err error
-	client, err := newSMTPClient(addr)
+	client, err := newSMTPClient(addr, smtpDeliveryTimeout)
 	if err != nil {
 		return err
 	}
@@ -142,9 +147,7 @@ func SendEmail(subject string, receiver string, content string) error {
 	if err != nil {
 		return err
 	}
-	err = client.Quit()
-	if err != nil {
-		SysError(LogText("failed to send email to %s: %v", receiver, err))
-	}
-	return err
+	// DATA has been accepted. A failed QUIT must not trigger another delivery.
+	_ = client.Quit()
+	return nil
 }
