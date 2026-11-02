@@ -1025,6 +1025,7 @@ func TestChannelPricingExplicitShapesAndAllLanes(t *testing.T) {
 				assert.Equal(t, 4.0, price.CacheCreationRatio)
 				assert.Equal(t, 4.0, price.CacheCreation5mRatio)
 				assert.InDelta(t, 6.4, price.CacheCreation1hRatio, 0.00001)
+				assert.Equal(t, 8.0, price.CacheCreation12hRatio)
 				assert.Equal(t, 5.0, price.ImageRatio)
 				assert.Equal(t, 6.0, price.AudioRatio)
 				assert.Equal(t, 7.0, price.AudioCompletionRatio)

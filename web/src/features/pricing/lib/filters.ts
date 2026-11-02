@@ -22,9 +22,12 @@ import {
   QUOTA_TYPES,
   QUOTA_TYPE_VALUES,
   ENDPOINT_TYPES,
+  type QuotaTypeOption,
   type SortOption,
 } from '../constants'
 import type { PricingModel } from '../types'
+import { compileBillingExpression } from './billing-expression/parser'
+import { visitExpression } from './billing-expression/types'
 import { getChannelPricingVariants } from './channel-pricing'
 import {
   getCardExamplePrice,
@@ -80,6 +83,39 @@ export function filterByGroup(
   return models.filter((m) => m.enable_groups?.includes(group))
 }
 
+/** Pricing category of the active configuration, shared by filters and counts. */
+export function getModelQuotaType(
+  model: PricingModel
+): Exclude<QuotaTypeOption, 'all'> | undefined {
+  // Task-usage models retain their own category.
+  if (hasTaskUsageSchema(model)) return QUOTA_TYPES.TASK
+
+  if (model.billing_mode === 'tiered_expr' && model.billing_expr) {
+    const compiled = compileBillingExpression(model.billing_expr)
+    if (compiled.status === 'ready') {
+      if (!compiled.functions.has('fixed')) return QUOTA_TYPES.TOKEN
+
+      // Only models whose pricing leaves are all fixed count as per-request.
+      let hasTokenPricing = false
+      visitExpression(compiled.ast, (node) => {
+        if (node.kind !== 'call' || node.name !== 'tier') return
+        const price = node.args[1]
+        if (price.kind !== 'call' || price.name !== 'fixed') {
+          hasTokenPricing = true
+        }
+      })
+      return hasTokenPricing ? QUOTA_TYPES.TOKEN : QUOTA_TYPES.REQUEST
+    }
+  }
+
+  // Preserve legacy classification when the expression cannot be parsed.
+  if (model.quota_type === QUOTA_TYPE_VALUES.TOKEN) return QUOTA_TYPES.TOKEN
+  if (model.quota_type === QUOTA_TYPE_VALUES.REQUEST) {
+    return QUOTA_TYPES.REQUEST
+  }
+  return undefined
+}
+
 /**
  * Filter models by quota type
  */
@@ -89,24 +125,10 @@ export function filterByQuotaType(
   selectedGroup?: string
 ): PricingModel[] {
   if (quotaType === QUOTA_TYPES.ALL) return models
-  const targetType =
-    quotaType === QUOTA_TYPES.TOKEN
-      ? QUOTA_TYPE_VALUES.TOKEN
-      : QUOTA_TYPE_VALUES.REQUEST
   return models.filter((model) =>
-    getChannelPricingVariants(model, selectedGroup).some((variant) => {
-      if (quotaType === QUOTA_TYPES.TASK) return hasTaskUsageSchema(variant)
-      if (hasTaskUsageSchema(variant)) return false
-      const summary = getDynamicPricingSummary(variant, { tokenUnit: 'M' })
-      if (summary?.entries.length) {
-        return summary.entries.some((entry) =>
-          targetType === QUOTA_TYPE_VALUES.TOKEN
-            ? entry.unit === 'token'
-            : entry.unit === 'request' || entry.unit === 'image'
-        )
-      }
-      return variant.quota_type === targetType
-    })
+    getChannelPricingVariants(model, selectedGroup).some(
+      (variant) => getModelQuotaType(variant) === quotaType
+    )
   )
 }
 

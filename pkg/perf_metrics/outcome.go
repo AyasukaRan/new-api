@@ -21,8 +21,9 @@ const (
 // ClassifyRelayOutcome decides whether one finished relay counts as a health
 // sample. Business rejections and cancellations during generation are not
 // samples; a stream already completed normally without errors remains eligible
-// after its context is canceled. Classification is independent of retries,
-// channel disabling and billing.
+// after its context is canceled, and so does an error-free non-stream response,
+// since a proxy may close the connection right after it is written.
+// Classification is independent of retries, channel disabling and billing.
 func ClassifyRelayOutcome(ctx context.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) Outcome {
 	if info == nil || info.PerformanceBusinessRejection {
 		return OutcomeIgnored
@@ -33,7 +34,7 @@ func ClassifyRelayOutcome(ctx context.Context, info *relaycommon.RelayInfo, apiE
 	stream := info.StreamStatus.OutcomeSnapshot()
 	// Closing a client after a terminal response must not erase an observed
 	// success or an upstream rejection that arrived before the disconnect.
-	if ctx != nil && ctx.Err() == context.Canceled && stream.Response == relaycommon.ResponseOutcomeUnknown && stream.EndReason != relaycommon.StreamEndReasonDone &&
+	if ctx != nil && ctx.Err() == context.Canceled && (apiErr != nil || info.IsStream || info.StreamStatus != nil) && stream.Response == relaycommon.ResponseOutcomeUnknown && stream.EndReason != relaycommon.StreamEndReasonDone &&
 		(apiErr == nil || apiErr.GetErrorCode() == types.ErrorCodeDoRequestFailed) {
 		return OutcomeIgnored
 	}

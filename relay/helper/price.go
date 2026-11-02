@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -30,9 +31,6 @@ func modelPriceNotConfiguredError(c *gin.Context, modelName string, userId int) 
 	}
 	return errors.New(i18n.T(c, key, map[string]any{"Model": modelName}))
 }
-
-// https://docs.claude.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration
-const claudeCacheCreation1hMultiplier = 6 / 3.75
 
 // servingChannelId reports which channel will actually run the request.
 //
@@ -71,7 +69,8 @@ func applyChannelPricing(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, bil
 	price.CacheRatio = ratio_setting.ResolveRatio(pricing.CacheRatio, price.CacheRatio)
 	price.CacheCreationRatio = ratio_setting.ResolveRatio(pricing.CreateCacheRatio, price.CacheCreationRatio)
 	price.CacheCreation5mRatio = price.CacheCreationRatio
-	price.CacheCreation1hRatio = price.CacheCreationRatio * claudeCacheCreation1hMultiplier
+	price.CacheCreation1hRatio = price.CacheCreationRatio * hosttypes.ClaudeCacheCreation1hMultiplier
+	price.CacheCreation12hRatio = price.CacheCreationRatio * hosttypes.OpenAICacheCreation12hMultiplier
 	price.ImageRatio = ratio_setting.ResolveRatio(pricing.ImageRatio, price.ImageRatio)
 	price.AudioRatio = ratio_setting.ResolveRatio(pricing.AudioRatio, price.AudioRatio)
 	price.AudioCompletionRatio = ratio_setting.ResolveRatio(pricing.AudioCompletionRatio, price.AudioCompletionRatio)
@@ -211,6 +210,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	var cacheCreationRatio float64
 	var cacheCreationRatio5m float64
 	var cacheCreationRatio1h float64
+	var cacheCreationRatio12h float64
 	var audioRatio float64
 	var audioCompletionRatio float64
 	var freeModel bool
@@ -240,19 +240,21 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		cacheCreationRatio, _ = ratio_setting.GetCreateCacheRatio(billingModelName)
 		cacheCreationRatio5m = cacheCreationRatio
 		// 固定1h和5min缓存写入价格的比例
-		cacheCreationRatio1h = cacheCreationRatio * claudeCacheCreation1hMultiplier
+		cacheCreationRatio1h = cacheCreationRatio * hosttypes.ClaudeCacheCreation1hMultiplier
+		cacheCreationRatio12h = cacheCreationRatio * hosttypes.OpenAICacheCreation12hMultiplier
 		imageRatio, _ = ratio_setting.GetImageRatio(billingModelName)
 		audioRatio = ratio_setting.GetAudioRatio(billingModelName)
 		audioCompletionRatio = ratio_setting.GetAudioCompletionRatio(billingModelName)
 		lanes := hosttypes.PriceData{
 			ModelRatio: modelRatio, CompletionRatio: completionRatio, CacheRatio: cacheRatio,
 			CacheCreationRatio: cacheCreationRatio, CacheCreation5mRatio: cacheCreationRatio5m,
-			CacheCreation1hRatio: cacheCreationRatio1h, ImageRatio: imageRatio,
+			CacheCreation1hRatio: cacheCreationRatio1h, CacheCreation12hRatio: cacheCreationRatio12h, ImageRatio: imageRatio,
 			AudioRatio: audioRatio, AudioCompletionRatio: audioCompletionRatio,
 		}
 		applyChannelPricing(c, info, billingModelName, &lanes)
 		modelRatio, completionRatio, cacheRatio = lanes.ModelRatio, lanes.CompletionRatio, lanes.CacheRatio
 		cacheCreationRatio, cacheCreationRatio5m, cacheCreationRatio1h = lanes.CacheCreationRatio, lanes.CacheCreation5mRatio, lanes.CacheCreation1hRatio
+		cacheCreationRatio12h = lanes.CacheCreation12hRatio
 		imageRatio, audioRatio, audioCompletionRatio = lanes.ImageRatio, lanes.AudioRatio, lanes.AudioCompletionRatio
 		// Reserve the selected channel's input cost under the same configured
 		// multiplier as global pricing. Output is charged at settlement.
@@ -293,20 +295,21 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	}
 
 	priceData := hosttypes.PriceData{
-		FreeModel:            freeModel,
-		ModelPrice:           modelPrice,
-		ModelRatio:           modelRatio,
-		CompletionRatio:      completionRatio,
-		GroupRatioInfo:       groupRatioInfo,
-		UsePrice:             usePrice,
-		CacheRatio:           cacheRatio,
-		ImageRatio:           imageRatio,
-		AudioRatio:           audioRatio,
-		AudioCompletionRatio: audioCompletionRatio,
-		CacheCreationRatio:   cacheCreationRatio,
-		CacheCreation5mRatio: cacheCreationRatio5m,
-		CacheCreation1hRatio: cacheCreationRatio1h,
-		QuotaToPreConsume:    preConsumedQuota,
+		FreeModel:             freeModel,
+		ModelPrice:            modelPrice,
+		ModelRatio:            modelRatio,
+		CompletionRatio:       completionRatio,
+		GroupRatioInfo:        groupRatioInfo,
+		UsePrice:              usePrice,
+		CacheRatio:            cacheRatio,
+		ImageRatio:            imageRatio,
+		AudioRatio:            audioRatio,
+		AudioCompletionRatio:  audioCompletionRatio,
+		CacheCreationRatio:    cacheCreationRatio,
+		CacheCreation5mRatio:  cacheCreationRatio5m,
+		CacheCreation1hRatio:  cacheCreationRatio1h,
+		CacheCreation12hRatio: cacheCreationRatio12h,
+		QuotaToPreConsume:     preConsumedQuota,
 	}
 	_, priceData.ChannelPricing = ratio_setting.GetChannelModelPricing(billingModelName, servingChannelId(c, info))
 	priceData.AudioPricingEnabled = ratio_setting.ContainsAudioRatio(billingModelName) || ratio_setting.ContainsAudioCompletionRatio(billingModelName)
@@ -448,7 +451,33 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 		return hosttypes.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", billingModelName)
 	}
 	exprHash := billingexpr.ExprHashString(exprStr)
-	if info.RelayFormat == types.RelayFormatOpenAIRealtime && billingexpr.UsesFixedPricingByHash(exprStr, exprHash) {
+	usedVars := billingexpr.UsedVarsByHash(exprStr, exprHash)
+	if usedVars["u"] {
+		return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelayTaskUsagePriceUnsupported, map[string]any{"Model": billingModelName}))
+	}
+	fixedPricing := billingexpr.UsesFixedPricingByHash(exprStr, exprHash)
+	value, _ := c.Get(jsplugin.ContextKeyRelayEndpoint)
+	if endpoint, ok := value.(jsplugin.PinnedEndpoint); ok && !fixedPricing {
+		for _, candidate := range endpoint.Candidates {
+			pluginKey := candidate.Plugin.Meta.Key
+			if _, overridden := billing_setting.GetPluginBillingExpr(pluginKey, endpoint.Model); overridden {
+				continue
+			}
+			if _, overridden := billing_setting.GetPluginBillingExpr(pluginKey, endpoint.MappedModel); endpoint.MappedModel != "" && overridden {
+				continue
+			}
+			taskBillingModel := endpoint.Model
+			if billing_setting.GetBillingMode(taskBillingModel) != billing_setting.BillingModeTieredExpr {
+				taskBillingModel = endpoint.MappedModel
+			}
+			// Task expressions return USD; ordinary expressions return USD *
+			// 1M. Even a constant without u() cannot safely serve both contracts.
+			if taskBillingModel == billingModelName {
+				return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelaySharedTaskPriceNeedsOverride, map[string]any{"Model": billingModelName, "Plugin": pluginKey}))
+			}
+		}
+	}
+	if info.RelayFormat == types.RelayFormatOpenAIRealtime && fixedPricing {
 		return hosttypes.PriceData{}, fmt.Errorf("fixed pricing is not supported for Realtime requests")
 	}
 
@@ -461,7 +490,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 	if err != nil {
 		return hosttypes.PriceData{}, err
 	}
-	if billingexpr.UsedVarsByHash(exprStr, exprHash)["image_count"] {
+	if usedVars["image_count"] {
 		requestInput, err = ResolveImageBillingRequestInput(c, info, requestInput)
 		if err != nil {
 			return hosttypes.PriceData{}, err

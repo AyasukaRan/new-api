@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
@@ -15,8 +16,8 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 // DeepSeekToolsHelper relays the DeepSeek Search and Fetch APIs like
@@ -108,12 +109,14 @@ func DeepSeekToolsHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIErr
 	// call settles at the routing name's request price; any other response
 	// releases the reservation.
 	var billable bool
-	switch info.RelayMode {
-	case relayconstant.RelayModeToolsFetch:
-		billable = gjson.GetBytes(responseBody, "content").String() != ""
-	default:
-		results := gjson.GetBytes(responseBody, "results")
-		billable = results.IsArray() && len(results.Array()) > 0
+	if httpResp.StatusCode == http.StatusOK && ojson.ValidBytes(responseBody) {
+		if info.RelayMode == relayconstant.RelayModeToolsFetch {
+			content := ojson.GetBytesNoCopy(responseBody, "content")
+			billable = content.Type == ojson.String && strings.TrimSpace(content.String()) != ""
+		} else {
+			results := ojson.GetBytesNoCopy(responseBody, "results")
+			billable = results.IsArray() && len(results.Array()) > 0
+		}
 	}
 	if !billable {
 		if info.Billing != nil {

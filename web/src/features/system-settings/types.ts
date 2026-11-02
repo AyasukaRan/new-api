@@ -474,6 +474,7 @@ export type UpstreamConfig = {
 }
 
 export type FetchUpstreamRatiosRequest = {
+  include_unchanged?: boolean
   upstreams: UpstreamConfig[]
   timeout: number
   /** Restricts the sync to the models these channels are configured to serve. */

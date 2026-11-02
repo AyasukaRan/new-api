@@ -74,8 +74,10 @@ import {
 } from './model-pricing-snapshots'
 import {
   buildModelRatioColumns,
+  PRICE_ATTENTION_FILTER,
   TASK_PRICING_MODE_FILTER,
 } from './model-ratio-table-columns'
+import { type ModelPricingIssue, useModelPricingIssues } from './pricing-issues'
 
 type ModelRatioVisualEditorProps = {
   savedModelPrice: string
@@ -198,6 +200,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         : null,
     [effectiveEntry]
   )
+  const pricingIssuesQuery = useModelPricingIssues()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState('')
@@ -260,6 +263,17 @@ const ModelRatioVisualEditorComponent = forwardRef<
     [pricingModels]
   )
 
+  const pricingIssues = useMemo(() => {
+    const byModel = new Map<string, ModelPricingIssue[]>()
+    for (const issue of pricingIssuesQuery.data ?? []) {
+      byModel.set(issue.model_name, [
+        ...(byModel.get(issue.model_name) ?? []),
+        issue,
+      ])
+    }
+    return byModel
+  }, [pricingIssuesQuery.data])
+
   const models = useMemo(() => {
     const savedRows = buildModelSnapshots({
       modelPrice: savedModelPrice,
@@ -290,10 +304,16 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
     const savedByName = new Map(savedRows.map((row) => [row.name, row]))
     const draftByName = new Map(draftRows.map((row) => [row.name, row]))
+    // A plugin model that was never priced has no saved row; list it so its
+    // pricing issue can be seen and fixed here.
     const modelNames =
       filterMode === 'unset'
         ? new Set(candidateModelNames ?? [])
-        : new Set([...savedByName.keys(), ...draftByName.keys()])
+        : new Set([
+            ...savedByName.keys(),
+            ...draftByName.keys(),
+            ...pricingIssues.keys(),
+          ])
 
     return [...modelNames]
       .map((name) => {
@@ -319,6 +339,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
   }, [
     candidateModelNames,
     filterMode,
+    pricingIssues,
     savedModelPrice,
     savedModelRatio,
     savedCacheRatio,
@@ -367,6 +388,10 @@ const ModelRatioVisualEditorComponent = forwardRef<
     }
     return counts
   }, [models, taskModelNames])
+  const attentionCount = useMemo(
+    () => models.filter((model) => pricingIssues.has(model.name)).length,
+    [models, pricingIssues]
+  )
 
   const handleEdit = useCallback(
     (model: ModelRow) => {
@@ -556,9 +581,10 @@ const ModelRatioVisualEditorComponent = forwardRef<
         onEdit: handleEdit,
         deleteDisabled: filterMode === 'unset',
         taskModelNames,
+        pricingIssues,
         t,
       }),
-    [handleEdit, handleDelete, filterMode, t, taskModelNames]
+    [handleEdit, handleDelete, filterMode, t, taskModelNames, pricingIssues]
   )
 
   const ensurePageInRange = useCallback((pageCount: number) => {
@@ -686,6 +712,8 @@ const ModelRatioVisualEditorComponent = forwardRef<
   let emptyStateText = t('No models configured. Use Add model to get started.')
   if (table.getState().globalFilter) {
     emptyStateText = t('No models match your search')
+  } else if (table.getState().columnFilters.length > 0) {
+    emptyStateText = t('No models match the selected filters')
   } else if (filterMode === 'unset') {
     emptyStateText = candidateModelsLoading
       ? t('Loading...')
@@ -728,6 +756,17 @@ const ModelRatioVisualEditorComponent = forwardRef<
                     label: 'Expression - Task pricing',
                     value: TASK_PRICING_MODE_FILTER,
                     count: modeCounts[TASK_PRICING_MODE_FILTER],
+                  },
+                ],
+              },
+              {
+                columnId: 'name',
+                title: t('Price status'),
+                options: [
+                  {
+                    label: 'Price needs attention',
+                    value: PRICE_ATTENTION_FILTER,
+                    count: attentionCount,
                   },
                 ],
               },

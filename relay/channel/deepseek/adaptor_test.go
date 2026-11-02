@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay"
@@ -23,7 +24,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 )
 
 func TestConvertOpenAIRequestCompletesDeepSeekThinkingToolHistory(t *testing.T) {
@@ -397,7 +397,7 @@ func TestModelModifiersUpstreamFields(t *testing.T) {
 					sent, err = common.Marshal(converted)
 					require.NoError(t, err)
 				}
-				wire := gjson.ParseBytes(sent)
+				wire := ojson.ParseBytes(sent)
 				wantModel := "deepseek-flash"
 				if strings.HasPrefix(tt.model, "deepseek-v4-pro") {
 					wantModel = "deepseek-v4-pro"
@@ -406,7 +406,7 @@ func TestModelModifiersUpstreamFields(t *testing.T) {
 				if tt.thinking == "" {
 					// No modifier: the client's reasoning fields go out as sent.
 					for _, member := range []string{"thinking", "reasoning_effort", "output_config", "reasoning"} {
-						assert.Equal(t, gjson.Get(body, member).Raw, wire.Get(member).Raw, "%s %s", format, member)
+						assert.Equal(t, ojson.Get(body, member).Raw, wire.Get(member).Raw, "%s %s", format, member)
 					}
 					continue
 				}
@@ -418,7 +418,7 @@ func TestModelModifiersUpstreamFields(t *testing.T) {
 				case types.RelayFormatClaude:
 					assert.JSONEq(t, `{"type":"`+tt.thinking+`"}`, wire.Get("thinking").Raw, format)
 					assert.Equal(t, tt.effort, wire.Get("output_config.effort").String(), format)
-					assert.Equal(t, gjson.Get(body, "output_config.format").Raw, wire.Get("output_config.format").Raw, format)
+					assert.Equal(t, ojson.Get(body, "output_config.format").Raw, wire.Get("output_config.format").Raw, format)
 					assert.Equal(t, int64(64), wire.Get("max_tokens").Int(), format)
 					wantTemperature := 0.7
 					if strings.Contains(tt.model, "@temperature:0.3") {

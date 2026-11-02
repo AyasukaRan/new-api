@@ -208,6 +208,14 @@ func SetRelayRouter(router *gin.Engine) {
 			c.Abort()
 		}
 	})
+	// Veo's :predictLongRunning goes to the plugin route that declares it (the
+	// google plugin's POST /v1beta/models/:model) before this group's auth,
+	// rate limit and channel selection; without one it stays with the relay.
+	relayGeminiRouter.Use(func(c *gin.Context) {
+		if strings.HasSuffix(c.Request.URL.Path, ":predictLongRunning") {
+			defaultPluginDispatcher.dispatch(c)
+		}
+	})
 	relayGeminiRouter.Use(middleware.RouteTag("relay"))
 	relayGeminiRouter.Use(middleware.SystemPerformanceCheck())
 	relayGeminiRouter.Use(middleware.TokenAuth())

@@ -57,6 +57,27 @@ func TestBuildAlphaSearchRequestBodyNoMappingKeepsRawBytes(t *testing.T) {
 	assert.Equal(t, raw, out)
 }
 
+// A single model is rewritten where it stands. Routing reads the first
+// "model" and most upstreams read the last, so a repeated model comes out as
+// one member carrying the mapped value.
+func TestBuildAlphaSearchRequestBodyRewritesModel(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"single model keeps its place", `{"model":"gpt-5.1","input":[]}`, `{"model":"gpt-5.1-mapped","input":[]}`},
+		{"repeated model collapses", `{"model":"gpt-5.1","input":[],"model":"gpt-5.5-pro"}`, `{"input":[],"model":"gpt-5.1-mapped"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := buildAlphaSearchRequestBody([]byte(tt.raw), "gpt-5.1", "gpt-5.1-mapped")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(out))
+		})
+	}
+}
+
 type recordedSettlement struct {
 	settled  []int
 	refunded bool
@@ -101,6 +122,14 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 			response: `{"results":[]}`, channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true},
 		{name: "fetch with page content", path: fetch, body: `{"url":"https://example.com/"}`,
 			response: `{"title":"Example Domain","content":"# Example Domain"}`, channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, settled: []int{375}},
+		{name: "queued search is free", path: search, body: `{"query":"deepseek"}`,
+			response: results, channelType: constant.ChannelTypeDeepSeek, status: http.StatusAccepted, refunded: true},
+		{name: "invalid search response is free", path: search, body: `{"query":"deepseek"}`,
+			response: results + "truncated", channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true},
+		{name: "fetch without readable content is free", path: fetch, body: `{"url":"https://example.com/"}`,
+			response: `{"content":"   "}`, channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true},
+		{name: "fetch with non-text content is free", path: fetch, body: `{"url":"https://example.com/"}`,
+			response: `{"content":{"error":"no page"}}`, channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true},
 		{name: "fetch failure keeps its status", path: fetch, body: `{"url":"https://example.com/missing"}`,
 			response:    `{"error":{"message":"failed to fetch URL","type":"not_found_error","param":null,"code":"invalid_request_error"}}`,
 			channelType: constant.ChannelTypeDeepSeek, status: http.StatusNotFound},
@@ -153,7 +182,7 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 			assert.Equal(t, tc.body, string(gotBody))
 			assert.Equal(t, tc.settled, settlement.settled)
 			assert.Equal(t, tc.refunded, settlement.refunded)
-			if tc.status != http.StatusOK {
+			if tc.status < 200 || tc.status >= 300 {
 				require.NotNil(t, apiErr)
 				assert.Equal(t, tc.status, apiErr.StatusCode)
 				return
