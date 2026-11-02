@@ -56,8 +56,8 @@ export function ChannelBalanceSettings(props: {
     const threshold = getValues('balance_email_threshold')
     if (threshold != null && (!Number.isFinite(threshold) || threshold < 0)) {
       setValue('balance_email_threshold', null, { shouldDirty: true })
-      clearErrors('balance_email_threshold')
     }
+    clearErrors('balance_email_threshold')
   }
 
   const disabled =
@@ -184,7 +184,7 @@ export function ChannelBalanceSettings(props: {
                 <FormLabel>{t('Balance email notifications')}</FormLabel>
                 <FormDescription>
                   {t(
-                    'Email the available balance to administrators subscribed to channel notifications after a successful scheduled refresh.'
+                    'Email administrators subscribed to channel notifications when a scheduled check finds the available balance below the threshold.'
                   )}
                 </FormDescription>
               </div>
@@ -212,6 +212,7 @@ export function ChannelBalanceSettings(props: {
                   <Input
                     {...field}
                     disabled={disabled}
+                    aria-required={!disabled}
                     type='number'
                     min={0}
                     step='any'
@@ -227,7 +228,7 @@ export function ChannelBalanceSettings(props: {
                 </FormControl>
                 <FormDescription>
                   {t(
-                    'Leave empty to receive every update. Set an amount in the upstream balance unit to receive one email when the balance is at or below it. Alerts resume after the balance rises above it.'
+                    'Enter an amount in the upstream balance unit. Only one alert is sent until the balance returns to the threshold or higher.'
                   )}
                 </FormDescription>
                 <FormMessage />

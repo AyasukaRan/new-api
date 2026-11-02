@@ -1132,7 +1132,11 @@ func UpdateChannel(c *gin.Context) {
 		validationChannel.OtherSettings = originChannel.OtherSettings
 	}
 	if validationChannel.Setting == nil {
-		validationChannel.Setting = originChannel.Setting
+		validationChannel.Setting, err = inheritedChannelSettings(originChannel.Setting, nil)
+		if err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 	if validationChannel.Models == "" {
 		validationChannel.Models = originChannel.Models
@@ -1418,6 +1422,45 @@ type fetchModelsRequest struct {
 	Proxy          *string `json:"proxy"`
 }
 
+// Old channel settings could enable email without a threshold. Treat that flag
+// as off when inheriting settings; newly submitted settings must validate.
+func inheritedChannelSettings(source *string, proxy *string) (*string, error) {
+	var policy dto.ChannelSettings
+	if source != nil && *source != "" {
+		if err := common.UnmarshalJsonStr(*source, &policy); err != nil {
+			return nil, err
+		}
+	}
+	legacy := policy.BalanceEmailEnabled && policy.BalanceEmailThreshold == nil
+	if !legacy && proxy == nil {
+		return source, nil
+	}
+	fields := map[string]json.RawMessage{}
+	if source != nil && *source != "" && *source != "null" {
+		if err := common.UnmarshalJsonStr(*source, &fields); err != nil {
+			return nil, err
+		}
+	}
+	if legacy {
+		delete(fields, "balance_email_enabled")
+	}
+	if proxy != nil {
+		if fields == nil {
+			fields = make(map[string]json.RawMessage)
+		}
+		value, err := common.Marshal(strings.TrimSpace(*proxy))
+		if err != nil {
+			return nil, err
+		}
+		fields["proxy"] = value
+	}
+	raw, err := common.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	return common.GetPointer(string(raw)), nil
+}
+
 func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
 	var channel *model.Channel
 	if req.ChannelID > 0 {
@@ -1474,11 +1517,11 @@ func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Chan
 		}
 		channel.HeaderOverride = &rawHeaderOverride
 	}
-	if req.Proxy != nil {
-		channelSettings := channel.GetSetting()
-		channelSettings.Proxy = strings.TrimSpace(*req.Proxy)
-		channel.SetSetting(channelSettings)
+	inherited, err := inheritedChannelSettings(channel.Setting, req.Proxy)
+	if err != nil {
+		return nil, err
 	}
+	channel.Setting = inherited
 
 	if err := validateChannel(channel, false); err != nil {
 		return nil, err
@@ -1627,6 +1670,11 @@ func CopyChannel(c *gin.Context) {
 		common.ApiErrorT(c, "Failed to fetch channel. Please try again later")
 		return
 	}
+	inherited, err := inheritedChannelSettings(origin.Setting, nil)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Failed to copy channel: invalid channel settings"})
+		return
+	}
 	if (origin.Type == constant.ChannelTypeTaskPlugin || len(origin.GetSetting().TaskPluginBindings()) > 0) &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "task plugin channels require the task_plugin.bind permission"})
@@ -1635,7 +1683,8 @@ func CopyChannel(c *gin.Context) {
 
 	// clone channel
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives
-	clone.Id = 0     // let DB auto-generate
+	clone.Setting = inherited
+	clone.Id = 0 // let DB auto-generate
 	clone.CreatedTime = common.GetTimestamp()
 	clone.Name = origin.Name + suffix
 	clone.TestTime = 0

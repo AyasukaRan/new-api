@@ -2320,11 +2320,21 @@ test('editing MaaS keeps its provider identity, batch credentials and disabled b
   expect(
     screen.getByRole('spinbutton', { name: 'Low balance threshold' })
   ).toHaveValue(7.25)
+  await user.click(screen.getByRole('switch', { name: 'Balance queries' }))
+  const threshold = screen.getByRole('spinbutton', {
+    name: 'Low balance threshold',
+  })
+  await user.clear(threshold)
+  await user.type(threshold, '4.75')
+  await user.click(screen.getByRole('switch', { name: 'Balance queries' }))
   await user.click(screen.getByRole('button', { name: 'Update Channel' }))
   await waitFor(() => expect(put).toHaveBeenCalled())
   const payload = put.mock.calls[0][1] as { type: number; setting: string }
   expect(payload.type).toBe(62)
-  expect(JSON.parse(payload.setting)).toMatchObject(settings)
+  expect(JSON.parse(payload.setting)).toMatchObject({
+    ...settings,
+    balance_email_threshold: 4.75,
+  })
 })
 
 test('selecting vLLM after MaaS uses its distinct persisted provider number', async () => {

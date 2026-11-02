@@ -337,6 +337,17 @@ export const channelFormSchema = z
   })
   .superRefine((data, ctx) => {
     if (
+      data.balance_email_enabled &&
+      !data.balance_query_disabled &&
+      data.balance_email_threshold == null
+    ) {
+      addRequiredIssue(
+        ctx,
+        'balance_email_threshold',
+        'Enter a finite balance threshold of zero or more.'
+      )
+    }
+    if (
       [
         3,
         8,
@@ -783,7 +794,10 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   if (formData.balance_query_disabled) {
     settingObj.balance_query_disabled = true
   }
-  if (formData.balance_email_enabled) {
+  if (
+    formData.balance_email_enabled &&
+    formData.balance_email_threshold != null
+  ) {
     settingObj.balance_email_enabled = true
   }
   if (formData.balance_email_threshold != null) {

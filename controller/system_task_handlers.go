@@ -137,11 +137,7 @@ func (channelBalanceHandler) Run(ctx context.Context, task *model.SystemTask, ru
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
-	scheduledTask := ""
-	if payload.Scheduled {
-		scheduledTask = task.TaskID
-	}
-	summary, err := refreshChannelBalances(ctx, service.NewSystemTaskProgressReporter(task, runnerID), scheduledTask)
+	summary, err := refreshChannelBalances(ctx, service.NewSystemTaskProgressReporter(task, runnerID), payload.Scheduled)
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
 		return

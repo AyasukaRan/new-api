@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -917,14 +918,7 @@ func TestChannelBalanceEmailNotifications(t *testing.T) {
 		to := body.To[0]
 		recipients[to]++
 		assert.Contains(t, body.HTML, "A &lt;key&gt;")
-		expected := 7.0
-		if limits["a"] <= 0 {
-			expected = 0
-		}
-		if limits["a"] == 0.1 {
-			expected = 0.3
-		}
-		assert.Contains(t, body.HTML, fmt.Sprintf("%v USD", expected))
+		assert.Contains(t, body.HTML, "7 USD")
 		status := 200
 		if failRoot && to == "root@example.com" {
 			status = 503
@@ -933,7 +927,7 @@ func TestChannelBalanceEmailNotifications(t *testing.T) {
 	})
 	run := func(task string, wantSent, wantFailure int) channelBalanceSummary {
 		t.Helper()
-		result, err := refreshChannelBalances(context.Background(), nil, task)
+		result, err := refreshChannelBalances(context.Background(), nil, task != "")
 		require.NoError(t, err)
 		assert.Equal(t, wantSent, result.EmailsSent)
 		assert.Equal(t, wantFailure, result.EmailFailedChannels)
@@ -946,7 +940,7 @@ func TestChannelBalanceEmailNotifications(t *testing.T) {
 		require.NoError(t, channel.Update())
 	}
 	run("opted-out", 0, 0)
-	save(true, common.GetPointer(7.0))
+	save(true, common.GetPointer(8.0))
 	run("", 0, 0) // Manual batch does not alert.
 	partial := limits["b"]
 	delete(limits, "b")
@@ -955,26 +949,95 @@ func TestChannelBalanceEmailNotifications(t *testing.T) {
 	run("low", 1, 1)
 	failRoot = false
 	run("retry", 1, 0)
+	// A previous release stored a task ID alongside the same low-balance episode.
+	var stored model.ChannelBalanceSample
+	require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Last(&stored).Error)
+	stateJSON, err := common.Marshal(stored.EmailState)
+	require.NoError(t, err)
+	var legacy map[string]json.RawMessage
+	require.NoError(t, common.Unmarshal(stateJSON, &legacy))
+	legacy["task"] = json.RawMessage(`"old-run"`)
+	stateJSON, err = common.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Table("channel_balance_samples").Where("id = ?", stored.ID).UpdateColumn("email_state", string(stateJSON)).Error)
 	run("still-low", 0, 0)
 	assert.Equal(t, map[string]int{"root@example.com": 2, "notice@example.com": 1}, recipients)
-	save(false, common.GetPointer(7.0))
-	save(true, common.GetPointer(7.0))
+	// An older release notified exactly at eight, then retained that reading
+	// through a partial check. The first new reading of seven must alert again.
+	var last model.ChannelBalanceSample
+	require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Last(&last).Error)
+	require.NoError(t, model.DB.Model(&last).Updates(map[string]any{"success": false, "partial": true, "known_balance": 0, "balance": 8.0}).Error)
+	run("old-equality-followed-by-partial", 2, 0)
+	save(false, common.GetPointer(8.0))
+	save(true, common.GetPointer(8.0))
 	run("re-enabled", 2, 0)
-	limits["a"] = 10
-	run("", 0, 0) // A confirmed manual recovery re-arms the threshold.
+	limits["a"] = 8
+	run("at-threshold", 0, 0) // Exactly the threshold recovers.
 	limits["a"] = 7
 	run("low-again", 2, 0)
-	save(true, nil)
-	run("each-A", 2, 0)
-	run("each-A", 0, 0) // A retried scheduled job is still one notification.
-	run("each-B", 2, 0)
+	limits["a"] = 8
+	run("", 0, 0) // Manual recovery also re-arms the alert.
+	limits["a"] = 7
+	run("low-after-manual-recovery", 2, 0)
+	save(true, nil) // Simulate a channel stored by the release that allowed this.
+	assert.Error(t, channel.ValidateSettings())
+	assert.Equal(t, 1, run("legacy-nil-threshold", 0, 0).Succeeded)
+	save(false, nil)
+	require.NoError(t, channel.ValidateSettings())
 	save(true, common.GetPointer(0.0))
-	run("above-zero", 0, 0)
+	require.NoError(t, channel.ValidateSettings())
 	limits["a"] = -10
-	run("depleted", 2, 0) // Multi-key debt does not reduce another key's funds.
+	run("zero-at-zero-threshold", 0, 0) // Separate accounts cannot subtract from the available multi-key total.
 	limits["a"], limits["b"] = 0.1, 0.2
 	save(true, common.GetPointer(0.3))
-	run("decimal-boundary", 2, 0)
+	run("decimal-boundary", 0, 0)
+}
+
+func TestLegacyChannelBalanceEmailInheritedSettings(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.AuditLog{}, &model.Log{}))
+	source := newAdvancedCustomModelListChannel("http://127.0.0.1:1", "key", "/saved/models", nil)
+	source.Name, source.Models, source.Group = "legacy notifications", "old-model", "default"
+	const original = `{"balance_email_enabled":true,"balance_email_threshold":null,"system_prompt":"kept","future":{"number":9007199254740993}}`
+	source.Setting = common.GetPointer(original)
+	require.NoError(t, db.Create(source).Error)
+	proxy := "http://127.0.0.1:9999"
+	preview, err := buildAdvancedCustomModelPreviewChannel(fetchModelsRequest{ChannelID: source.Id, Proxy: &proxy})
+	require.NoError(t, err)
+	assert.False(t, preview.GetSetting().BalanceEmailEnabled)
+	assert.Equal(t, proxy, preview.GetSetting().Proxy)
+	assert.Contains(t, *preview.Setting, `"future":{"number":9007199254740993}`)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(source.Id)}}
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy", nil)
+	CopyChannel(ctx)
+	var copied struct {
+		Success bool
+		Message string
+		Data    struct{ ID int }
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &copied))
+	require.True(t, copied.Success, copied.Message)
+	var clone model.Channel
+	require.NoError(t, db.First(&clone, copied.Data.ID).Error)
+	assert.False(t, clone.GetSetting().BalanceEmailEnabled)
+	assert.Equal(t, "kept", clone.GetSetting().SystemPrompt)
+	assert.Contains(t, *clone.Setting, `"future":{"number":9007199254740993}`)
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/channel/", strings.NewReader(fmt.Sprintf(`{"id":%d,"name":"renamed"}`, source.Id)))
+	UpdateChannel(ctx)
+	var edited struct {
+		Success bool
+		Message string
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &edited))
+	require.True(t, edited.Success, edited.Message)
+	var unchanged model.Channel
+	require.NoError(t, db.First(&unchanged, source.Id).Error)
+	assert.Equal(t, original, *unchanged.Setting)
+	assert.Equal(t, "renamed", unchanged.Name)
 }
 
 func TestChannelBalanceDatabaseMatrix(t *testing.T) {
@@ -1049,9 +1112,9 @@ func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, float64(13), *monitor.Balance)
 				assert.True(t, monitor.Success)
 				assert.False(t, monitor.Partial)
-				channel.SetSetting(dto.ChannelSettings{BalanceEmailEnabled: true, BalanceEmailThreshold: common.GetPointer(13.0)})
+				channel.SetSetting(dto.ChannelSettings{BalanceEmailEnabled: true, BalanceEmailThreshold: common.GetPointer(14.0)})
 				require.NoError(t, database.Model(channel).Update("setting", channel.Setting).Error)
-				notice, err := queryChannelBalance(context.Background(), channel, "scheduled-a")
+				notice, err := queryChannelBalance(context.Background(), channel, true)
 				require.NoError(t, err)
 				delivered, err := notice.sample.DeliverBalanceEmail(2, func(*model.Channel) error { return fmt.Errorf("mail failed") })
 				assert.Error(t, err)

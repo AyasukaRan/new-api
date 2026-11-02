@@ -43,7 +43,7 @@ type ChannelSettings struct {
 	// BalanceQueryDisabled stops manual and scheduled balance checks while
 	// preserving the last recorded balance. Existing configurations allow checks.
 	BalanceQueryDisabled bool `json:"balance_query_disabled,omitempty"`
-	// Nil threshold sends on each scheduled reading; zero is an explicit threshold.
+	// A threshold is required when email reminders are enabled; zero is valid.
 	BalanceEmailEnabled   bool     `json:"balance_email_enabled,omitempty"`
 	BalanceEmailThreshold *float64 `json:"balance_email_threshold,omitempty"`
 	// BalanceQueryType names the provider whose balance endpoint this channel
@@ -125,7 +125,8 @@ func (s *ChannelSettings) ValidateBalanceQuery() error {
 	if s == nil {
 		return nil
 	}
-	if limit := s.BalanceEmailThreshold; limit != nil && (math.IsNaN(*limit) || math.IsInf(*limit, 0) || *limit < 0) {
+	limit := s.BalanceEmailThreshold
+	if (s.BalanceEmailEnabled && limit == nil) || (limit != nil && (math.IsNaN(*limit) || math.IsInf(*limit, 0) || *limit < 0)) {
 		return fmt.Errorf("Enter a finite balance threshold of zero or more.")
 	}
 	s.BalanceQueryType = strings.TrimSpace(s.BalanceQueryType)

@@ -423,7 +423,25 @@ func (channel *Channel) PruneGroupModels() error {
 		}
 		setting.GroupModels[group] = kept
 	}
-	channel.SetSetting(setting)
+	// Only the scopes changed. Keep settings written by newer releases.
+	var fields map[string]json.RawMessage
+	if err := common.UnmarshalJsonStr(*channel.Setting, &fields); err != nil {
+		return err
+	}
+	if len(setting.GroupModels) == 0 {
+		delete(fields, "group_models")
+	} else {
+		raw, err := common.Marshal(setting.GroupModels)
+		if err != nil {
+			return err
+		}
+		fields["group_models"] = raw
+	}
+	raw, err := common.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	channel.Setting = common.GetPointer(string(raw))
 	return nil
 }
 

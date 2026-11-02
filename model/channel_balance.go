@@ -36,7 +36,7 @@ type ChannelBalanceMonitor struct {
 // KnownBalance is the sum of the keys that answered this particular check.
 type ChannelBalanceSample struct {
 	EmailState         *channelBalanceEmailState `json:"-" gorm:"type:text;serializer:json"`
-	ScheduledTask      string                    `json:"-" gorm:"-"`
+	Scheduled          bool                      `json:"-" gorm:"-"`
 	ID                 int64                     `json:"id" gorm:"primaryKey"`
 	ChannelID          int                       `json:"channel_id" gorm:"index:idx_channel_balance_time,priority:1"`
 	CheckedAt          int64                     `json:"checked_at" gorm:"bigint;index:idx_channel_balance_time,priority:2"`
@@ -219,7 +219,6 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 type channelBalanceEmailState struct {
 	Generation int64         `json:"generation"`
 	Threshold  *float64      `json:"threshold,omitempty"`
-	Task       string        `json:"task,omitempty"`
 	Recipients map[int]int64 `json:"recipients,omitempty"`
 }
 
@@ -228,25 +227,25 @@ func sameBalanceThreshold(a, b *float64) bool {
 }
 
 func nextChannelBalanceEmailState(setting dto.ChannelSettings, current, previous *ChannelBalanceSample) *channelBalanceEmailState {
-	if !setting.BalanceEmailEnabled || setting.BalanceQueryDisabled {
+	if !setting.BalanceEmailEnabled || setting.BalanceQueryDisabled || setting.BalanceEmailThreshold == nil {
 		return nil
 	}
 	threshold := setting.BalanceEmailThreshold
 	state := previous.EmailState
-	if state != nil && (current.ConfigurationHash != previous.ConfigurationHash || !sameBalanceThreshold(state.Threshold, threshold)) {
+	// Older releases could notify at equality. Balance retains the last full
+	// reading through partial checks, so equality re-arms those old episodes too.
+	if state != nil && (current.ConfigurationHash != previous.ConfigurationHash || !sameBalanceThreshold(state.Threshold, threshold) ||
+		(previous.Balance != nil && *previous.Balance >= *threshold)) {
 		state = nil
 	}
 	if !current.Success || current.Partial {
 		return state
 	}
-	if threshold != nil && current.KnownBalance > *threshold {
+	if current.KnownBalance >= *threshold {
 		return nil
 	}
-	if threshold == nil && current.ScheduledTask == "" {
-		return state
-	}
-	if state == nil || (threshold == nil && state.Task != current.ScheduledTask) {
-		state = &channelBalanceEmailState{Generation: current.StartedAt, Threshold: threshold, Task: current.ScheduledTask}
+	if state == nil {
+		state = &channelBalanceEmailState{Generation: current.StartedAt, Threshold: threshold}
 	}
 	return state
 }
@@ -254,7 +253,7 @@ func nextChannelBalanceEmailState(setting dto.ChannelSettings, current, previous
 // DeliverBalanceEmail claims one recipient of the latest confirmed reading,
 // sends outside the database lock, and leaves failed deliveries retryable.
 func (sample *ChannelBalanceSample) DeliverBalanceEmail(userID int, send func(*Channel) error) (bool, error) {
-	if sample.EmailState == nil || sample.ScheduledTask == "" || !sample.Success || sample.Partial {
+	if sample.EmailState == nil || !sample.Scheduled || !sample.Success || sample.Partial {
 		return false, nil
 	}
 	var claimed *Channel
@@ -271,7 +270,7 @@ func (sample *ChannelBalanceSample) DeliverBalanceEmail(userID int, send func(*C
 			return err
 		}
 		setting := channel.GetSetting()
-		if !setting.BalanceEmailEnabled || !sameBalanceThreshold(setting.BalanceEmailThreshold, sample.EmailState.Threshold) {
+		if !setting.BalanceEmailEnabled || setting.BalanceEmailThreshold == nil || sample.KnownBalance >= *setting.BalanceEmailThreshold || !sameBalanceThreshold(setting.BalanceEmailThreshold, sample.EmailState.Threshold) {
 			return nil
 		}
 		hash, err := channelBalanceConfigurationHash(&channel)

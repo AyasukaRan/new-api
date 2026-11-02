@@ -598,10 +598,10 @@ func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) 
 }
 
 func updateChannelBalanceWithContext(ctx context.Context, channel *model.Channel) (channelBalanceResult, error) {
-	return queryChannelBalance(ctx, channel, "")
+	return queryChannelBalance(ctx, channel, false)
 }
 
-func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduledTask string) (channelBalanceResult, error) {
+func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled bool) (channelBalanceResult, error) {
 	startedAt := time.Now().UnixNano()
 	keys := []string{channel.Key}
 	if channel.ChannelInfo.IsMultiKey {
@@ -663,7 +663,7 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduledT
 	}
 	result.Partial = succeeded > 0 && succeeded < len(keys)
 	sample := &model.ChannelBalanceSample{
-		ScheduledTask: scheduledTask, StartedAt: startedAt, CheckedAt: common.GetTimestamp(),
+		Scheduled: scheduled, StartedAt: startedAt, CheckedAt: common.GetTimestamp(),
 		KnownBalance: result.Balance, Partial: result.Partial,
 		Success: len(keys) > 0 && succeeded == len(keys), KeyBalances: result.KeyBalances,
 	}
@@ -836,10 +836,10 @@ type channelBalanceSummary struct {
 }
 
 func updateAllChannelsBalance(ctx context.Context, report func(processed, total int)) (channelBalanceSummary, error) {
-	return refreshChannelBalances(ctx, report, "")
+	return refreshChannelBalances(ctx, report, false)
 }
 
-func refreshChannelBalances(ctx context.Context, report func(processed, total int), scheduledTask string) (channelBalanceSummary, error) {
+func refreshChannelBalances(ctx context.Context, report func(processed, total int), scheduled bool) (channelBalanceSummary, error) {
 	channels, err := model.GetAllChannels(0, 0, true, false)
 	if err != nil {
 		return channelBalanceSummary{}, err
@@ -854,7 +854,7 @@ func refreshChannelBalances(ctx context.Context, report func(processed, total in
 		} else {
 			// A disabled channel can still have upstream funds. Balance checks
 			// include every channel and never enable/disable channels or keys.
-			result, err := queryChannelBalance(ctx, channel, scheduledTask)
+			result, err := queryChannelBalance(ctx, channel, scheduled)
 			if errors.Is(err, model.ErrChannelBalanceQueryDisabled) {
 				summary.Skipped++
 			} else if err != nil {
@@ -868,7 +868,7 @@ func refreshChannelBalances(ctx context.Context, report func(processed, total in
 				summary.Partial++
 			} else {
 				summary.Succeeded++
-				if scheduledTask != "" && result.sample.EmailState != nil {
+				if scheduled && result.sample.EmailState != nil {
 					queryType, _ := resolveBalanceQuery(channel)
 					unit := ""
 					switch queryType {
