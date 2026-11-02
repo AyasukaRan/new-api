@@ -832,6 +832,21 @@ func validateModelPricing(db *gorm.DB, name string, values, previous PricingValu
 			// shared models against each profile, so their prices must follow it.
 			unchanged := previous[key] == expression
 			var err error
+			if len(targets) == 0 && generation != nil {
+				// Global alias prices can be prepared before the channel's
+				// abilities or plugin binding exist. Provider overrides above
+				// still require an enabled, bound route.
+				aliases := taskAliasViewPtr.Load()
+				if !taskAliasViewFresh(aliases, generation.Number) {
+					aliases, err = readTaskAliasView(generation, db)
+					if err != nil {
+						return err
+					}
+				}
+				if alias, found := aliases.byFold[jsplugin.ASCIIFold(name)]; found {
+					targets = map[string][]string{alias.PluginKey: {alias.Declared}}
+				}
+			}
 			if len(targets) > 0 {
 				for pluginKey, models := range targets {
 					_, overridden := variants[pluginKey]
