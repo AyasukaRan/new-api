@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
@@ -388,18 +389,114 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 	return result, nil
 }
 
-// Reasons a plugin provider cannot charge a task model with the saved prices.
+// Reasons the configured price cannot be used.
 const (
-	ModelPricingIssueUnconfigured = "unconfigured"
-	ModelPricingIssueIncompatible = "incompatible"
-	ModelPricingIssueStale        = "stale"
+	ModelPricingIssueUnconfigured      = "unconfigured"
+	ModelPricingIssueIncompatible      = "incompatible"
+	ModelPricingIssueStale             = "stale"
+	ModelPricingIssueInvalidExpression = "invalid_expression"
+	ModelPricingIssueInvalidTaskPrice  = "invalid_task_price"
 )
 
 type ModelPricingIssue struct {
-	ModelName  string `json:"model_name"`
-	PluginKey  string `json:"plugin_key"`
-	PluginName string `json:"plugin_name"`
-	Reason     string `json:"reason"`
+	ChannelID   int    `json:"channel_id,omitempty"`
+	ChannelName string `json:"channel_name,omitempty"`
+	ModelName   string `json:"model_name"`
+	PluginKey   string `json:"plugin_key"`
+	PluginName  string `json:"plugin_name"`
+	Reason      string `json:"reason"`
+}
+
+// GetRoutedModelPricingIssues reports the effective prices of enabled routes.
+// Different groups sharing a channel/model have the same price. The plugin
+// maintenance API below separately checks the entire plugin catalog.
+func GetRoutedModelPricingIssues() ([]ModelPricingIssue, error) {
+	var channels []Channel
+	if err := DB.Select("id", "type", "name", "setting", "model_mapping").Where("status = ?", common.ChannelStatusEnabled).Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	var routes []Ability
+	if err := DB.Model(&Ability{}).Distinct("channel_id", "model").Where("enabled = ?", true).Order("channel_id, model").Find(&routes).Error; err != nil {
+		return nil, err
+	}
+	modelsByChannel := make(map[int][]string)
+	for _, route := range routes {
+		modelsByChannel[route.ChannelId] = append(modelsByChannel[route.ChannelId], route.Model)
+	}
+	generation := jsplugin.DefaultRegistry.Generation()
+	issues := make([]ModelPricingIssue, 0)
+	for _, channel := range channels {
+		models := modelsByChannel[channel.Id]
+		if len(models) == 0 {
+			continue
+		}
+		var mapping map[string]string
+		if raw := channel.GetModelMapping(); raw != "" && common.UnmarshalJsonStr(raw, &mapping) != nil {
+			continue // malformed relay mapping cannot serve a model
+		}
+		for _, name := range models {
+			mapped, cyclic := followChannelModelMapping(mapping, name)
+			if cyclic {
+				continue
+			}
+			declared, direct := generation.CanonicalModel(name)
+			providers := pricingChannelProviders(generation, &channel, name, mapped)
+			if !direct && mapped != name {
+				declared, _ = generation.CanonicalModel(mapped)
+				if declared != "" {
+					if alias, found := ResolveTaskModelAlias(generation, name); !found {
+						providers = nil
+					} else if alias.Declared == "" {
+						// The generic /v1/tasks/:key entry still accepts an alias
+						// resolving to different models of this same plugin.
+						providers = slices.DeleteFunc(providers, func(plugin *jsplugin.LoadedPlugin) bool {
+							return plugin.Meta.Key != alias.PluginKey
+						})
+					} else if alias.Declared != declared {
+						providers = nil
+					}
+				}
+			}
+			if len(providers) == 0 {
+				if channel.Type == constant.ChannelTypeTaskPlugin {
+					continue
+				}
+				if channel.Type == constant.ChannelTypeNewAPI && declared != "" {
+					// A plugin-native route requires a matching binding. Shared
+					// host protocols can still execute on ordinary relay.
+					if len(ordinaryEndpointPlugins(generation, declared)) == 0 {
+						continue
+					}
+				}
+				providers = []*jsplugin.LoadedPlugin{nil}
+			}
+			for _, provider := range providers {
+				billingName := name
+				if provider != nil && direct {
+					billingName = declared
+				}
+				_, reason := resolveChannelPricing(Pricing{ModelName: billingName}, channel.Id, provider, mapped, generation.SharedModel(billingName) || generation.SharedModel(mapped))
+				if reason == "" {
+					continue
+				}
+				issue := ModelPricingIssue{ModelName: name, ChannelID: channel.Id, ChannelName: channel.Name, Reason: reason}
+				if provider != nil {
+					issue.PluginKey, issue.PluginName = provider.Meta.Key, provider.Meta.Name
+				}
+				issues = append(issues, issue)
+			}
+		}
+	}
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].ModelName != issues[j].ModelName {
+			return issues[i].ModelName < issues[j].ModelName
+		}
+		if issues[i].ChannelID != issues[j].ChannelID {
+			return issues[i].ChannelID < issues[j].ChannelID
+		}
+		return issues[i].PluginKey < issues[j].PluginKey
+	})
+	return issues, nil
 }
 
 // GetModelPricingIssues reads the provider variants of the pricing snapshot for

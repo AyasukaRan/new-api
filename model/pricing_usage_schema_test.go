@@ -87,7 +87,7 @@ func TestPricingChannelOverrideModesAndFreePrices(t *testing.T) {
 		{"missing ratio is unconfigured", "catalog-unpriced", 2, "per_token", 0, 0, 0, 1, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			actual := resolveChannelPricing(Pricing{ModelName: tc.model}, tc.channel, nil, tc.model, false)
+			actual, _ := resolveChannelPricing(Pricing{ModelName: tc.model}, tc.channel, nil, tc.model, false)
 			assert.Equal(t, tc.mode, actual.BillingMode)
 			assert.Equal(t, tc.quotaType, actual.QuotaType)
 			assert.Equal(t, tc.configured, actual.PricingConfigured)
@@ -97,7 +97,7 @@ func TestPricingChannelOverrideModesAndFreePrices(t *testing.T) {
 			assert.Equal(t, tc.expression, actual.BillingExpr)
 		})
 	}
-	free := resolveChannelPricing(Pricing{ModelName: "catalog-model"}, 1, nil, "catalog-model", false)
+	free, _ := resolveChannelPricing(Pricing{ModelName: "catalog-model"}, 1, nil, "catalog-model", false)
 	require.NotNil(t, free.CacheRatio)
 	assert.Zero(t, *free.CacheRatio)
 }
@@ -143,10 +143,10 @@ func TestPricingChannelTaskSchemaCompatibilityMatchesRelay(t *testing.T) {
 		UsageSchema: map[string]jsplugin.UsageFieldSchema{"current": {Type: "number", Unit: "count"}},
 	}}
 	base := Pricing{ModelName: "catalog-narrowed"}
-	single := resolveChannelPricing(base, 0, provider, base.ModelName, false)
+	single, _ := resolveChannelPricing(base, 0, provider, base.ModelName, false)
 	assert.True(t, single.PricingConfigured, "single-plugin stored prices stay valid after a schema narrows")
 	assert.Equal(t, `u("retired") * 0.2`, single.BillingExpr)
-	shared := resolveChannelPricing(base, 0, provider, base.ModelName, true)
+	shared, _ := resolveChannelPricing(base, 0, provider, base.ModelName, true)
 	assert.False(t, shared.PricingConfigured, "shared providers must reject incompatible usage facts")
 	assert.Empty(t, shared.BillingExpr)
 }

@@ -46,6 +46,8 @@ afterEach(() => {
 
 type EditorFixture = {
   issues?: ModelPricingIssue[]
+  filterMode?: 'unset'
+  removedChannelId?: number
   taskModels?: string[]
   billingMode?: string
   billingExpr?: string
@@ -63,6 +65,41 @@ async function renderEditor(fixture: EditorFixture = {}) {
     }
     if (url === '/api/option/model_pricing/issues') {
       return { data: { success: true, data: fixture.issues ?? [] } }
+    }
+    if (url === '/api/option/model_pricing') {
+      return {
+        data: {
+          success: true,
+          data: {
+            entries: [
+              {
+                model_name: 'gpt-4.1-mini',
+                effective: {
+                  'billing_setting.billing_mode': 'tiered_expr',
+                  'billing_setting.billing_expr': 'tier("base", p * 1 + c * 2)',
+                },
+              },
+            ],
+          },
+        },
+      }
+    }
+    if (url === '/api/option/') {
+      return { data: { success: true, data: [] } }
+    }
+    if (url === '/api/channel') {
+      const items = (fixture.issues ?? [])
+        .filter(
+          (issue) =>
+            issue.channel_id && issue.channel_id !== fixture.removedChannelId
+        )
+        .map((issue) => ({
+          id: issue.channel_id,
+          name: issue.channel_name,
+          models: issue.model_name,
+          status: 1,
+        }))
+      return { data: { success: true, data: { items, total: items.length } } }
     }
     return { data: { success: true, data: {} } }
   })
@@ -109,6 +146,7 @@ async function renderEditor(fixture: EditorFixture = {}) {
         pluginBillingExpr={pluginBillingExpr}
         onChange={vi.fn()}
         onSave={vi.fn()}
+        filterMode={fixture.filterMode}
         isSaving={false}
       />
     </QueryClientProvider>
@@ -237,4 +275,91 @@ it('filters the table down to the models whose price needs attention', async () 
     screen.queryByRole('row', { name: /claude-sonnet/ })
   ).not.toBeInTheDocument()
   expect(within(filter).getByText('Price needs attention')).toBeInTheDocument()
+})
+
+it('lists one row per affected model and opens each affected channel without touching global pricing', async () => {
+  const user = userEvent.setup()
+  const shared = 'gpt-4.1-mini'
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const patch = vi.spyOn(api, 'patch')
+  await renderEditor({
+    filterMode: 'unset',
+    issues: [
+      {
+        model_name: shared,
+        channel_id: 7,
+        channel_name: 'Ordinary',
+        reason: 'invalid_expression',
+      },
+      {
+        model_name: shared,
+        channel_id: 12,
+        channel_name: 'Task route',
+        plugin_key: 'beta',
+        plugin_name: 'Beta',
+        reason: 'invalid_task_price',
+      },
+    ],
+  })
+
+  const rows = screen.getAllByRole('row', { name: /gpt-4\.1-mini/ })
+  expect(rows).toHaveLength(1)
+  expect(
+    screen.queryByRole('row', { name: /claude-sonnet/ })
+  ).not.toBeInTheDocument()
+  await user.click(
+    within(rows[0]).getByRole('button', {
+      name: '#12 Task route · Beta: Task pricing is required for this provider',
+    })
+  )
+  await waitFor(() =>
+    expect(screen.getByRole('combobox', { name: 'Pricing scope' })).toHaveValue(
+      '#12 Task route · Enabled'
+    )
+  )
+  await user.click(
+    within(rows[0]).getByRole('button', {
+      name: '#7 Ordinary: Invalid billing expression',
+    })
+  )
+  await waitFor(() =>
+    expect(screen.getByRole('combobox', { name: 'Pricing scope' })).toHaveValue(
+      '#7 Ordinary · Enabled'
+    )
+  )
+  await user.click(
+    await screen.findByRole('button', { name: 'Save channel pricing' })
+  )
+  await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+  const written = put.mock.calls[0][1] as { key: string; value: string }
+  expect(written.key).toBe('ChannelModelPricing')
+  expect(Object.keys(JSON.parse(written.value)[shared])).toEqual(['7'])
+  expect(patch).not.toHaveBeenCalled()
+})
+
+it('does not create an override from a stale alert when the channel has since disappeared', async () => {
+  await renderEditor({
+    filterMode: 'unset',
+    removedChannelId: 7,
+    issues: [
+      {
+        model_name: 'gpt-4.1-mini',
+        channel_id: 7,
+        channel_name: 'Removed',
+        reason: 'unconfigured',
+      },
+    ],
+  })
+  fireEvent.click(
+    await screen.findByRole('button', { name: '#7 Removed: No price set' })
+  )
+  expect(await screen.findByText('Unavailable channel')).toBeVisible()
+  expect(
+    screen.queryByRole('button', { name: 'Save channel pricing' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Save model prices' })
+  ).not.toBeInTheDocument()
 })

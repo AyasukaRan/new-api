@@ -263,11 +263,20 @@ describe('model pricing badge', () => {
       .querySelectorAll('li')
   }
 
-  it('counts each task model once on the System Settings entry of the main sidebar', async () => {
+  it('counts each affected model once on the System Settings entry of the main sidebar', async () => {
     await renderSidebar('/dashboard/overview', ROLE.SUPER_ADMIN, () => [
       issue('kling-v3', 'kling'),
-      issue('shared-video', 'alpha'),
-      issue('shared-video', 'beta'),
+      {
+        model_name: 'shared-video',
+        channel_id: 7,
+        channel_name: 'Ordinary',
+        reason: 'unconfigured',
+      },
+      {
+        ...issue('shared-video', 'beta'),
+        channel_id: 9,
+        channel_name: 'Plugin channel',
+      },
     ])
 
     expect(await screen.findByText('System Settings: 2')).toBeInTheDocument()
@@ -303,6 +312,19 @@ describe('model pricing badge', () => {
     // Every pricing save runs this invalidation.
     issues = []
     await act(() => invalidateModelPricing(client))
+    await waitFor(() => expect(badgedEntries()).toHaveLength(0))
+  })
+
+  it('hides cached pricing alerts after the user loses pricing access', async () => {
+    await renderSidebar('/dashboard/overview', ROLE.SUPER_ADMIN, () => [
+      issue('shared', 'beta'),
+    ])
+    await screen.findByText('System Settings: 1')
+    act(() =>
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 1, username: 'root', role: ROLE.ADMIN })
+    )
     await waitFor(() => expect(badgedEntries()).toHaveLength(0))
   })
 

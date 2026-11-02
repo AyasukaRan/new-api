@@ -21,6 +21,7 @@ import type { ColumnDef } from '@tanstack/react-table'
 import { DataTableColumnHeader } from '@/components/data-table/core/column-header'
 import { StaticRowActions } from '@/components/data-table/static/static-row-actions'
 import { StatusBadge } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 
 import {
@@ -45,10 +46,10 @@ const filterBySelectedValues = (
 
 type BuildModelRatioColumnsOptions = {
   onDelete: (name: string) => void
-  onEdit: (model: ModelRow) => void
+  onEdit: (model: ModelRow, channelId?: number) => void
   deleteDisabled?: boolean
   taskModelNames?: Set<string>
-  /** Task model prices the gateway reports a plugin cannot charge, by model. */
+  /** Pricing issues across enabled channels, grouped by model. */
   pricingIssues?: Map<string, ModelPricingIssue[]>
   t: (key: string, options?: Record<string, unknown>) => string
 }
@@ -101,14 +102,6 @@ export function buildModelRatioColumns({
           !issues && isTaskModel && hasConfiguredTaskPricing
         const showTieredBadge =
           !issues && row.original.billingMode === 'tiered_expr' && !isTaskModel
-        const issueText = issues
-          ?.map((issue) =>
-            t('{{name}}: {{reason}}', {
-              name: issue.plugin_name,
-              reason: t(PRICING_ISSUE_REASONS[issue.reason]),
-            })
-          )
-          .join(' · ')
 
         return (
           <div className='flex min-w-0 flex-col gap-0.5'>
@@ -147,14 +140,29 @@ export function buildModelRatioColumns({
                 />
               ) : null}
             </div>
-            {issueText ? (
-              <span
-                className='text-muted-foreground truncate text-xs'
-                title={issueText}
-              >
-                {issueText}
-              </span>
-            ) : null}
+            {issues?.map((issue) => {
+              const channel = issue.channel_id
+                ? `#${issue.channel_id} ${issue.channel_name ?? ''}`.trim()
+                : issue.channel_name
+              const name = [channel, issue.plugin_name || issue.plugin_key]
+                .filter(Boolean)
+                .join(' · ')
+              const reason = t(PRICING_ISSUE_REASONS[issue.reason])
+              const label = name
+                ? t('{{name}}: {{reason}}', { name, reason })
+                : reason
+              return (
+                <Button
+                  key={`${issue.channel_id ?? ''}:${issue.plugin_key ?? ''}:${issue.reason}`}
+                  type='button'
+                  variant='link'
+                  className='text-muted-foreground h-auto max-w-full justify-start self-start p-0 text-start text-xs whitespace-normal'
+                  onClick={() => onEdit(row.original, issue.channel_id)}
+                >
+                  {label}
+                </Button>
+              )
+            })}
           </div>
         )
       },

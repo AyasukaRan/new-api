@@ -19,7 +19,7 @@ func GetModelPricingConfig(c *gin.Context) {
 }
 
 func GetModelPricingIssues(c *gin.Context) {
-	issues, err := model.GetModelPricingIssues("")
+	issues, err := model.GetRoutedModelPricingIssues()
 	if err != nil {
 		common.ApiError(c, err)
 		return

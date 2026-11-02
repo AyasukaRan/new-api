@@ -28,7 +28,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 
 import { fetchUpstreamModels, updateChannel } from '../../api'
 import {
-  channelsQueryKeys,
+  refreshChannelStatusQueries,
   normalizeModelName,
   parseModelsString,
 } from '../../lib'
@@ -156,7 +156,7 @@ export function FetchModelsDialog({
       })
       if (response.success) {
         toast.success(t('Models updated successfully'))
-        queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+        void refreshChannelStatusQueries(queryClient)
         onOpenChange(false)
       } else {
         handleServerError(response, t('Failed to update models'))

@@ -165,6 +165,24 @@ func ResolveTaskBillingExpr(pluginKey, model, mappedModel string) (string, bool)
 	return "", false
 }
 
+// SharesTaskBillingModel reports when an ordinary request on a shared host
+// endpoint would interpret a task price as a token price. Task expressions
+// produce USD directly, whereas ordinary expressions produce USD per million.
+func SharesTaskBillingModel(plugin, model, mapped, ordinary string) bool {
+	if _, ok := GetPluginBillingExpr(plugin, model); ok {
+		return false
+	}
+	if mapped != "" {
+		if _, ok := GetPluginBillingExpr(plugin, mapped); ok {
+			return false
+		}
+	}
+	if GetBillingMode(model) != BillingModeTieredExpr {
+		model = mapped
+	}
+	return model == ordinary
+}
+
 // TaskExprCompatible checks the schema contract even for usage references in
 // branches that the current request would not evaluate.
 func TaskExprCompatible(expression string, schema map[string]jsplugin.UsageFieldSchema) bool {

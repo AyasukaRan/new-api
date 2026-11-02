@@ -39,7 +39,7 @@ import {
   getAllModels,
   getGroups,
 } from '../../api'
-import { channelsQueryKeys } from '../../lib'
+import { refreshChannelStatusQueries } from '../../lib'
 import type { TagOperationParams } from '../../types'
 import { useChannels } from '../channels-provider'
 import { ModelMappingEditor } from '../model-mapping-editor'
@@ -161,7 +161,7 @@ export function TagBatchEditDialog({
       )
       if (response.success) {
         toast.success(t('Tag updated successfully'))
-        queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+        void refreshChannelStatusQueries(queryClient)
         handleClose()
       } else {
         handleServerError(response, t('Failed to update tag'))

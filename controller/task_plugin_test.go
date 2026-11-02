@@ -737,17 +737,9 @@ func TestSwitchedOffPluginPricesAreNotPricingIssues(t *testing.T) {
 	require.NoError(t, model.DB.Save(&model.Option{Key: billing_setting.PluginBillingExprOption, Value: string(prices)}).Error)
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{billing_setting.PluginBillingExprOption: string(prices)}))
 	readIssues := func() []model.ModelPricingIssue {
-		recorder := httptest.NewRecorder()
-		context, _ := gin.CreateTestContext(recorder)
-		context.Request = httptest.NewRequest(http.MethodGet, "/api/option/model_pricing/issues", nil)
-		GetModelPricingIssues(context)
-		var response struct {
-			Success bool                      `json:"success"`
-			Data    []model.ModelPricingIssue `json:"data"`
-		}
-		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
-		require.True(t, response.Success)
-		return slices.DeleteFunc(response.Data, func(issue model.ModelPricingIssue) bool {
+		issues, err := model.GetModelPricingIssues("")
+		require.NoError(t, err)
+		return slices.DeleteFunc(issues, func(issue model.ModelPricingIssue) bool {
 			return issue.PluginKey != key && issue.PluginKey != "kling"
 		})
 	}

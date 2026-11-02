@@ -37,6 +37,7 @@ import {
   type ChannelPricingMap,
 } from './model-channel-pricing'
 import type { ModelRatioData } from './model-pricing-core'
+import { MODEL_PRICING_ISSUES_QUERY_KEY } from './pricing-issues'
 
 const OPTION_KEY = 'ChannelModelPricing'
 const EMPTY_OVERRIDES: Record<string, ChannelPricing> = {}
@@ -240,6 +241,9 @@ export function useModelChannelPricing(modelName?: string) {
       client.setQueryData(['model-channel-pricing', request.modelName], map)
       void client.invalidateQueries({ queryKey: ['system-options'] })
       void client.invalidateQueries({ queryKey: ['pricing'] })
+      void client.invalidateQueries({
+        queryKey: MODEL_PRICING_ISSUES_QUERY_KEY,
+      })
       toast.success(t('Setting updated successfully'))
     },
   })

@@ -41,7 +41,7 @@ import {
   getAllModels,
   getGroups,
 } from '../../api'
-import { channelsQueryKeys } from '../../lib'
+import { refreshChannelStatusQueries } from '../../lib'
 import type { TagOperationParams } from '../../types'
 import { useChannels } from '../channels-provider'
 
@@ -194,7 +194,7 @@ export function EditTagDialog({ open, onOpenChange }: EditTagDialogProps) {
 
       if (response.success) {
         toast.success(t('Tag updated successfully'))
-        queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+        void refreshChannelStatusQueries(queryClient)
         onOpenChange(false)
       } else {
         handleServerError(response, t('Failed to update tag'))

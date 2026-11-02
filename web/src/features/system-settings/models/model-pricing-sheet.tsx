@@ -135,6 +135,7 @@ type ModelPricingSheetProps = {
   globalEffectiveDataLoading?: boolean
   globalEffectiveDataError?: string
   onReloadGlobalEffectiveData?: () => void | Promise<unknown>
+  initialChannelId?: number
   onScopeChange?: (channelId: string | null) => void
 }
 
@@ -147,8 +148,12 @@ type ModelPricingEditorPanelProps = Omit<
   scrollHeader?: ReactNode
 }
 
-export type ModelPricingEditorPanelHandle = {
+type ModelPricingFieldsHandle = {
   commitDraft: () => Promise<ModelRatioData | null>
+}
+
+export type ModelPricingEditorPanelHandle = ModelPricingFieldsHandle & {
+  selectScope: (value: string) => void
 }
 
 const DEFAULT_TOKEN_BILLING_EXPR = 'tier("base", p * 0 + c * 0)'
@@ -218,13 +223,15 @@ const ModelPricingScopeEditor = forwardRef<
   ModelPricingEditorPanelProps
 >(function ModelPricingScopeEditor(props, ref) {
   const { t } = useTranslation()
-  const [scope, setScope] = useState('global')
+  const [scope, setScope] = useState(
+    props.initialChannelId ? String(props.initialChannelId) : 'global'
+  )
   const [dirty, setDirty] = useState(false)
   const [fieldsRevision, setFieldsRevision] = useState(0)
   const [pendingChange, setPendingChange] = useState<
     { type: 'scope'; value: string } | { type: 'reset' } | null
   >(null)
-  const fieldsRef = useRef<ModelPricingEditorPanelHandle>(null)
+  const fieldsRef = useRef<ModelPricingFieldsHandle>(null)
   const channels = useModelChannelPricing(props.editData?.name)
   const getEditorData = channels.getEditorData
   const onDirtyChange = props.onDirtyChange
@@ -238,6 +245,11 @@ const ModelPricingScopeEditor = forwardRef<
   const effectiveError =
     !isGlobal &&
     (props.globalEffectiveDataError ||
+      (!channels.isLoading &&
+      !channels.loadError &&
+      !channels.channelOptions.some((option) => option.value === scope)
+        ? t('Unavailable channel')
+        : '') ||
       (!props.globalEffectiveDataLoading && !effectivePricing
         ? t('Failed to load model pricing')
         : ''))
@@ -260,9 +272,19 @@ const ModelPricingScopeEditor = forwardRef<
     return () => onScopeChange?.(null)
   }, [isGlobal, scope, onScopeChange])
 
+  const selectScope = useCallback(
+    (value: string | null) => {
+      if (!value || value === scope) return
+      if (dirty) setPendingChange({ type: 'scope', value })
+      else setScope(value)
+    },
+    [dirty, scope]
+  )
+
   useImperativeHandle(
     ref,
     () => ({
+      selectScope,
       commitDraft: async () => {
         if (!isGlobal) {
           toast.error(
@@ -273,7 +295,7 @@ const ModelPricingScopeEditor = forwardRef<
         return (await fieldsRef.current?.commitDraft()) ?? null
       },
     }),
-    [isGlobal, t]
+    [isGlobal, selectScope, t]
   )
 
   const saveChannel = async () => {
@@ -354,11 +376,7 @@ const ModelPricingScopeEditor = forwardRef<
                 aria-label={t('Pricing scope')}
                 searchPlaceholder={t('Search channels')}
                 emptyText={t('No channels found')}
-                onValueChange={(value) => {
-                  if (!value || value === scope) return
-                  if (dirty) setPendingChange({ type: 'scope', value })
-                  else setScope(value)
-                }}
+                onValueChange={selectScope}
               />
             </Field>
             {!isGlobal && (
@@ -471,7 +489,7 @@ type ModelPricingFieldsProps = ModelPricingEditorPanelProps & {
 }
 
 const ModelPricingFields = forwardRef<
-  ModelPricingEditorPanelHandle,
+  ModelPricingFieldsHandle,
   ModelPricingFieldsProps
 >(function ModelPricingFields(
   {

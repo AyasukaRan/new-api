@@ -460,19 +460,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 	if endpoint, ok := value.(jsplugin.PinnedEndpoint); ok && !fixedPricing {
 		for _, candidate := range endpoint.Candidates {
 			pluginKey := candidate.Plugin.Meta.Key
-			if _, overridden := billing_setting.GetPluginBillingExpr(pluginKey, endpoint.Model); overridden {
-				continue
-			}
-			if _, overridden := billing_setting.GetPluginBillingExpr(pluginKey, endpoint.MappedModel); endpoint.MappedModel != "" && overridden {
-				continue
-			}
-			taskBillingModel := endpoint.Model
-			if billing_setting.GetBillingMode(taskBillingModel) != billing_setting.BillingModeTieredExpr {
-				taskBillingModel = endpoint.MappedModel
-			}
-			// Task expressions return USD; ordinary expressions return USD *
-			// 1M. Even a constant without u() cannot safely serve both contracts.
-			if taskBillingModel == billingModelName {
+			if billing_setting.SharesTaskBillingModel(pluginKey, endpoint.Model, endpoint.MappedModel, billingModelName) {
 				return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelaySharedTaskPriceNeedsOverride, map[string]any{"Model": billingModelName, "Plugin": pluginKey}))
 			}
 		}

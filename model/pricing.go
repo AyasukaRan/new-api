@@ -243,7 +243,7 @@ func ResolveBillingModelName(origin string, channelID int) string {
 
 // resolveChannelPricing describes the same channel override precedence used by
 // relay, without evaluating a request or changing any stored billing settings.
-func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.LoadedPlugin, mappedModel string, sharedModel bool) Pricing {
+func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.LoadedPlugin, mappedModel string, sharedModel bool) (Pricing, string) {
 	pricing := base
 	pricing.ChannelPricingVariants = nil
 	pricing.BillingPluginVariants = nil
@@ -289,11 +289,25 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 		pricing.BillingExpr = expression
 		_, compileErr := billingexpr.CompileFromCache(expression)
 		pricing.PricingConfigured = strings.TrimSpace(expression) != "" && compileErr == nil
-		if provider != nil && (billingexpr.UsesFixedPricing(expression) || (sharedModel && !billing_setting.TaskExprCompatible(expression, pricing.BillingUsageSchema))) {
-			pricing.BillingExpr = ""
-			pricing.PricingConfigured = false
+		switch {
+		case strings.TrimSpace(expression) == "":
+			return pricing, ModelPricingIssueUnconfigured
+		case compileErr != nil:
+			return pricing, ModelPricingIssueInvalidExpression
+		case provider == nil && (billingexpr.UsedVars(expression)["u"] ||
+			(!billingexpr.UsesFixedPricing(expression) && ordinaryRouteSharesTaskPrice(base.ModelName, mappedModel, name))):
+			pricing.BillingExpr, pricing.PricingConfigured = "", false
+			return pricing, ModelPricingIssueInvalidExpression
+		case provider != nil && billingexpr.UsesFixedPricing(expression):
+			pricing.BillingExpr, pricing.PricingConfigured = "", false
+			return pricing, ModelPricingIssueInvalidTaskPrice
+		case provider != nil && !billing_setting.TaskExprCompatible(expression, pricing.BillingUsageSchema):
+			if sharedModel {
+				pricing.BillingExpr, pricing.PricingConfigured = "", false
+			}
+			return pricing, ModelPricingIssueIncompatible
 		}
-		return pricing
+		return pricing, ""
 	}
 
 	override, _ := ratio_setting.GetChannelModelPricing(name, channelID)
@@ -311,7 +325,10 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 		if hasPrice {
 			pricing.ModelPrice = price
 		}
-		return pricing
+		if !hasPrice {
+			return pricing, ModelPricingIssueUnconfigured
+		}
+		return pricing, ""
 	}
 	modelRatio, hasRatio, _ := ratio_setting.GetModelRatio(name)
 	pricing.PricingConfigured = hasRatio || (override.ModelRatio != nil && ratio_setting.ResolveRatio(override.ModelRatio, -1) >= 0)
@@ -342,7 +359,70 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 		value := ratio_setting.ResolveRatio(override.AudioCompletionRatio, ratio_setting.GetAudioCompletionRatio(name))
 		pricing.AudioCompletionRatio = &value
 	}
-	return pricing
+	if !pricing.PricingConfigured {
+		return pricing, ModelPricingIssueUnconfigured
+	}
+	return pricing, ""
+}
+
+// Models claimed by an ordinary host protocol can be served by an unbound
+// channel at that same endpoint. Plugin-native paths require a matching binding.
+func ordinaryEndpointPlugins(g *jsplugin.RoutingGeneration, declared string) []*jsplugin.LoadedPlugin {
+	return slices.DeleteFunc(g.PluginsByModel(declared), func(plugin *jsplugin.LoadedPlugin) bool {
+		return !slices.ContainsFunc(plugin.Meta.Protocols, func(claim jsplugin.ProtocolClaim) bool {
+			return len(claim.Models) == 0 || slices.Contains(claim.Models, declared)
+		})
+	})
+}
+
+func ordinaryRouteSharesTaskPrice(clientModel, mapped, billingName string) bool {
+	g := jsplugin.DefaultRegistry.Generation()
+	pin, direct := g.CanonicalModel(clientModel)
+	declared, mappedPin := pin, ""
+	if !direct {
+		if _, known := g.CanonicalModel(mapped); !known || clientModel == mapped {
+			return false
+		}
+		alias, ok := ResolveTaskModelAlias(g, clientModel)
+		if !ok || alias.Declared == "" {
+			return false
+		}
+		pin, declared, mappedPin = alias.Alias, alias.Declared, alias.Declared
+	}
+	for _, plugin := range ordinaryEndpointPlugins(g, declared) {
+		if billing_setting.SharesTaskBillingModel(plugin.Meta.Key, pin, mappedPin, billingName) {
+			return true
+		}
+	}
+	return false
+}
+
+// pricingChannelProviders looks up the task providers this channel could actually
+// execute for a client model. Other enabled channels may use ordinary relay for
+// the same model even when a task plugin also declares its name.
+func pricingChannelProviders(g *jsplugin.RoutingGeneration, channel *Channel, model, mapped string) []*jsplugin.LoadedPlugin {
+	declared, found := g.CanonicalModel(model)
+	if !found && model != mapped {
+		declared, found = g.CanonicalModel(mapped)
+	}
+	if !found {
+		return nil
+	}
+	candidates := g.PluginsByModel(declared)
+	if channel.Type == constant.ChannelTypeTaskPlugin || channel.Type == constant.ChannelTypeNewAPI {
+		var setting dto.ChannelSettings
+		if channel.Setting == nil || common.UnmarshalJsonStr(*channel.Setting, &setting) != nil {
+			return nil
+		}
+		return slices.DeleteFunc(candidates, func(candidate *jsplugin.LoadedPlugin) bool {
+			return !setting.BindsTaskPlugin(candidate.Meta.Key) || (channel.Type == constant.ChannelTypeNewAPI && !candidate.Meta.SupportsUpstream(jsplugin.UpstreamKindNewAPI))
+		})
+	}
+	provider, ok := g.GetByChannelType(channel.Type)
+	if ok && slices.Contains(candidates, provider) {
+		return []*jsplugin.LoadedPlugin{provider}
+	}
+	return nil
 }
 
 // FilterPricingByUsableGroups filters before merging equal prices, so neither a
@@ -689,32 +769,20 @@ func updatePricing() {
 			if target, cyclic := followChannelModelMapping(pricingModelMappings[channelID], model); !cyclic {
 				mappedModel = target
 			}
-			candidates := pluginGeneration.PluginsByModel(model)
-			if len(candidates) == 0 && mappedModel != model {
-				candidates = pluginGeneration.PluginsByModel(mappedModel)
-			}
-			matchedProvider := false
-			for _, candidate := range candidates {
-				if channel.Type == constant.ChannelTypeTaskPlugin || channel.Type == constant.ChannelTypeNewAPI {
-					if !channel.GetSetting().BindsTaskPlugin(candidate.Meta.Key) {
-						continue
-					}
-				} else if !slices.Contains(candidate.Meta.ChannelTypes, channel.Type) {
-					continue
-				}
-				matchedProvider = true
-				variant = resolveChannelPricing(pricing, channelID, candidate, mappedModel, pluginGeneration.SharedModel(model) || pluginGeneration.SharedModel(mappedModel))
+			providers := pricingChannelProviders(pluginGeneration, channel, model, mappedModel)
+			for _, provider := range providers {
+				variant, _ = resolveChannelPricing(pricing, channelID, provider, mappedModel, pluginGeneration.SharedModel(model) || pluginGeneration.SharedModel(mappedModel))
 				variant.EnableGroup = modelChannelGroups[model][channelID]
 				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 			}
-			if matchedProvider {
+			if len(providers) > 0 {
 				continue
 			}
 			if channel.Type == constant.ChannelTypeTaskPlugin {
 				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 				continue
 			}
-			variant = resolveChannelPricing(pricing, channelID, nil, mappedModel, false)
+			variant, _ = resolveChannelPricing(pricing, channelID, nil, mappedModel, false)
 			variant.EnableGroup = modelChannelGroups[model][channelID]
 			pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 		}

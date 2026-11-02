@@ -21,6 +21,7 @@ import i18next from 'i18next'
 import { toast } from 'sonner'
 
 import { perfMetricsQueryKeys } from '@/features/performance-metrics/api'
+import { MODEL_PRICING_ISSUES_QUERY_KEY } from '@/features/system-settings/models/pricing-issues'
 import { handleServerError } from '@/lib/handle-server-error'
 import { getServerMessage } from '@/lib/server-error-message'
 
@@ -68,6 +69,7 @@ export async function refreshChannelStatusQueries(
       channelsQueryKeys.all,
       ['models'],
       ['pricing'],
+      MODEL_PRICING_ISSUES_QUERY_KEY,
       ['channel-monitoring'],
       perfMetricsQueryKeys.summaries,
       perfMetricsQueryKeys.details,
@@ -209,7 +211,7 @@ export async function handleDeleteChannel(
     const response = await deleteChannel(id)
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.DELETED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.()
     } else {
       handleServerError(response, i18next.t(ERROR_MESSAGES.DELETE_FAILED))
@@ -402,7 +404,7 @@ export async function handleCopyChannel(
     const response = await copyChannel(id, params)
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.COPIED))
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.(response.data?.id ?? 0)
     } else {
       handleServerError(response, i18next.t('Failed to copy channel'))
@@ -437,7 +439,7 @@ export async function handleBatchDelete(
           count: response.data || ids.length,
         })
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.(response.data || ids.length)
     } else {
       handleServerError(response, i18next.t(ERROR_MESSAGES.DELETE_FAILED))
@@ -659,7 +661,7 @@ export async function handleFixAbilities(
           }
         )
       )
-      queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+      await refreshChannelStatusQueries(queryClient)
       onSuccess?.(response.data)
     } else {
       handleServerError(

@@ -47,6 +47,7 @@ import {
   DataTableView,
   useDataTable,
 } from '@/components/data-table'
+import { ErrorState } from '@/components/error-state'
 import { Button } from '@/components/ui/button'
 import { useModelPricing } from '@/features/model-pricing/api'
 import {
@@ -69,7 +70,6 @@ import {
 import {
   buildModelSnapshots,
   getSnapshotSignature,
-  isBasePricingUnset,
   type ModelRow,
 } from './model-pricing-snapshots'
 import {
@@ -102,8 +102,6 @@ type ModelRatioVisualEditorProps = {
   billingMode: string
   billingExpr: string
   pluginBillingExpr?: string
-  candidateModelNames?: string[]
-  candidateModelsLoading?: boolean
   filterMode?: 'all' | 'unset'
   onChange: (field: string, value: string) => void
   onSave: () => void | Promise<void>
@@ -145,8 +143,6 @@ const ModelRatioVisualEditorComponent = forwardRef<
     billingMode,
     billingExpr,
     pluginBillingExpr = '{}',
-    candidateModelNames,
-    candidateModelsLoading,
     filterMode = 'all',
     onChange,
     onSave,
@@ -162,6 +158,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorInSheet, setEditorInSheet] = useState(false)
   const [editData, setEditData] = useState<ModelRatioData | null>(null)
+  const [initialChannelId, setInitialChannelId] = useState<number>()
   const [editorDirty, setEditorDirty] = useState(false)
   const [pendingEditorAction, setPendingEditorAction] = useState<
     (() => void) | null
@@ -266,10 +263,9 @@ const ModelRatioVisualEditorComponent = forwardRef<
   const pricingIssues = useMemo(() => {
     const byModel = new Map<string, ModelPricingIssue[]>()
     for (const issue of pricingIssuesQuery.data ?? []) {
-      byModel.set(issue.model_name, [
-        ...(byModel.get(issue.model_name) ?? []),
-        issue,
-      ])
+      const issues = byModel.get(issue.model_name)
+      if (issues) issues.push(issue)
+      else byModel.set(issue.model_name, [issue])
     }
     return byModel
   }, [pricingIssuesQuery.data])
@@ -304,11 +300,9 @@ const ModelRatioVisualEditorComponent = forwardRef<
 
     const savedByName = new Map(savedRows.map((row) => [row.name, row]))
     const draftByName = new Map(draftRows.map((row) => [row.name, row]))
-    // A plugin model that was never priced has no saved row; list it so its
-    // pricing issue can be seen and fixed here.
     const modelNames =
       filterMode === 'unset'
-        ? new Set(candidateModelNames ?? [])
+        ? pricingIssues.keys()
         : new Set([
             ...savedByName.keys(),
             ...draftByName.keys(),
@@ -333,11 +327,9 @@ const ModelRatioVisualEditorComponent = forwardRef<
           isDraftNew: Boolean(!saved && draft),
         }
       })
-      .filter((row) => !row.isDraftDeleted)
-      .filter((row) => filterMode !== 'unset' || isBasePricingUnset(row.saved))
+      .filter((row) => !row.isDraftDeleted || pricingIssues.has(row.name))
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [
-    candidateModelNames,
     filterMode,
     pricingIssues,
     savedModelPrice,
@@ -388,21 +380,25 @@ const ModelRatioVisualEditorComponent = forwardRef<
     }
     return counts
   }, [models, taskModelNames])
-  const attentionCount = useMemo(
-    () => models.filter((model) => pricingIssues.has(model.name)).length,
-    [models, pricingIssues]
-  )
-
   const handleEdit = useCallback(
-    (model: ModelRow) => {
+    (model: ModelRow, channelId?: number) => {
+      const targetChannelId =
+        channelId ??
+        (filterMode === 'unset'
+          ? pricingIssues.get(model.name)?.[0]?.channel_id
+          : undefined)
       if (
         editorStateRef.current.open &&
         editorStateRef.current.name === model.name
       ) {
+        if (targetChannelId) {
+          editorPanelRef.current?.selectScope(String(targetChannelId))
+        }
         if (editorStateRef.current.inSheet) setSheetOpen(true)
         return
       }
       requestEditorChange(() => {
+        setInitialChannelId(targetChannelId)
         const editableModel = model.draft ?? model.saved ?? model
         let editBillingMode: PricingMode = 'per-token'
         if (editableModel.billingMode === 'tiered_expr') {
@@ -430,11 +426,12 @@ const ModelRatioVisualEditorComponent = forwardRef<
         setSheetOpen(isMobile)
       })
     },
-    [isMobile, requestEditorChange]
+    [filterMode, pricingIssues, isMobile, requestEditorChange]
   )
 
   const handleAdd = useCallback(() => {
     requestEditorChange(() => {
+      setInitialChannelId(undefined)
       setEditData(null)
       setEditorOpen(true)
       setEditorInSheet(isMobile)
@@ -715,13 +712,27 @@ const ModelRatioVisualEditorComponent = forwardRef<
   } else if (table.getState().columnFilters.length > 0) {
     emptyStateText = t('No models match the selected filters')
   } else if (filterMode === 'unset') {
-    emptyStateText = candidateModelsLoading
+    emptyStateText = pricingIssuesQuery.isLoading
       ? t('Loading...')
-      : t('No models with unset prices')
+      : t('No active models need pricing changes')
+  }
+
+  if (filterMode === 'unset' && pricingIssuesQuery.isError) {
+    return (
+      <ErrorState
+        description={pricingIssuesQuery.error.message}
+        onRetry={() => void pricingIssuesQuery.refetch()}
+      />
+    )
   }
 
   return (
     <div className='flex min-h-0 flex-1 flex-col gap-4'>
+      {filterMode === 'unset' && (
+        <p className='text-muted-foreground text-sm'>
+          {t('Models with missing or incompatible prices on enabled channels.')}
+        </p>
+      )}
       <div
         role='region'
         aria-label={t('Model prices')}
@@ -766,7 +777,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
                   {
                     label: 'Price needs attention',
                     value: PRICE_ATTENTION_FILTER,
-                    count: attentionCount,
+                    count: pricingIssues.size,
                   },
                 ],
               },
@@ -849,6 +860,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
             <ModelPricingEditorPanel
               ref={editorPanelRef}
               editData={editData}
+              initialChannelId={initialChannelId}
               globalEffectiveData={globalEffectiveData}
               globalEffectiveDataLoading={pricingConfig.isPending}
               globalEffectiveDataError={pricingConfig.error?.message}
@@ -929,6 +941,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
             }
           }}
           editData={editData}
+          initialChannelId={initialChannelId}
           globalEffectiveData={globalEffectiveData}
           globalEffectiveDataLoading={pricingConfig.isPending}
           globalEffectiveDataError={pricingConfig.error?.message}
@@ -981,8 +994,6 @@ export const ModelRatioVisualEditor = memo(
       prevProps.billingMode === nextProps.billingMode &&
       prevProps.billingExpr === nextProps.billingExpr &&
       prevProps.pluginBillingExpr === nextProps.pluginBillingExpr &&
-      prevProps.candidateModelNames === nextProps.candidateModelNames &&
-      prevProps.candidateModelsLoading === nextProps.candidateModelsLoading &&
       prevProps.filterMode === nextProps.filterMode &&
       prevProps.onChange === nextProps.onChange &&
       prevProps.onSave === nextProps.onSave &&

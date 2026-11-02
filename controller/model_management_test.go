@@ -1989,7 +1989,7 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
 			for _, spec := range []struct{ key, field, unit string }{{"matrix-alpha", "seconds", "second"}, {"matrix-beta", "credits", "credit"}} {
 				source := fmt.Sprintf(`
-		export const meta = {apiVersion:1,key:%q,name:%q,version:"1.0.0",author:{name:"Test"},models:[%q],fetchMode:"per_task",usageSchema:{%s:{type:"number",unit:%q}}};
+		export const meta = {apiVersion:1,key:%q,name:%q,version:"1.0.0",author:{name:"Test"},models:[%q],fetchMode:"per_task",upstreams:["new_api"],usageSchema:{%s:{type:"number",unit:%q}}};
 		export function buildSubmitRequest(){return {};}
 		export function parseSubmitResponse(){return {};}
 		export function buildQueryRequest(){return {};}
@@ -2019,6 +2019,71 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 				"billing_setting.billing_expr": string(baseJSON), "billing_setting.billing_mode": string(modeJSON),
 			}))
+			t.Run("enabled_channel_pricing_issues", func(t *testing.T) {
+				savedChannelPrices := ratio_setting.ChannelModelPricing2JSONString()
+				savedModelRatios := ratio_setting.ModelRatio2JSONString()
+				savedSelfUse := operation_setting.SelfUseModeEnabled
+				t.Cleanup(func() {
+					require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(savedChannelPrices))
+					require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedModelRatios))
+					operation_setting.SelfUseModeEnabled = savedSelfUse
+				})
+				operation_setting.SelfUseModeEnabled = false
+				require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"globally-free":0}`))
+				issueAPI := func() []model.ModelPricingIssue {
+					var result struct {
+						Success bool                      `json:"success"`
+						Data    []model.ModelPricingIssue `json:"data"`
+					}
+					r := modelManagementRequest(t, GetModelPricingIssues, http.MethodGet, "/api/option/model_pricing/issues", nil, &result)
+					require.True(t, result.Success, r.Body.String())
+					require.NotNil(t, result.Data)
+					return result.Data
+				}
+				require.Empty(t, issueAPI(), "registered plugins alone are not channel pricing issues")
+
+				bindBeta := `{"task_extend_plugin_keys":["matrix-beta"]}`
+				mapping := fmt.Sprintf(`{"route-alias":"mid","mid":%q}`, name)
+				channels := []model.Channel{
+					{Id: 71, Type: constant.ChannelTypeOpenAI, Name: "Text", Models: "route-missing,globally-free,lane-free," + name, Group: "one,two"},
+					{Id: 72, Type: constant.ChannelTypeOpenAI, Name: "Backup", Models: "route-missing"},
+					{Id: 73, Type: constant.ChannelTypeOpenAI, Name: "Disabled", Status: common.ChannelStatusManuallyDisabled, Models: "no-route"},
+					{Id: 74, Type: constant.ChannelTypeNewAPI, Name: "Bound", Models: "route-alias", Setting: &bindBeta, ModelMapping: &mapping},
+					{Id: 75, Type: constant.ChannelTypeTaskPlugin, Name: "Unbound", Models: name},
+					{Id: 76, Type: constant.ChannelTypeNewAPI, Name: "Native only, unbound", Models: name},
+				}
+				for i := range channels {
+					channel := &channels[i]
+					require.NoError(t, db.Create(channel).Error)
+					require.NoError(t, channel.AddAbilities(db))
+				}
+				// A stale enabled ability must not resurrect a disabled channel.
+				require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", 73).Update("enabled", true).Error)
+				require.NoError(t, db.Create(&model.Ability{ChannelId: 71, Group: "one", Model: "disabled-ability", Enabled: false}).Error)
+				require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(`{"lane-free":{"71":{"billing_mode":"per_request","model_price":0}}}`))
+				textMissing := model.ModelPricingIssue{ModelName: "route-missing", ChannelID: 71, ChannelName: "Text", Reason: model.ModelPricingIssueUnconfigured}
+				backupMissing := model.ModelPricingIssue{ModelName: "route-missing", ChannelID: 72, ChannelName: "Backup", Reason: model.ModelPricingIssueUnconfigured}
+				ordinaryTaskPrice := model.ModelPricingIssue{ModelName: name, ChannelID: 71, ChannelName: "Text", Reason: model.ModelPricingIssueInvalidExpression}
+				taskAlias := model.ModelPricingIssue{ModelName: "route-alias", ChannelID: 74, ChannelName: "Bound", PluginKey: "matrix-beta", PluginName: "matrix-beta", Reason: model.ModelPricingIssueIncompatible}
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, taskAlias}, issueAPI())
+
+				// A mapped channel override is a valid free task price. An explicit
+				// alias override wins even when it is the wrong kind of expression.
+				overrides := map[string]map[int]ratio_setting.ChannelModelPricing{
+					name:        {74: {BillingMode: "per_request", ModelPrice: common.GetPointer(0.0)}},
+					"lane-free": {71: {BillingMode: "per_request", ModelPrice: common.GetPointer(0.0)}},
+				}
+				raw, err := common.Marshal(overrides)
+				require.NoError(t, err)
+				require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(string(raw)))
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice}, issueAPI())
+				overrides["route-alias"] = map[int]ratio_setting.ChannelModelPricing{74: {BillingMode: "tiered_expr", BillingExpr: `tier("request", fixed(0.1))`}}
+				raw, err = common.Marshal(overrides)
+				require.NoError(t, err)
+				require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(string(raw)))
+				taskAlias.Reason = model.ModelPricingIssueInvalidTaskPrice
+				assert.ElementsMatch(t, []model.ModelPricingIssue{textMissing, backupMissing, ordinaryTaskPrice, taskAlias}, issueAPI())
+			})
 			before, err := model.GetModelPricingSnapshot([]string{name})
 			require.NoError(t, err)
 			require.Len(t, before.Entries, 1)

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import { MODEL_PRICING_ISSUES_QUERY_KEY } from '@/features/system-settings/models/pricing-issues'
 import { api } from '@/lib/api'
 
 import { getChannels } from '../../api'
@@ -98,6 +99,7 @@ it.each([
       ['channels', 'pricing-override-picker'],
       ['models', 'list'],
       ['pricing'],
+      MODEL_PRICING_ISSUES_QUERY_KEY,
       ['perf-metrics', 'example-model'],
       ['perf-metrics-summary', 24],
       ['perf-metrics-admin', 1, 100, 'example-model', 24],

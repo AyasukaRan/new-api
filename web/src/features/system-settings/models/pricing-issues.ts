@@ -26,12 +26,19 @@ import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
 import { createServerError } from '@/lib/server-error-message'
 
-/** A task model price one plugin provider cannot charge, as the gateway reports it. */
+/** A model price that cannot be charged on the reported channel or plugin. */
 export type ModelPricingIssue = {
   model_name: string
-  plugin_key: string
-  plugin_name: string
-  reason: 'unconfigured' | 'incompatible' | 'stale'
+  channel_id?: number
+  channel_name?: string
+  plugin_key?: string
+  plugin_name?: string
+  reason:
+    | 'unconfigured'
+    | 'incompatible'
+    | 'stale'
+    | 'invalid_expression'
+    | 'invalid_task_price'
 }
 
 /** Plain-language reason labels; the values are i18n keys. */
@@ -42,6 +49,8 @@ export const PRICING_ISSUE_REASONS: Record<
   unconfigured: 'No price set',
   incompatible: 'The price uses usage the plugin no longer provides',
   stale: 'The plugin no longer offers this model',
+  invalid_expression: 'Invalid billing expression',
+  invalid_task_price: 'Task pricing is required for this provider',
 }
 
 /**
@@ -67,11 +76,12 @@ export function useModelPricingIssues() {
     queryKey: MODEL_PRICING_ISSUES_QUERY_KEY,
     queryFn: getModelPricingIssues,
     enabled: canEdit,
+    select: (issues) => (canEdit ? issues : []),
     meta: { errorToast: false },
   })
 }
 
-/** The number of task models whose price needs attention, for nav badges. */
+/** The number of distinct active models whose price needs attention, for nav badges. */
 export function useModelPricingIssueBadge(): string | undefined {
   const { i18n } = useTranslation()
   const issues = useModelPricingIssues().data ?? []

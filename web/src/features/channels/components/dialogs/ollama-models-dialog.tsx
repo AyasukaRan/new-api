@@ -50,7 +50,11 @@ import {
   fetchUpstreamModels,
   updateChannel,
 } from '../../api'
-import { channelsQueryKeys, parseModelsString } from '../../lib'
+import {
+  channelsQueryKeys,
+  parseModelsString,
+  refreshChannelStatusQueries,
+} from '../../lib'
 import {
   formatBytes,
   normalizeOllamaModels,
@@ -216,7 +220,7 @@ export function OllamaModelsDialog({
             ? t('Models updated successfully')
             : t('Models appended successfully')
         )
-        queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+        void refreshChannelStatusQueries(queryClient)
       } else {
         handleServerError(res, t('Failed to update models'))
       }
