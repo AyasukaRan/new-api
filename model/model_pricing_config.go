@@ -770,37 +770,37 @@ func validateModelPricing(db *gorm.DB, name string, values, previous PricingValu
 		if !ok || variants == nil {
 			return errors.New("plugin billing expressions must be a plugin-to-expression object")
 		}
-		var targets map[string][]string
-		if len(variants) > 0 {
-			var err error
-			targets, err = pluginPricingModels(db, generation, name)
-			if err != nil {
-				return err
-			}
+	}
+	var targets map[string][]string
+	if _, hasExpression := values["billing_setting.billing_expr"]; len(variants) > 0 || hasExpression {
+		var err error
+		targets, err = pluginPricingModels(db, generation, name)
+		if err != nil {
+			return err
 		}
-		for key, value := range variants {
-			expression, ok := value.(string)
-			if !ok || strings.TrimSpace(expression) == "" {
-				return fmt.Errorf("model %s: plugin %s: billing expression is required", name, key)
-			}
-			plugin, exists := generation.Get(key)
-			models := targets[key]
-			declared := exists && len(models) > 0
-			// An unchanged override stays saveable after its plugin disappears or
-			// stops declaring the model. A sole provider also keeps it after
-			// narrowing its usage profile; relay checks shared models against
-			// each profile, so their prices must follow it.
-			if previousVariants[key] == expression && (!declared || len(targets) == 1 && !generation.SharedModel(models[0])) {
-				continue
-			}
-			if !declared {
-				return fmt.Errorf("model %s: plugin %s does not declare this model", name, key)
-			}
-			for _, target := range models {
-				schema, _ := plugin.Meta.UsageForModel(target)
-				if err := billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
-					return fmt.Errorf("model %s: plugin %s: %w", name, key, err)
-				}
+	}
+	for key, value := range variants {
+		expression, ok := value.(string)
+		if !ok || strings.TrimSpace(expression) == "" {
+			return fmt.Errorf("model %s: plugin %s: billing expression is required", name, key)
+		}
+		plugin, exists := generation.Get(key)
+		models := targets[key]
+		declared := exists && len(models) > 0
+		// An unchanged override stays saveable after its plugin disappears or
+		// stops declaring the model. A sole provider also keeps it after
+		// narrowing its usage profile; relay checks shared models against
+		// each profile, so their prices must follow it.
+		if previousVariants[key] == expression && (!declared || len(targets) == 1 && !generation.SharedModel(models[0])) {
+			continue
+		}
+		if !declared {
+			return fmt.Errorf("model %s: plugin %s does not declare this model", name, key)
+		}
+		for _, target := range models {
+			schema, _ := plugin.Meta.UsageForModel(target)
+			if err := billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
+				return fmt.Errorf("model %s: plugin %s: %w", name, key, err)
 			}
 		}
 	}
@@ -832,26 +832,23 @@ func validateModelPricing(db *gorm.DB, name string, values, previous PricingValu
 			// shared models against each profile, so their prices must follow it.
 			unchanged := previous[key] == expression
 			var err error
-			if plugins := generation.PluginsByModel(name); len(plugins) > 0 {
-				for _, plugin := range plugins {
-					_, overridden := variants[plugin.Meta.Key]
-					_, wasOverridden := previousVariants[plugin.Meta.Key]
-					if overridden || (unchanged && !wasOverridden && len(plugins) == 1) {
+			if len(targets) > 0 {
+				for pluginKey, models := range targets {
+					_, overridden := variants[pluginKey]
+					_, wasOverridden := previousVariants[pluginKey]
+					if overridden {
 						continue
 					}
-					schema, _ := plugin.Meta.UsageForModel(name)
-					if err = billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
-						return fmt.Errorf("model %s: plugin %s: %w", name, plugin.Meta.Key, err)
+					plugin, _ := generation.Get(pluginKey)
+					for _, declared := range models {
+						if unchanged && !wasOverridden && len(targets) == 1 && !generation.SharedModel(declared) {
+							continue
+						}
+						schema, _ := plugin.Meta.UsageForModel(declared)
+						if err := billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
+							return fmt.Errorf("model %s: plugin %s: %w", name, pluginKey, err)
+						}
 					}
-				}
-			} else if target, resolved := ResolveTaskModelAlias(generation, name); resolved {
-				if plugin, ok := generation.Get(target.PluginKey); ok {
-					if !unchanged || generation.SharedModel(target.Declared) {
-						schema, _ := plugin.Meta.UsageForModel(target.Declared)
-						err = billing_setting.SmokeTestTaskExpr(expression, schema)
-					}
-				} else {
-					err = billing_setting.SmokeTestExpr(expression)
 				}
 			} else if !unchanged || len(billingexpr.UsedUsageKeys(expression)) == 0 {
 				err = billing_setting.SmokeTestExpr(expression)

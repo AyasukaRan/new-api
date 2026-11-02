@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2134,11 +2135,28 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 					aliasPrices := map[string]string{"matrix-alpha::route-alias": base, "matrix-beta::route-alias": base}
 					initial, err := common.Marshal(aliasPrices)
 					require.NoError(t, err)
-					require.NoError(t, db.Save(&model.Option{Key: billing_setting.PluginBillingExprOption, Value: string(initial)}).Error)
-					require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{billing_setting.PluginBillingExprOption: string(initial)}))
+					const aliasGlobal = `tier("alias-default", u("credits") * 0.25)`
+					aliasExpressions, err := common.Marshal(map[string]string{name: base, "route-alias": aliasGlobal})
+					require.NoError(t, err)
+					aliasModes, err := common.Marshal(map[string]string{name: "tiered_expr", "route-alias": "tiered_expr"})
+					require.NoError(t, err)
+					setOptions := func(options map[string]string) {
+						for key, value := range options {
+							require.NoError(t, db.Save(&model.Option{Key: key, Value: value}).Error)
+						}
+						require.NoError(t, config.GlobalConfig.LoadFromDB(options))
+					}
+					setOptions(map[string]string{
+						billing_setting.PluginBillingExprOption: string(initial),
+						"billing_setting.billing_expr":          string(aliasExpressions),
+						"billing_setting.billing_mode":          string(aliasModes),
+					})
 					t.Cleanup(func() {
-						require.NoError(t, db.Where(&model.Option{Key: billing_setting.PluginBillingExprOption}).Delete(&model.Option{}).Error)
-						require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{billing_setting.PluginBillingExprOption: "{}"}))
+						setOptions(map[string]string{
+							billing_setting.PluginBillingExprOption: "{}",
+							"billing_setting.billing_expr":          string(baseJSON),
+							"billing_setting.billing_mode":          string(modeJSON),
+						})
 					})
 					delete(overrides[name], 77)
 					raw, err := common.Marshal(overrides)
@@ -2155,13 +2173,19 @@ func TestSharedModelPluginPricingDatabaseMatrix(t *testing.T) {
 						assert.False(t, provider.Stale)
 					}
 					assert.Contains(t, entry.PluginVariants[1].UsageSchema, "credits")
-					patch := model.ModelPricingChange{ModelName: "route-alias", ExpectedVersion: entry.Version, Pricing: model.PricingValues{
-						billing_setting.PluginBillingExprOption: map[string]any{"matrix-alpha": base, "matrix-beta": variant},
-					}}
+					// Changing only Beta must preserve the alias-wide expression and Alpha's separate price.
+					draft := maps.Clone(entry.Configured)
+					draft[billing_setting.PluginBillingExprOption] = map[string]any{"matrix-alpha": base, "matrix-beta": variant}
+					patch := model.ModelPricingChange{ModelName: "route-alias", ExpectedVersion: entry.Version, Pricing: draft}
 					updated := modelManagementRequest(t, UpdateModelPricingConfig, http.MethodPatch, "/api/option/model_pricing", map[string]any{"changes": []model.ModelPricingChange{patch}}, nil)
 					require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
 					aliasPrices["matrix-beta::route-alias"] = variant
 					assert.Equal(t, aliasPrices, billing_setting.GetPluginBillingExprCopy())
+					persisted, err := model.GetModelPricingSnapshot([]string{"route-alias"})
+					require.NoError(t, err)
+					assert.Equal(t, aliasGlobal, persisted.Entries[0].Configured["billing_setting.billing_expr"])
+					assert.Equal(t, "tiered_expr", persisted.Entries[0].Configured["billing_setting.billing_mode"])
+					assert.Equal(t, draft, persisted.Entries[0].Configured)
 					assert.NotContains(t, issueAPI(), want)
 				})
 
