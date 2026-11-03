@@ -150,7 +150,7 @@ func TestSourceQuotaEndpointsScopeAndTimeRange(t *testing.T) {
 	}{
 		{name: "admin all", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100, Finance: &model.DashboardFinance{UnrecordedCount: 2}}, {ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70, Finance: &model.DashboardFinance{UnrecordedCount: 1}}}},
 		{name: "admin username", handler: GetAllSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob", want: []model.SourceQuotaData{{ClientTool: "", Count: 1, TokenUsed: 30, Quota: 70, Finance: &model.DashboardFinance{UnrecordedCount: 1}}}},
-		{name: "self ignores another user and test selector", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob&user_id=2&source=test", want: []model.SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 40, Quota: 100}}},
+		{name: "self ignores another user and test selector", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=2000&username=bob&user_id=2&source=test", want: []model.SourceQuotaData{{Count: 2, TokenUsed: 40, Quota: 100}}},
 		{name: "empty range is array", handler: GetUserSourceQuotaDates, query: "start_timestamp=2001&end_timestamp=2002", want: []model.SourceQuotaData{}},
 		{name: "invalid start", handler: GetAllSourceQuotaDates, query: "start_timestamp=bad&end_timestamp=2000", message: "invalid start_timestamp"},
 		{name: "invalid end", handler: GetUserSourceQuotaDates, query: "start_timestamp=1000&end_timestamp=0", message: "invalid end_timestamp"},
@@ -215,10 +215,8 @@ func TestSourceQuotaTimeSeriesPreservesHourlyTotalsAndScope(t *testing.T) {
 		{ClientTool: "OpenAI Python SDK", CreatedAt: 7200, Count: 11, TokenUsed: 110, Quota: 1100},
 	}
 	selfSeries := []sourceRow{
-		{ClientTool: "", CreatedAt: 3600, Count: 13, TokenUsed: 130, Quota: 1300},
-		{ClientTool: "OpenAI Python SDK", CreatedAt: 3600, Count: 5, TokenUsed: 50, Quota: 500},
-		{ClientTool: "", CreatedAt: 7200, Count: 17, TokenUsed: 170, Quota: 1700},
-		{ClientTool: "OpenAI Python SDK", CreatedAt: 7200, Count: 11, TokenUsed: 110, Quota: 1100},
+		{CreatedAt: 3600, Count: 18, TokenUsed: 180, Quota: 1800},
+		{CreatedAt: 7200, Count: 28, TokenUsed: 280, Quota: 2800},
 	}
 	for _, test := range []struct {
 		name    string
@@ -229,6 +227,7 @@ func TestSourceQuotaTimeSeriesPreservesHourlyTotalsAndScope(t *testing.T) {
 		series  bool
 	}{
 		{name: "default summary", handler: GetAllSourceQuotaDates, role: common.RoleAdminUser, want: allSummary},
+		{name: "self summary combines all sources", handler: GetUserSourceQuotaDates, role: common.RoleCommonUser, query: "&user_id=2&username=bob&role=100&client_tool=curl", want: []sourceRow{{Count: 46, TokenUsed: 460, Quota: 4600}}},
 		{name: "explicit false keeps summary", handler: GetAllSourceQuotaDates, role: common.RoleAdminUser, query: "&time_series=false", want: allSummary},
 		{name: "admin hourly all users and models", handler: GetAllSourceQuotaDates, role: common.RoleAdminUser, query: "&time_series=true", want: allSeries, series: true},
 		{name: "root hourly", handler: GetAllSourceQuotaDates, role: common.RoleRootUser, query: "&time_series=true", want: allSeries, series: true},

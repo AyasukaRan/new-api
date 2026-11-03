@@ -306,7 +306,7 @@ func TestSourceQuotaDataMigrationAndAggregation(t *testing.T) {
 					assert.Equal(t, []SourceQuotaData{{ClientTool: "DeepSeek Harness", Count: 3, TokenUsed: 45, Quota: 300}, {ClientTool: "", Count: 2, TokenUsed: 50, Quota: 500}, {ClientTool: "OpenAI Python SDK", Count: 2, TokenUsed: 50, Quota: 400}}, rows)
 					selfRows, err := GetSourceQuotaData(3600, 7199, "bob", 1, common.RoleCommonUser, false)
 					require.NoError(t, err)
-					assert.Equal(t, []SourceQuotaData{{ClientTool: "DeepSeek Harness", Count: 3, TokenUsed: 45, Quota: 300}, {ClientTool: "", Count: 2, TokenUsed: 50, Quota: 500}, {ClientTool: "OpenAI Python SDK", Count: 1, TokenUsed: 25, Quota: 200}}, selfRows)
+					assert.Equal(t, []SourceQuotaData{{Count: 6, TokenUsed: 120, Quota: 1000}}, selfRows)
 					filtered, err := GetSourceQuotaData(3600, 7199, "bob", 0, common.RoleAdminUser, false)
 					require.NoError(t, err)
 					assert.Equal(t, []SourceQuotaData{{ClientTool: "OpenAI Python SDK", Count: 1, TokenUsed: 25, Quota: 200}}, filtered)
@@ -324,9 +324,7 @@ func TestSourceQuotaDataMigrationAndAggregation(t *testing.T) {
 							{ClientTool: "OpenAI Python SDK", CreatedAt: 7200, Count: 1, TokenUsed: 25, Quota: 200},
 						}},
 						{name: "self", username: "bob", userID: 1, role: common.RoleCommonUser, want: []SourceQuotaData{
-							{ClientTool: "DeepSeek Harness", CreatedAt: 3600, Count: 3, TokenUsed: 45, Quota: 300},
-							{ClientTool: "", CreatedAt: 3600, Count: 2, TokenUsed: 50, Quota: 500},
-							{ClientTool: "OpenAI Python SDK", CreatedAt: 3600, Count: 1, TokenUsed: 25, Quota: 200},
+							{CreatedAt: 3600, Count: 6, TokenUsed: 120, Quota: 1000},
 						}},
 						{name: "admin username", username: "bob", role: common.RoleAdminUser, want: []SourceQuotaData{
 							{ClientTool: "OpenAI Python SDK", CreatedAt: 3600, Count: 1, TokenUsed: 25, Quota: 200},
@@ -435,9 +433,13 @@ func TestSourceQuotaRecordingExcludesProbesAndErrors(t *testing.T) {
 	require.NoError(t, DB.Where("user_id = ? AND client_tool = ? AND model_name = ?", user.Id, "curl", "model").First(&usage).Error)
 	assert.Equal(t, int64(4), usage.CacheReadTokens, "probe usage is excluded from the source/model charts")
 	assert.Equal(t, int64(2), usage.CacheCreationTokens)
-	rows, err := GetSourceQuotaData(1, time.Now().Unix(), "", user.Id, common.RoleCommonUser, false)
+	end := time.Now().Unix()
+	rows, err := GetSourceQuotaData(1, end, user.Username, 0, common.RoleAdminUser, false)
 	require.NoError(t, err)
 	assert.Equal(t, []SourceQuotaData{{ClientTool: "curl", Count: 2, TokenUsed: 10, Quota: 50}, {ClientTool: "", Count: 1, TokenUsed: 10, Quota: 20}}, rows)
+	rows, err = GetSourceQuotaData(1, end, "", user.Id, common.RoleCommonUser, false)
+	require.NoError(t, err)
+	assert.Equal(t, []SourceQuotaData{{Count: 3, TokenUsed: 20, Quota: 70}}, rows)
 	payload, err := common.Marshal(rows)
 	require.NoError(t, err)
 	assert.NotContains(t, string(payload), "never-in-source-response")

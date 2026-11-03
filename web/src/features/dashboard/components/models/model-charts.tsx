@@ -57,6 +57,7 @@ interface ModelChartsProps {
   data: QuotaDataItem[]
   loading?: boolean
   timeGranularity?: TimeGranularity
+  trendOnly?: boolean
   defaultChartTab?: ModelAnalyticsChartTab
   timeDomain?: DashboardChartTimeDomain
   activeTab?: ModelAnalyticsChartTab
@@ -77,7 +78,7 @@ export function ModelCharts(props: ModelChartsProps) {
   const [localTab, setLocalTab] = useState<ModelAnalyticsChartTab>(
     props.defaultChartTab ?? 'trend'
   )
-  const activeTab = props.activeTab ?? localTab
+  const activeTab = props.trendOnly ? 'trend' : (props.activeTab ?? localTab)
   const title = props.title ?? t('Model Call Analytics')
   const [themeReady, setThemeReady] = useState(false)
   const themeManagerRef = useRef<
@@ -168,36 +169,38 @@ export function ModelCharts(props: ModelChartsProps) {
         </div>
 
         <div className='flex min-w-0 flex-wrap items-center gap-2 lg:justify-end'>
-          <div className='bg-muted/60 inline-flex max-w-full overflow-x-auto rounded-lg border p-0.5'>
-            {MODEL_ANALYTICS_CHART_OPTIONS.map((tab) => (
-              <Button
-                key={tab.value}
-                type='button'
-                variant='ghost'
-                size='sm'
-                aria-pressed={activeTab === tab.value}
-                onClick={() => {
-                  if (props.activeTab === undefined) setLocalTab(tab.value)
-                  props.onActiveTabChange?.(tab.value)
-                }}
-                className={`shrink-0 rounded-md px-3 text-xs font-medium transition-colors ${
-                  activeTab === tab.value
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {t(
-                  props.metric && props.metric !== 'requests'
-                    ? {
-                        trend: 'Trend',
-                        proportion: 'Distribution',
-                        top: 'Ranking',
-                      }[tab.value]
-                    : tab.labelKey
-                )}
-              </Button>
-            ))}
-          </div>
+          {!props.trendOnly && (
+            <div className='bg-muted/60 inline-flex max-w-full overflow-x-auto rounded-lg border p-0.5'>
+              {MODEL_ANALYTICS_CHART_OPTIONS.map((tab) => (
+                <Button
+                  key={tab.value}
+                  type='button'
+                  variant='ghost'
+                  size='sm'
+                  aria-pressed={activeTab === tab.value}
+                  onClick={() => {
+                    if (props.activeTab === undefined) setLocalTab(tab.value)
+                    props.onActiveTabChange?.(tab.value)
+                  }}
+                  className={`shrink-0 rounded-md px-3 text-xs font-medium transition-colors ${
+                    activeTab === tab.value
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {t(
+                    props.metric && props.metric !== 'requests'
+                      ? {
+                          trend: 'Trend',
+                          proportion: 'Distribution',
+                          top: 'Ranking',
+                        }[tab.value]
+                      : tab.labelKey
+                  )}
+                </Button>
+              ))}
+            </div>
+          )}
           {props.headerActions}
         </div>
       </div>
@@ -208,6 +211,10 @@ export function ModelCharts(props: ModelChartsProps) {
             key={chartKey}
             spec={{
               ...spec,
+              ...(props.trendOnly && {
+                title: { visible: false },
+                legends: { visible: false },
+              }),
               theme: resolvedTheme === 'dark' ? 'dark' : 'light',
               background: 'transparent',
             }}

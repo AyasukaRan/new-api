@@ -210,22 +210,22 @@ type SourceQuotaData struct {
 
 func GetSourceQuotaData(startTime int64, endTime int64, username string, userID int, role int, timeSeries bool) ([]SourceQuotaData, error) {
 	rows := make([]SourceQuotaData, 0)
-	selectColumns := "COALESCE(client_tool, '') as client_tool, sum(count) as count, sum(token_used) as token_used, sum(quota) as quota"
-	groupColumns := "COALESCE(client_tool, '')"
-	orderColumns := "count DESC, client_tool ASC"
+	selectColumns := "sum(count) as count, sum(token_used) as token_used, sum(quota) as quota"
+	query := DB.Table("quota_data").Where("created_at >= ? AND created_at <= ?", startTime, endTime)
 	if timeSeries {
 		selectColumns += ", created_at"
-		groupColumns += ", created_at"
-		orderColumns = "created_at ASC, " + orderColumns
+		query = query.Group("created_at").Order("created_at ASC")
 	}
-	query := DB.Table("quota_data").
-		Select(selectColumns).
-		Where("created_at >= ? AND created_at <= ?", startTime, endTime)
 	if role < common.RoleAdminUser {
-		query = query.Where("user_id = ?", userID)
-	} else if username != "" {
-		query = query.Where("username = ?", username)
+		// Group by the authenticated user so an empty range still returns no rows.
+		query = query.Where("user_id = ?", userID).Group("user_id")
+	} else {
+		selectColumns += ", COALESCE(client_tool, '') as client_tool"
+		query = query.Group("COALESCE(client_tool, '')").Order("count DESC, client_tool ASC")
+		if username != "" {
+			query = query.Where("username = ?", username)
+		}
 	}
-	err := query.Group(groupColumns).Order(orderColumns).Find(&rows).Error
+	err := query.Select(selectColumns).Find(&rows).Error
 	return rows, err
 }

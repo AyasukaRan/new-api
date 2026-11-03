@@ -61,6 +61,10 @@ export function CallSources(props: CallSourcesProps) {
   const userId = useAuthStore((state) => state.auth.user?.id)
   const role = useAuthStore((state) => state.auth.user?.role)
   const isAdmin = Boolean(role && role >= ROLE.ADMIN)
+  const title = isAdmin ? t('Call Sources') : t('Call Trend')
+  const loadError = isAdmin
+    ? t('Failed to load call sources')
+    : t('Failed to fetch usage')
   const timeGranularity =
     props.filters?.time_granularity ?? DEFAULT_TIME_GRANULARITY
   const params = useMemo(
@@ -93,7 +97,7 @@ export function CallSources(props: CallSourcesProps) {
         await getSourceQuotaData(params, isAdmin)
       )
       if (response.success !== true || !Array.isArray(response.data)) {
-        throw createServerError(response, t('Failed to load call sources'))
+        throw createServerError(response, loadError)
       }
       return response.data
     },
@@ -108,7 +112,9 @@ export function CallSources(props: CallSourcesProps) {
         Number.isFinite(row.created_at)
       ) {
         chartData.push({
-          model_name: row.client_tool || t('Unidentified source'),
+          model_name: isAdmin
+            ? row.client_tool || t('Unidentified source')
+            : t('Requests'),
           created_at: row.created_at,
           count: row.count,
           token_used: row.token_used,
@@ -130,7 +136,7 @@ export function CallSources(props: CallSourcesProps) {
   } else if (query.isError) {
     content = (
       <ErrorState
-        title={t('Failed to load call sources')}
+        title={loadError}
         description={getServerErrorMessage(
           query.error,
           t('Please try again later.')
@@ -145,9 +151,11 @@ export function CallSources(props: CallSourcesProps) {
     content = <EmptyState title={t('No data available')} className='min-h-48' />
   }
 
-  const description = t(
-    'Successful requests by client. Older records without source information appear as unidentified.'
-  )
+  const description = isAdmin
+    ? t(
+        'Successful requests by client. Older records without source information appear as unidentified.'
+      )
+    : undefined
   const refreshButton = (
     <Button
       variant='ghost'
@@ -163,22 +171,23 @@ export function CallSources(props: CallSourcesProps) {
   )
 
   return (
-    <section aria-label={t('Call Sources')} aria-busy={query.isFetching}>
+    <section aria-label={title} aria-busy={query.isFetching}>
       {query.isSuccess && chartData.length > 0 ? (
         <ModelCharts
           metric={isAdmin ? props.metric : undefined}
-          title={t('Call Sources')}
+          title={title}
           description={description}
           headerActions={refreshButton}
           data={chartData}
           timeGranularity={timeGranularity}
           timeDomain={timeDomain}
+          trendOnly={!isAdmin}
           activeTab={props.activeTab}
           onActiveTabChange={props.onActiveTabChange}
         />
       ) : (
         <PanelWrapper
-          title={t('Call Sources')}
+          title={title}
           description={description}
           className='rounded-lg'
           headerActions={refreshButton}

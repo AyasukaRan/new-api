@@ -96,6 +96,12 @@ afterEach(async () => {
   localStorage.clear()
 })
 
+function signInAsAdmin() {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
+}
+
 function renderSources(currentFilters = filters) {
   return render(
     <QueryClientProvider client={client}>
@@ -105,6 +111,7 @@ function renderSources(currentFilters = filters) {
 }
 
 it('retains each source hour in the chart and includes all requests in the total', async () => {
+  signInAsAdmin()
   const get = vi.spyOn(api, 'get').mockResolvedValue({
     data: {
       success: true,
@@ -173,6 +180,7 @@ function SynchronizedCharts(props: { filters: DashboardFilters }) {
 }
 
 it('keeps source and model chart types synchronized in both directions without refetching', async () => {
+  signInAsAdmin()
   const get = vi
     .spyOn(api, 'get')
     .mockResolvedValue({ data: { success: true, data: rows } })
@@ -223,6 +231,7 @@ it('keeps source and model chart types synchronized in both directions without r
 })
 
 it('includes unidentified historical requests with zero cost in the distribution', async () => {
+  signInAsAdmin()
   vi.spyOn(api, 'get').mockResolvedValue({
     data: { success: true, data: rows },
   })
@@ -256,9 +265,7 @@ it('uses the self endpoint without username and sends the selected exact time ra
 })
 
 it('follows the administrator username filter and refreshes the displayed sources', async () => {
-  useAuthStore
-    .getState()
-    .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
+  signInAsAdmin()
   const get = vi
     .spyOn(api, 'get')
     .mockResolvedValue({ data: { success: true, data: rows } })
@@ -311,7 +318,8 @@ it('follows the administrator username filter and refreshes the displayed source
   )
 })
 
-it('clears the previous account sources while the next account is loading', async () => {
+it('clears the administrator source breakdown immediately when the same account loses access', async () => {
+  signInAsAdmin()
   const get = vi
     .spyOn(api, 'get')
     .mockResolvedValue({ data: { success: true, data: rows } })
@@ -327,7 +335,7 @@ it('clears the previous account sources while the next account is loading', asyn
   await act(() =>
     useAuthStore
       .getState()
-      .auth.setUser({ id: 8, username: 'next-member', role: 1, quota: 0 })
+      .auth.setUser({ id: 1, username: 'former-admin', role: 1, quota: 0 })
   )
   expect(await screen.findByRole('status')).toHaveTextContent('Loading...')
   expect(screen.queryByLabelText('Rendered area chart')).not.toBeInTheDocument()
@@ -352,7 +360,7 @@ it.each([
     await userEvent.setup().click(retry)
     expect(
       await screen.findByLabelText('Rendered area chart')
-    ).toHaveTextContent('DeepSeek Harness')
+    ).toHaveTextContent('Requests')
   }
 )
 
@@ -364,6 +372,7 @@ it('keeps the panel empty when the selected range has no usage', async () => {
 })
 
 it('updates the unidentified source chart label after switching language without refetching', async () => {
+  signInAsAdmin()
   const get = vi.spyOn(api, 'get').mockResolvedValue({
     data: { success: true, data: rows },
   })
@@ -384,9 +393,7 @@ it('updates the unidentified source chart label after switching language without
 })
 
 it('renders source gross profit as signed bars for an administrator, sharing the chosen view', async () => {
-  useAuthStore
-    .getState()
-    .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
+  signInAsAdmin()
   vi.spyOn(api, 'get').mockResolvedValue({
     data: {
       success: true,
@@ -421,24 +428,11 @@ it('renders source gross profit as signed bars for an administrator, sharing the
   )
 })
 
-it('keeps normal user source charts on request counts even if a financial metric is supplied', async () => {
+it('combines all personal calls into one trend even with source names and a saved ranking preference', async () => {
   vi.spyOn(api, 'get').mockResolvedValue({
     data: {
       success: true,
-      data: [
-        {
-          ...rows[0],
-          finance: {
-            cost_quota: 650000,
-            profit_quota: -150000,
-            covered_revenue_quota: 500000,
-            recorded_count: 1,
-            actual_count: 1,
-            estimated_count: 0,
-            unrecorded_count: 0,
-          },
-        },
-      ],
+      data: [...rows, { ...rows[0], created_at: rows[1].created_at, count: 2 }],
     },
   })
   render(
@@ -446,13 +440,19 @@ it('keeps normal user source charts on request counts even if a financial metric
       <CallSources filters={filters} metric='profit' activeTab='top' />
     </QueryClientProvider>
   )
-  const chart = await screen.findByLabelText('Rendered bar chart')
-  expect(JSON.parse(chart.textContent ?? '[]')[0].values).toEqual([
-    { Model: 'DeepSeek Harness', Count: 3 },
+  const panel = await screen.findByRole('group', { name: 'Call Trend' })
+  const chart = await within(panel).findByLabelText('Rendered area chart')
+  const data = JSON.parse(chart.textContent ?? '[]')[0].values as Array<{
+    Model: string
+    Count: number
+  }>
+  expect([...new Set(data.map((point) => point.Model))]).toEqual(['Requests'])
+  expect(data.map((point) => point.Count).filter(Boolean)).toEqual([3, 3])
+  expect(within(panel).getByText('6')).toBeVisible()
+  expect(within(panel).getAllByRole('button')).toEqual([
+    within(panel).getByRole('button', { name: 'Refresh' }),
   ])
-  expect(
-    screen.getByRole('button', { name: 'Call Count Ranking' })
-  ).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.queryByText('Call Sources')).not.toBeInTheDocument()
 })
 
 it('does not fetch or expose user financial charts after administrator access is removed', async () => {
@@ -483,9 +483,7 @@ it('does not fetch or expose user financial charts after administrator access is
     selectedRange: 1,
     topUserLimit: 10,
   }
-  useAuthStore
-    .getState()
-    .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
+  signInAsAdmin()
   render(
     <QueryClientProvider client={client}>
       <UserCharts filters={filters} onFiltersChange={() => {}} />
