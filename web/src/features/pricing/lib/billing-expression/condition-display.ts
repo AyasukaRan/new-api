@@ -20,9 +20,14 @@ import type { TOptions } from 'i18next'
 
 import { toIntlLocale } from '@/i18n/languages'
 
-import { flattenBinary } from './display'
+import { flattenBinary, isTimeCondition } from './display'
 import { compileBillingExpression } from './parser'
-import { TIME_FUNCTIONS, type ExpressionNode, type TimeFunction } from './types'
+import {
+  expressionDependencies,
+  TIME_FUNCTIONS,
+  type ExpressionNode,
+  type TimeFunction,
+} from './types'
 
 type Translate = (key: string, options?: TOptions) => string
 type Description = {
@@ -265,4 +270,53 @@ export function formatBillingCondition(
   } catch {
     return null
   }
+}
+
+function isDateFilter(node: ExpressionNode, timezone: string): boolean {
+  if (node.kind === 'binary' && ['&&', '||'].includes(node.operator)) {
+    return (
+      isDateFilter(node.left, timezone) && isDateFilter(node.right, timezone)
+    )
+  }
+  const comparison = timeComparison(node)
+  return Boolean(
+    comparison &&
+    comparison.timezone === timezone &&
+    ['month', 'day', 'weekday'].includes(comparison.name)
+  )
+}
+
+/** Condense a schedule with an explicit date exclusion. Its source remains available in the tier table. */
+export function formatCalendarSchedule(
+  source: string,
+  t: Translate,
+  locale: string
+): string | null {
+  const compiled = compileBillingExpression(source)
+  if (compiled.status !== 'ready') return null
+  const root = compiled.ast
+  const complement = root.kind === 'unary' && root.operator === '!'
+  const rule = complement ? root.operand : root
+  if (
+    rule.kind !== 'binary' ||
+    rule.operator !== '&&' ||
+    rule.right.kind !== 'unary' ||
+    rule.right.operator !== '!' ||
+    !isTimeCondition(rule.left)
+  )
+    return null
+  const dates = rule.right.operand
+  const fields = expressionDependencies(dates).functions
+  if (!fields.has('month') || !fields.has('day')) return null
+  const schedule = describeBillingCondition(rule.left, t, locale)
+  if (!schedule?.timezone || !isDateFilter(dates, schedule.timezone))
+    return null
+  const options = {
+    schedule: schedule.text,
+    timezone: schedule.timezone,
+    interpolation: { escapeValue: false },
+  }
+  return complement
+    ? t('Outside {{schedule}}, or on excluded dates ({{timezone}})', options)
+    : t('{{schedule}}, except on excluded dates ({{timezone}})', options)
 }

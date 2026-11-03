@@ -76,6 +76,37 @@ it('renders weekday and hour conditions as time windows instead of expression so
   expect(screen.queryByText(/weekday\(/)).not.toBeInTheDocument()
 })
 
+it('summarizes calendar exclusions while preserving the recorded tier and exact conditions', async () => {
+  const zone = '"Asia/Shanghai"'
+  const dateFilter = `(month(${zone}) == 1 && day(${zone}) == 1) || (month(${zone}) == 5 && day(${zone}) <= 2 && weekday(${zone}) == 1)`
+  const condition = `weekday(${zone}) >= 1 && weekday(${zone}) <= 5 && ((hour(${zone}) >= 9 && hour(${zone}) < 12) || (hour(${zone}) >= 14 && hour(${zone}) < 18)) && !(${dateFilter})`
+  const expression = `${condition} ? tier("peak", p * 2 + c * 8) : tier("off_peak", p * 1 + c * 4)`
+  render(
+    <DynamicPricingBreakdown
+      billingExpr={expression}
+      matchedTierLabel='off_peak'
+    />
+  )
+
+  const row = screen.getByRole('row', { name: /Off-peak hours/ })
+  expect(within(row).getByText('Matched')).toBeInTheDocument()
+  expect(within(row).getByText('$1.0000')).toBeInTheDocument()
+  expect(
+    within(row).getByRole('button', {
+      name: 'Outside Mon–Fri 09:00–12:00 or 14:00–18:00, or on excluded dates (Asia/Shanghai)',
+    })
+  ).toBeInTheDocument()
+  const peak = screen.getByRole('row', { name: /Peak hours/ })
+  expect(within(peak).queryByText('Matched')).not.toBeInTheDocument()
+  const details = within(peak).getByRole('button', {
+    name: 'Mon–Fri 09:00–12:00 or 14:00–18:00, except on excluded dates (Asia/Shanghai)',
+  })
+  expect(details).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(details)
+  expect(details).toHaveAttribute('aria-expanded', 'true')
+  expect(within(peak).getByText(`(${condition})`)).toBeInTheDocument()
+})
+
 const model: PricingModel = {
   id: 1,
   model_name: 'incho_music',

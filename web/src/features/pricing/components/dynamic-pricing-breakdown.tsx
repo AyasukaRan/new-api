@@ -16,12 +16,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Tag as TagIcon } from 'lucide-react'
+import { ChevronDown, Tag as TagIcon } from 'lucide-react'
 import { useMemo, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { StaticDataTable } from '@/components/data-table'
 import { Badge } from '@/components/ui/badge'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -45,7 +50,10 @@ import {
   type RequestRuleTrace,
   type TierCondition,
 } from '../lib/billing-expr'
-import { formatBillingCondition } from '../lib/billing-expression/condition-display'
+import {
+  formatBillingCondition,
+  formatCalendarSchedule,
+} from '../lib/billing-expression/condition-display'
 import { compileBillingExpression } from '../lib/billing-expression/parser'
 import { isBreakdownTierMatched } from '../lib/breakdown-tier-match'
 import {
@@ -172,26 +180,55 @@ function isTaskBreakdownTier(tier: BreakdownTier): tier is ParsedTaskTier {
   return 'unitPrices' in tier
 }
 
-function formatBreakdownConditionSummary(
+function breakdownTierDescription(
   tier: BreakdownTier,
   t: (key: string) => string,
   schema: BillingUsageSchema | undefined,
   language: string,
   tierCount: number
-): string {
-  if (!isTaskBreakdownTier(tier)) {
-    if (tier.conditionText) {
-      return (
-        formatBillingCondition(tier.conditionText, t, language) ??
-        t(tier.conditionText)
-      )
+): { label: string; summary: ReactNode } {
+  const label = tier.label || t('Default')
+  if (isTaskBreakdownTier(tier)) {
+    return {
+      label,
+      summary:
+        taskTierConditions(tier, schema, language, t) ||
+        t(tierCount > 1 ? 'Other cases' : 'All requests'),
     }
-    return formatConditionSummary(tier.conditions, t)
   }
-  return (
-    taskTierConditions(tier, schema, language, t) ||
-    t(tierCount > 1 ? 'Other cases' : 'All requests')
-  )
+  if (!tier.conditionText)
+    return { label, summary: formatConditionSummary(tier.conditions, t) }
+  const schedule = formatCalendarSchedule(tier.conditionText, t, language)
+  if (!schedule) {
+    return {
+      label,
+      summary:
+        formatBillingCondition(tier.conditionText, t, language) ??
+        t(tier.conditionText),
+    }
+  }
+  let periodLabel = label
+  if (tier.label === 'peak') periodLabel = t('Peak hours')
+  if (tier.label === 'off_peak') periodLabel = t('Off-peak hours')
+  return {
+    label: periodLabel,
+    summary: (
+      <Collapsible>
+        <CollapsibleTrigger className='group inline-flex items-center gap-1 text-start hover:underline'>
+          {schedule}
+          <ChevronDown
+            aria-hidden
+            className='size-3 shrink-0 group-aria-expanded:rotate-180'
+          />
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <code className='mt-1 block max-h-32 overflow-y-auto font-mono text-xs break-all whitespace-pre-wrap'>
+            {tier.conditionText}
+          </code>
+        </CollapsibleContent>
+      </Collapsible>
+    ),
+  }
 }
 
 function formatBreakdownPrice(
@@ -488,7 +525,7 @@ export function DynamicPricingBreakdown({
           )}
           <div className='space-y-1.5 sm:hidden'>
             {tiers.map((tier) => {
-              const condSummary = formatBreakdownConditionSummary(
+              const { label, summary } = breakdownTierDescription(
                 tier,
                 t,
                 usageSchema,
@@ -521,7 +558,7 @@ export function DynamicPricingBreakdown({
                         variant='secondary'
                         className='bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300'
                       >
-                        {tier.label || t('Default')}
+                        {label}
                       </Badge>
                     )}
                     {isMatched && (
@@ -533,9 +570,9 @@ export function DynamicPricingBreakdown({
                       </Badge>
                     )}
                   </div>
-                  {condSummary && (
+                  {summary && (
                     <div className='text-muted-foreground mb-1.5 text-xs'>
-                      {condSummary}
+                      {summary}
                     </div>
                   )}
                   <div
@@ -617,7 +654,7 @@ export function DynamicPricingBreakdown({
                   compact ? 'py-2' : 'py-2.5'
                 ),
                 cell: (tier) => {
-                  const condSummary = formatBreakdownConditionSummary(
+                  const { label, summary } = breakdownTierDescription(
                     tier,
                     t,
                     usageSchema,
@@ -640,7 +677,7 @@ export function DynamicPricingBreakdown({
                             variant='secondary'
                             className='bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300'
                           >
-                            {tier.label || t('Default')}
+                            {label}
                           </Badge>
                         )}
                         {isMatched && (
@@ -652,9 +689,9 @@ export function DynamicPricingBreakdown({
                           </Badge>
                         )}
                       </div>
-                      {condSummary && (
+                      {summary && (
                         <div className='text-muted-foreground mt-1 text-xs'>
-                          {condSummary}
+                          {summary}
                         </div>
                       )}
                     </>

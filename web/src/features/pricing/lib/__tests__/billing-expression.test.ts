@@ -27,7 +27,10 @@ import {
   combineBillingExpr,
   splitBillingExprAndRequestRules,
 } from '../billing-expr'
-import { formatBillingCondition } from '../billing-expression/condition-display'
+import {
+  formatBillingCondition,
+  formatCalendarSchedule,
+} from '../billing-expression/condition-display'
 import { readTokenTierChain } from '../billing-expression/display'
 import { compileBillingExpression } from '../billing-expression/parser'
 import {
@@ -202,6 +205,23 @@ describe('local billing expression evaluation', () => {
       ok: true,
       source,
     })
+  })
+  test('preserves full conditions for date filters with another time zone or a non-date constraint', async () => {
+    const translations = createInstance()
+    await translations.init({ lng: 'zh', resources: { zh } })
+    for (const excluded of [
+      'month("UTC") == 1 && day("UTC") == 1',
+      'month("Asia/Shanghai") == 1 && day("Asia/Shanghai") == 1 && hour("Asia/Shanghai") < 12',
+      'month("Asia/Shanghai") == 1 && day("Asia/Shanghai") == 1 && p > 10',
+    ]) {
+      expect(
+        formatCalendarSchedule(
+          `${peakCondition} && !(${excluded})`,
+          translations.t,
+          'zh'
+        )
+      ).toBeNull()
+    }
   })
   test('localizes peak and complement conditions without exposing source code', async () => {
     const translations = createInstance()
