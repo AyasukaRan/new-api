@@ -56,7 +56,7 @@ func seedExportLogs(t *testing.T, mainDB *gorm.DB, logDB *gorm.DB, now int64) {
 	t.Helper()
 	require.NoError(t, mainDB.Create(&model.Channel{Id: 9, Name: "primary"}).Error)
 	logs := []model.Log{
-		{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, Quota: 10, RequestId: "a-1", Other: `{"admin_info":{"use_channel":["9"]}}`},
+		{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 9, TokenId: 23, Quota: 10, RequestId: "a-1", Other: `{"admin_info":{"use_channel":["9"]}}`},
 		{UserId: 2, Username: "bob", CreatedAt: now - 1800, Type: model.LogTypeConsume, ModelName: "gpt-b", ChannelId: 9, Quota: 20, RequestId: "b-1"},
 		{UserId: 1, Username: "alice", CreatedAt: now - 60, Type: model.LogTypeError, ModelName: "gpt-a", RequestId: "a-2"},
 		{UserId: 1, Username: "alice", CreatedAt: now - 400*24*3600, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "a-old"},
@@ -109,7 +109,7 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				mainType = common.DatabaseTypeSQLite
 			}
 			useLogExportDatabases(t, mainDB, db, mainType, tc.typ)
-			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}))
+			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}, &model.User{}))
 			if tc.kind == "clickhouse" {
 				t.Setenv("LOG_SQL_DSN", isolatedDSN)
 				require.NoError(t, model.InitLogDB())
@@ -157,6 +157,41 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			require.Len(t, userProbes, 3)
 			assert.Equal(t, []any{"a-2", "a-1"}, exportedRequestIds(userProbes), "user exports always retain usage isolation")
 
+			// The captured name belongs to a different account now. Searches,
+			// displayed rows and exported data must resolve the original user ID.
+			require.NoError(t, mainDB.Create(&model.User{Id: 1, Username: "463360046", AffCode: "rename1"}).Error)
+			require.NoError(t, mainDB.Create(&model.User{Id: 3, Username: "alice", AffCode: "reuse1"}).Error)
+			for _, name := range []string{"463360046", "46336%25"} {
+				matched := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, query+"&username="+name)[0]
+				require.Equal(t, true, matched["success"])
+				result := matched["data"].(map[string]any)
+				require.EqualValues(t, 2, result["total"])
+				for _, row := range result["items"].([]any) {
+					assert.Equal(t, "463360046", row.(map[string]any)["username"])
+				}
+			}
+			renamed := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&username=463360046")
+			require.Len(t, renamed, 3)
+			assert.Equal(t, "463360046", renamed[1]["username"])
+			own = callLogHandler(t, ExportUserLogs, 1, common.RoleCommonUser, query)
+			require.Len(t, own, 3)
+			assert.Equal(t, "463360046", own[0]["username"])
+			tokenLogs, err := model.GetLogByTokenId(23)
+			require.NoError(t, err)
+			require.Len(t, tokenLogs, 1)
+			assert.Equal(t, "463360046", tokenLogs[0].Username)
+
+			stats, err := model.SumUsedQuota(context.Background(), model.LogFilter{Username: "463360046", StartTimestamp: now - 2*24*3600}, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, 10, stats.Quota)
+			reassigned := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&username=alice")
+			require.Len(t, reassigned, 1)
+			assert.Equal(t, true, reassigned[0]["success"])
+			// Deleted or imported accounts without a current user retain their label.
+			orphan := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&username=bob")
+			require.Len(t, orphan, 2)
+			assert.Equal(t, "bob", orphan[0]["username"])
+
 			for _, log := range []model.Log{
 				{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "backfill-tie"},
 				{UserId: 1, Username: "alice", CreatedAt: now - 7200, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "backfill-older"},
@@ -182,7 +217,7 @@ func TestLogExportRules(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, _ := newAuditTestDatabase(t, "sqlite", "")
 	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
-	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Log{}, &model.QuotaData{}))
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Log{}, &model.QuotaData{}, &model.User{}))
 	now := time.Now().Unix()
 	seedExportLogs(t, db, db, now)
 	logSetting := operation_setting.GetLogSetting()

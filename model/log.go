@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -215,8 +217,11 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 		order = clickHouseLogOrder("")
 	}
 	err = applyLogSourceFilter(LOG_DB.Model(&Log{})).Where("token_id = ?", tokenId).Order(order).Limit(common.MaxRecentItems).Find(&logs).Error
+	if err != nil {
+		return nil, err
+	}
 	formatUserLogs(logs, 0)
-	return logs, err
+	return logs, resolveLogUsernames(logs)
 }
 
 func RecordLog(userId int, logType int, content *common.Message) {
@@ -577,6 +582,56 @@ type LogFilter struct {
 	UpstreamRequestId string
 }
 
+// A registered username identifies its current owner, even if another account
+// once had the same name. Unassigned names still find historical log snapshots.
+func filterLogsByUsername(tx *gorm.DB, username string) (*gorm.DB, error) {
+	if username == "" {
+		return tx, nil
+	}
+	users := DB.WithContext(tx.Statement.Context).Model(&User{})
+	if !strings.Contains(username, "%") {
+		var id int
+		if err := users.Where("username = ?", username).Limit(1).Pluck("id", &id).Error; err != nil {
+			return nil, err
+		}
+		if id != 0 {
+			return tx.Where("logs.user_id = ?", id), nil
+		}
+		return tx.Where("logs.username = ?", username), nil
+	}
+	// Wildcards can match both current and historical names. The two databases
+	// need different escaping when logs are in ClickHouse.
+	pattern, err := sanitizeLikePattern(username)
+	if err != nil {
+		return nil, err
+	}
+	condition, logPattern, err := buildLogLikeCondition("logs.username", username)
+	if err != nil {
+		return nil, err
+	}
+	matching := users.Where("username LIKE ? ESCAPE '!'", pattern)
+	if DB == LOG_DB {
+		return tx.Where("("+condition+" OR logs.user_id IN (?))", logPattern, matching.Select("id")), nil
+	}
+	var ids []int
+	if err := matching.Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return tx.Where(condition, logPattern), nil
+	}
+	// The log database cannot join users across connections. A numeric list
+	// of IDs from the main database avoids per-dialect bind parameter limits.
+	var list strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			list.WriteByte(',')
+		}
+		list.WriteString(strconv.Itoa(id))
+	}
+	return tx.Where("("+condition+" OR logs.user_id IN ("+list.String()+"))", logPattern), nil
+}
+
 func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	var err error
 	tx = applyLogSourceFilter(tx, f.Source)
@@ -590,7 +645,7 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", f.ModelName); err != nil {
 		return nil, err
 	}
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", f.Username); err != nil {
+	if tx, err = filterLogsByUsername(tx, f.Username); err != nil {
 		return nil, err
 	}
 	if f.TokenName != "" {
@@ -615,6 +670,48 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 		tx = tx.Where("logs."+logGroupCol+" = ?", f.Group)
 	}
 	return tx, nil
+}
+
+// The main database may be separate from the log database. Resolve names in
+// batches and keep the recorded name when the account no longer exists.
+func currentLogUsernames(ctx context.Context, ids []int) (map[int]string, error) {
+	names := make(map[int]string, len(ids))
+	for batch := range slices.Chunk(ids, 500) {
+		var users []struct {
+			Id       int
+			Username string
+		}
+		if err := DB.WithContext(ctx).Model(&User{}).Select("id", "username").Where("id IN ?", batch).Find(&users).Error; err != nil {
+			return nil, err
+		}
+		for _, user := range users {
+			names[user.Id] = user.Username
+		}
+	}
+	return names, nil
+}
+
+func (l *Log) useCurrentUsername(names map[int]string) {
+	if name, ok := names[l.UserId]; ok {
+		l.Username = name
+	}
+}
+
+func resolveLogUsernames(logs []*Log) error {
+	ids := types.NewSet[int]()
+	for _, log := range logs {
+		if log.UserId > 0 {
+			ids.Add(log.UserId)
+		}
+	}
+	names, err := currentLogUsernames(context.Background(), ids.Items())
+	if err != nil {
+		return err
+	}
+	for _, log := range logs {
+		log.useCurrentUsername(names)
+	}
+	return nil
 }
 
 func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
@@ -678,7 +775,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 		}
 	}
 
-	return logs, total, err
+	return logs, total, resolveLogUsernames(logs)
 }
 
 const logSearchCountLimit = 10000
@@ -705,7 +802,7 @@ func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*L
 	}
 
 	formatUserLogs(logs, startIdx)
-	return logs, total, err
+	return logs, total, resolveLogUsernames(logs)
 }
 
 // StreamAllLogs calls fn with each log matching filter, newest first, as an
@@ -723,6 +820,15 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 	// Resolve names before opening the log cursor. The main and log database
 	// can share a single connection, so a lookup inside the cursor would wait
 	// for the very connection held by that cursor.
+	var userIDs []int
+	if err := tx.Session(&gorm.Session{}).Model(&Log{}).Distinct("user_id").
+		Where("logs.user_id > ?", 0).Pluck("user_id", &userIDs).Error; err != nil {
+		return err
+	}
+	names, err := currentLogUsernames(ctx, userIDs)
+	if err != nil {
+		return err
+	}
 	var channelIDs []int
 	if err := tx.Session(&gorm.Session{}).Model(&Log{}).Distinct("channel_id").
 		Where("logs.channel_id <> ?", 0).Pluck("channel_id", &channelIDs).Error; err != nil {
@@ -743,6 +849,7 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 		}
 	}
 	return streamLogs(tx, "logs.created_at desc, logs.id desc", func(log *Log) error {
+		log.useCurrentUsername(names)
 		log.ChannelName = channelNames[log.ChannelId]
 		log.Other = formatLogOtherJSON(log.Other, visibility)
 		return fn(log)
@@ -757,10 +864,15 @@ func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*
 	if err != nil {
 		return err
 	}
+	names, err := currentLogUsernames(ctx, []int{userId})
+	if err != nil {
+		return err
+	}
 	count := 0
 	return streamLogs(tx, "logs.id desc", func(log *Log) error {
 		count++
 		log.Id = count
+		log.useCurrentUsername(names)
 		log.ChannelName = ""
 		log.Other = formatLogOtherJSON(log.Other, logOtherVisibilityUser)
 		return fn(log)
