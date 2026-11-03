@@ -303,14 +303,16 @@ export function formatCalendarSchedule(
     rule.right.kind !== 'unary' ||
     rule.right.operator !== '!' ||
     !isTimeCondition(rule.left)
-  )
+  ) {
     return null
+  }
   const dates = rule.right.operand
   const fields = expressionDependencies(dates).functions
   if (!fields.has('month') || !fields.has('day')) return null
   const schedule = describeBillingCondition(rule.left, t, locale)
-  if (!schedule?.timezone || !isDateFilter(dates, schedule.timezone))
+  if (!schedule?.timezone || !isDateFilter(dates, schedule.timezone)) {
     return null
+  }
   const options = {
     schedule: schedule.text,
     timezone: schedule.timezone,

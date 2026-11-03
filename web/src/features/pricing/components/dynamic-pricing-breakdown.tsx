@@ -196,8 +196,9 @@ function breakdownTierDescription(
         t(tierCount > 1 ? 'Other cases' : 'All requests'),
     }
   }
-  if (!tier.conditionText)
+  if (!tier.conditionText) {
     return { label, summary: formatConditionSummary(tier.conditions, t) }
+  }
   const schedule = formatCalendarSchedule(tier.conditionText, t, language)
   if (!schedule) {
     return {

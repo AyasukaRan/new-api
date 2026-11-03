@@ -190,7 +190,7 @@ func (o *LogOther) JSONString() string {
 	return o.jsonString()
 }
 
-// ClientTool returns the public request-source label recorded for this call.
+// ClientTool returns the stored request-source label used by usage aggregation.
 func (o *LogOther) ClientTool() string {
 	if o == nil {
 		return ""

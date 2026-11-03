@@ -248,7 +248,7 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 					_ = connection.Close()
 				}
 			})
-			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}))
+			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}, &model.User{}))
 			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
 			now := common.GetTimestamp()
 			start := now - 600

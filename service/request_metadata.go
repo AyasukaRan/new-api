@@ -380,8 +380,8 @@ func (m *requestMetadata) acceptResponsesTool(item gjson.Result, complete bool) 
 	}
 }
 
-// AppendRequestMetadata uses public log metadata: owners can see their own
-// client and requested tool names, but no raw headers or tool arguments.
+// AppendRequestMetadata retains the top-level fields used by usage aggregation.
+// Personal log projections expose reasoning effort and omit client and tool metadata.
 func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *model.LogOther) {
 	if other == nil || c == nil {
 		return
