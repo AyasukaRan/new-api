@@ -156,6 +156,18 @@ async function renderPage(path = '/security') {
 }
 
 describe('security page migration', () => {
+  it('only shows regular users their applicable personal sidebar switches', async () => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ ...profile, permissions: { sidebar_settings: true } })
+    await renderPage('/profile')
+    expect(
+      await screen.findByText('Customize sidebar display content')
+    ).toBeVisible()
+    expect(screen.getByText('API usage records')).toBeVisible()
+    expect(screen.queryByText('Audit Logs')).not.toBeInTheDocument()
+  })
+
   it('places account management on the left and verification on the right', async () => {
     await renderPage()
     const login = await screen.findByRole('region', {

@@ -7606,7 +7606,7 @@
     "View users, their sign-in bindings, and permission settings.": "ユーザー、ログイン連携、権限設定を表示します。",
     "View your profile, groups, and available models.": "プロフィール、グループ、利用可能なモデルを表示します。",
     "View your topup transaction records and payment history": "チャージ取引記録と支払い履歴を表示",
-    "View your usage logs, statistics, tasks, and audit logs.": "利用ログ、統計、タスク、監査ログを表示します。",
+    "View your usage logs, statistics, and tasks.": "利用ログ、統計、タスクを表示します。",
     "Viewed channel key {{name}} (ID: {{id}})": "チャネルキー {{name}} を表示しました（ID: {{id}}）",
     "Violation Code": "違反コード",
     "Violation deduction amount": "違反控除金額",

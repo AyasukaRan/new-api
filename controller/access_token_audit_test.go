@@ -578,7 +578,7 @@ func TestAuditIsolationVisibilityAndFailureContracts(t *testing.T) {
 	}
 	router := gin.New()
 	router.Use(middleware.RequestId(), middleware.AccessTokenAudit())
-	router.GET("/api/audit/self", middleware.UserAuth(), GetAuditLogs)
+	router.GET("/api/audit/self", middleware.AdminAuth(), GetAuditLogs)
 	router.GET("/api/audit", middleware.AdminAuth(), middleware.RequirePermission(authz.AuditRead), GetAuditLogs)
 	response := auditRequest(router, "GET", "/api/audit/self?username=other&user_id=2&category=security&success=false&page_size=1", pat)
 	var result struct {
@@ -645,7 +645,7 @@ func TestAuditRoleVisibilityAndPermissions(t *testing.T) {
 	router := gin.New()
 	router.Use(middleware.RequestId(), middleware.AccessTokenAudit())
 	router.GET("/api/audit", middleware.AdminAuth(), middleware.RequirePermission(authz.AuditRead), GetAuditLogs)
-	router.GET("/api/audit/self", middleware.UserAuth(), GetAuditLogs)
+	router.GET("/api/audit/self", middleware.AdminAuth(), GetAuditLogs)
 	now := time.Now().Unix()
 	session := &model.UserSession{SID: "audit-permissions-session", UserID: admin.Id, Version: 1, UserAuthVersion: 1, Status: model.UserSessionStatusActive, RefreshHash: "placeholder", LoginMethod: "password", LastActiveAt: now, ExpiresAt: now + 3600}
 	require.NoError(t, model.CreateUserSession(session))

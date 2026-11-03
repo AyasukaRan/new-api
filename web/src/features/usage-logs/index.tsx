@@ -25,6 +25,7 @@ import type { NavGroup } from '@/components/layout/types'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { CacheStatsDialog } from '@/features/system-settings/general/channel-affinity/cache-stats-dialog'
 import { useSidebarConfig } from '@/hooks/use-sidebar-config'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { UserInfoDialog } from './components/dialogs/user-info-dialog'
 import {
@@ -191,8 +192,12 @@ function UsageLogsContent() {
 export function UsageLogs() {
   const { section } = route.useParams()
   const source = section === 'test' ? 'test' : 'usage'
+  const user = useAuthStore((state) => state.auth.user)
   return (
-    <UsageLogsProvider key={source} source={source}>
+    <UsageLogsProvider
+      key={`${source}:${user?.id}:${user?.role}`}
+      source={source}
+    >
       <UsageLogsContent />
     </UsageLogsProvider>
   )

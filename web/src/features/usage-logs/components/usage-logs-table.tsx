@@ -98,10 +98,10 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
-  const userId = useAuthStore((state) => state.auth.user?.id)
+  const user = useAuthStore((state) => state.auth.user)
   const { data: showBillingSource = false } = useQuery({
-    queryKey: ['usage-log-billing-source', isAdmin, userId],
-    enabled: logCategory === 'common' && userId != null,
+    queryKey: ['usage-log-billing-source', isAdmin, user?.id],
+    enabled: logCategory === 'common' && user?.id != null,
     queryFn: async () => {
       if (isAdmin) {
         const plansResult = await getAdminPlans()
@@ -167,6 +167,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       logCategory,
       viewAccess,
       logSource,
+      user?.id,
+      user?.role,
       pagination.pageIndex + 1,
       pagination.pageSize,
       columnFilters,
@@ -194,7 +196,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       if (
         previousQuery?.queryKey[1] === logCategory &&
         previousQuery.queryKey[2] === viewAccess &&
-        previousQuery.queryKey[3] === logSource
+        previousQuery.queryKey[3] === logSource &&
+        previousQuery.queryKey[4] === user?.id &&
+        previousQuery.queryKey[5] === user?.role
       ) {
         return previousData
       }

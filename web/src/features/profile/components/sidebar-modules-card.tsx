@@ -35,6 +35,7 @@ import { parseSidebarModulesAdmin } from '@/features/system-settings/maintenance
 import { useStatus } from '@/hooks/use-status'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 type SidebarModuleConfig = {
@@ -48,7 +49,12 @@ type SectionDef = {
   key: string
   title: string
   description: string
-  modules: { key: string; title: string; description: string }[]
+  modules: {
+    key: string
+    title: string
+    description: string
+    requiredRole?: number
+  }[]
 }
 
 export function SidebarModulesCard() {
@@ -99,6 +105,7 @@ export function SidebarModulesCard() {
         },
         {
           key: 'audit',
+          requiredRole: ROLE.ADMIN,
           title: t('Audit Logs'),
           description: t('Login, security and access records'),
         },
@@ -147,7 +154,10 @@ export function SidebarModulesCard() {
         if (!adminSection?.enabled) return []
 
         const modules = section.modules.filter(
-          (module) => adminSection[module.key] === true
+          (module) =>
+            adminSection[module.key] === true &&
+            (currentUser?.role ?? ROLE.GUEST) >=
+              (module.requiredRole ?? ROLE.GUEST)
         )
         return modules.length ? [{ ...section, modules }] : []
       })

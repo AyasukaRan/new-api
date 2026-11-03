@@ -97,6 +97,7 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Audit Logs'),
             url: '/usage-logs/audit',
             icon: ClipboardList,
+            requiredRole: ROLE.ADMIN,
           },
           {
             title: t('Test Logs'),

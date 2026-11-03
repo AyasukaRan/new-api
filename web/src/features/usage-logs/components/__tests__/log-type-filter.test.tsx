@@ -36,6 +36,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { CommonLogsFilterBar } from '../common-logs-filter-bar'
 import { UsageLogsProvider } from '../usage-logs-provider'
@@ -54,12 +55,12 @@ function FilterFixture() {
 }
 
 async function renderFilter() {
-  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
-    data: {
-      success: true,
-      data: url === '/api/user/self/groups' ? {} : { quota: 0, rpm: 0, tpm: 0 },
-    },
-  }))
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/group/') return { data: { success: true, data: [] } }
+    const data =
+      url === '/api/user/self/groups' ? {} : { quota: 0, rpm: 0, tpm: 0 }
+    return { data: { success: true, data } }
+  })
   const root = createRootRoute()
   const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
   const logs = createRoute({
@@ -86,10 +87,12 @@ async function renderFilter() {
 
 afterEach(() => {
   cleanup()
+  useAuthStore.getState().auth.reset()
   vi.restoreAllMocks()
 })
 
 it('marks only retired log types as deprecated while keeping historical filters selectable', async () => {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
   const router = await renderFilter()
   await userEvent.click(screen.getByRole('combobox', { name: 'Type' }))
   for (const label of ['Manage', 'Login']) {
@@ -127,4 +130,17 @@ it('marks only retired log types as deprecated while keeping historical filters 
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({ type: ['7'], page: 1 })
   )
+})
+
+it('hides historical audit filters from regular users and still offers usage records', async () => {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
+  await renderFilter()
+  await userEvent.click(screen.getByRole('combobox', { name: 'Type' }))
+  expect(screen.getByRole('option', { name: 'Consume' })).toBeVisible()
+  expect(
+    screen.queryByRole('option', { name: /^Manage/ })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('option', { name: /^Login/ })
+  ).not.toBeInTheDocument()
 })

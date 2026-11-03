@@ -209,6 +209,39 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			assert.EqualValues(t, 4, total)
 			require.Len(t, page, 2)
 			assert.Equal(t, []string{"a-1", "backfill-older"}, []string{page[0].RequestId, page[1].RequestId}, "equal timestamps use a stable tie-breaker across pages")
+			t.Run("legacy audit isolation", func(t *testing.T) {
+				for _, row := range []model.Log{
+					{UserId: 77, TokenId: 778, Type: model.LogTypeManage, RequestId: "legacy-operation", CreatedAt: now - 2},
+					{UserId: 77, TokenId: 778, Type: model.LogTypeLogin, RequestId: "legacy-signin", CreatedAt: now - 1},
+					{UserId: 77, TokenId: 778, Type: model.LogTypeConsume, RequestId: "normal-usage", CreatedAt: now},
+				} {
+					require.NoError(t, model.LOG_DB.Create(&row).Error)
+				}
+				for _, logType := range []int{0, model.LogTypeManage, model.LogTypeLogin} {
+					forged := fmt.Sprintf("%s&type=%d&role=100&source=test&admin_self_view=true", query, logType)
+					list := callLogHandler(t, GetUserLogs, 77, common.RoleCommonUser, forged)[0]
+					require.Equal(t, true, list["success"])
+					data := list["data"].(map[string]any)
+					export := callLogHandler(t, ExportUserLogs, 77, common.RoleCommonUser, forged)
+					wanted := []any{}
+					if logType == 0 {
+						wanted = append(wanted, "normal-usage")
+					}
+					assert.EqualValues(t, len(wanted), data["total"])
+					require.Len(t, data["items"], len(wanted))
+					if len(wanted) != 0 {
+						assert.Equal(t, wanted[0], data["items"].([]any)[0].(map[string]any)["request_id"])
+					}
+					assert.Equal(t, wanted, exportedRequestIds(export))
+					assert.Equal(t, true, export[len(export)-1]["success"])
+				}
+				tokenRows, err := model.GetLogByTokenId(778)
+				require.NoError(t, err)
+				require.Len(t, tokenRows, 1)
+				assert.Equal(t, "normal-usage", tokenRows[0].RequestId)
+				ownAdmin := callLogHandler(t, ExportUserLogs, 77, common.RoleAdminUser, query)
+				assert.Equal(t, []any{"normal-usage", "legacy-signin", "legacy-operation"}, exportedRequestIds(ownAdmin))
+			})
 		})
 	}
 }

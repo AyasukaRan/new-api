@@ -30,6 +30,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 import { Route as LogsRoute } from '@/routes/_authenticated/usage-logs/$section'
+import { Route as AuditRoute } from '@/routes/_authenticated/usage-logs/audit'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema } from '../../data/schema'
@@ -82,13 +83,19 @@ async function renderLogs(section: string, role = 100) {
     beforeLoad: (context) => LogsRoute.options.beforeLoad?.(context as never),
     validateSearch: (search: Record<string, unknown>) => search,
   })
+  const audit = createRoute({
+    getParentRoute: () => auth,
+    path: '/usage-logs/audit',
+    component: AuditRoute.options.component,
+    beforeLoad: (context) => AuditRoute.options.beforeLoad?.(context as never),
+  })
   const forbidden = createRoute({
     getParentRoute: () => root,
     path: '/403',
     component: () => <h1>Forbidden</h1>,
   })
   const router = createRouter({
-    routeTree: root.addChildren([auth.addChildren([logs]), forbidden]),
+    routeTree: root.addChildren([auth.addChildren([logs, audit]), forbidden]),
     history: createMemoryHistory({
       initialEntries: [`/usage-logs/${section}`],
     }),
@@ -98,8 +105,13 @@ async function renderLogs(section: string, role = 100) {
       <RouterProvider router={router} />
     </QueryClientProvider>
   )
-  let heading = section === 'test' ? 'Test Logs' : 'Common Logs'
-  if (role < 10 && section === 'test') heading = 'Forbidden'
+  const titles: Record<string, string> = {
+    test: 'Test Logs',
+    audit: 'Audit Logs',
+    common: 'Common Logs',
+  }
+  let heading = titles[section]
+  if (role < 10 && ['test', 'audit'].includes(section)) heading = 'Forbidden'
   await screen.findByRole('heading', { name: heading })
   return router
 }
@@ -222,11 +234,81 @@ it.each([2, 8])(
   }
 )
 
-it('denies direct test-page access to regular users before any test API request', async () => {
-  const get = vi.spyOn(api, 'get')
-  const router = await renderLogs('test', 1)
+it.each(['test', 'audit'])(
+  'denies direct %s page access to regular users before any log API request',
+  async (section) => {
+    const get = vi.spyOn(api, 'get')
+    const router = await renderLogs(section, 1)
+    expect(router.state.location.pathname).toBe('/403')
+    expect(
+      get.mock.calls.some(([path]) => /\/api\/(log|audit)/.test(path))
+    ).toBe(false)
+  }
+)
+
+it('closes an open audit page immediately when the account loses its administrator role', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { items: [], total: 0 } },
+  })
+  const router = await renderLogs('audit', 10)
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith('/api/audit/self', expect.anything())
+  )
+  await act(() =>
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
+  )
+  expect(
+    await screen.findByRole('heading', { name: 'Forbidden' })
+  ).toBeVisible()
   expect(router.state.location.pathname).toBe('/403')
   expect(
-    get.mock.calls.some(([path]) => String(path).includes('/api/log'))
-  ).toBe(false)
+    screen.queryByRole('heading', { name: 'Audit Logs' })
+  ).not.toBeInTheDocument()
+})
+
+it('discarding the administrator role also discards cached personal log rows', async () => {
+  let resolve: ((value: { data: unknown }) => void) | undefined
+  const pending = new Promise<{ data: unknown }>((complete) => {
+    resolve = complete
+  })
+  vi.spyOn(api, 'get').mockImplementation(async (path) => {
+    const url = new URL(path, 'http://localhost')
+    if (url.pathname === '/api/group/') {
+      return { data: { success: true, data: [] } }
+    }
+    if (url.pathname.endsWith('/stat')) {
+      return { data: { success: true, data: { quota: 0, rpm: 0, tpm: 0 } } }
+    }
+    if (url.pathname === '/api/log/self') {
+      if (useAuthStore.getState().auth.user?.role === 1) return pending
+      return {
+        data: {
+          success: true,
+          data: {
+            items: [
+              { ...usageLog, type: 3, content: 'historical-management-row' },
+            ],
+            total: 1,
+          },
+        },
+      }
+    }
+    return { data: { success: true, data: { items: [], total: 0 } } }
+  })
+  await renderLogs('common', 10)
+  await userEvent.click(screen.getByRole('tab', { name: 'Only Mine' }))
+  await userEvent.click(
+    await screen.findByRole('button', { name: 'historical-management-row' })
+  )
+  expect(await screen.findByRole('dialog')).toBeVisible()
+  await act(() =>
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
+  )
+  expect(
+    screen.queryByRole('button', { name: 'historical-management-row' })
+  ).not.toBeInTheDocument()
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  await act(() =>
+    resolve?.({ data: { success: true, data: { items: [], total: 0 } } })
+  )
 })

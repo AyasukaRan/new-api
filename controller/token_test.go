@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/QuantumNous/new-api/service/authz"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -736,7 +737,8 @@ func TestAPITokenAuditDatabaseMatrix(t *testing.T) {
 				db, _ := newAuditTestDatabase(t, database.name, dsn)
 				model.DB = db
 				common.SetDatabaseTypes(database.typ, database.typ)
-				require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Token{}))
+				require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Token{}, &model.UserAccessToken{}, &model.Option{}))
+				require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
 				// Initialize production column quoting as well as the existing audit table.
 				require.NoError(t, model.InitLogDB())
 				if separateLog {
@@ -791,7 +793,8 @@ func verifyAPITokenAudit(t *testing.T) {
 	tokenRoutes.GET("/", GetAllTokens)
 	tokenRoutes.GET("/:id", GetToken)
 	tokenRoutes.GET("/search", SearchTokens)
-	router.GET("/api/audit/self", middleware.UserAuth(), GetAuditLogs)
+	router.GET("/api/audit/self", middleware.AdminAuth(), GetAuditLogs)
+	router.GET("/api/audit", middleware.AdminAuth(), middleware.RequirePermission(authz.AuditRead), GetAuditLogs)
 
 	for index, tc := range []struct {
 		name, method, path, body, action string
@@ -989,12 +992,17 @@ func verifyAPITokenAudit(t *testing.T) {
 		}
 	})
 
-	t.Run("self audit excludes other owners", func(t *testing.T) {
+	t.Run("personal and token-filtered audit events require an administrator", func(t *testing.T) {
 		model.RecordAuditLog(nil, model.AuditLog{UserId: other.Id, Username: other.Username, ActorRole: common.RoleCommonUser, Category: model.AuditCategorySecurity, Action: "token.delete", Content: "other-user-audit", Success: true})
-		response := auditRequest(router, "GET", "/api/audit/self?category=security&page_size=100", jwt)
-		assert.Equal(t, 200, response.Code)
-		assert.Contains(t, response.Body.String(), "token.create")
-		assert.NotContains(t, response.Body.String(), "other-user-audit")
+		scoped, _ := createScopedAccessToken(t, user.Id, time.Now().Add(time.Hour).Unix(), "usage:read")
+		for _, credential := range []string{jwt, scoped, pat} {
+			for _, path := range []string{"/api/audit", "/api/audit/self?category=security&page_size=100", "/api/audit/self?category=access_token&token_ref=" + model.AccessTokenFingerprint(scoped) + "&user_id=1&role=100"} {
+				response := auditRequest(router, "GET", path, credential)
+				assert.Equal(t, http.StatusForbidden, response.Code)
+				assert.NotContains(t, response.Body.String(), "token.create")
+				assert.NotContains(t, response.Body.String(), "other-user-audit")
+			}
+		}
 	})
 
 	t.Run("audit storage failure preserves operation result", func(t *testing.T) {

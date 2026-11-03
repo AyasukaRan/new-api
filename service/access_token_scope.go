@@ -63,7 +63,7 @@ var accessTokenStaticResources = []AccessTokenResource{
 		{Action: accessTokenActionReveal, LabelKey: "Reveal full keys", DescriptionKey: "View complete API keys."},
 	}},
 	{Resource: "usage", LabelKey: "Usage", group: AccessTokenGroupPersonal, minRole: common.RoleCommonUser, Actions: []authz.ActionDefinition{
-		accessTokenView("View your usage logs, statistics, tasks, and audit logs."),
+		accessTokenView("View your usage logs, statistics, and tasks."),
 	}},
 	{Resource: "wallet", LabelKey: "Wallet", group: AccessTokenGroupPersonal, minRole: common.RoleCommonUser, Actions: []authz.ActionDefinition{
 		accessTokenView("View balance, top-up records, subscriptions, and referral information."),

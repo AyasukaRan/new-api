@@ -45,6 +45,7 @@ import {
 } from '@/components/ui/sheet'
 import { SecureVerificationDialog } from '@/features/auth/secure-verification'
 import { AuditLogViewer } from '@/features/usage-logs/audit/components/audit-log-viewer'
+import { useIsAdmin } from '@/hooks/use-admin'
 import { toIntlLocale } from '@/i18n/languages'
 
 import type { AccessTokenItem as AccessToken } from '../api'
@@ -57,6 +58,7 @@ import { AccessTokenEditDialog } from './dialogs/access-token-edit-dialog'
 export function AccessTokensCard() {
   const { t, i18n } = useTranslation()
   const access = useAccessTokens()
+  const canViewRecords = useIsAdmin()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const timeFormat = useMemo(
     () =>
@@ -152,13 +154,15 @@ export function AccessTokensCard() {
                 )}
               </p>
               <div className='flex flex-wrap gap-2'>
-                <Button
-                  size='sm'
-                  variant='outline'
-                  onClick={() => setRecords({ tokenRef: legacy.token_ref })}
-                >
-                  {t('Access records')}
-                </Button>
+                {canViewRecords && (
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={() => setRecords({ tokenRef: legacy.token_ref })}
+                  >
+                    {t('Access records')}
+                  </Button>
+                )}
                 <Button
                   size='sm'
                   variant='destructive'
@@ -190,8 +194,10 @@ export function AccessTokensCard() {
                   disabled={access.pending}
                   canEdit={!!catalog}
                   onEdit={setEditTarget}
-                  onShowRecords={(target) =>
-                    setRecords({ tokenRef: target.token_ref })
+                  onShowRecords={
+                    canViewRecords
+                      ? (target) => setRecords({ tokenRef: target.token_ref })
+                      : undefined
                   }
                   onRevoke={setRevokeTarget}
                 />
@@ -214,9 +220,15 @@ export function AccessTokensCard() {
             )}
           </CardDescription>
           <CardAction className='flex flex-wrap justify-end gap-2'>
-            <Button size='sm' variant='outline' onClick={() => setRecords({})}>
-              {t('Access records')}
-            </Button>
+            {canViewRecords && (
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => setRecords({})}
+              >
+                {t('Access records')}
+              </Button>
+            )}
             <Button
               size='sm'
               disabled={!catalog || atLimit || access.pending}
@@ -280,45 +292,47 @@ export function AccessTokensCard() {
         isLoading={access.pending}
         handleConfirm={() => void confirmRevoke()}
       />
-      <Sheet
-        open={records !== null}
-        onOpenChange={(open) => {
-          if (!open) setRecords(null)
-        }}
-      >
-        <SheetContent className='w-full sm:max-w-5xl' showCloseButton={false}>
-          <SheetHeader className='border-b pr-20'>
-            <SheetTitle>{t('Access records')}</SheetTitle>
-            <SheetDescription>
-              {t(
-                'Audit records start after this feature was enabled. Earlier records remain in Common Logs.'
+      {canViewRecords && (
+        <Sheet
+          open={records !== null}
+          onOpenChange={(open) => {
+            if (!open) setRecords(null)
+          }}
+        >
+          <SheetContent className='w-full sm:max-w-5xl' showCloseButton={false}>
+            <SheetHeader className='border-b pr-20'>
+              <SheetTitle>{t('Access records')}</SheetTitle>
+              <SheetDescription>
+                {t(
+                  'Audit records start after this feature was enabled. Earlier records remain in Common Logs.'
+                )}
+              </SheetDescription>
+            </SheetHeader>
+            <SheetClose
+              render={
+                <Button
+                  size='sm'
+                  variant='ghost'
+                  className='absolute top-3 right-3'
+                />
+              }
+            >
+              {t('Close')}
+            </SheetClose>
+            <div className='min-h-0 flex-1 px-4 pb-4'>
+              {records && (
+                <AuditLogViewer
+                  key={records.tokenRef ?? 'all'}
+                  scope='self'
+                  accessOnly
+                  currentTokenRef={records.tokenRef}
+                  defaultTokenScope={records.tokenRef ? 'current' : undefined}
+                />
               )}
-            </SheetDescription>
-          </SheetHeader>
-          <SheetClose
-            render={
-              <Button
-                size='sm'
-                variant='ghost'
-                className='absolute top-3 right-3'
-              />
-            }
-          >
-            {t('Close')}
-          </SheetClose>
-          <div className='min-h-0 flex-1 px-4 pb-4'>
-            {records && (
-              <AuditLogViewer
-                key={records.tokenRef ?? 'all'}
-                scope='self'
-                accessOnly
-                currentTokenRef={records.tokenRef}
-                defaultTokenScope={records.tokenRef ? 'current' : undefined}
-              />
-            )}
-          </div>
-        </SheetContent>
-      </Sheet>
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
     </>
   )
 }

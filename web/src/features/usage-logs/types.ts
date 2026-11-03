@@ -197,7 +197,7 @@ export interface LogOtherData {
     success?: boolean
     params?: Record<string, string>
   }
-  // Login audit fields (type=7); visible to the log owner
+  // Historical login audit fields (type=7); administrators only
   login_method?: string
   user_agent?: string
   request_path?: string

@@ -630,31 +630,29 @@ it.each([10, 100])(
   }
 )
 
-it.each([1, 10])(
-  'role %i without an audit grant queries only its own records without scope tabs',
-  async (role) => {
-    useAuthStore.getState().auth.setUser({ id: 2, username: 'alice', role })
-    const get = vi.spyOn(api, 'get').mockResolvedValue({
-      data: { success: true, data: { items: [], total: 0 } },
-    })
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
-    render(
-      <QueryClientProvider client={client}>
-        <AuditLogs />
-      </QueryClientProvider>
-    )
-    await waitFor(() =>
-      expect(get).toHaveBeenCalledWith('/api/audit/self', expect.anything())
-    )
-    expect(get).not.toHaveBeenCalledWith('/api/audit', expect.anything())
-    expect(
-      screen.queryByRole('tablist', { name: 'View scope' })
-    ).not.toBeInTheDocument()
-    expect(screen.queryByRole('tab', { name: 'All' })).not.toBeInTheDocument()
-  }
-)
+it('an administrator without an audit grant queries only their own records without scope tabs', async () => {
+  const role = 10
+  useAuthStore.getState().auth.setUser({ id: 2, username: 'alice', role })
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { items: [], total: 0 } },
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <AuditLogs />
+    </QueryClientProvider>
+  )
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith('/api/audit/self', expect.anything())
+  )
+  expect(get).not.toHaveBeenCalledWith('/api/audit', expect.anything())
+  expect(
+    screen.queryByRole('tablist', { name: 'View scope' })
+  ).not.toBeInTheDocument()
+  expect(screen.queryByRole('tab', { name: 'All' })).not.toBeInTheDocument()
+})
 
 it('clears global records and open details on revocation, falls back to self, and refreshes permissions', async () => {
   const admin = {

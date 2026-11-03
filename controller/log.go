@@ -21,6 +21,7 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	filter := model.LogFilter{
 		Source:            model.LogSourceUsage,
+		AdminSelfView:     c.GetInt("role") >= common.RoleAdminUser,
 		Type:              logType,
 		StartTimestamp:    startTimestamp,
 		EndTimestamp:      endTimestamp,

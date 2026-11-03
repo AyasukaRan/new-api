@@ -607,6 +607,39 @@ describe('access tokens card', () => {
     expect(verifyCalls()).toHaveLength(0)
   })
 
+  it('keeps personal token controls while hiding audit records for a regular user', async () => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
+    list = {
+      items: [tokenItem({ id: 7 })],
+      legacy: {
+        token_ref: 'b'.repeat(64),
+        token_hint: 'Test',
+        created_at: null,
+        last_used_at: null,
+        last_used_ip: '',
+        retire_at: NOW + 120,
+      },
+    }
+    renderCard()
+    expect(await screen.findByText('Legacy token')).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: 'Create access token' })
+    ).toBeEnabled()
+    expect(
+      screen.queryByRole('button', { name: 'Access records' })
+    ).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+    expect(await screen.findByRole('menuitem', { name: 'Edit' })).toBeVisible()
+    expect(screen.getByRole('menuitem', { name: 'Revoke' })).toBeVisible()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Access records' })
+    ).not.toBeInTheDocument()
+    expect(api.get).not.toHaveBeenCalledWith(
+      '/api/audit/self',
+      expect.anything()
+    )
+  })
+
   it('opens access records for every token or for one token', async () => {
     list = {
       items: [tokenItem({ id: 7, token_ref: 'c'.repeat(64) })],

@@ -126,7 +126,7 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
-  const { isAdminView: isAdmin, logSource } = useLogsViewScope()
+  const { isAdminView: isAdmin, canManageScope, logSource } = useLogsViewScope()
   const isTest = logSource === 'test'
   const section = isTest ? 'test' : 'common'
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
@@ -290,12 +290,14 @@ export function CommonLogsFilterBar<TData>(
     : '[-webkit-text-security:disc]'
   const logTypeItems = useMemo(
     () =>
-      LOG_TYPE_FILTERS.map((type) => ({
-        value: type.value,
-        label: t(type.label),
-        deprecated: type.deprecated,
-      })),
-    [t]
+      LOG_TYPE_FILTERS.filter((type) => !type.deprecated || canManageScope).map(
+        (type) => ({
+          value: type.value,
+          label: t(type.label),
+          deprecated: type.deprecated,
+        })
+      ),
+    [t, canManageScope]
   )
   const selectedLogType = logTypeItems.find((type) => type.value === logType)
   const deprecatedTypeDescription = t(
@@ -412,7 +414,7 @@ export function CommonLogsFilterBar<TData>(
           className='max-w-[calc(100vw-2rem)] min-w-52'
         >
           <SelectGroup>
-            {LOG_TYPE_FILTERS.map((type) => (
+            {logTypeItems.map((type) => (
               <SelectItem
                 key={type.value}
                 value={type.value}
@@ -421,7 +423,7 @@ export function CommonLogsFilterBar<TData>(
                   type.deprecated ? deprecatedTypeDescription : undefined
                 }
               >
-                {t(type.label)}
+                {type.label}
                 {type.deprecated && (
                   <Badge
                     variant='secondary'

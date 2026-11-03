@@ -41,7 +41,7 @@ interface AccessTokenItemProps {
   /** False while the permission catalog needed for editing is unavailable. */
   canEdit: boolean
   onEdit: (token: AccessToken) => void
-  onShowRecords: (token: AccessToken) => void
+  onShowRecords?: (token: AccessToken) => void
   onRevoke: (token: AccessToken) => void
 }
 
@@ -113,12 +113,14 @@ export function AccessTokenItem(props: AccessTokenItemProps) {
             <Pencil size={16} />
           </DropdownMenuShortcut>
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => props.onShowRecords(token)}>
-          {t('Access records')}
-          <DropdownMenuShortcut>
-            <History size={16} />
-          </DropdownMenuShortcut>
-        </DropdownMenuItem>
+        {props.onShowRecords && (
+          <DropdownMenuItem onClick={() => props.onShowRecords?.(token)}>
+            {t('Access records')}
+            <DropdownMenuShortcut>
+              <History size={16} />
+            </DropdownMenuShortcut>
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
           disabled={props.disabled}

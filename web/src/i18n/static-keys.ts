@@ -851,7 +851,7 @@ export const STATIC_I18N_KEYS = [
   'Reveal full keys',
   'View complete API keys.',
   'Usage',
-  'View your usage logs, statistics, tasks, and audit logs.',
+  'View your usage logs, statistics, and tasks.',
   'Wallet',
   'View balance, top-up records, subscriptions, and referral information.',
   'Top up, pay for subscriptions, check in, and transfer referral rewards.',

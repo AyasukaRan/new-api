@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient } from '@tanstack/react-query'
+import { Navigate } from '@tanstack/react-router'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -87,6 +88,8 @@ export function AuditLogs() {
       // Keep the denied scope closed when refreshing capabilities fails.
     }
   }, [queryClient, userId])
+  if (!user || user.role < ROLE.ADMIN) return <Navigate to='/403' replace />
+
   return (
     <SectionPageLayout fixedContent>
       <SectionPageLayout.Title>{t('Audit Logs')}</SectionPageLayout.Title>

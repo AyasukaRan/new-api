@@ -684,7 +684,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const showManageAuditSection =
     isManage && props.isAdmin && (operationText != null || auditRoute != null)
 
-  // Login audit (type=7); visible to the log owner, not admin-only.
+  // Administrators can also inspect their own historical login records.
   const isLogin = props.log.type === 7
   const loginAuditFields = isLogin
     ? ([
