@@ -109,6 +109,7 @@ func (m Properties) Value() (driver.Value, error) {
 }
 
 type TaskPrivateData struct {
+	ClientIP string `json:"client_ip,omitempty"`
 	// Older in-flight jobs already counted their successful submission as
 	// the request outcome. Only newly tracked jobs also emit a scoped terminal metric.
 	TrackTerminalMetric bool   `json:"track_terminal_metric,omitempty"`
@@ -210,15 +211,18 @@ func GenerateTaskID() string {
 }
 
 func (p *TaskPrivateData) Scan(val any) error {
-	bytesValue := jsonScanBytes(val)
-	if len(bytesValue) == 0 {
-		return nil
+	var stored TaskPrivateData
+	if raw := jsonScanBytes(val); len(raw) > 0 {
+		if err := common.Unmarshal(raw, &stored); err != nil {
+			return err
+		}
 	}
-	return common.Unmarshal(bytesValue, p)
+	*p = stored
+	return nil
 }
 
 func (p TaskPrivateData) Value() (driver.Value, error) {
-	if p.Key == "" && p.UpstreamTaskID == "" && p.ResultURL == "" &&
+	if p.ClientIP == "" && !p.TrackTerminalMetric && p.Key == "" && p.UpstreamTaskID == "" && p.ResultURL == "" &&
 		p.Execution == nil && p.BillingSource == "" && p.SubscriptionId == 0 &&
 		p.TokenId == 0 && p.NodeName == "" && p.BillingContext == nil &&
 		!p.ResponsesBackground && len(p.PluginState) == 0 && p.PollFailures == 0 &&

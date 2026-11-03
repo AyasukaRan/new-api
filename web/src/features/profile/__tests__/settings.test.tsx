@@ -52,7 +52,6 @@ const settings = {
   gotify_token: '',
   gotify_priority: 5,
   accept_unset_model_ratio_model: true,
-  record_ip_log: true,
   upstream_model_update_notify_enabled: true,
 }
 
@@ -63,33 +62,36 @@ function sentBody(put: { mock: { calls: unknown[][] } }): unknown {
   return JSON.parse(JSON.stringify(put.mock.calls[0][1]))
 }
 
-describe('user settings saves across profile and security', () => {
-  it('disabling IP recording sends the latest complete notification settings', async () => {
+describe('saving notification settings', () => {
+  it('a partial notification update skips a legacy IP preference and preserves the other settings', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValue({
       data: {
         success: true,
-        data: { ...profile, setting: JSON.stringify(settings) },
+        data: {
+          ...profile,
+          setting: JSON.stringify({ ...settings, record_ip_log: false }),
+        },
       },
     })
     const put = vi
       .spyOn(api, 'put')
       .mockResolvedValue({ data: { success: true } })
-    await updateUserSettings({ record_ip_log: false })
+    await updateUserSettings({ notification_email: 'alice@example.com' })
     expect(get).toHaveBeenCalledWith('/api/user/self')
     expect(put).toHaveBeenCalledWith('/api/user/setting', {
       ...settings,
-      record_ip_log: false,
+      notification_email: 'alice@example.com',
     })
   })
 
-  it('saving IP recording for a user with no settings supplies the defaults and leaves unchosen switches unset', async () => {
+  it('saving notifications for a user with no settings supplies the defaults and leaves unchosen switches unset', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({
       data: { success: true, data: { ...profile, role: ROLE.SUPER_ADMIN } },
     })
     const put = vi
       .spyOn(api, 'put')
       .mockResolvedValue({ data: { success: true } })
-    await updateUserSettings({ record_ip_log: true })
+    await updateUserSettings({ notify_type: 'email' })
     expect(put.mock.calls[0][0]).toBe('/api/user/setting')
     expect(sentBody(put)).toEqual({
       notify_type: 'email',
@@ -102,37 +104,14 @@ describe('user settings saves across profile and security', () => {
       gotify_token: '',
       gotify_priority: 5,
       accept_unset_model_ratio_model: false,
-      record_ip_log: true,
       upstream_model_update_notify_enabled: false,
-    })
-  })
-
-  it('alternating notification and IP saves retains the latest values from each page', async () => {
-    let saved = { ...settings }
-    vi.spyOn(api, 'get').mockImplementation(async () => ({
-      data: {
-        success: true,
-        data: { ...profile, setting: JSON.stringify(saved) },
-      },
-    }))
-    vi.spyOn(api, 'put').mockImplementation(async (_url, body) => {
-      saved = body as typeof settings
-      return { data: { success: true } }
-    })
-    await updateUserSettings({ record_ip_log: false })
-    await updateUserSettings({ quota_warning_threshold: 2500 })
-    await updateUserSettings({ record_ip_log: true })
-    expect(saved).toEqual({
-      ...settings,
-      quota_warning_threshold: 2500,
-      record_ip_log: true,
     })
   })
 
   it('a rejected profile read prevents the settings write', async () => {
     vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'))
     const put = vi.spyOn(api, 'put')
-    await expect(updateUserSettings({ record_ip_log: false })).rejects.toThrow(
+    await expect(updateUserSettings({ notify_type: 'email' })).rejects.toThrow(
       'offline'
     )
     expect(put).not.toHaveBeenCalled()
@@ -143,7 +122,7 @@ describe('user settings saves across profile and security', () => {
       data: { success: false, message: 'Unavailable' },
     })
     const put = vi.spyOn(api, 'put')
-    expect(await updateUserSettings({ record_ip_log: false })).toEqual({
+    expect(await updateUserSettings({ notify_type: 'email' })).toEqual({
       success: false,
       message: 'Unavailable',
     })
@@ -157,13 +136,13 @@ describe('user settings saves across profile and security', () => {
     vi.spyOn(api, 'put').mockResolvedValue({
       data: { success: false, message: 'Save failed' },
     })
-    expect(await updateUserSettings({ record_ip_log: true })).toEqual({
+    expect(await updateUserSettings({ notify_type: 'email' })).toEqual({
       success: false,
       message: 'Save failed',
     })
   })
 
-  it('saving a stale notification form keeps the current IP setting and the notification edits', async () => {
+  it('saving the notification form omits the retired preference and saves the edits', async () => {
     const onUpdate = vi.fn()
     vi.spyOn(api, 'get').mockResolvedValue({
       data: {
@@ -197,7 +176,6 @@ describe('user settings saves across profile and security', () => {
     expect(put).toHaveBeenCalledWith('/api/user/setting', {
       ...settings,
       quota_warning_threshold: 2700,
-      record_ip_log: false,
     })
   })
 })

@@ -365,33 +365,23 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	}
 	attachRequestBody(c, other)
 	otherStr := other.JSONString()
-	// 判断是否需要记录 IP：默认记录，读不到设置时按不记录处理
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		needRecordIp = settingMap.ShouldRecordIp()
-	}
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        common.GetTimestamp(),
-		Type:             LogTypeError,
-		Content:          content,
-		PromptTokens:     0,
-		CompletionTokens: 0,
-		TokenName:        tokenName,
-		ModelName:        modelName,
-		Quota:            0,
-		ChannelId:        channelId,
-		TokenId:          tokenId,
-		UseTime:          useTimeSeconds,
-		IsStream:         isStream,
-		Group:            group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         common.GetTimestamp(),
+		Type:              LogTypeError,
+		Content:           content,
+		PromptTokens:      0,
+		CompletionTokens:  0,
+		TokenName:         tokenName,
+		ModelName:         modelName,
+		Quota:             0,
+		ChannelId:         channelId,
+		TokenId:           tokenId,
+		UseTime:           useTimeSeconds,
+		IsStream:          isStream,
+		Group:             group,
+		Ip:                common.RequestClientIP(c),
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
@@ -441,33 +431,23 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	attachRequestBody(c, other)
 	content := other.setContent(params.Content)
 	otherStr := other.JSONString()
-	// IP capture follows the user's preference and fails closed on lookup errors.
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		needRecordIp = settingMap.ShouldRecordIp()
-	}
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        createdAt,
-		Type:             logType,
-		Content:          content,
-		PromptTokens:     params.PromptTokens,
-		CompletionTokens: params.CompletionTokens,
-		TokenName:        params.TokenName,
-		ModelName:        params.ModelName,
-		Quota:            params.Quota,
-		ChannelId:        params.ChannelId,
-		TokenId:          params.TokenId,
-		UseTime:          params.UseTimeSeconds,
-		IsStream:         params.IsStream,
-		Group:            params.Group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         createdAt,
+		Type:              logType,
+		Content:           content,
+		PromptTokens:      params.PromptTokens,
+		CompletionTokens:  params.CompletionTokens,
+		TokenName:         params.TokenName,
+		ModelName:         params.ModelName,
+		Quota:             params.Quota,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		UseTime:           params.UseTimeSeconds,
+		IsStream:          params.IsStream,
+		Group:             params.Group,
+		Ip:                common.RequestClientIP(c),
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
@@ -503,6 +483,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 }
 
 type RecordTaskBillingLogParams struct {
+	ClientIP  string
 	UserId    int
 	LogType   int
 	Content   []*common.Message
@@ -530,6 +511,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 	other := params.Other
 	log := &Log{
 		UserId:    params.UserId,
+		Ip:        params.ClientIP,
 		Username:  username,
 		CreatedAt: createdAt,
 		Type:      params.LogType,

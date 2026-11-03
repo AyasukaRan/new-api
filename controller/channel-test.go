@@ -472,6 +472,7 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 		requestPath = strings.Replace(requestPath, ":generateContent", ":streamGenerateContent", 1)
 	}
 	c.Request = httptest.NewRequestWithContext(requestCtx, http.MethodPost, requestPath, nil)
+	c.Request.RemoteAddr = "" // A gateway-generated probe has no client network peer.
 
 	cache, err := model.GetUserCache(testUserID)
 	if err != nil {

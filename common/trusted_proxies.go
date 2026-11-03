@@ -52,3 +52,12 @@ func ConfigureTrustedProxies(engine *gin.Engine, trustedProxies []string) error 
 	}
 	return nil
 }
+
+// RequestClientIP uses the trusted proxy policy configured on the serving
+// engine. Synthetic or background work has no network peer to attribute.
+func RequestClientIP(c *gin.Context) string {
+	if c == nil || c.Request == nil || c.Request.RemoteAddr == "" {
+		return ""
+	}
+	return c.ClientIP()
+}

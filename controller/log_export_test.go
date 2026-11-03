@@ -320,3 +320,122 @@ func TestAcquireLogExportLock(t *testing.T) {
 		})
 	}
 }
+
+func TestUsageLogClientIPDatabaseMatrix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousLog, previousExport, previousMaster := common.LogConsumeEnabled, common.DataExportEnabled, common.IsMasterNode
+	common.LogConsumeEnabled, common.DataExportEnabled, common.IsMasterNode = true, false, true
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.DataExportEnabled, common.IsMasterNode = previousLog, previousExport, previousMaster
+	})
+	for _, dialect := range []struct {
+		name, env string
+		kind      common.DatabaseType
+	}{
+		{"sqlite", "", common.DatabaseTypeSQLite}, {"mysql", "AUDIT_MYSQL_DSN", common.DatabaseTypeMySQL}, {"postgres", "AUDIT_POSTGRES_DSN", common.DatabaseTypePostgreSQL}, {"clickhouse", "AUDIT_CLICKHOUSE_DSN", common.DatabaseTypeClickHouse},
+	} {
+		t.Run(dialect.name, func(t *testing.T) {
+			dsn := os.Getenv(dialect.env)
+			if dialect.env != "" && dsn == "" {
+				t.Skip(dialect.env + " not configured")
+			}
+			logDB, logDSN := newAuditTestDatabase(t, dialect.name, dsn)
+			mainKind := dialect.kind
+			mainName, mainDSN := dialect.name, dsn
+			if mainKind == common.DatabaseTypeClickHouse {
+				mainKind = common.DatabaseTypeSQLite
+				mainName, mainDSN = "sqlite", ""
+			}
+			mainDB, _ := newAuditTestDatabase(t, mainName, mainDSN)
+			useLogExportDatabases(t, mainDB, logDB, mainKind, dialect.kind)
+			if dialect.kind == common.DatabaseTypeClickHouse {
+				t.Setenv("LOG_SQL_DSN", logDSN)
+				require.NoError(t, model.InitLogDB())
+				logDB = model.LOG_DB
+			} else {
+				require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+			}
+			versionSQL := "SELECT version()"
+			if dialect.name == "sqlite" {
+				versionSQL = "SELECT sqlite_version()"
+			}
+			var version string
+			require.NoError(t, logDB.Raw(versionSQL).Scan(&version).Error)
+			t.Logf("log database %s %s", dialect.name, version)
+
+			require.NoError(t, mainDB.AutoMigrate(&model.User{}, &model.Task{}, &model.Midjourney{}, &model.Channel{}))
+			// Recreate the previous released table (the same columns minus client_ip)
+			// with a real task row; a second startup must preserve data and indexes.
+			old := model.Midjourney{MjId: "existing", Prompt: "preserved", Quota: 17, UserId: 9}
+			require.NoError(t, mainDB.Create(&old).Error)
+			require.NoError(t, mainDB.Migrator().DropColumn(&model.Midjourney{}, "ClientIP"))
+			require.False(t, mainDB.Migrator().HasColumn(&model.Midjourney{}, "ClientIP"))
+			for range 2 {
+				require.NoError(t, mainDB.AutoMigrate(&model.Midjourney{}))
+			}
+			require.True(t, mainDB.Migrator().HasIndex(&model.Midjourney{}, "idx_midjourneys_mj_id"))
+			var migrated model.Midjourney
+			require.NoError(t, mainDB.First(&migrated, old.Id).Error)
+			assert.Equal(t, "preserved", migrated.Prompt)
+			assert.Equal(t, 17, migrated.Quota)
+			assert.Empty(t, migrated.ClientIP)
+
+			user := model.User{Username: "ip-fixture", AffCode: "fixture-ip", Setting: `{"record_ip_log":false,"language":"vi"}`, Quota: 1000}
+			require.NoError(t, mainDB.Create(&user).Error)
+			channel := model.Channel{Name: "ip", Key: "fixture-key"}
+			require.NoError(t, mainDB.Create(&channel).Error)
+			router := gin.New()
+			require.NoError(t, router.SetTrustedProxies([]string{"127.0.0.1"}))
+			router.POST("/", func(c *gin.Context) {
+				model.RecordConsumeLog(c, user.Id, model.RecordConsumeLogParams{ModelName: "usage", Quota: 1})
+				model.RecordErrorLog(c, user.Id, 0, "bad", "", "upstream error", 0, 0, false, "", nil)
+			})
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.RemoteAddr = "127.0.0.1:10001"
+			const ip = "2001:db8::123"
+			req.Header.Set("X-Forwarded-For", ip)
+			router.ServeHTTP(httptest.NewRecorder(), req)
+			req.RemoteAddr = "198.51.100.19:10001"
+			router.ServeHTTP(httptest.NewRecorder(), req)
+			req.RemoteAddr = ""
+			router.ServeHTTP(httptest.NewRecorder(), req)
+			for _, kind := range []int{model.LogTypeError, model.LogTypeConsume} {
+				var ips []string
+				require.NoError(t, logDB.Model(&model.Log{}).Where("type = ?", kind).Pluck("ip", &ips).Error)
+				assert.ElementsMatch(t, []string{ip, "198.51.100.19", ""}, ips)
+			}
+
+			task := model.Task{TaskID: "ip-job", UserId: user.Id, ChannelId: channel.Id, Quota: 20, Properties: model.Properties{OriginModelName: "ip-task"}, PrivateData: model.TaskPrivateData{ClientIP: ip}}
+			require.NoError(t, mainDB.Create(&task).Error)
+			var loaded model.Task
+			require.NoError(t, mainDB.First(&loaded, task.ID).Error)
+			require.Equal(t, ip, loaded.PrivateData.ClientIP)
+			assert.NotContains(t, common.GetJsonString(loaded), ip)
+			stored := loaded.PrivateData
+			for _, oldValue := range []any{nil, `{"upstream_task_id":"legacy"}`} {
+				stored.ClientIP = ip
+				require.NoError(t, stored.Scan(oldValue))
+				assert.Empty(t, stored.ClientIP, "old rows must not inherit the preceding task IP")
+			}
+			service.RecalculateTaskQuota(t.Context(), &loaded, 23, common.NewMessage("task delta"))
+			require.True(t, service.RefundTaskQuota(t.Context(), &loaded, "task failed"))
+			mj := model.Midjourney{MjId: "ip-mj", ClientIP: ip, UserId: user.Id, ChannelId: channel.Id, Quota: 37}
+			require.NoError(t, mainDB.Create(&mj).Error)
+			var loadedMJ model.Midjourney
+			require.NoError(t, mainDB.First(&loadedMJ, mj.Id).Error)
+			assert.NotContains(t, common.GetJsonString(loadedMJ), ip)
+			require.True(t, service.RefundMidjourneyQuota(t.Context(), &loadedMJ, "failed"))
+			model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{UserId: user.Id, LogType: model.LogTypeRefund, Quota: 41})
+			for _, q := range []int{3, 23, 37, 41} {
+				var rows []model.Log
+				require.NoError(t, logDB.Where("quota = ?", q).Find(&rows).Error)
+				require.Len(t, rows, 1)
+				if q == 41 {
+					assert.Empty(t, rows[0].Ip)
+				} else {
+					assert.Equal(t, ip, rows[0].Ip)
+				}
+			}
+		})
+	}
+}

@@ -237,6 +237,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	}
 	midjResponse := &mjResp.Response
 	midjourneyTask := &model.Midjourney{
+		ClientIP:    common.RequestClientIP(c),
 		UserId:      info.UserId,
 		Code:        midjResponse.Code,
 		Action:      constant.MjActionSwapFace,
@@ -566,6 +567,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	// 24-prompt包含敏感词 {"code":24,"description":"可能包含敏感词","properties":{"promptEn":"nude body","bannedWord":"nude"}}
 	// other: 提交错误，description为错误描述
 	midjourneyTask := &model.Midjourney{
+		ClientIP:    common.RequestClientIP(c),
 		UserId:      relayInfo.UserId,
 		Code:        midjResponse.Code,
 		Action:      midjRequest.Action,

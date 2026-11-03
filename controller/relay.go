@@ -769,6 +769,7 @@ func executeTaskSubmissionWith(
 
 	stage = "insert"
 	task := model.InitTask(result.Platform, relayInfo)
+	task.PrivateData.ClientIP = common.RequestClientIP(c)
 	task.PrivateData.TrackTerminalMetric = true
 	task.PrivateData.Execution = service.TaskExecutionSnapshotFromContext(c)
 	task.PrivateData.UpstreamTaskID = result.UpstreamTaskID

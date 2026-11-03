@@ -223,6 +223,7 @@ func TestExecuteTaskSubmissionPersistsPinnedPluginProvenance(t *testing.T) {
 	t.Cleanup(func() { common.LogConsumeEnabled = previousLogConsumeEnabled })
 
 	c := taskSubmissionTestContext()
+	c.Request.RemoteAddr = "203.0.113.19:10001"
 	c.Set(common.RequestIdKey, "request-public")
 	c.Set(pluginruntime.ContextKeyPinnedPlugin, pluginruntime.PinnedPlugin{
 		Generation: &pluginruntime.RoutingGeneration{Number: 42},
@@ -261,6 +262,7 @@ func TestExecuteTaskSubmissionPersistsPinnedPluginProvenance(t *testing.T) {
 
 	var stored model.Task
 	require.NoError(t, database.Where("task_id = ?", "task_public").First(&stored).Error)
+	assert.Equal(t, "203.0.113.19", stored.PrivateData.ClientIP)
 	require.NotNil(t, stored.PrivateData.Execution)
 	require.NotNil(t, stored.PrivateData.Execution.TaskPlugin)
 	assert.Equal(t, "document-parser", stored.PrivateData.Execution.TaskPlugin.Key)

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -528,6 +529,18 @@ func GetSelf(c *gin.Context) {
 // administrator-only remarks.
 func buildSelfUserData(user *model.User) map[string]any {
 	userSetting := user.GetSetting()
+	settingsJSON := user.Setting
+	if strings.Contains(settingsJSON, `"record_ip_log"`) {
+		// Old accounts may still store this retired preference. Preserve every
+		// unrelated key in their dashboard response until their next settings save.
+		var settings map[string]json.RawMessage
+		if common.UnmarshalJsonStr(settingsJSON, &settings) == nil {
+			delete(settings, "record_ip_log")
+			if encoded, err := common.Marshal(settings); err == nil {
+				settingsJSON = string(encoded)
+			}
+		}
+	}
 	permissions := calculateUserPermissions(user.Role)
 	permissions["admin_permissions"] = authz.Capabilities(user.Id, user.Role)
 	return map[string]any{
@@ -553,7 +566,7 @@ func buildSelfUserData(user *model.User) map[string]any {
 		"aff_history_quota": user.AffHistoryQuota,
 		"inviter_id":        user.InviterId,
 		"linux_do_id":       user.LinuxDOId,
-		"setting":           user.Setting,
+		"setting":           settingsJSON,
 		"stripe_customer":   user.StripeCustomer,
 		"sidebar_modules":   userSetting.SidebarModules, // 正确提取sidebar_modules字段
 		"permissions":       permissions,
@@ -1364,7 +1377,6 @@ type UpdateUserSettingRequest struct {
 	UpstreamModelUpdateNotifyEnabled *bool   `json:"upstream_model_update_notify_enabled,omitempty"`
 	ChannelNotifyEnabled             *bool   `json:"channel_notify_enabled,omitempty"`
 	AcceptUnsetModelRatioModel       bool    `json:"accept_unset_model_ratio_model"`
-	RecordIpLog                      *bool   `json:"record_ip_log,omitempty"`
 }
 
 func UpdateUserSetting(c *gin.Context) {
@@ -1461,9 +1473,7 @@ func UpdateUserSetting(c *gin.Context) {
 	settings.NotifyType = req.QuotaWarningType
 	settings.QuotaWarningThreshold = req.QuotaWarningThreshold
 	settings.AcceptUnsetRatioModel = req.AcceptUnsetModelRatioModel
-	if req.RecordIpLog != nil {
-		settings.RecordIpLog = req.RecordIpLog
-	}
+
 	if req.QuotaWarningEnabled != nil {
 		settings.QuotaWarningEnabled = req.QuotaWarningEnabled
 	}

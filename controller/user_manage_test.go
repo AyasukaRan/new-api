@@ -829,7 +829,6 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 	}
 	webhook := stored
 	webhook.NotifyType, webhook.WebhookUrl, webhook.WebhookSecret, webhook.BarkUrl = dto.NotifyTypeWebhook, "https://example.com/hook", "stored-hook-secret", ""
-	webhook.RecordIpLog = &on
 	kept := func(setting dto.UserSetting) dto.UserSetting {
 		setting.Language, setting.SidebarModules, setting.BillingPreference = stored.Language, stored.SidebarModules, stored.BillingPreference
 		return setting
@@ -846,12 +845,12 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 		{
 			name:        "older client without the new switches",
 			role:        common.RoleAdminUser,
-			body:        `{"notify_type":"webhook","quota_warning_threshold":2000,"webhook_url":"https://example.com/hook","webhook_secret":"hook-secret","accept_unset_model_ratio_model":true,"record_ip_log":true}`,
+			body:        `{"notify_type":"webhook","quota_warning_threshold":2000,"webhook_url":"https://example.com/hook","webhook_secret":"hook-secret","accept_unset_model_ratio_model":true,"record_ip_log":false}`,
 			wantSuccess: true,
 			want: kept(dto.UserSetting{
 				NotifyType: dto.NotifyTypeWebhook, WebhookUrl: "https://example.com/hook", WebhookSecret: "hook-secret",
 				QuotaWarningThreshold: 2000, QuotaWarningEnabled: &off, ChannelNotifyEnabled: &on, UpstreamModelUpdateNotifyEnabled: true,
-				AcceptUnsetRatioModel: true, RecordIpLog: &on,
+				AcceptUnsetRatioModel: true,
 			}),
 		},
 		{
@@ -869,7 +868,7 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 			want:        kept(dto.UserSetting{NotifyType: dto.NotifyTypeEmail, QuotaWarningEnabled: &on, ChannelNotifyEnabled: &on, UpstreamModelUpdateNotifyEnabled: true}),
 		},
 		{
-			name:        "same webhook keeps omitted secret and IP preference",
+			name:        "same webhook keeps omitted secret",
 			role:        common.RoleAdminUser,
 			initial:     &webhook,
 			body:        `{"notify_type":"webhook","quota_warning_threshold":500000,"webhook_url":"https://example.com/hook"}`,
@@ -882,7 +881,7 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 			initial:     &webhook,
 			body:        `{"notify_type":"email","quota_warning_threshold":0}`,
 			wantSuccess: true,
-			want:        kept(dto.UserSetting{NotifyType: dto.NotifyTypeEmail, QuotaWarningEnabled: &off, ChannelNotifyEnabled: &on, UpstreamModelUpdateNotifyEnabled: true, RecordIpLog: &on}),
+			want:        kept(dto.UserSetting{NotifyType: dto.NotifyTypeEmail, QuotaWarningEnabled: &off, ChannelNotifyEnabled: &on, UpstreamModelUpdateNotifyEnabled: true}),
 		},
 		{
 			name: "negative threshold",
@@ -900,6 +899,13 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 			setting, err := common.Marshal(initial)
 			require.NoError(t, err)
 			user := model.User{Username: "setting-owner", Role: tc.role, Status: common.UserStatusEnabled, AffCode: "setting-owner-aff", Setting: string(setting)}
+			if strings.Contains(tc.body, "record_ip_log") {
+				var legacy map[string]any
+				require.NoError(t, common.Unmarshal(setting, &legacy))
+				legacy["record_ip_log"] = false
+				user.Setting = common.GetJsonString(legacy)
+				assert.NotContains(t, buildSelfUserData(&user)["setting"], "record_ip_log")
+			}
 			require.NoError(t, db.Create(&user).Error)
 
 			recorder := httptest.NewRecorder()
@@ -912,6 +918,9 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 			assert.Contains(t, recorder.Body.String(), fmt.Sprintf(`"success":%t`, tc.wantSuccess))
 			require.NoError(t, db.First(&user, user.Id).Error)
 			assert.Equal(t, tc.want, user.GetSetting())
+			if tc.wantSuccess {
+				assert.NotContains(t, user.Setting, "record_ip_log")
+			}
 		})
 	}
 }

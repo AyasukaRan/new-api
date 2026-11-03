@@ -24,8 +24,9 @@ type Midjourney struct {
 	Buttons     string `json:"buttons"`
 	Properties  string `json:"properties"`
 
-	TokenId          int `json:"-" gorm:"default:0"`
-	BillingChannelId int `json:"-" gorm:"default:0"`
+	ClientIP         string `json:"-" gorm:"size:45"`
+	TokenId          int    `json:"-" gorm:"default:0"`
+	BillingChannelId int    `json:"-" gorm:"default:0"`
 }
 
 // TaskQueryParams 用于包含所有搜索条件的结构体，可以根据需求添加更多字段
