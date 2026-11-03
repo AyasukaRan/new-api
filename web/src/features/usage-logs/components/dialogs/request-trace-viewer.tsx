@@ -141,7 +141,7 @@ export default function RequestTraceViewer(props: {
         </div>
       </div>
       <div className='shrink-0 pt-2'>
-        <RequestMetadataTags metadata={props.metadata} />
+        <RequestMetadataTags isAdmin={isAdmin} metadata={props.metadata} />
       </div>
       <TabsContent
         value='conversation'

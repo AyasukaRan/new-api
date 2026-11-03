@@ -26,6 +26,7 @@ import { getReasoningEffortVariant } from '../lib/format'
 import type { LogOtherData } from '../types'
 
 export function RequestMetadataTags(props: {
+  isAdmin: boolean
   metadata?: LogOtherData | null
   expanded?: boolean
 }) {
@@ -35,23 +36,26 @@ export function RequestMetadataTags(props: {
     typeof metadata?.reasoning_effort === 'string'
       ? metadata.reasoning_effort.trim()
       : ''
+  const adminMetadata = props.isAdmin ? metadata : null
   const client =
-    typeof metadata?.client_tool === 'string' ? metadata.client_tool.trim() : ''
-  const tools = Array.isArray(metadata?.invoked_tools)
+    typeof adminMetadata?.client_tool === 'string'
+      ? adminMetadata.client_tool.trim()
+      : ''
+  const tools = Array.isArray(adminMetadata?.invoked_tools)
     ? [
         ...new Set(
-          metadata.invoked_tools
+          adminMetadata.invoked_tools
             .filter((name) => typeof name === 'string' && name.trim())
             .map((name) => name.trim())
         ),
       ]
     : []
-  const partial = metadata?.tool_observation === 'partial'
+  const partial = adminMetadata?.tool_observation === 'partial'
   const noTools =
     props.expanded &&
-    metadata?.tool_observation === 'complete' &&
-    Array.isArray(metadata.invoked_tools) &&
-    metadata.invoked_tools.length === 0
+    adminMetadata?.tool_observation === 'complete' &&
+    Array.isArray(adminMetadata.invoked_tools) &&
+    adminMetadata.invoked_tools.length === 0
 
   if (!effort && !client && tools.length === 0 && !partial && !noTools) {
     return null

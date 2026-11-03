@@ -75,8 +75,8 @@ function renderWithQueries(element: ReactNode, client?: QueryClient) {
   )
 }
 
-function LogSurface(props: { mobile: boolean }) {
-  const columns = useCommonLogsColumns(false, false)
+function LogSurface(props: { mobile: boolean; isAdmin: boolean }) {
+  const columns = useCommonLogsColumns(props.isAdmin, false)
   const table = useReactTable({
     data: [log],
     columns,
@@ -102,16 +102,24 @@ afterEach(() => {
 })
 
 test('leaves old records without metadata unlabelled instead of claiming no tools were called', () => {
-  const view = render(<RequestMetadataTags metadata={{}} expanded />)
+  const view = render(<RequestMetadataTags isAdmin metadata={{}} expanded />)
   expect(
     screen.queryByRole('group', { name: 'Request attributes' })
   ).not.toBeInTheDocument()
   view.rerender(
-    <RequestMetadataTags metadata={{ tool_observation: 'complete' }} expanded />
+    <RequestMetadataTags
+      isAdmin
+      metadata={{ tool_observation: 'complete' }}
+      expanded
+    />
   )
   expect(screen.queryByText('No tools invoked')).not.toBeInTheDocument()
   view.rerender(
-    <RequestMetadataTags metadata={{ reasoning_effort: 'none' }} expanded />
+    <RequestMetadataTags
+      isAdmin
+      metadata={{ reasoning_effort: 'none' }}
+      expanded
+    />
   )
   expect(screen.getByText('Reasoning: none')).toBeInTheDocument()
   expect(screen.queryByText('No tools invoked')).not.toBeInTheDocument()
@@ -120,6 +128,7 @@ test('leaves old records without metadata unlabelled instead of claiming no tool
 test('distinguishes confirmed empty tool output from a partial observation', () => {
   const view = render(
     <RequestMetadataTags
+      isAdmin
       metadata={{ invoked_tools: [], tool_observation: 'complete' }}
       expanded
     />
@@ -127,6 +136,7 @@ test('distinguishes confirmed empty tool output from a partial observation', () 
   expect(screen.getByText('No tools invoked')).toBeInTheDocument()
   view.rerender(
     <RequestMetadataTags
+      isAdmin
       metadata={{ invoked_tools: [], tool_observation: 'partial' }}
       expanded
     />
@@ -137,7 +147,7 @@ test('distinguishes confirmed empty tool output from a partial observation', () 
 
 test('shows two tools and lets keyboard users expand the remaining tool names', async () => {
   const user = userEvent.setup()
-  render(<RequestMetadataTags metadata={metadata} />)
+  render(<RequestMetadataTags isAdmin metadata={metadata} />)
   expect(screen.getByText('Reasoning: high')).toBeInTheDocument()
   expect(screen.getByTitle('Client: Codex CLI')).toHaveTextContent('Codex CLI')
   expect(screen.queryByText('Tool: read_resource')).not.toBeInTheDocument()
@@ -191,7 +201,7 @@ test('wraps complete long tool names in details and ignores malformed or duplica
   })
   const view = render(
     <I18nextProvider i18n={i18n}>
-      <RequestMetadataTags metadata={malformed} expanded />
+      <RequestMetadataTags isAdmin metadata={malformed} expanded />
     </I18nextProvider>
   )
   const group = screen.getByRole('group', { name: 'Request attributes' })
@@ -214,7 +224,8 @@ test('wraps complete long tool names in details and ignores malformed or duplica
 test.each([false, true])(
   'shows the same request tags in the model summary when mobile is %s',
   (mobile) => {
-    renderWithQueries(<LogSurface mobile={mobile} />)
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
+    renderWithQueries(<LogSurface mobile={mobile} isAdmin />)
     const group = screen.getByRole('group', { name: 'Request attributes' })
     expect(within(group).getByText('Reasoning: high')).toBeInTheDocument()
     expect(within(group).getByText('Codex CLI')).toBeInTheDocument()
@@ -225,7 +236,17 @@ test.each([false, true])(
   }
 )
 
-test('shows all request tags in owner details without a duplicate reasoning row', () => {
+test.each([false, true])(
+  'hides the request source and tool tags in personal logs when mobile is %s',
+  (mobile) => {
+    renderWithQueries(<LogSurface mobile={mobile} isAdmin={false} />)
+    expect(screen.getByText('Reasoning: high')).toBeInTheDocument()
+    expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Tool:/)).not.toBeInTheDocument()
+  }
+)
+
+test('shows only reasoning in owner details even when cached data contains admin tags', () => {
   renderWithQueries(
     <DetailsDialog
       log={log}
@@ -237,7 +258,8 @@ test('shows all request tags in owner details without a duplicate reasoning row'
   )
   expect(screen.getAllByText('Reasoning: high')).toHaveLength(1)
   expect(screen.queryByText('Reasoning Effort')).not.toBeInTheDocument()
-  expect(screen.getByText('Tool: read_resource')).toBeInTheDocument()
+  expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
+  expect(screen.queryByText(/Tool:/)).not.toBeInTheDocument()
   expect(
     screen.queryByRole('button', { name: 'Show all invoked tools' })
   ).not.toBeInTheDocument()
@@ -297,7 +319,9 @@ test.each([
 ])(
   'preserves provider effort %s without translation or case normalization',
   (effort, label) => {
-    render(<RequestMetadataTags metadata={{ reasoning_effort: effort }} />)
+    render(
+      <RequestMetadataTags isAdmin metadata={{ reasoning_effort: effort }} />
+    )
     expect(screen.getByText(`Reasoning: ${label}`)).toBeInTheDocument()
   }
 )

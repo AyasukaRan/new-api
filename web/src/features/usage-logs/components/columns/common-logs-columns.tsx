@@ -696,7 +696,10 @@ export function useCommonLogsColumns(
                 actualModel={modelInfo.actualModel}
                 responseModel={modelInfo.responseModel}
               />
-              <RequestMetadataTags metadata={parseLogOther(log.other)} />
+              <RequestMetadataTags
+                isAdmin={isAdmin}
+                metadata={parseLogOther(log.other)}
+              />
             </div>
           )
         },

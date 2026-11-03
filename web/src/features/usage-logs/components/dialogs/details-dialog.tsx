@@ -748,7 +748,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
       bodyClassName='pr-2 sm:pr-4'
     >
       <div className='w-full max-w-full min-w-0 space-y-2.5 overflow-x-hidden py-1 sm:space-y-3'>
-        <RequestMetadataTags metadata={other} expanded />
+        <RequestMetadataTags
+          isAdmin={props.isAdmin}
+          metadata={other}
+          expanded
+        />
 
         {/* Full request/response exchange (admin only) */}
         {props.isAdmin && adminInfo?.trace_id && (

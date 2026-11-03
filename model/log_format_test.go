@@ -35,6 +35,17 @@ func TestFormatUserLogsStripsQuotaSaturation(t *testing.T) {
 	require.Contains(t, parsed, "model_price")
 }
 
+func TestUserLogHidesRequestSourceAndTools(t *testing.T) {
+	other := `{"reasoning_effort":"high","client_tool":"Go HTTP Client","invoked_tools":["sub2api_web_fetch"],"tool_observation":"complete"}`
+	user := []*Log{{Other: other}}
+	formatUserLogs(user, 0)
+	assert.JSONEq(t, `{"reasoning_effort":"high"}`, user[0].Other)
+
+	admin := []*Log{{Other: other}}
+	FormatAdminLogs(admin)
+	assert.JSONEq(t, other, admin[0].Other)
+}
+
 func TestTaskPluginLogVisibilityIsRoleSeparated(t *testing.T) {
 	other := common.MapToJsonStr(map[string]any{
 		"model_price": 1.25,

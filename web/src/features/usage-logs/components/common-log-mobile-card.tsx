@@ -41,7 +41,7 @@ import {
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { RequestMetadataTags } from './request-metadata-tags'
 import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
-import { useUsageLogsContext } from './usage-logs-provider'
+import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 type FieldName =
   | 'model'
@@ -65,6 +65,7 @@ export function CommonLogMobileCard<TData>(props: {
 }) {
   const { t } = useTranslation()
   const context = useUsageLogsContext()
+  const { isAdminView } = useLogsViewScope()
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = parseLogOther(log.other)
@@ -154,7 +155,7 @@ export function CommonLogMobileCard<TData>(props: {
               wrapText
               onInspect={() => setSelectedField('model')}
             />
-            <RequestMetadataTags metadata={other} />
+            <RequestMetadataTags isAdmin={isAdminView} metadata={other} />
           </div>
         )}
         {fields.cost.visible && costCell && (
