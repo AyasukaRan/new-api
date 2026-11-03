@@ -198,17 +198,64 @@ func formatUserLogs(logs []*Log, startIdx int) {
 // FormatAdminLogs removes root-only diagnostics while retaining operational
 // admin_info. Root callers must not pass their results through this formatter.
 func FormatAdminLogs(logs []*Log) {
-	for i := range logs {
-		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityAdmin)
-	}
+	FormatLogList(logs, common.RoleAdminUser, false)
 }
 
 // FormatRootLogs normalizes legacy metadata into the current scoped shape
 // without removing root-only diagnostics.
 func FormatRootLogs(logs []*Log) {
-	for i := range logs {
-		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityRoot)
+	FormatLogList(logs, common.RoleRootUser, false)
+}
+
+// FormatLogList applies the administrator's existing visibility before sending
+// a full list or a summary whose captured request bodies can be fetched later.
+func FormatLogList(logs []*Log, role int, deferBody bool) {
+	visibility := logOtherVisibilityUser
+	if role >= common.RoleRootUser {
+		visibility = logOtherVisibilityRoot
+	} else if role >= common.RoleAdminUser {
+		visibility = logOtherVisibilityAdmin
 	}
+	for _, log := range logs {
+		log.Other = projectLogOtherJSON(log.Other, visibility, deferBody && log.CreatedAt > 0)
+	}
+}
+
+// GetLogRequestBody reads only the captured body, never the other privileged
+// metadata from the same row.
+func GetLogRequestBody(ctx context.Context, createdAt int64, requestID, ref string) (string, error) {
+	query := LOG_DB.WithContext(ctx).Model(&Log{}).Select("other").Where("created_at = ?", createdAt)
+	if requestID == "" {
+		query = query.Where("request_id = '' OR request_id IS NULL")
+	} else {
+		query = query.Where("request_id = ?", requestID)
+	}
+	rows, err := query.Rows()
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var other *string
+		if err := rows.Scan(&other); err != nil {
+			return "", err
+		}
+		if other == nil {
+			continue
+		}
+		var capture struct {
+			AdminInfo struct {
+				RequestBody string `json:"request_body"`
+			} `json:"admin_info"`
+		}
+		if common.UnmarshalJsonStr(*other, &capture) == nil {
+			body := capture.AdminInfo.RequestBody
+			if body != "" && logRequestBodyRef(body) == ref {
+				return body, nil
+			}
+		}
+	}
+	return "", rows.Err()
 }
 
 // Records predating the dedicated audit table can still occur in the usage

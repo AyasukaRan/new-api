@@ -25,16 +25,34 @@ func TestDashboardFinanceDatabaseMatrix(t *testing.T) {
 		{"sqlite", "", common.DatabaseTypeSQLite},
 		{"mysql", "AUDIT_MYSQL_DSN", common.DatabaseTypeMySQL},
 		{"postgres", "AUDIT_POSTGRES_DSN", common.DatabaseTypePostgreSQL},
+		{"clickhouse", "AUDIT_CLICKHOUSE_DSN", common.DatabaseTypeClickHouse},
 	} {
 		t.Run(dialect.name, func(t *testing.T) {
 			if dialect.env != "" && os.Getenv(dialect.env) == "" {
 				t.Skip(dialect.env + " is not configured")
 			}
-			mainDB, _ := newAuditTestDatabase(t, dialect.name, os.Getenv(dialect.env))
-			logDB, _ := newAuditTestDatabase(t, dialect.name, os.Getenv(dialect.env))
-			useLogExportDatabases(t, mainDB, logDB, dialect.kind, dialect.kind)
+			mainName, mainDSN, mainKind := dialect.name, os.Getenv(dialect.env), dialect.kind
+			if dialect.kind == common.DatabaseTypeClickHouse {
+				mainName, mainDSN, mainKind = "sqlite", "", common.DatabaseTypeSQLite
+			}
+			mainDB, _ := newAuditTestDatabase(t, mainName, mainDSN)
+			logDB, logDSN := newAuditTestDatabase(t, dialect.name, os.Getenv(dialect.env))
+			useLogExportDatabases(t, mainDB, logDB, mainKind, dialect.kind)
 			require.NoError(t, mainDB.AutoMigrate(&model.QuotaData{}, &model.Channel{}, &model.Token{}))
-			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+			if dialect.kind == common.DatabaseTypeClickHouse {
+				previousMaster := common.IsMasterNode
+				common.IsMasterNode = true
+				t.Cleanup(func() { common.IsMasterNode = previousMaster })
+				t.Setenv("LOG_SQL_DSN", logDSN)
+				t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", "0")
+				require.NoError(t, model.InitLogDB())
+				logDB = model.LOG_DB
+				conn, err := logDB.DB()
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = conn.Close() })
+			} else {
+				require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+			}
 			var version string
 			versionSQL := "SELECT version()"
 			if dialect.name == "sqlite" {
@@ -149,8 +167,8 @@ func TestDashboardFinanceDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, model.DashboardFinance{CostQuota: 65.25, ProfitQuota: 34.75, CoveredRevenueQuota: 100, RecordedCount: 1, ActualCount: 1}, *row.Finance)
 			}
 
-			// Cross a full keyset batch with identical timestamps. The dashboard
-			// can lag one request without dropping cost or producing negative unknowns.
+			// Imported events can share both a timestamp and an empty request ID.
+			// Retain them all even if the hourly usage table lags one request.
 			batch := make([]model.Log, 129)
 			for i := range batch {
 				batch[i] = model.Log{UserId: 5, Username: "batch", ModelName: "batch", CreatedAt: 3900, Type: model.LogTypeConsume, Quota: 100, Other: actual}

@@ -27,6 +27,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { getUserQuotaDates } from '@/features/dashboard/api'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
@@ -92,6 +93,7 @@ beforeEach(() => {
             data: { subscriptions: [], all_subscriptions: [] },
           },
         }
+      case '/api/data/':
       case '/api/data/self':
         return { data: { success: true, data: [] } }
       default:
@@ -122,6 +124,14 @@ async function renderOverview() {
 }
 
 describe('overview setup guide', () => {
+  it('requests quota history directly from the canonical route for each dashboard view', async () => {
+    const params = { start_timestamp: 1, end_timestamp: 2 }
+    await getUserQuotaDates(params, true)
+    expect(api.get).toHaveBeenLastCalledWith('/api/data/', { params })
+    await getUserQuotaDates(params, false)
+    expect(api.get).toHaveBeenLastCalledWith('/api/data/self', { params })
+  })
+
   it('shows usage first and only a header entry when setup is complete', async () => {
     await renderOverview()
 

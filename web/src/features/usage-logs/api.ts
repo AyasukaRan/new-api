@@ -77,7 +77,27 @@ async function fetchLogStats<T>(
 // ============================================================================
 
 export const getAllLogs = (params: GetLogsParams = {}) =>
-  fetchLogs('/api/log', params, true)
+  fetchLogs('/api/log/', { ...params, compact: 1 }, true)
+
+export async function getLogRequestBody(
+  createdAt: number,
+  requestId: string,
+  ref: string,
+  signal?: AbortSignal
+) {
+  const response = await api.get<{ success: boolean; data: string }>(
+    '/api/log/request_body',
+    {
+      params: { created_at: createdAt, request_id: requestId, ref },
+      signal,
+      disableDuplicate: true,
+    }
+  )
+  if (!response.data.success || typeof response.data.data !== 'string') {
+    throw createServerError(response.data)
+  }
+  return response.data.data
+}
 
 export const getUserLogs = (
   params: Omit<GetLogsParams, 'username' | 'channel'> = {}

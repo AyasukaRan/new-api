@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { TFunction } from 'i18next'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -35,6 +34,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
+import type { TFunction } from 'i18next'
 import {
   Copy,
   Check,
@@ -53,7 +54,10 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { CopyButton } from '@/components/copy-button'
 import { Dialog } from '@/components/dialog'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -65,9 +69,12 @@ import { PolicyDecisionRecord } from '@/features/system-settings/request-policie
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
+import { ROLE } from '@/lib/roles'
 import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
+import { getLogRequestBody } from '../../api'
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import type { UsageLog } from '../../data/schema'
 import {
@@ -564,6 +571,71 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
   )
 }
 
+function CapturedRequestBody(props: {
+  log: UsageLog
+  adminInfo: NonNullable<LogOtherData['admin_info']>
+}) {
+  const { t } = useTranslation()
+  const user = useAuthStore((state) => state.auth.user)
+  const {
+    request_body: inlineBody,
+    request_body_ref: ref,
+    request_body_truncated,
+  } = props.adminInfo
+  const { created_at, request_id = '' } = props.log
+  const canLoad = (user?.role ?? 0) >= ROLE.ADMIN
+  const query = useQuery({
+    queryKey: [
+      'log-request-body',
+      user?.id,
+      user?.role,
+      created_at,
+      request_id,
+      ref,
+    ],
+    queryFn: ({ signal }) =>
+      getLogRequestBody(created_at, request_id, ref ?? '', signal),
+    enabled: canLoad && !inlineBody && !!ref,
+    retry: false,
+    gcTime: 0,
+  })
+  if (!canLoad) return null
+  const body = inlineBody ?? query.data
+  return (
+    <DetailSection
+      icon={<FileJson className='size-3.5' aria-hidden='true' />}
+      label={t('Request Content')}
+    >
+      {body != null && (
+        <div className='bg-muted/50 relative rounded-md border p-3'>
+          <CopyButton value={body} className='absolute top-2 right-2 size-8' />
+          <pre className='max-h-72 overflow-auto pr-10 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap'>
+            {body}
+          </pre>
+        </div>
+      )}
+      {body == null && query.isError && (
+        <ErrorState
+          className='min-h-0'
+          title={t('Failed to load logs')}
+          onRetry={() => void query.refetch()}
+        />
+      )}
+      {body == null && !query.isError && (
+        <LoadingState inline message={t('Loading...')} />
+      )}
+      {request_body_truncated != null && (
+        <p className='text-muted-foreground mt-2 text-xs'>
+          {t(
+            'Truncated for storage. The original request was {{bytes}} bytes.',
+            { bytes: request_body_truncated }
+          )}
+        </p>
+      )}
+    </DetailSection>
+  )
+}
+
 interface DetailsDialogProps {
   source?: LogSource
   log: UsageLog
@@ -952,39 +1024,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
         )}
 
         {/* Captured request payload (admin only) */}
-        {props.isAdmin && adminInfo?.request_body && (
-          <DetailSection
-            icon={<FileJson className='size-3.5' aria-hidden='true' />}
-            label={t('Request Content')}
-          >
-            <div className='bg-muted/50 relative rounded-md border p-3'>
-              <Button
-                variant='ghost'
-                size='sm'
-                className='absolute top-2 right-2 h-8 w-8 p-0'
-                onClick={() => copyToClipboard(adminInfo.request_body ?? '')}
-                title={t('Copy to clipboard')}
-              >
-                {copiedText === adminInfo.request_body ? (
-                  <Check className='size-4 text-green-600' />
-                ) : (
-                  <Copy className='size-4' />
-                )}
-              </Button>
-              <pre className='max-h-72 overflow-auto pr-10 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap'>
-                {adminInfo.request_body}
-              </pre>
-            </div>
-            {adminInfo.request_body_truncated != null && (
-              <p className='text-muted-foreground mt-2 text-xs'>
-                {t(
-                  'Truncated for storage. The original request was {{bytes}} bytes.',
-                  { bytes: adminInfo.request_body_truncated }
-                )}
-              </p>
-            )}
-          </DetailSection>
-        )}
+        {props.open &&
+          props.isAdmin &&
+          (adminInfo?.request_body || adminInfo?.request_body_ref) && (
+            <CapturedRequestBody log={props.log} adminInfo={adminInfo} />
+          )}
 
         {/* Reject reason (admin only) */}
         {props.isAdmin && adminInfo?.reject_reason && (

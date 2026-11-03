@@ -29,6 +29,8 @@ import { afterAll, afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import en from '@/i18n/locales/en.json'
 import zh from '@/i18n/locales/zh.json'
+import { api } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
 import {
   DEFAULT_CURRENCY_CONFIG,
   useSystemConfigStore,
@@ -590,3 +592,40 @@ test.each([true, false])(
     }
   }
 )
+
+test('an admin loads the captured request only when opening the row and can retry a failed fetch', async () => {
+  useAuthStore.getState().auth.setUser({ id: 77, role: 10, username: 'admin' })
+  const ref = 'a'.repeat(64)
+  const get = vi
+    .spyOn(api, 'get')
+    .mockRejectedValueOnce(new Error('unavailable'))
+    .mockResolvedValue({
+      data: { success: true, data: 'captured request text' },
+    })
+  try {
+    const open = renderPreview({
+      model_price: 1,
+      admin_info: { request_body_ref: ref, request_body_truncated: 123456 },
+    })
+    expect(get).not.toHaveBeenCalledWith(
+      '/api/log/request_body',
+      expect.anything()
+    )
+    fireEvent.click(open)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(
+      await within(dialog).findByText('captured request text')
+    ).toBeVisible()
+    expect(within(dialog).getByText(/123456 bytes/)).toBeVisible()
+    expect(get).toHaveBeenCalledWith(
+      '/api/log/request_body',
+      expect.objectContaining({
+        params: { request_id: 'req-1', created_at: 1, ref },
+      })
+    )
+  } finally {
+    get.mockRestore()
+    useAuthStore.getState().auth.reset()
+  }
+})

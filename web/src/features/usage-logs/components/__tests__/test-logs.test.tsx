@@ -173,6 +173,12 @@ it('keeps the independent test page and its filters on test-only API requests', 
   const logRequests = get.mock.calls
     .map(([path]) => new URL(path, 'http://localhost'))
     .filter((url) => url.pathname.startsWith('/api/log'))
+  expect(
+    logRequests.some(
+      (url) =>
+        url.pathname === '/api/log/' && url.searchParams.get('compact') === '1'
+    )
+  ).toBe(true)
   expect(logRequests.some((url) => url.pathname === '/api/log/stat')).toBe(true)
   expect(
     logRequests.every((url) => url.searchParams.get('source') === 'test')

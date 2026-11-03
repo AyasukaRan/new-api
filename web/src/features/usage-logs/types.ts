@@ -160,6 +160,7 @@ export interface LogOtherData {
     // Verbatim relay request payload, captured only while
     // LogRequestBodyEnabled is on. Admin-only (nested under admin_info).
     request_body?: string
+    request_body_ref?: string
     // Original byte size, present only when request_body was truncated.
     request_body_truncated?: number
     // Key of the full four-leg exchange stored outside the log row, present

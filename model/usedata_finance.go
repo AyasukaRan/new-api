@@ -86,8 +86,8 @@ var dashboardFinanceCache = hot.NewHotCache[string, map[dashboardFinanceKey]Dash
 	WithTTL(15 * time.Second).Build()
 var dashboardFinanceLoads singleflight.Group
 
-// getDashboardFinance reads only candidate snapshots, in keyset batches. The
-// bounded short-lived cache shares one scan between the dashboard's charts.
+// getDashboardFinance streams candidate snapshots once, without materializing log batches.
+// The bounded short-lived cache shares the result between the dashboard's charts.
 // Parsing in Go also handles legacy invalid JSON without database-specific casts.
 func getDashboardFinance(ctx context.Context, startTime, endTime int64, username string) (map[dashboardFinanceKey]DashboardFinance, error) {
 	if startTime < 0 || endTime < startTime || endTime > math.MaxInt64-3599 {
@@ -107,64 +107,43 @@ func getDashboardFinance(ctx context.Context, startTime, endTime int64, username
 		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		costs := make(map[dashboardFinanceKey]DashboardFinance)
-		var lastTime int64
-		var lastID int
-		var lastRequestID string
-		for {
-			query := applyLogSourceFilter(LOG_DB.WithContext(ctx).Model(&Log{})).
-				Select([]string{"id", "created_at", "user_id", "username", "model_name", "channel_id", "token_id", "group", "quota", "request_id", "other"}).
-				Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, startTime, endTime).
-				Where("other LIKE ?", `%"cost"%`)
-			if username != "" {
-				query = query.Where("username = ?", username)
+		query := applyLogSourceFilter(LOG_DB.WithContext(ctx).Model(&Log{})).
+			Select([]string{"created_at", "user_id", "username", "model_name", "channel_id", "token_id", "group", "quota", "other"}).
+			Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, startTime, endTime).
+			Where("other LIKE ?", `%"cost"%`)
+		if username != "" {
+			query = query.Where("username = ?", username)
+		}
+		err := streamLogs(query, "logs.created_at ASC, logs.id ASC", func(log *Log) error {
+			var metadata struct {
+				ClientTool string `json:"client_tool"`
+				AdminInfo  struct {
+					Cost *dashboardCostSnapshot `json:"cost"`
+				} `json:"admin_info"`
+				RootInfo struct {
+					NodeName *string `json:"node_name"`
+				} `json:"root_info"`
 			}
-			if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-				if lastTime > 0 {
-					query = query.Where("created_at > ? OR (created_at = ? AND request_id > ?)", lastTime, lastTime, lastRequestID)
-				}
-				query = query.Order("created_at ASC, request_id ASC")
-			} else {
-				if lastTime > 0 {
-					query = query.Where("created_at > ? OR (created_at = ? AND id > ?)", lastTime, lastTime, lastID)
-				}
-				query = query.Order("created_at ASC, id ASC")
+			if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
+				return nil
 			}
-			var logs []Log
-			if err := query.Limit(128).Find(&logs).Error; err != nil {
-				return nil, err
+			recorded, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost)
+			if !valid {
+				return nil
 			}
-			for _, log := range logs {
-				var metadata struct {
-					ClientTool string `json:"client_tool"`
-					AdminInfo  struct {
-						Cost *dashboardCostSnapshot `json:"cost"`
-					} `json:"admin_info"`
-					RootInfo struct {
-						NodeName *string `json:"node_name"`
-					} `json:"root_info"`
-				}
-				if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
-					continue
-				}
-				recorded, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost)
-				if !valid {
-					continue
-				}
-				other := NewLogOther()
-				other.SetPublic("client_tool", metadata.ClientTool)
-				key := dashboardFinanceKey{CreatedAt: log.CreatedAt - log.CreatedAt%3600, UserID: log.UserId, Username: log.Username, ModelName: log.ModelName, ClientTool: other.ClientTool(), UseGroup: log.Group, TokenID: log.TokenId, ChannelID: log.ChannelId, NodeKnown: metadata.RootInfo.NodeName != nil}
-				if key.NodeKnown {
-					key.NodeName = *metadata.RootInfo.NodeName
-				}
-				finance := costs[key]
-				finance.add(recorded)
-				costs[key] = finance
+			other := NewLogOther()
+			other.SetPublic("client_tool", metadata.ClientTool)
+			key := dashboardFinanceKey{CreatedAt: log.CreatedAt - log.CreatedAt%3600, UserID: log.UserId, Username: log.Username, ModelName: log.ModelName, ClientTool: other.ClientTool(), UseGroup: log.Group, TokenID: log.TokenId, ChannelID: log.ChannelId, NodeKnown: metadata.RootInfo.NodeName != nil}
+			if key.NodeKnown {
+				key.NodeName = *metadata.RootInfo.NodeName
 			}
-			if len(logs) < 128 {
-				break
-			}
-			last := logs[len(logs)-1]
-			lastTime, lastID, lastRequestID = last.CreatedAt, last.Id, last.RequestId
+			finance := costs[key]
+			finance.add(recorded)
+			costs[key] = finance
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
 		// Large reports are still accurate, but should not occupy all cache memory.
 		if len(costs) <= 25000 {

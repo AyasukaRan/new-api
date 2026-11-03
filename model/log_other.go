@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"slices"
@@ -249,6 +250,12 @@ func normalizeLegacyRejectReason(values map[string]json.RawMessage) bool {
 // values as RawMessage. This preserves integers larger than JavaScript's safe
 // range instead of round-tripping them through float64.
 func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
+	return projectLogOtherJSON(value, visibility, false)
+}
+
+// projectLogOtherJSON can defer the captured request in interactive admin lists.
+// Exports and clients using the full representation keep the original payload.
+func projectLogOtherJSON(value string, visibility logOtherVisibility, deferBody bool) string {
 	if value == "" {
 		return ""
 	}
@@ -277,6 +284,9 @@ func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
 		}
 	} else {
 		changed = normalizeLegacyRejectReason(values)
+		if deferBody && deferLogRequestBody(values) {
+			changed = true
+		}
 		if visibility == logOtherVisibilityAdmin {
 			if _, exists := values[logOtherRootInfoKey]; exists {
 				delete(values, logOtherRootInfoKey)
@@ -296,4 +306,25 @@ func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
 		return "{}"
 	}
 	return string(formatted)
+}
+
+func deferLogRequestBody(values map[string]json.RawMessage) bool {
+	var admin map[string]json.RawMessage
+	if raw := values[logOtherAdminInfoKey]; len(raw) == 0 || common.Unmarshal(raw, &admin) != nil {
+		return false
+	}
+	var body string
+	if raw := admin["request_body"]; len(raw) == 0 || common.Unmarshal(raw, &body) != nil || body == "" {
+		return false
+	}
+	delete(admin, "request_body")
+	admin["request_body_ref"], _ = common.Marshal(logRequestBodyRef(body))
+	values[logOtherAdminInfoKey], _ = common.Marshal(admin)
+	return true
+}
+
+// A request can produce multiple logs in the same second, and ClickHouse log IDs
+// are page positions. Match the captured content before returning a candidate.
+func logRequestBodyRef(body string) string {
+	return hex.EncodeToString(common.Sha256Raw([]byte(body)))
 }

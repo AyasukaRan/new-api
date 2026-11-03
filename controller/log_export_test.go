@@ -242,6 +242,75 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				ownAdmin := callLogHandler(t, ExportUserLogs, 77, common.RoleAdminUser, query)
 				assert.Equal(t, []any{"normal-usage", "legacy-signin", "legacy-operation"}, exportedRequestIds(ownAdmin))
 			})
+			t.Run("deferred request body", func(t *testing.T) {
+				const requestID = "same-request-multiple-attempts"
+				bodies := map[string]string{"attempt-a": "第一轮\n中文", "attempt-b": `{"input":"another payload"}`}
+				for name, body := range bodies {
+					other := common.MapToJsonStr(map[string]any{
+						"admin_info": map[string]any{"request_body": body, "request_body_truncated": 123, "use_channel": []string{"9"}},
+						"root_info":  map[string]any{"private": true},
+					})
+					require.NoError(t, model.LOG_DB.Create(&model.Log{
+						UserId: 77, CreatedAt: now, Type: model.LogTypeConsume, ModelName: name, RequestId: requestID, Other: other,
+					}).Error)
+				}
+				filter := query + "&request_id=" + requestID
+				compact := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, filter+"&compact=1")[0]
+				require.Equal(t, true, compact["success"])
+				items := compact["data"].(map[string]any)["items"].([]any)
+				require.Len(t, items, len(bodies))
+				for _, item := range items {
+					row := item.(map[string]any)
+					var meta map[string]map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(row["other"].(string), &meta))
+					require.NotContains(t, meta, "root_info")
+					admin := meta["admin_info"]
+					assert.NotContains(t, admin, "request_body")
+					assert.EqualValues(t, 123, admin["request_body_truncated"])
+					assert.Equal(t, []any{"9"}, admin["use_channel"])
+					ref := admin["request_body_ref"].(string)
+					args := fmt.Sprintf("created_at=%d&request_id=%s&ref=%s", now, requestID, ref)
+					got := callLogHandler(t, GetLogRequestBody, 3, common.RoleAdminUser, args)[0]
+					require.Equal(t, true, got["success"])
+					assert.Equal(t, bodies[row["model_name"].(string)], got["data"])
+				}
+				missing := callLogHandler(t, GetLogRequestBody, 3, common.RoleAdminUser, fmt.Sprintf("created_at=%d&request_id=%s&ref=%s", now, requestID, strings.Repeat("0", 64)))[0]
+				assert.Equal(t, false, missing["success"])
+				root := callLogHandler(t, GetAllLogs, 1, common.RoleRootUser, filter+"&compact=1")[0]
+				assert.Contains(t, root["data"].(map[string]any)["items"].([]any)[0].(map[string]any)["other"], "root_info")
+				legacy := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, filter)[0]
+				export := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, filter+"&compact=1")
+				require.Len(t, export, 3)
+				for _, row := range []map[string]any{legacy["data"].(map[string]any)["items"].([]any)[0].(map[string]any), export[0]} {
+					assert.Contains(t, row["other"], `"request_body":`)
+					assert.NotContains(t, row["other"], "request_body_ref")
+				}
+				self := callLogHandler(t, GetUserLogs, 77, common.RoleCommonUser, filter+"&compact=1")[0]
+				for _, item := range self["data"].(map[string]any)["items"].([]any) {
+					assert.NotContains(t, item.(map[string]any)["other"], "request_body")
+				}
+
+				// SQL databases may contain NULL IDs from older records. ClickHouse
+				// stores an empty String instead. Both appear empty in the list.
+				legacyCapture := model.Log{CreatedAt: now - 1, Type: model.LogTypeConsume, ModelName: "legacy-no-request-id", Other: `{"admin_info":{"request_body":"legacy body"}}`}
+				require.NoError(t, model.LOG_DB.Create(&legacyCapture).Error)
+				if tc.kind != "clickhouse" {
+					require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("id = ?", legacyCapture.Id).UpdateColumn("request_id", nil).Error)
+				}
+				legacyResponse := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, query+"&model_name=legacy-no-request-id&compact=1")[0]
+				legacyRows := legacyResponse["data"].(map[string]any)["items"].([]any)
+				require.Len(t, legacyRows, 1)
+				legacyRow := legacyRows[0].(map[string]any)
+				assert.Empty(t, legacyRow["request_id"])
+				var legacyMeta map[string]map[string]string
+				require.NoError(t, common.UnmarshalJsonStr(legacyRow["other"].(string), &legacyMeta))
+				args := fmt.Sprintf("created_at=%d&request_id=&ref=%s", now-1, legacyMeta["admin_info"]["request_body_ref"])
+				gotLegacy := callLogHandler(t, GetLogRequestBody, 3, common.RoleAdminUser, args)[0]
+				assert.Equal(t, "legacy body", gotLegacy["data"])
+				wrongTime := fmt.Sprintf("created_at=%d&request_id=&ref=%s", now, legacyMeta["admin_info"]["request_body_ref"])
+				assert.Equal(t, false, callLogHandler(t, GetLogRequestBody, 3, common.RoleAdminUser, wrongTime)[0]["success"])
+
+			})
 		})
 	}
 }
