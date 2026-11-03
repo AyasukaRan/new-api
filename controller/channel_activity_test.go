@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
@@ -498,6 +500,124 @@ func TestChannelKeyMonitoringAdminAPI(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, common.GetPointer(true), private.Channels[0].Keys[0].Success)
 	assert.Empty(t, private.Channels[0].Keys[0].Error)
+}
+
+func TestMarketplaceMonitoringViewerScope(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	require.NoError(t, db.AutoMigrate(&model.UserSession{}, &model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}))
+	withSelfUseModeDisabled(t)
+	originalGroups, originalRatios := setting.UserUsableGroups2JSONString(), ratio_setting.GroupRatio2JSONString()
+	special := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup
+	originalSpecial := special.ReadAll()
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(originalGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(originalRatios))
+		special.Clear()
+		special.AddAll(originalSpecial)
+	})
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"public":"Public","retired":"Formerly public"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"public":1,"official":1}`))
+	special.Set("official", map[string]string{"-:public": ""})
+	channel := model.Channel{Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Models: "guest-model,member-model,hidden-model", Group: "public,official",
+		Setting: common.GetPointer(`{"group_models":{"public":["guest-model","hidden-model"],"official":["member-model","hidden-model"]}}`)}
+	require.NoError(t, channel.Insert())
+	retired := model.Channel{Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Models: "retired-model", Group: "retired"}
+	require.NoError(t, retired.Insert())
+	require.NoError(t, db.Create(&model.Model{ModelName: "hidden-model", Status: 2}).Error)
+	model.InvalidatePricingCache()
+	t.Cleanup(model.InvalidatePricingCache)
+	now := time.Now()
+	hour := now.Truncate(time.Hour).Unix()
+	for name, group := range map[string]string{"guest-model": "public", "member-model": "official", "hidden-model": "official", "retired-model": "retired"} {
+		channelID := channel.Id
+		if group == "retired" {
+			channelID = retired.Id
+		}
+		require.NoError(t, db.Create(&model.PerfMetric{ModelName: name, Group: group, BucketTs: hour, RequestCount: 1, SuccessCount: 1}).Error)
+		require.NoError(t, db.Create(&model.ChannelPerfMetric{ChannelID: channelID, ModelName: name, Group: group, Source: perfmetrics.SourceRelayResult, BucketTs: hour, RequestCount: 1, SuccessCount: 1}).Error)
+		require.NoError(t, model.RecordChannelModelProbe(channelID, name, now.UnixMilli(), common.GetPointer(true)))
+	}
+
+	router := gin.New()
+	monitor := router.Group("/api/perf-metrics", middleware.HeaderNavModulePublicOrUserAuth("pricing"))
+	monitor.GET("", GetPerfMetrics)
+	monitor.GET("/summary", GetPerfMetricsSummary)
+	for _, viewer := range []struct {
+		name        string
+		role        int
+		wantModels  []string
+		deniedGroup string
+	}{
+		{"guest", 0, []string{"guest-model"}, "official"},
+		{"member", common.RoleCommonUser, []string{"member-model"}, "public"},
+		{"administrator", common.RoleAdminUser, []string{"guest-model", "member-model", "hidden-model"}, ""},
+	} {
+		t.Run(viewer.name, func(t *testing.T) {
+			var token string
+			if viewer.role != 0 {
+				user := model.User{Username: viewer.name, Role: viewer.role, Group: "official", Status: common.UserStatusEnabled, AuthVersion: 1, AffCode: viewer.name}
+				require.NoError(t, db.Create(&user).Error)
+				session, err := service.CreateLoginSession(user.Id, "password", "127.0.0.1", "monitoring-scope")
+				require.NoError(t, err)
+				token = session.AccessToken
+			}
+			request := func(path string, out any) {
+				req := httptest.NewRequest(http.MethodGet, "/api/perf-metrics"+path, nil)
+				req.Header.Set("New-Api-User", "1")
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				require.NoError(t, common.Unmarshal(w.Body.Bytes(), out))
+			}
+			var summary struct{ Data perfmetrics.SummaryAllResult }
+			request("/summary?recent_model=guest-model&recent_model=member-model&recent_model=hidden-model&recent_model=retired-model&role=100", &summary)
+			var names []string
+			for _, item := range summary.Data.Models {
+				names = append(names, item.ModelName)
+			}
+			assert.ElementsMatch(t, viewer.wantModels, names)
+			for _, name := range []string{"guest-model", "member-model", "hidden-model", "retired-model"} {
+				visible := slices.Contains(viewer.wantModels, name)
+				var detail struct{ Data perfmetrics.QueryResult }
+				request("?model="+name+"&role=100&user_group=official", &detail)
+				if visible {
+					assert.NotEmpty(t, summary.Data.RecentSuccessSeries[name])
+					require.Len(t, detail.Data.Channels, 1)
+					assert.Equal(t, common.GetPointer(true), detail.Data.CurrentAvailable)
+					continue
+				}
+				assert.NotContains(t, summary.Data.RecentSuccessSeries, name)
+				assert.Empty(t, detail.Data.Channels)
+				assert.Nil(t, detail.Data.CurrentAvailable)
+				assert.Nil(t, detail.Data.Summary)
+				request("?model="+name+"&group="+viewer.deniedGroup, &detail)
+				assert.Empty(t, detail.Data.Groups)
+				assert.Empty(t, detail.Data.Channels)
+				assert.Nil(t, detail.Data.AvailabilityRate)
+				assert.Nil(t, detail.Data.CurrentAvailable)
+			}
+			if viewer.deniedGroup != "" {
+				var detail struct{ Data perfmetrics.QueryResult }
+				request("?model="+viewer.wantModels[0]+"&group="+viewer.deniedGroup, &detail)
+				assert.Empty(t, detail.Data.Groups)
+				assert.Empty(t, detail.Data.Channels)
+				assert.Nil(t, detail.Data.CurrentAvailable)
+				assert.Nil(t, detail.Data.AvailabilityRate)
+				assert.Empty(t, detail.Data.Series)
+			}
+		})
+	}
+	common.OptionMapRWMutex.Lock()
+	common.OptionMap["HeaderNavModules"] = `{"pricing":{"enabled":true,"requireAuth":true}}`
+	common.OptionMapRWMutex.Unlock()
+	for _, path := range []string{"/api/perf-metrics?model=guest-model", "/api/perf-metrics/summary"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+	}
 }
 
 func TestChannelRequestActivityLifecycle(t *testing.T) {

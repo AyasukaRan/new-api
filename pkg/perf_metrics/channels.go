@@ -3,6 +3,7 @@ package perfmetrics
 import (
 	"context"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -67,16 +68,26 @@ var channelBuckets sync.Map
 var channelMetricsMu sync.RWMutex
 
 func RecordChannelSample(sample Sample, source string) {
+	recordChannelSample(sample, source, time.Now().Unix(), "")
+}
+
+// RecordPhysicalProbe uses the completion time shared with the monitoring round.
+func RecordPhysicalProbe(sample Sample, completedAt int64) {
+	sample.Group = ""
+	recordChannelSample(sample, SourceProbe, completedAt/1000, "")
+}
+
+func recordChannelSample(sample Sample, source string, timestamp int64, taskAcceptance string) {
 	if !perf_metrics_setting.GetSetting().Enabled || sample.Model == "" {
 		return
 	}
-	if source != SourceRelayResult && source != SourceRequest && source != SourceUsage && source != SourceProbe && source != SourceRouteState && source != SourceAvailability && source != SourceAvailabilityAll {
+	if source != SourceRelayResult && source != SourceRequest && source != SourceUsage && source != SourceProbe && source != SourceRouteState && source != SourceAvailability && source != SourceAvailabilityAll && source != sourceTaskResult && source != sourceTaskAccepted && source != sourceTaskAttempt {
 		return
 	}
 	if source != SourceAvailability && source != SourceAvailabilityAll && sample.ChannelID <= 0 {
 		return
 	}
-	if sample.Group == "" && (source == SourceRelayResult || source == SourceRequest || source == SourceUsage || source == SourceAvailability) {
+	if sample.Group == "" && (source == SourceRelayResult || source == SourceRequest || source == SourceUsage || source == SourceAvailability || source == sourceTaskResult || source == sourceTaskAccepted || source == sourceTaskAttempt) {
 		sample.Group = "default"
 	}
 	if source == SourceRouteState {
@@ -88,14 +99,24 @@ func RecordChannelSample(sample Sample, source string) {
 		sample.GenerationMs = 1
 	}
 	key := channelBucketKey{
-		bucketKey: bucketKey{model: sample.Model, group: sample.Group, bucketTs: bucketStart(time.Now().Unix())},
+		bucketKey: bucketKey{model: sample.Model, group: sample.Group, bucketTs: bucketStart(timestamp)},
 		channelID: sample.ChannelID,
 		source:    source,
 	}
-	channelMetricsMu.RLock()
-	defer channelMetricsMu.RUnlock()
+	if taskAcceptance != "" {
+		channelMetricsMu.Lock()
+		defer channelMetricsMu.Unlock()
+	} else {
+		channelMetricsMu.RLock()
+		defer channelMetricsMu.RUnlock()
+	}
 	actual, _ := channelBuckets.LoadOrStore(key, &atomicBucket{})
 	actual.(*atomicBucket).add(sample)
+	if taskAcceptance != "" {
+		key.source = taskAcceptance
+		acceptance, _ := channelBuckets.LoadOrStore(key, &atomicBucket{})
+		acceptance.(*atomicBucket).add(sample)
+	}
 }
 
 // FlushChannelMetrics also flushes current buckets. A completed health-check
@@ -132,12 +153,20 @@ func FlushChannelMetrics() error {
 }
 
 func queryChannelBuckets(modelName string, channelID int, groups []string, hours int, sources ...string) (map[channelBucketKey]counters, error) {
+	var ids []int
+	if channelID > 0 {
+		ids = []int{channelID}
+	}
+	return queryChannelBucketsForRoutes(modelName, ids, groups, hours, sources...)
+}
+
+func queryChannelBucketsForRoutes(modelName string, channelIDs []int, groups []string, hours int, sources ...string) (map[channelBucketKey]counters, error) {
 	startTs, endTs := queryWindow(time.Now(), hours)
 	allowed := allowedGroupSet(groups)
 	allowedSources := allowedGroupSet(sources)
 	channelMetricsMu.RLock()
 	defer channelMetricsMu.RUnlock()
-	rows, err := model.GetChannelPerfMetrics(modelName, channelID, groups, startTs, endTs, sources...)
+	rows, err := model.GetChannelPerfMetricsForChannels(modelName, channelIDs, groups, startTs, endTs, sources...)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +182,7 @@ func queryChannelBuckets(modelName string, channelID int, groups []string, hours
 				return true
 			}
 		}
-		if key.bucketTs < startTs || key.bucketTs > endTs || (modelName != "" && key.model != modelName) || (channelID > 0 && key.channelID != channelID) {
+		if key.bucketTs < startTs || key.bucketTs > endTs || (modelName != "" && key.model != modelName) || (channelIDs != nil && !slices.Contains(channelIDs, key.channelID)) {
 			return true
 		}
 		if allowed != nil {

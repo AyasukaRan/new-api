@@ -41,6 +41,18 @@ func GetUserUsableGroups(userGroup string) map[string]string {
 	return groupsCopy
 }
 
+// GetUserVisibleGroups returns the routes offered by the catalog and group
+// pickers. The optional auto selector has no group ratio of its own.
+func GetUserVisibleGroups(userGroup string) map[string]string {
+	groups := GetUserUsableGroups(userGroup)
+	for group := range groups {
+		if group != "auto" && !ratio_setting.ContainsGroupRatio(group) {
+			delete(groups, group)
+		}
+	}
+	return groups
+}
+
 func GroupInUserUsableGroups(userGroup, groupName string) bool {
 	_, ok := GetUserUsableGroups(userGroup)[groupName]
 	return ok

@@ -31,24 +31,27 @@ export const perfMetricsQueryKeys = {
 
 export async function getPerfMetricsSummary(
   hours = 24,
-  recentModels?: string[]
+  recentModels?: string[],
+  signal?: AbortSignal
 ): Promise<PerfSummaryAllData> {
   const res = await api.get<PerfSummaryAllData>('/api/perf-metrics/summary', {
     params: { hours, recent_model: recentModels },
     paramsSerializer: { indexes: null },
+    signal,
+    disableDuplicate: true,
   })
   return res.data
 }
 
 export async function getPerfMetrics(
   modelName: string,
-  hours = 24
+  hours = 24,
+  signal?: AbortSignal
 ): Promise<PerformanceMetricsData> {
   const res = await api.get<PerformanceMetricsData>('/api/perf-metrics', {
-    params: {
-      model: modelName,
-      hours,
-    },
+    params: { model: modelName, hours },
+    signal,
+    disableDuplicate: true,
   })
   return res.data
 }

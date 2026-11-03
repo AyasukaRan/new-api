@@ -41,6 +41,7 @@ import {
 } from '@/components/ui/tooltip'
 import { getGroups } from '@/features/users/api'
 import { useMediaQuery } from '@/hooks'
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { getUserGroups } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -120,6 +121,7 @@ export function CommonLogsFilterBar<TData>(
   props: CommonLogsFilterBarProps<TData>
 ) {
   const { t } = useTranslation()
+  const scope = useModelAccessScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -135,8 +137,9 @@ export function CommonLogsFilterBar<TData>(
     enabled: isAdmin,
   })
   const { data: userGroups } = useQuery({
-    queryKey: ['user-groups'],
-    queryFn: async () => requireServerSuccess(await getUserGroups()),
+    queryKey: ['user-groups', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserGroups(signal)),
     enabled: !isAdmin,
   })
   const groupOptions = useMemo(() => {

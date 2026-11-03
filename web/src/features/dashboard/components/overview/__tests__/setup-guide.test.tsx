@@ -76,7 +76,15 @@ beforeEach(() => {
           },
         }
       case '/api/user/models':
-        return { data: { success: true, data: ['gpt-4o-mini'] } }
+        return {
+          data: {
+            success: true,
+            data:
+              useAuthStore.getState().auth.user?.group === 'empty'
+                ? []
+                : ['gpt-4o-mini'],
+          },
+        }
       case '/api/subscription/self':
         return {
           data: {
@@ -132,6 +140,22 @@ describe('overview setup guide', () => {
     )
     expect(panel).toBeInTheDocument()
     expect(panel).not.toBeVisible()
+  })
+
+  it('removes the previous model from request examples when the account loses model access', async () => {
+    const user = userEvent.setup()
+    await renderOverview()
+    await user.click(await screen.findByRole('button', { name: 'Setup guide' }))
+    expect(await screen.findByText('gpt-4o-mini')).toBeVisible()
+    const member = useAuthStore.getState().auth.user
+    if (!member) throw new Error('Expected a signed-in user')
+    await act(() =>
+      useAuthStore.getState().auth.setUser({ ...member, group: 'empty' })
+    )
+    expect(screen.queryAllByText(/gpt-4o-mini/)).toHaveLength(0)
+    expect(
+      screen.queryByRole('button', { name: 'Copy ready-to-run curl' })
+    ).not.toBeInTheDocument()
   })
 
   it('toggles the completed guide with the keyboard and restores focus after hiding it', async () => {

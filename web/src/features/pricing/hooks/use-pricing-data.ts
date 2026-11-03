@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { useStatus } from '@/hooks/use-status'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -26,10 +27,12 @@ import { getPricing } from '../api'
 
 export function usePricingData(enabled = true) {
   const { status } = useStatus()
+  const scope = useModelAccessScope()
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['pricing'],
-    queryFn: async () => requireServerSuccess(await getPricing()),
+    queryKey: ['pricing', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getPricing(signal)),
     staleTime: 5 * 60 * 1000,
     enabled,
   })

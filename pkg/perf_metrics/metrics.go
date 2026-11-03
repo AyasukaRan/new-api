@@ -155,9 +155,10 @@ func RecordTaskResult(task *model.Task, result *relaycommon.TaskInfo) {
 		endTs = time.Now().Unix()
 	}
 	sample := Sample{
-		Model:   modelName,
-		Group:   task.Group,
-		Success: task.Status == model.TaskStatusSuccess,
+		Model:     modelName,
+		ChannelID: task.ChannelId,
+		Group:     task.Group,
+		Success:   task.Status == model.TaskStatusSuccess,
 	}
 	if task.SubmitTime > 0 && endTs > task.SubmitTime {
 		sample.LatencyMs = (endTs - task.SubmitTime) * 1000
@@ -171,16 +172,44 @@ func RecordTaskResult(task *model.Task, result *relaycommon.TaskInfo) {
 		}
 	}
 	Record(sample)
+	if task.PrivateData.TrackTerminalMetric {
+		RecordChannelSample(sample, sourceTaskResult)
+	}
+}
+
+const sourceTaskResult = "task_result"
+const sourceTaskAccepted = "task_accepted"
+const sourceTaskAttempt = "task_attempt"
+
+// Task submission is also used as a channel diagnostic. Keep the existing
+// attempt and final records, marking an accepted submission so the scoped view
+// can report the terminal outcome once even if it arrives in a later bucket.
+func RecordTaskSubmission(info *relaycommon.RelayInfo, channelID int, success, final bool) {
+	if info == nil || info.IsChannelTest {
+		return
+	}
+	now := time.Now()
+	sample := ChannelAttemptSample(info, channelID, success, now)
+	source, accepted := SourceRequest, sourceTaskAttempt
+	if final {
+		sample = RelaySample(info, success, 0)
+		source, accepted = SourceRelayResult, sourceTaskAccepted
+	}
+	if !success {
+		accepted = ""
+	}
+	recordChannelSample(sample, source, now.Unix(), accepted)
 }
 
 // Immediate failures are submit failures, which are not health samples.
 func RecordImmediateTaskResult(info *relaycommon.RelayInfo, result *relaycommon.TaskInfo) {
-	if result == nil || result.Status != model.TaskStatusSuccess {
+	if info == nil || info.IsChannelTest || result == nil || result.Status != model.TaskStatusSuccess {
 		return
 	}
 	sample := Sample{
 		Model:     info.OriginModelName,
 		Group:     info.UsingGroup,
+		ChannelID: info.GetChannelID(),
 		LatencyMs: time.Since(info.StartTime).Milliseconds(),
 		Success:   true,
 	}
@@ -189,6 +218,7 @@ func RecordImmediateTaskResult(info *relaycommon.RelayInfo, result *relaycommon.
 		sample.GenerationMs = sample.LatencyMs
 	}
 	Record(sample)
+	RecordChannelSample(sample, sourceTaskResult)
 }
 
 func Record(sample Sample) {

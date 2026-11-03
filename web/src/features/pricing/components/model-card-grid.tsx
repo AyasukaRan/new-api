@@ -16,14 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { memo, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
-import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
-import { requireServerSuccess } from '@/lib/server-error-message'
+import { usePerfMetricsSummary } from '@/features/performance-metrics/hooks'
 
 import { DEFAULT_PRICING_PAGE_SIZE, DEFAULT_TOKEN_UNIT } from '../constants'
 import type { PricingModel, TokenUnit } from '../types'
@@ -50,13 +48,9 @@ export const ModelCardGrid = memo(function ModelCardGrid(
   const totalPages = Math.max(1, Math.ceil(props.models.length / pageSize))
   const currentPage = Math.min(page, totalPages)
 
-  const perfQuery = useQuery({
-    queryKey: ['perf-metrics-summary', 24],
-    queryFn: async () => requireServerSuccess(await getPerfMetricsSummary(24)),
+  const perfQuery = usePerfMetricsSummary({
     enabled: props.models.length > 0,
-    staleTime: 60 * 1000,
-    refetchInterval: 60 * 1000,
-    retry: false,
+    poll: true,
   })
 
   const pagedModels = useMemo(() => {

@@ -109,7 +109,10 @@ func (m Properties) Value() (driver.Value, error) {
 }
 
 type TaskPrivateData struct {
-	Key string `json:"key,omitempty"`
+	// Older in-flight jobs already counted their successful submission as
+	// the request outcome. Only newly tracked jobs also emit a scoped terminal metric.
+	TrackTerminalMetric bool   `json:"track_terminal_metric,omitempty"`
+	Key                 string `json:"key,omitempty"`
 	// BaseUrl records the host this task was submitted to, for the tasks that
 	// do not run at their channel's relay address — batch inference lives on
 	// its own host. Polling and artifact content both read it, so a task keeps

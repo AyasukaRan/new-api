@@ -190,13 +190,24 @@ func UpsertChannelPerfMetric(metric *ChannelPerfMetric) error {
 }
 
 func GetChannelPerfMetrics(modelName string, channelID int, groups []string, startTs, endTs int64, sources ...string) ([]ChannelPerfMetric, error) {
+	var ids []int
+	if channelID > 0 {
+		ids = []int{channelID}
+	}
+	return GetChannelPerfMetricsForChannels(modelName, ids, groups, startTs, endTs, sources...)
+}
+
+func GetChannelPerfMetricsForChannels(modelName string, channelIDs []int, groups []string, startTs, endTs int64, sources ...string) ([]ChannelPerfMetric, error) {
 	rows := make([]ChannelPerfMetric, 0)
 	query := DB.Where("bucket_ts >= ? AND bucket_ts <= ?", startTs, endTs)
 	if modelName != "" {
 		query = query.Where("model_name = ?", modelName)
 	}
-	if channelID > 0 {
-		query = query.Where("channel_id = ?", channelID)
+	if channelIDs != nil {
+		if len(channelIDs) == 0 {
+			return rows, nil
+		}
+		query = query.Where("channel_id IN ?", channelIDs)
 	}
 	if len(sources) > 0 {
 		query = query.Where("source IN ?", sources)

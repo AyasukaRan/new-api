@@ -38,6 +38,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -48,13 +49,11 @@ import {
   getOptionLoadErrorMessage,
   shouldClearModelForGroup,
 } from '../lib'
-import type { GroupOption, ModelOption, PlaygroundConfig } from '../types'
+import type { PlaygroundConfig } from '../types'
 
 type UsePlaygroundOptionsParams = {
   currentGroup: string
   currentModel: string
-  setGroups: (groups: GroupOption[]) => void
-  setModels: (models: ModelOption[]) => void
   updateConfig: <K extends keyof PlaygroundConfig>(
     key: K,
     value: PlaygroundConfig[K]
@@ -64,10 +63,9 @@ type UsePlaygroundOptionsParams = {
 export function usePlaygroundOptions({
   currentGroup,
   currentModel,
-  setGroups,
-  setModels,
   updateConfig,
 }: UsePlaygroundOptionsParams) {
+  const scope = useModelAccessScope()
   const { t } = useTranslation()
 
   const {
@@ -76,9 +74,9 @@ export function usePlaygroundOptions({
     isError: isModelsError,
     isLoading: isLoadingModels,
   } = useQuery({
-    queryKey: ['playground-models', currentGroup],
-    queryFn: async () =>
-      requireServerSuccess(await getUserModels(currentGroup)),
+    queryKey: ['playground-models', currentGroup, ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserModels(currentGroup, signal)),
     enabled: currentGroup !== '',
   })
 
@@ -87,8 +85,9 @@ export function usePlaygroundOptions({
     error: groupsError,
     isError: isGroupsError,
   } = useQuery({
-    queryKey: ['playground-groups'],
-    queryFn: async () => requireServerSuccess(await getUserGroups()),
+    queryKey: ['playground-groups', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserGroups(signal)),
   })
 
   useEffect(() => {
@@ -118,7 +117,6 @@ export function usePlaygroundOptions({
   useEffect(() => {
     if (!modelsData) return
 
-    setModels(modelsData)
     const fallback = getModelFallback(modelsData, currentModel)
 
     if (fallback) {
@@ -129,20 +127,21 @@ export function usePlaygroundOptions({
     if (shouldClearModelForGroup(modelsData, currentModel)) {
       updateConfig('model', '')
     }
-  }, [modelsData, currentModel, setModels, updateConfig])
+  }, [modelsData, currentModel, updateConfig])
 
   useEffect(() => {
     if (!groupsData) return
 
-    setGroups(groupsData)
     const fallback = getGroupFallback(groupsData, currentGroup)
 
     if (fallback) {
       updateConfig('group', fallback)
     }
-  }, [groupsData, currentGroup, setGroups, updateConfig])
+  }, [groupsData, currentGroup, updateConfig])
 
   return {
     isLoadingModels,
+    groups: groupsData ?? [],
+    models: modelsData ?? [],
   }
 }

@@ -63,6 +63,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
@@ -107,6 +108,7 @@ export function ApiKeysMutateDrawer({
   currentRow,
 }: ApiKeyMutateDrawerProps) {
   const { t } = useTranslation()
+  const scope = useModelAccessScope()
   const isUpdate = !!currentRow
   const currentRowId = currentRow?.id
   const { triggerRefresh } = useApiKeys()
@@ -120,8 +122,9 @@ export function ApiKeysMutateDrawer({
 
   // Fetch models
   const { data: modelsData } = useQuery({
-    queryKey: ['user-models'],
-    queryFn: async () => requireServerSuccess(await getUserModels()),
+    queryKey: ['user-models', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserModels(signal)),
     enabled: open,
     staleTime: 0,
   })
@@ -132,8 +135,9 @@ export function ApiKeysMutateDrawer({
     isFetched: groupsFetched,
     isFetching: groupsFetching,
   } = useQuery({
-    queryKey: ['user-groups'],
-    queryFn: async () => requireServerSuccess(await getUserGroups()),
+    queryKey: ['user-groups', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserGroups(signal)),
     enabled: open,
     staleTime: 0,
   })
@@ -155,8 +159,9 @@ export function ApiKeysMutateDrawer({
     isFetched: autoGroupsFetched,
     isFetching: autoGroupsFetching,
   } = useQuery({
-    queryKey: ['token-auto-groups'],
-    queryFn: async () => requireServerSuccess(await getTokenAutoGroups()),
+    queryKey: ['token-auto-groups', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getTokenAutoGroups(signal)),
     enabled: open,
     staleTime: 0,
   })

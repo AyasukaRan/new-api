@@ -30,6 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createJSONStorage } from 'zustand/middleware'
 
 import { api } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
 import {
   DEFAULT_CURRENCY_CONFIG,
   useSystemConfigStore,
@@ -38,6 +39,7 @@ import {
 import { CachedPriceCell } from '../components/cached-price-cell'
 import { ModelCard } from '../components/model-card'
 import { ModelCardGrid } from '../components/model-card-grid'
+import { usePricingData } from '../hooks/use-pricing-data'
 import type { PricingModel } from '../types'
 
 function pricingModel(overrides: Partial<PricingModel> = {}): PricingModel {
@@ -79,6 +81,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   queryClient.clear()
+  useAuthStore.getState().auth.reset()
   useSystemConfigStore
     .getState()
     .setConfig({ currency: { ...DEFAULT_CURRENCY_CONFIG } })
@@ -695,6 +698,47 @@ describe('model cards', () => {
     expect(screen.getByText(expression)).toBeVisible()
   })
 
+  it('replaces the visible catalog and shared-model availability after a group change', async () => {
+    const member = { id: 7, role: 1, username: 'member', group: 'broad' }
+    useAuthStore.getState().auth.setUser(member)
+    queryClient.setQueryData(['status'], {})
+    vi.spyOn(api, 'get').mockImplementation(async (path) => {
+      const broad = useAuthStore.getState().auth.user?.group === 'broad'
+      if (path === '/api/pricing') {
+        const models = [pricingModel()]
+        if (broad) {
+          models.push(pricingModel({ id: 2, model_name: 'broad-only' }))
+        }
+        return { data: { success: true, data: models, vendors: [] } }
+      }
+      if (path === '/api/perf-metrics/summary') {
+        const shared = {
+          model_name: 'example-model',
+          availability_rate: broad ? 94 : 37,
+        }
+        return { data: { success: true, data: { models: [shared] } } }
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    function Catalog() {
+      const { models } = usePricingData()
+      return <ModelCardGrid models={models} onModelClick={vi.fn()} />
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Catalog />
+      </QueryClientProvider>
+    )
+    expect(await screen.findByText('94.0%')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'broad-only' })).toBeVisible()
+    await act(() =>
+      useAuthStore.getState().auth.setUser({ ...member, group: 'restricted' })
+    )
+    expect(screen.queryByText('broad-only')).not.toBeInTheDocument()
+    expect(screen.queryByText('94.0%')).not.toBeInTheDocument()
+    expect(await screen.findByText('37.0%')).toBeVisible()
+  })
+
   it('keeps browsing and neutral health placeholders available after the metrics request fails', async () => {
     const request = vi
       .spyOn(api, 'get')
@@ -713,6 +757,8 @@ describe('model cards', () => {
     expect(request).toHaveBeenCalledWith('/api/perf-metrics/summary', {
       params: { hours: 24, recent_model: undefined },
       paramsSerializer: { indexes: null },
+      signal: expect.any(AbortSignal),
+      disableDuplicate: true,
     })
     expect(
       within(
@@ -742,6 +788,8 @@ describe('model cards', () => {
     expect(request).toHaveBeenCalledWith('/api/perf-metrics/summary', {
       params: { hours: 24, recent_model: undefined },
       paramsSerializer: { indexes: null },
+      signal: expect.any(AbortSignal),
+      disableDuplicate: true,
     })
     await user.click(screen.getByRole('button', { name: 'Next page' }))
     expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(1)

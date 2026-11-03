@@ -680,7 +680,7 @@ func executeTaskSubmissionWith(
 		}
 		finishActivity(observation)
 		if observation != nil {
-			perfmetrics.RecordChannelAttempt(relayInfo, channel.Id, *observation)
+			perfmetrics.RecordTaskSubmission(relayInfo, channel.Id, *observation, false)
 		}
 		statusCode, errorMessage := 0, ""
 		if taskErr != nil {
@@ -716,7 +716,7 @@ func executeTaskSubmissionWith(
 		}
 	}
 	if observation != nil {
-		perfmetrics.RecordChannelRelayResult(relayInfo, *observation)
+		perfmetrics.RecordTaskSubmission(relayInfo, relayInfo.GetChannelID(), *observation, true)
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -769,6 +769,7 @@ func executeTaskSubmissionWith(
 
 	stage = "insert"
 	task := model.InitTask(result.Platform, relayInfo)
+	task.PrivateData.TrackTerminalMetric = true
 	task.PrivateData.Execution = service.TaskExecutionSnapshotFromContext(c)
 	task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
 	task.PrivateData.BillingSource = relayInfo.BillingSource

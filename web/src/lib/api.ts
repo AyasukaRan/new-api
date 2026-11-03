@@ -48,21 +48,27 @@ export async function getSelf() {
   return res.data
 }
 
-export async function getUserModels(): Promise<{
+export async function getUserModels(signal?: AbortSignal): Promise<{
   success: boolean
   message?: string
   data?: string[]
 }> {
-  const res = await api.get('/api/user/models')
+  const res = await api.get('/api/user/models', {
+    signal,
+    disableDuplicate: true,
+  })
   return res.data
 }
 
-export async function getUserGroups(): Promise<{
+export async function getUserGroups(signal?: AbortSignal): Promise<{
   success: boolean
   message?: string
   data?: Record<string, { desc: string; ratio: number | string }>
 }> {
-  const res = await api.get('/api/user/self/groups')
+  const res = await api.get('/api/user/self/groups', {
+    signal,
+    disableDuplicate: true,
+  })
   return res.data
 }
 

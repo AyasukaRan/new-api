@@ -2,17 +2,45 @@ package controller
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 )
+
+func monitorScopeForViewer(c *gin.Context, hours int) perfmetrics.QueryParams {
+	params := perfmetrics.QueryParams{Hours: hours}
+	if c.GetInt("role") >= common.RoleAdminUser {
+		params.AllowedGroups = append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
+		return params
+	}
+	usable := service.GetUserVisibleGroups(c.GetString("user_group"))
+	params.AllowedGroups = lo.Keys(usable)
+	if len(params.AllowedGroups) == 0 {
+		return params
+	}
+	params.VisibleModels = make(map[string]bool)
+	catalog := model.GetPricing()
+	for i := range catalog {
+		item := &catalog[i]
+		for _, group := range item.EnableGroup {
+			if _, ok := usable[group]; ok || group == "all" {
+				params.VisibleModels[item.ModelName] = true
+				break
+			}
+		}
+	}
+	return params
+}
 
 func GetAdminPerfMetrics(c *gin.Context) {
 	modelName := strings.TrimSpace(c.Query("model"))
@@ -42,8 +70,14 @@ func GetPerfMetricsSummary(c *gin.Context) {
 		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
 		return
 	}
-	activeGroups := append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
-	result, err := perfmetrics.QuerySummaryAll(hours, activeGroups, recentModels...)
+	scope := monitorScopeForViewer(c, hours)
+	var result perfmetrics.SummaryAllResult
+	var err error
+	if c.GetInt("role") >= common.RoleAdminUser {
+		result, err = perfmetrics.QuerySummaryAll(hours, scope.AllowedGroups, recentModels...)
+	} else {
+		result, err = perfmetrics.QueryVisibleSummary(scope, recentModels...)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -75,13 +109,14 @@ func GetPerfMetrics(c *gin.Context) {
 		}
 	}
 
-	activeRatios := ratio_setting.GetGroupRatioCopy()
-	result, err := perfmetrics.Query(perfmetrics.QueryParams{
-		Model:         modelName,
-		Group:         c.Query("group"),
-		Hours:         hours,
-		AllowedGroups: append(lo.Keys(activeRatios), "auto"),
-	})
+	params := monitorScopeForViewer(c, hours)
+	params.Model = modelName
+	params.Group = c.Query("group")
+	query := perfmetrics.QueryVisible
+	if c.GetInt("role") >= common.RoleAdminUser {
+		query = perfmetrics.Query
+	}
+	result, err := query(params)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -90,11 +125,9 @@ func GetPerfMetrics(c *gin.Context) {
 		return
 	}
 
-	if group := c.Query("group"); group != "" && group != "auto" {
-		if _, active := activeRatios[group]; !active {
-			result.AvailabilityRate = nil
-			result.AvailabilitySeries = nil
-		}
+	if params.Group != "" && !slices.Contains(params.AllowedGroups, params.Group) {
+		result.AvailabilityRate = nil
+		result.AvailabilitySeries = nil
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

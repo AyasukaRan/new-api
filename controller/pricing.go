@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"maps"
-
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -17,40 +15,49 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 
 func GetPricing(c *gin.Context) {
 	pricing := model.GetPricing()
-	userId, exists := c.Get("id")
-	usableGroup := map[string]string{}
-	groupRatio := map[string]float64{}
-	maps.Copy(groupRatio, ratio_setting.GetGroupRatioCopy())
-	var group string
-	if exists {
-		user, err := model.GetUserCache(userId.(int))
-		if err == nil {
-			group = user.Group
-			for g := range groupRatio {
-				ratio, ok := ratio_setting.GetGroupGroupRatio(group, g)
-				if ok {
-					groupRatio[g] = ratio
+	// The pricing route's auth middleware supplies the current account group.
+	group := c.GetString("user_group")
+	groupRatio := ratio_setting.GetGroupRatioCopy()
+	usableGroup := service.GetUserVisibleGroups(group)
+	pricing = filterPricingByUsableGroups(pricing, usableGroup)
+	for g := range groupRatio {
+		if _, ok := usableGroup[g]; !ok {
+			delete(groupRatio, g)
+			continue
+		}
+		if ratio, ok := ratio_setting.GetGroupGroupRatio(group, g); ok && group != "" {
+			groupRatio[g] = ratio
+		}
+	}
+	vendors := model.GetVendors()
+	endpoints := model.GetSupportedEndpointMap()
+	if c.GetInt("role") < common.RoleAdminUser {
+		vendorIDs := make(map[int]bool)
+		visibleEndpoints := make(map[string]common.EndpointInfo)
+		for _, item := range pricing {
+			vendorIDs[item.VendorID] = true
+			for _, kind := range item.SupportedEndpointTypes {
+				if info, exists := endpoints[string(kind)]; exists {
+					visibleEndpoints[string(kind)] = info
 				}
 			}
 		}
-	}
-
-	usableGroup = service.GetUserUsableGroups(group)
-	pricing = filterPricingByUsableGroups(pricing, usableGroup)
-	// check groupRatio contains usableGroup
-	for group := range ratio_setting.GetGroupRatioCopy() {
-		if _, ok := usableGroup[group]; !ok {
-			delete(groupRatio, group)
+		visibleVendors := make([]model.PricingVendor, 0, len(vendorIDs))
+		for _, vendor := range vendors {
+			if vendorIDs[vendor.ID] {
+				visibleVendors = append(visibleVendors, vendor)
+			}
 		}
+		vendors, endpoints = visibleVendors, visibleEndpoints
 	}
 
 	c.JSON(200, gin.H{
 		"success":            true,
 		"data":               pricing,
-		"vendors":            model.GetVendors(),
+		"vendors":            vendors,
 		"group_ratio":        groupRatio,
 		"usable_group":       usableGroup,
-		"supported_endpoint": model.GetSupportedEndpointMap(),
+		"supported_endpoint": endpoints,
 		"auto_groups":        service.GetUserAutoGroup(group),
 		"pricing_version":    "a42d372ccf0b5dd13ecf71203521f9d2",
 	})

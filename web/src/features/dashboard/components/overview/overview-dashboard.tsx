@@ -51,6 +51,7 @@ import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { fetchTokenKey, getApiKeys } from '@/features/keys/api'
 import type { ApiKey } from '@/features/keys/types'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { getUserModels } from '@/lib/api'
 import { currentBaseUrl } from '@/lib/base-path'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -491,10 +492,11 @@ export function OverviewDashboard() {
     staleTime: 60 * 1000,
   })
 
+  const scope = useModelAccessScope()
   const modelsQuery = useQuery({
-    queryKey: ['dashboard', 'overview', 'user-models'],
-    queryFn: async () => {
-      const result = requireServerSuccess(await getUserModels())
+    queryKey: ['dashboard', 'overview', 'user-models', ...scope],
+    queryFn: async ({ signal }) => {
+      const result = requireServerSuccess(await getUserModels(signal))
       return result.success ? (result.data ?? []) : []
     },
     staleTime: 5 * 60 * 1000,
@@ -594,13 +596,13 @@ export function OverviewDashboard() {
 
   const requestExample = useMemo<RequestExample>(() => {
     const endpoint = normalizeEndpoint(apiInfoItems[0]?.url)
-    const model = modelsQuery.data?.[0] ?? 'gpt-4o-mini'
+    const model = modelsQuery.data?.[0] ?? ''
     const keyName = preferredKey?.name ?? t('No API key yet')
     const ready = Boolean(preferredKey?.id && model)
 
     return {
       endpoint,
-      model,
+      model: model || '<model>',
       keyName,
       keyId: preferredKey?.id,
       displayKey: preferredKey

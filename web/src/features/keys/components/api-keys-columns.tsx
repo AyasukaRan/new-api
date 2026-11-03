@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '@/components/status-badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { useMediaQuery } from '@/hooks'
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { toIntlLocale } from '@/i18n/languages'
 import { getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay } from '@/lib/currency'
@@ -48,9 +49,11 @@ import { DataTableRowActions } from './data-table-row-actions'
 const EMPTY_GROUP_RATIOS: Record<string, number | string> = {}
 
 function useGroupRatios(): Record<string, number | string> {
+  const scope = useModelAccessScope()
   const { data } = useQuery({
-    queryKey: ['user-groups'],
-    queryFn: async () => requireServerSuccess(await getUserGroups()),
+    queryKey: ['user-groups', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserGroups(signal)),
     staleTime: 0,
     select: (res) => {
       if (!res.success || !res.data) return {}

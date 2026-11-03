@@ -28,6 +28,9 @@ type QueryParams struct {
 	// AllowedGroups restricts both the per-group results and the model summary;
 	// nil allows every group.
 	AllowedGroups []string
+	// VisibleModels is the model square's catalog for the requesting account.
+	// QueryVisible and QueryVisibleSummary require explicit membership.
+	VisibleModels map[string]bool
 }
 
 // Summary is the request-weighted aggregate over every bucket in the window.

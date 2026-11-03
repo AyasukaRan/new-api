@@ -234,13 +234,14 @@ export function parseTaskResult(){return {};}
 			common.SetDatabaseTypes(dbType, oldLogType)
 			initCol()
 			resetPricingEndpointTestTables(t)
+			require.NoError(t, DB.Create(&Model{ModelName: "catalog-db", Endpoints: `{"explicit":"/custom"}`, Status: 1, NameRule: NameRuleExact}).Error)
 			for _, spec := range []struct {
-				id, status int
-				group      string
+				id, status, channelType int
+				group                   string
 			}{
-				{7101, 1, "visible"}, {7102, 1, "private"}, {7103, 2, "visible"}, {7104, 1, "visible"},
+				{7101, 1, constant.ChannelTypeOpenAI, "visible"}, {7102, 1, constant.ChannelTypeGemini, "private"}, {7103, 2, constant.ChannelTypeOpenAI, "visible"}, {7104, 1, constant.ChannelTypeOpenAI, "visible"},
 			} {
-				require.NoError(t, DB.Create(&Channel{Id: spec.id, Name: fmt.Sprintf("secret-channel-%d", spec.id), Key: "secret-key", Status: spec.status, Type: constant.ChannelTypeOpenAI, Models: "catalog-db", Group: spec.group}).Error)
+				require.NoError(t, DB.Create(&Channel{Id: spec.id, Name: fmt.Sprintf("secret-channel-%d", spec.id), Key: "secret-key", Status: spec.status, Type: spec.channelType, Models: "catalog-db", Group: spec.group}).Error)
 				require.NoError(t, DB.Create(&Ability{ChannelId: spec.id, Model: "catalog-db", Group: spec.group, Enabled: true}).Error)
 			}
 			for _, spec := range []struct {
@@ -265,6 +266,15 @@ export function parseTaskResult(){return {};}
 					require.Len(t, items, 3)
 					byModel := pricingByModel(items)
 					require.Len(t, byModel["catalog-db"].ChannelPricingVariants, 2)
+					expected := []constant.EndpointType{constant.EndpointTypeOpenAI, "explicit"}
+					assert.Equal(t, expected, byModel["catalog-db"].SupportedEndpointTypes)
+					for _, variant := range byModel["catalog-db"].ChannelPricingVariants {
+						assert.Equal(t, expected, variant.SupportedEndpointTypes)
+					}
+					private := pricingByModel(FilterPricingByUsableGroups(GetPricing(), map[string]string{"private": ""}))
+					assert.Equal(t, []constant.EndpointType{constant.EndpointTypeGemini, constant.EndpointTypeOpenAI, "explicit"}, private["catalog-db"].SupportedEndpointTypes)
+					both := pricingByModel(FilterPricingByUsableGroups(GetPricing(), map[string]string{"visible": "", "private": ""}))
+					assert.ElementsMatch(t, []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeGemini, "explicit"}, both["catalog-db"].SupportedEndpointTypes)
 					assert.Equal(t, `tier("channel", p * 1)`, byModel["catalog-db"].BillingExpr)
 					assert.Equal(t, `tier("global", p * 3)`, byModel["catalog-db"].ChannelPricingVariants[1].BillingExpr)
 					alias := byModel["catalog-alias"]

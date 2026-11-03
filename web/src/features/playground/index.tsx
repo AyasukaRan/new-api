@@ -31,11 +31,7 @@ export function Playground() {
     parameterEnabled,
     messages,
     isLoadingMessages,
-    models,
-    groups,
     updateMessages,
-    setModels,
-    setGroups,
     updateConfig,
     updateParameterEnabled,
     clearMessages,
@@ -66,11 +62,9 @@ export function Playground() {
     clearMessages()
   }
 
-  const { isLoadingModels } = usePlaygroundOptions({
+  const { groups, models, isLoadingModels } = usePlaygroundOptions({
     currentGroup: config.group,
     currentModel: config.model,
-    setGroups,
-    setModels,
     updateConfig,
   })
 

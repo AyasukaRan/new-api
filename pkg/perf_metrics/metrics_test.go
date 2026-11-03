@@ -384,6 +384,142 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 				assert.Empty(t, history.RecentSuccessSeries["history-expired"])
 				assert.Empty(t, history.RecentSuccessSeries["history-hot-expired"])
 			})
+			t.Run("visible routes isolate probe rounds and requests", func(t *testing.T) {
+				require.NoError(t, db.AutoMigrate(&model.ChannelModelActivity{}, &model.ChannelKeyObservation{}))
+				const shared = "scope-shared"
+				const hidden = "scope-hidden"
+				const archived = "scope-archived"
+				settings := `{"group_models":{"ds":["scope-shared","scope-archived"],"other":["scope-hidden"]}}`
+				channels := []model.Channel{
+					{Name: "mixed", Key: "test", Group: "ds,other,also-ds", Models: shared + "," + hidden + "," + archived, Setting: &settings, Status: common.ChannelStatusEnabled},
+					{Name: "second", Key: "test", Group: "ds", Models: shared, Status: common.ChannelStatusEnabled},
+					{Name: "hidden", Key: "test", Group: "other", Models: shared, Status: common.ChannelStatusEnabled},
+					{Name: "disabled", Key: "test", Group: "ds", Models: shared, Status: common.ChannelStatusManuallyDisabled},
+				}
+				require.NoError(t, db.Create(&channels).Error)
+				first, second, private := channels[0].Id, channels[1].Id, channels[2].Id
+				access := QueryParams{Model: shared, Hours: 24, AllowedGroups: []string{"ds", "also-ds"}, VisibleModels: map[string]bool{shared: true}}
+				row := func(id int, name, g, source string, window int64, n, ok, latency int64) {
+					t.Helper()
+					require.NoError(t, model.UpsertChannelPerfMetric(&model.ChannelPerfMetric{ChannelID: id, ModelName: name, Group: g, Source: source, BucketTs: window, RequestCount: n, SuccessCount: ok, TotalLatencyMs: latency}))
+				}
+				// Neither a final outcome from a currently invisible route nor an
+				// unscoped legacy/global history row can affect this account.
+				row(private, shared, "ds", SourceRelayResult, hour, 900, 900, 900000)
+				row(channels[3].Id, shared, "ds", SourceRequest, hour, 900, 900, 900000)
+				row(0, shared, "", SourceAvailabilityAll, hour, 900, 900, 900000)
+				row(0, shared, "ds", SourceAvailability, hour, 900, 900, 900000)
+				row(0, shared, "ds", SourceRelayResult, hour, 900, 900, 900000)
+				row(first, hidden, "", SourceProbe, hour, 4, 4, 40000)
+				row(first, archived, "", SourceProbe, hour, 4, 4, 40000)
+				row(first, shared, "other", SourceRequest, hour, 19, 19, 190000)
+				require.NoError(t, model.UpsertPerfMetric(&model.PerfMetric{ModelName: shared, Group: "ds", BucketTs: hour, RequestCount: 90, SuccessCount: 90}))
+				row(first, shared, "ds", SourceRequest, hour, 1, 0, 10)
+				row(first, shared, "ds", SourceRelayResult, hour, 1, 0, 10)
+				// Two uncorrelated old probes both failed. This is one exact OR.
+				row(first, shared, "", SourceProbe, hour, 1, 0, 10)
+				row(second, shared, "", SourceProbe, hour, 1, 0, 10)
+				// Three rounds in the same bucket. Channel A succeeded in two,
+				// channel B in the other one, and the unrelated channel always
+				// succeeded. The first two visible round signatures also repeat.
+				for _, one := range []bool{true, true, false} {
+					RecordVisibleRound(shared, []RoundRoute{{first, one, now.UnixMilli(), one}, {second, !one, now.UnixMilli(), !one}, {private, true, now.UnixMilli(), true}})
+					RecordChannelSample(Sample{ChannelID: first, Model: shared, Success: one, LatencyMs: 10}, SourceProbe)
+					RecordChannelSample(Sample{ChannelID: second, Model: shared, Success: !one, LatencyMs: 10}, SourceProbe)
+				}
+				// A pre-upgrade pair of failures in this same bucket survives.
+				RecordChannelSample(Sample{ChannelID: first, Model: shared, LatencyMs: 10}, SourceProbe)
+				RecordChannelSample(Sample{ChannelID: second, Model: shared, LatencyMs: 10}, SourceProbe)
+				// Only old, attributable requests belong in the seven-day series.
+				row(first, shared, "ds", SourceRelayResult, hour-4*86400, 1, 1, 30)
+				row(private, shared, "other", SourceRelayResult, hour-4*86400, 9, 0, 90)
+				success := true
+				require.NoError(t, model.RecordChannelModelProbe(private, shared, now.UnixMilli(), &success))
+				failure := false
+				require.NoError(t, model.RecordChannelModelProbe(first, shared, now.UnixMilli(), &failure))
+				require.NoError(t, model.RecordChannelModelProbe(second, shared, now.UnixMilli(), &failure))
+				for _, persisted := range []bool{false, true} {
+					if persisted {
+						require.NoError(t, FlushChannelMetrics())
+					}
+					detail, err := QueryVisible(access)
+					require.NoError(t, err)
+					require.NotNil(t, detail.AvailabilityRate)
+					assert.Equal(t, 50.0, *detail.AvailabilityRate, "three available rounds, two failed rounds, one failed real request")
+					require.NotNil(t, detail.CurrentAvailable)
+					assert.False(t, *detail.CurrentAvailable)
+					require.Len(t, detail.Channels, 2)
+					assert.Equal(t, 1, detail.Channels[0].ChannelIndex)
+					require.Len(t, detail.Groups, 2)
+					assert.Equal(t, "ds", detail.Groups[1].Group)
+					assert.Equal(t, 50.0, detail.Groups[1].SuccessRate)
+					require.NotNil(t, detail.Summary)
+					assert.Equal(t, int64(10), detail.AvgLatencyMs)
+					summaryAccess := access
+					summaryAccess.Model = ""
+					summary, err := QueryVisibleSummary(summaryAccess, shared, hidden, archived)
+					require.NoError(t, err)
+					require.Len(t, summary.Models, 1)
+					assert.Equal(t, shared, summary.Models[0].ModelName)
+					assert.Equal(t, int64(11), summary.Models[0].RequestCount, "multi-group probes are counted once")
+					assert.Equal(t, detail.AvailabilityRate, summary.Models[0].AvailabilityRate)
+					assert.Equal(t, detail.AvailabilitySeries, summary.Models[0].RecentSuccessSeries)
+					assert.Len(t, summary.RecentSuccessSeries[shared], 3)
+					assert.NotContains(t, summary.RecentSuccessSeries, hidden)
+					assert.NotContains(t, summary.RecentSuccessSeries, archived)
+				}
+				// A long probe is timed in the earlier bucket but its correlated
+				// OR outcome is counted only once at the end of the round.
+				crossStart := (hour - 3600) * 1000
+				RecordPhysicalProbe(Sample{ChannelID: first, Model: shared, Success: false, LatencyMs: 10}, crossStart)
+				RecordVisibleRound(shared, []RoundRoute{{ChannelID: first, ProbeCompletedAt: crossStart}})
+				onlyFirst := access
+				onlyFirst.Group = "also-ds"
+				crossed, err := QueryVisible(onlyFirst)
+				require.NoError(t, err)
+				require.NotNil(t, crossed.AvailabilityRate)
+				assert.InDelta(t, 100.0/3, *crossed.AvailabilityRate, .01, "two successes out of six physical rounds")
+				for _, pt := range crossed.AvailabilitySeries {
+					assert.NotEqual(t, hour-3600, pt.Ts, "timing of an earlier probe must not duplicate its outcome")
+				}
+				// Both terminal task paths publish a real, attributed result.
+				// Submitting an accepted job does not count it twice, including
+				// when asynchronous completion falls in a different time bucket.
+				taskAccess := QueryParams{Model: archived, Hours: 24, AllowedGroups: []string{"ds"}, VisibleModels: map[string]bool{archived: true}}
+				taskInfo := &relaycommon.RelayInfo{OriginModelName: archived, UsingGroup: "ds", StartTime: now.Add(-time.Second), ChannelMeta: &relaycommon.ChannelMeta{ChannelId: first}}
+				RecordTaskSubmission(taskInfo, first, true, false)
+				RecordTaskSubmission(taskInfo, first, true, true)
+				RecordImmediateTaskResult(taskInfo, &relaycommon.TaskInfo{Status: model.TaskStatusSuccess, TotalTokens: 50})
+				row(first, archived, "ds", SourceRequest, hour-2*3600, 1, 1, 60)
+				row(first, archived, "ds", sourceTaskAttempt, hour-2*3600, 1, 1, 60)
+				row(first, archived, "ds", SourceRelayResult, hour-2*3600, 1, 1, 60)
+				row(first, archived, "ds", sourceTaskAccepted, hour-2*3600, 1, 1, 60)
+				task := &model.Task{ChannelId: first, Group: "ds", Properties: model.Properties{OriginModelName: archived}, Status: model.TaskStatusFailure, SubmitTime: hour - 2*3600, FinishTime: now.Unix()}
+				RecordTaskResult(task, nil) // a pre-upgrade task keeps its original recorded submission
+				task.PrivateData.TrackTerminalMetric = true
+				RecordTaskResult(task, nil)
+				taskSummary, err := QueryVisibleSummary(taskAccess)
+				require.NoError(t, err)
+				require.Len(t, taskSummary.Models, 1)
+				assert.Equal(t, int64(6), taskSummary.Models[0].RequestCount, "4 pre-existing probes and 2 terminal task results")
+				require.NotNil(t, taskSummary.Models[0].AvailabilityRate)
+				assert.InDelta(t, 100*5.0/6, *taskSummary.Models[0].AvailabilityRate, .01)
+
+				for _, params := range []QueryParams{
+					{Model: hidden, AllowedGroups: []string{"ds"}, VisibleModels: map[string]bool{hidden: true}},
+					{Model: shared, Group: "other", AllowedGroups: []string{"ds"}, VisibleModels: access.VisibleModels},
+					{Model: archived, AllowedGroups: access.AllowedGroups, VisibleModels: access.VisibleModels},
+					{Model: shared, AllowedGroups: access.AllowedGroups},
+					{Model: shared, VisibleModels: access.VisibleModels},
+				} {
+					result, err := QueryVisible(params)
+					require.NoError(t, err)
+					assert.Nil(t, result.Summary)
+					assert.Empty(t, result.Groups)
+					assert.Empty(t, result.Channels)
+					assert.Nil(t, result.CurrentAvailable)
+				}
+			})
 		})
 	}
 }

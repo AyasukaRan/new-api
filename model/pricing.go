@@ -190,11 +190,13 @@ func loadPricingAdvancedCustomConfigs(enableAbilities []AbilityWithChannel) map[
 	return configs
 }
 
-func appendPricingEndpoint(endpoints []string, endpoint string) []string {
-	if endpoint == "" || common.StringsContains(endpoints, endpoint) {
-		return endpoints
+func mergePricingEndpoints(endpoints []constant.EndpointType, additions ...constant.EndpointType) []constant.EndpointType {
+	for _, endpoint := range additions {
+		if endpoint != "" && !slices.Contains(endpoints, endpoint) {
+			endpoints = append(endpoints, endpoint)
+		}
 	}
-	return append(endpoints, endpoint)
+	return endpoints
 }
 
 // HasPriceOrRatioEntry reports an explicit price after wildcard normalization;
@@ -450,6 +452,7 @@ func FilterPricingByUsableGroups(pricing []Pricing, usableGroup map[string]strin
 		variants := make([]Pricing, 0, len(candidates))
 		byPrice := make(map[string]int)
 		allGroups := make(map[string]struct{})
+		var allEndpoints []constant.EndpointType
 		for _, candidate := range candidates {
 			groups := make([]string, 0)
 			for group := range usableGroup {
@@ -462,20 +465,25 @@ func FilterPricingByUsableGroups(pricing []Pricing, usableGroup map[string]strin
 				continue
 			}
 			slices.Sort(groups)
+			endpoints := candidate.SupportedEndpointTypes
 			candidate.EnableGroup = nil
+			candidate.SupportedEndpointTypes = nil
 			candidate.ChannelPricingVariants = nil
 			encoded, err := common.Marshal(candidate)
 			if err != nil {
 				continue
 			}
+			allEndpoints = mergePricingEndpoints(allEndpoints, endpoints...)
 			key := string(encoded)
 			if index, found := byPrice[key]; found {
+				variants[index].SupportedEndpointTypes = mergePricingEndpoints(variants[index].SupportedEndpointTypes, endpoints...)
 				variants[index].EnableGroup = append(variants[index].EnableGroup, groups...)
 				slices.Sort(variants[index].EnableGroup)
 				variants[index].EnableGroup = slices.Compact(variants[index].EnableGroup)
 				continue
 			}
 			candidate.EnableGroup = groups
+			candidate.SupportedEndpointTypes = slices.Clone(endpoints)
 			byPrice[key] = len(variants)
 			variants = append(variants, candidate)
 		}
@@ -484,6 +492,7 @@ func FilterPricingByUsableGroups(pricing []Pricing, usableGroup map[string]strin
 		}
 		visible := variants[0]
 		visible.PricingVersion = item.PricingVersion
+		visible.SupportedEndpointTypes = allEndpoints
 		visible.EnableGroup = make([]string, 0, len(allGroups))
 		for group := range allGroups {
 			visible.EnableGroup = append(visible.EnableGroup, group)
@@ -569,19 +578,18 @@ func updatePricing() {
 	}
 
 	//这里使用切片而不是Set，因为一个模型可能支持多个端点类型，并且第一个端点是优先使用端点
-	modelSupportEndpointsStr := make(map[string][]string)
+	modelSupportEndpointTypes = make(map[string][]constant.EndpointType)
+	channelEndpoints := make(map[string]map[int][]constant.EndpointType)
 	advancedCustomConfigs := loadPricingAdvancedCustomConfigs(enableAbilities)
 
 	// 先根据已有能力填充原生端点
 	for _, ability := range enableAbilities {
-		endpoints := modelSupportEndpointsStr[ability.Model]
-		channelTypes := getPricingEndpointTypesForAbility(ability, advancedCustomConfigs)
-		for _, channelType := range channelTypes {
-			if !common.StringsContains(endpoints, string(channelType)) {
-				endpoints = append(endpoints, string(channelType))
-			}
+		if channelEndpoints[ability.Model] == nil {
+			channelEndpoints[ability.Model] = make(map[int][]constant.EndpointType)
 		}
-		modelSupportEndpointsStr[ability.Model] = endpoints
+		channelTypes := getPricingEndpointTypesForAbility(ability, advancedCustomConfigs)
+		channelEndpoints[ability.Model][ability.ChannelId] = slices.Clone(channelTypes)
+		modelSupportEndpointTypes[ability.Model] = mergePricingEndpoints(modelSupportEndpointTypes[ability.Model], channelTypes...)
 	}
 
 	// 再补充模型自定义端点：若配置有效则追加到已有推断，不再裁剪渠道真实能力
@@ -591,27 +599,19 @@ func updatePricing() {
 		}
 		var raw map[string]any
 		if err := common.Unmarshal([]byte(meta.Endpoints), &raw); err == nil {
-			endpoints := modelSupportEndpointsStr[modelName]
+			var explicit []constant.EndpointType
 			for k, v := range raw {
 				switch v.(type) {
 				case string, map[string]any:
-					endpoints = appendPricingEndpoint(endpoints, k)
+					explicit = append(explicit, constant.EndpointType(k))
 				}
 			}
-			if len(endpoints) > 0 {
-				modelSupportEndpointsStr[modelName] = endpoints
+			slices.Sort(explicit)
+			modelSupportEndpointTypes[modelName] = mergePricingEndpoints(modelSupportEndpointTypes[modelName], explicit...)
+			for id, endpoints := range channelEndpoints[modelName] {
+				channelEndpoints[modelName][id] = mergePricingEndpoints(endpoints, explicit...)
 			}
 		}
-	}
-
-	modelSupportEndpointTypes = make(map[string][]constant.EndpointType)
-	for model, endpoints := range modelSupportEndpointsStr {
-		supportedEndpoints := make([]constant.EndpointType, 0)
-		for _, endpointStr := range endpoints {
-			endpointType := constant.EndpointType(endpointStr)
-			supportedEndpoints = append(supportedEndpoints, endpointType)
-		}
-		modelSupportEndpointTypes[model] = supportedEndpoints
 	}
 
 	// 构建全局 supportedEndpointMap（默认 + 自定义覆盖）
@@ -766,9 +766,11 @@ func updatePricing() {
 		slices.Sort(channelIDs)
 		for _, channelID := range channelIDs {
 			channel := pricingChannels[channelID]
+			channelBase := pricing
+			channelBase.SupportedEndpointTypes = channelEndpoints[model][channelID]
 			variant := Pricing{
 				ModelName: model, Description: pricing.Description, Icon: pricing.Icon, Tags: pricing.Tags,
-				VendorID: pricing.VendorID, SupportedEndpointTypes: pricing.SupportedEndpointTypes,
+				VendorID: pricing.VendorID, SupportedEndpointTypes: channelBase.SupportedEndpointTypes,
 				EnableGroup: modelChannelGroups[model][channelID],
 			}
 			if channel == nil {
@@ -783,7 +785,7 @@ func updatePricing() {
 			}
 			providers := pricingChannelProviders(pluginGeneration, channel, model, mappedModel)
 			for _, provider := range providers {
-				variant, _ = resolveChannelPricing(pricing, channelID, provider, mappedModel, pluginGeneration.SharedModel(model) || pluginGeneration.SharedModel(mappedModel))
+				variant, _ = resolveChannelPricing(channelBase, channelID, provider, mappedModel, pluginGeneration.SharedModel(model) || pluginGeneration.SharedModel(mappedModel))
 				variant.EnableGroup = modelChannelGroups[model][channelID]
 				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 			}
@@ -794,7 +796,7 @@ func updatePricing() {
 				pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 				continue
 			}
-			variant, _ = resolveChannelPricing(pricing, channelID, nil, mappedModel, false)
+			variant, _ = resolveChannelPricing(channelBase, channelID, nil, mappedModel, false)
 			variant.EnableGroup = modelChannelGroups[model][channelID]
 			pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, variant)
 		}

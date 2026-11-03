@@ -412,8 +412,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		common.SysError("failed to record channel check result: " + err.Error())
 	}
 	perfmetrics.Record(sample)
-	sample.Group = ""
-	perfmetrics.RecordChannelSample(sample, perfmetrics.SourceProbe)
+	perfmetrics.RecordPhysicalProbe(sample, completedAt)
 	if round, ok := ctx.Value(channelAvailabilityRoundKey{}).(*channelAvailabilityRound); ok {
 		round.mu.Lock()
 		round.probes[channelModelProbe{channel.Id, sample.Model}] = channelProbeObservation{success: sample.Success, completedAt: completedAt}
@@ -421,7 +420,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	} else {
 		// Direct manual checks must update the same channel availability
 		// series as scheduled assessments, even within an existing hour.
-		perfmetrics.RecordChannelSample(sample, perfmetrics.SourceRouteState)
+		perfmetrics.RecordVisibleRound(sample.Model, []perfmetrics.RoundRoute{{ChannelID: channel.Id, Success: sample.Success, ProbeCompletedAt: completedAt, ProbeSuccess: sample.Success}})
 	}
 	return result
 }
@@ -1418,7 +1417,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 	// The end-of-round configuration determines which routes can currently
 	// serve traffic. A disabled route's successful probe is not usable failover.
 	var current []*model.Channel
-	if err := model.DB.Select("id", "models", "group", "status").Where("status = ?", common.ChannelStatusEnabled).Find(&current).Error; err != nil {
+	if err := model.DB.Select("id", "models", "group", "setting", "status").Where("status = ?", common.ChannelStatusEnabled).Find(&current).Error; err != nil {
 		common.SysError("failed to resolve model availability routes: " + err.Error())
 		return summary
 	}
@@ -1449,25 +1448,26 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 	type availabilityKey struct{ model, group string }
 	type availabilityOutcome struct{ complete, success, probed bool }
 	outcomes := make(map[availabilityKey]availabilityOutcome)
+	roundRoutes := make(map[string][]perfmetrics.RoundRoute)
 	activeGroups := ratio_setting.GetGroupRatioCopy()
 	for _, channel := range current {
-		groups := make(map[string]bool)
+		modelGroups := make(map[string]map[string]bool)
 		for _, group := range channel.GetGroups() {
-			if _, active := activeGroups[group]; active || group == "auto" {
-				groups[group] = true
-			}
-		}
-		if len(groups) == 0 {
-			continue
-		}
-		groups[""] = true // The model-wide outcome spans each route exactly once.
-		seenModels := make(map[string]bool)
-		for _, name := range channel.GetModels() {
-			name = strings.TrimSpace(name)
-			if name == "" || seenModels[name] {
+			if _, active := activeGroups[group]; !active && group != "auto" {
 				continue
 			}
-			seenModels[name] = true
+			for _, name := range channel.GetModelsForGroup(group) {
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
+				if modelGroups[name] == nil {
+					modelGroups[name] = map[string]bool{"": true}
+				}
+				modelGroups[name][group] = true
+			}
+		}
+		for name, groups := range modelGroups {
 			pair := channelModelProbe{channel.Id, name}
 			probe, probed := round.probes[pair]
 			success, observed := probe.success, probed
@@ -1475,8 +1475,8 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 			if (probed || round.skipped[pair]) && activity.LastResultAt > 0 && activity.LastResultAt <= now && now-activity.LastResultAt <= interval.Milliseconds() && activity.LastResultAt >= probe.completedAt {
 				success, observed = activity.LastResultSuccess, true
 			}
-			if probed {
-				perfmetrics.RecordChannelSample(perfmetrics.Sample{ChannelID: channel.Id, Model: name, Success: success}, perfmetrics.SourceRouteState)
+			if observed {
+				roundRoutes[name] = append(roundRoutes[name], perfmetrics.RoundRoute{ChannelID: channel.Id, Success: success, ProbeCompletedAt: probe.completedAt, ProbeSuccess: probe.success})
 			}
 			for group := range groups {
 				key := availabilityKey{name, group}
@@ -1490,6 +1490,9 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 				outcomes[key] = outcome
 			}
 		}
+	}
+	for name, routes := range roundRoutes {
+		perfmetrics.RecordVisibleRound(name, routes)
 	}
 	for key, outcome := range outcomes {
 		if !outcome.complete || !outcome.probed {

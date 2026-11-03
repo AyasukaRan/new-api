@@ -21,6 +21,9 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { api } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { CCSwitchDialog } from '../cc-switch-dialog'
 
 let queryClient: QueryClient
@@ -33,6 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   queryClient.clear()
+  useAuthStore.getState().auth.reset()
 })
 
 function renderDialog(models = ['gpt-5.4', 'claude-sonnet-4-6']) {
@@ -70,6 +74,43 @@ describe('CC Switch model selection', () => {
       expect(dialog).toBeVisible()
     }
   )
+
+  it('updates an open model picker when the current account changes group', async () => {
+    vi.spyOn(api, 'get').mockImplementation(async () => ({
+      data: {
+        success: true,
+        data: [
+          useAuthStore.getState().auth.user?.group === 'broad'
+            ? 'broad-only'
+            : 'limited-model',
+        ],
+      },
+    }))
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 7, username: 'member', group: 'broad', role: 1 })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CCSwitchDialog open onOpenChange={vi.fn()} tokenKey='test-only' />
+      </QueryClientProvider>
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('combobox', { name: 'Primary Model' }))
+    expect(
+      await screen.findByRole('option', { name: 'broad-only' })
+    ).toBeVisible()
+    await act(() =>
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 7, username: 'member', group: 'limited', role: 1 })
+    )
+    expect(
+      screen.queryByRole('option', { name: 'broad-only' })
+    ).not.toBeInTheDocument()
+    expect(
+      await screen.findByRole('option', { name: 'limited-model' })
+    ).toBeVisible()
+  })
 
   it('filters model names and supports keyboard selection and Escape without closing the dialog', async () => {
     renderDialog()

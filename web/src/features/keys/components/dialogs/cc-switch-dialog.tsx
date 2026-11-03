@@ -27,6 +27,7 @@ import { Combobox } from '@/components/ui/combobox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { getUserModels } from '@/lib/api'
 import { currentBaseUrl } from '@/lib/base-path'
 import { requireServerSuccess } from '@/lib/server-error-message'
@@ -98,14 +99,16 @@ interface Props {
 }
 
 export function CCSwitchDialog(props: Props) {
+  const scope = useModelAccessScope()
   const { t } = useTranslation()
   const [app, setApp] = useState<AppType>('claude')
   const [name, setName] = useState<string>(APP_CONFIGS.claude.defaultName)
   const [models, setModels] = useState<Record<string, string>>({})
 
   const { data: modelsData } = useQuery({
-    queryKey: ['user-models-ccswitch'],
-    queryFn: async () => requireServerSuccess(await getUserModels()),
+    queryKey: ['user-models-ccswitch', ...scope],
+    queryFn: async ({ signal }) =>
+      requireServerSuccess(await getUserModels(signal)),
     enabled: props.open,
     staleTime: 5 * 60 * 1000,
   })

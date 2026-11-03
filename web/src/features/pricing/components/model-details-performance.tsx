@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
 import { HeartPulse, Timer } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -28,7 +27,7 @@ import {
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
-import { getPerfMetrics } from '@/features/performance-metrics/api'
+import { useModelPerfMetrics } from '@/features/performance-metrics/hooks'
 import {
   formatLatency,
   formatThroughput,
@@ -41,7 +40,6 @@ import type {
   SuccessRatePoint,
 } from '@/features/performance-metrics/types'
 import { useIsAdmin } from '@/hooks/use-admin'
-import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -117,13 +115,7 @@ function toUptimeSeries(series?: SuccessRatePoint[] | null): UptimeDayPoint[] {
 export function ModelDetailsPerformance(props: { model: PricingModel }) {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
-  const metricsQuery = useQuery({
-    queryKey: ['perf-metrics', props.model.model_name],
-    queryFn: async () =>
-      requireServerSuccess(await getPerfMetrics(props.model.model_name, 24)),
-    staleTime: 60 * 1000,
-    refetchInterval: 60 * 1000,
-  })
+  const metricsQuery = useModelPerfMetrics(props.model.model_name)
   const groups = useMemo(
     () => metricsQuery.data?.data.groups ?? [],
     [metricsQuery.data]

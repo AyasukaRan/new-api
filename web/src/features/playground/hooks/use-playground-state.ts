@@ -29,13 +29,7 @@ import {
   loadMessages,
   type MessageStateUpdater,
 } from '../lib'
-import type {
-  Message,
-  PlaygroundConfig,
-  ParameterEnabled,
-  ModelOption,
-  GroupOption,
-} from '../types'
+import type { Message, PlaygroundConfig, ParameterEnabled } from '../types'
 
 const MESSAGE_SAVE_DEBOUNCE_MS = 500
 
@@ -57,9 +51,6 @@ export function usePlaygroundState() {
   const messagesSaveTimerRef = useRef<number | null>(null)
   const latestMessagesRef = useRef<Message[]>(messages)
   const hasLoadedMessagesRef = useRef(false)
-
-  const [models, setModels] = useState<ModelOption[]>([])
-  const [groups, setGroups] = useState<GroupOption[]>([])
 
   const persistMessages = useCallback((messagesToSave: Message[]) => {
     latestMessagesRef.current = messagesToSave
@@ -163,12 +154,6 @@ export function usePlaygroundState() {
     parameterEnabled,
     messages,
     isLoadingMessages,
-    models,
-    groups,
-
-    // Setters
-    setModels,
-    setGroups,
 
     // Actions
     updateConfig,

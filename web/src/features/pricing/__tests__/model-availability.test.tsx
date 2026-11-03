@@ -61,7 +61,9 @@ afterEach(() => {
 
 function renderPerformance(data?: PerformanceMetricsData['data']) {
   if (data) {
-    queryClient.setQueryData(['perf-metrics', model.model_name], {
+    const user = useAuthStore.getState().auth.user
+    const scope = user ? [user.id, user.role, user.group] : []
+    queryClient.setQueryData(['perf-metrics', model.model_name, ...scope], {
       success: true,
       data,
     })
@@ -710,6 +712,25 @@ describe('admin channel key diagnostics', () => {
     expect(await screen.findByText('No data')).toBeVisible()
     expect(screen.queryByText('Primary Provider')).not.toBeInTheDocument()
   })
+})
+
+it('clears cached channel rows when another account opens the same model', async () => {
+  const member = { id: 7, role: 1, username: 'member', group: 'default' }
+  useAuthStore.getState().auth.setUser(member)
+  vi.spyOn(api, 'get').mockImplementation(async () => {
+    const channels =
+      useAuthStore.getState().auth.user?.id === 7
+        ? [{ channel_index: 1 }, { channel_index: 2 }]
+        : [{ channel_index: 1 }]
+    return {
+      data: { success: true, data: { model_name: model.model_name, channels } },
+    }
+  })
+  renderPerformance()
+  expect(await screen.findByText('Channel 2')).toBeVisible()
+  await act(() => useAuthStore.getState().auth.setUser({ ...member, id: 8 }))
+  expect(screen.queryByText('Channel 2')).not.toBeInTheDocument()
+  expect(await screen.findByText('Channel 1')).toBeVisible()
 })
 
 it('keeps admin channel diagnostics available before public historical metrics exist', async () => {

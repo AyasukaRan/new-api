@@ -44,9 +44,14 @@ export async function sendChatCompletion(
 /**
  * Get user available models
  */
-export async function getUserModels(group: string): Promise<ModelOption[]> {
+export async function getUserModels(
+  group: string,
+  signal?: AbortSignal
+): Promise<ModelOption[]> {
   const res = await api.get(API_ENDPOINTS.USER_MODELS, {
     params: { group },
+    signal,
+    disableDuplicate: true,
   })
   const { data } = res
   requireServerSuccess(data)
@@ -64,8 +69,13 @@ export async function getUserModels(group: string): Promise<ModelOption[]> {
 /**
  * Get user groups
  */
-export async function getUserGroups(): Promise<GroupOption[]> {
-  const res = await api.get(API_ENDPOINTS.USER_GROUPS)
+export async function getUserGroups(
+  signal?: AbortSignal
+): Promise<GroupOption[]> {
+  const res = await api.get(API_ENDPOINTS.USER_GROUPS, {
+    signal,
+    disableDuplicate: true,
+  })
   const { data } = res
   requireServerSuccess(data)
 
