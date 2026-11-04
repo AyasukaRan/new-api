@@ -23,6 +23,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
 import { afterAll, afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -81,6 +82,7 @@ function DetailPreview(props: {
   isAdmin: boolean
   type?: number
   source?: LogSource
+  columnId?: 'content' | 'prompt_tokens'
 }) {
   const table = useReactTable({
     data: [makeLog(props.other, props.type)],
@@ -90,7 +92,7 @@ function DetailPreview(props: {
   const cell = table
     .getRowModel()
     .rows[0].getAllCells()
-    .find((item) => item.column.id === 'content')
+    .find((item) => item.column.id === (props.columnId ?? 'content'))
   if (!cell) throw new Error('The log must have a content column')
   return flexRender(cell.column.columnDef.cell, cell.getContext())
 }
@@ -149,6 +151,55 @@ test('keeps log details open when the parent refreshes with unchanged data', asy
   expect(await screen.findByRole('dialog')).toBeVisible()
   rerender(<DetailPreview other={other} isAdmin />)
   expect(screen.getByRole('dialog')).toBeVisible()
+})
+
+test.each([
+  ['peak', 'Peak hours', '高峰时段'],
+  ['off_peak', 'Off-peak hours', '非高峰时段'],
+])(
+  'shows the %s tier as a localized icon with a tooltip',
+  async (tier, label, translated) => {
+    const user = userEvent.setup()
+    i18n.addResourceBundle('zh', 'translation', zh.translation)
+    const preview = renderPreview({
+      billing_mode: 'tiered_expr',
+      matched_tier: tier,
+      expr_b64: btoa(`tier("${tier}", p * 2 + c * 8)`),
+    })
+    expect(within(preview).getByRole('img', { name: label })).toBeVisible()
+    expect(preview).toHaveTextContent('$2 / $8/M')
+    expect(preview).not.toHaveTextContent(tier)
+    await act(() => i18n.changeLanguage('zh'))
+    const translatedPreview = screen.getByRole('button', {
+      name: new RegExp(translated),
+    })
+    expect(
+      within(translatedPreview).getByRole('img', { name: translated })
+    ).toBeVisible()
+    await user.hover(translatedPreview)
+    expect(await screen.findByText(translated)).toBeVisible()
+    fireEvent.click(translatedPreview)
+    expect(await screen.findByRole('dialog')).toBeVisible()
+  }
+)
+
+test('keeps pure cached Claude input visible in the desktop Token column', () => {
+  render(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>
+        <DetailPreview
+          other={{ claude: true, cache_tokens: 1000 }}
+          isAdmin
+          columnId='prompt_tokens'
+        />
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+  expect(screen.getByText('Cache↓ 1,000')).toBeVisible()
+  expect(
+    screen.getByRole('progressbar', { name: 'Cache hit rate' })
+  ).toHaveAttribute('aria-valuenow', '100')
+  expect(screen.getByText('100%')).toBeVisible()
 })
 
 test.each([

@@ -24,6 +24,7 @@ import {
   splitBillingExprAndRequestRules,
   type ParsedTier,
 } from '@/features/pricing/lib/billing-expr'
+import { formatNumber, formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 
 import type { UsageLog } from '../data/schema'
@@ -221,6 +222,12 @@ export function getTimeColor(
   if (seconds < 10) return 'success'
   if (seconds < 30) return 'warning'
   return 'danger'
+}
+
+/** Keep the recorded millisecond precision for sub-second first tokens. */
+export function formatFirstResponseTime(milliseconds: number): string {
+  if (milliseconds < 1000) return `${formatNumber(Math.round(milliseconds))}ms`
+  return formatUseTime(milliseconds / 1000)
 }
 
 /**

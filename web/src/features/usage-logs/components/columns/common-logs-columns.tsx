@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { GitBranch, Sparkles, KeyRound } from 'lucide-react'
+import { GitBranch, Sparkles, KeyRound, Mountain } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -74,6 +74,7 @@ import {
   isPerCallBilling,
 } from '../../lib/utils'
 import type { LogOtherData, LogSource } from '../../types'
+import { CacheHitRate } from '../cache-hit-rate'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCostDisplay } from '../log-cost-display'
 import { ModelBadge } from '../model-badge'
@@ -83,8 +84,17 @@ import { useUsageLogsContext } from '../usage-logs-provider'
 
 interface DetailSegment {
   text: string
+  period?: 'peak' | 'off_peak'
   muted?: boolean
   danger?: boolean
+}
+
+function tierDetailSegment(label: string, priceText: string): DetailSegment {
+  const period = normalizeTierLabel(label)
+  if (period === 'peak' || period === 'off_peak') {
+    return { text: priceText, period }
+  }
+  return { text: `${label} · ${priceText}` }
 }
 
 function formatRatioCompact(ratio: number | undefined): string {
@@ -207,9 +217,9 @@ function buildTypeDetailSegments(
           `${t('Additional charge')} ${formatTaskUsageUnitPrice(tier.constant, { tokenUnit: 'M' })}/${t('request')}`
         )
       }
-      segments.push({
-        text: `${tier.label || t('Default')} · ${prices.join(' · ')}`,
-      })
+      segments.push(
+        tierDetailSegment(tier.label || t('Default'), prices.join(' · '))
+      )
     } else {
       segments.push({
         text: `${t('Dynamic Pricing')} · ${other.matched_tier || t('Special billing expression')}`,
@@ -223,9 +233,9 @@ function buildTypeDetailSegments(
         .map((entry) => formatPriceCompact(entry.price))
       if (baseEntries.length > 0) {
         const tierLabel = tieredSummary.tier.label || t('Default')
-        segments.push({
-          text: `${tierLabel} · ${formatPriceList(baseEntries, true)}`,
-        })
+        segments.push(
+          tierDetailSegment(tierLabel, formatPriceList(baseEntries, true))
+        )
       }
 
       const cacheEntries = tieredSummary.priceEntries
@@ -259,14 +269,19 @@ function buildTypeDetailSegments(
               'cacheCreate12hPrice',
             ].includes(entry.field)
         )
-        .map((entry) =>
-          entry.unit
-            ? `${tieredSummary.tier.label || t('Default')} · ${t(entry.shortLabel)} ${formatPriceCompact(entry.price)}/${t(entry.unit)}`
-            : `${t(entry.shortLabel)} ${formatPrice(entry.price)}`
+        .map(
+          (entry): DetailSegment =>
+            entry.unit
+              ? tierDetailSegment(
+                  tieredSummary.tier.label || t('Default'),
+                  `${t(entry.shortLabel)} ${formatPriceCompact(entry.price)}/${t(entry.unit)}`
+                )
+              : { text: `${t(entry.shortLabel)} ${formatPrice(entry.price)}` }
         )
       if (otherEntries.length > 0) {
         segments.push({
-          text: otherEntries.join(' · '),
+          text: otherEntries.map((entry) => entry.text).join(' · '),
+          period: otherEntries.find((entry) => entry.period)?.period,
           muted: true,
         })
       }
@@ -742,17 +757,22 @@ export function useCommonLogsColumns(
 
           const promptTokens = log.prompt_tokens || 0
           const completionTokens = log.completion_tokens || 0
-          if (promptTokens === 0 && completionTokens === 0) {
-            return <span className='text-muted-foreground text-xs'>-</span>
-          }
-
           const cacheReadTokens = other?.cache_tokens || 0
           const cacheWrite5m = other?.cache_creation_tokens_5m || 0
           const cacheWrite1h = other?.cache_creation_tokens_1h || 0
-          const hasSplitCache = cacheWrite5m > 0 || cacheWrite1h > 0
-          const cacheWriteTokens = hasSplitCache
-            ? cacheWrite5m + cacheWrite1h
-            : other?.cache_creation_tokens || 0
+          const cacheWriteTokens = Math.max(
+            other?.cache_write_tokens || 0,
+            other?.cache_creation_tokens || 0,
+            cacheWrite5m + cacheWrite1h
+          )
+          if (
+            promptTokens === 0 &&
+            completionTokens === 0 &&
+            cacheReadTokens === 0 &&
+            cacheWriteTokens === 0
+          ) {
+            return <span className='text-muted-foreground text-xs'>-</span>
+          }
 
           return (
             <div className='flex flex-col gap-0.5'>
@@ -774,6 +794,7 @@ export function useCommonLogsColumns(
                   )}
                 </div>
               )}
+              <CacheHitRate promptTokens={promptTokens} other={other} />
             </div>
           )
         },
@@ -854,6 +875,9 @@ export function useCommonLogsColumns(
           )
           const primary = segments[0]
           const hasMore = segments.length > 1
+          let periodLabel = ''
+          if (primary?.period === 'peak') periodLabel = t('Peak hours')
+          if (primary?.period === 'off_peak') periodLabel = t('Off-peak hours')
           let primaryTextClass = 'text-foreground'
           if (primary?.muted) {
             primaryTextClass = 'text-muted-foreground/60'
@@ -871,6 +895,17 @@ export function useCommonLogsColumns(
                   primaryTextClass
                 )}
               >
+                {periodLabel && (
+                  <Mountain
+                    role='img'
+                    aria-hidden={false}
+                    aria-label={periodLabel}
+                    className={cn(
+                      'mr-1 inline-block size-3.5 align-text-bottom',
+                      primary.period === 'off_peak' && 'rotate-180'
+                    )}
+                  />
+                )}
                 {primary.text}
                 {hasMore && (
                   <span className='text-muted-foreground/40 ml-0.5'>
@@ -887,16 +922,29 @@ export function useCommonLogsColumns(
             )
           }
 
+          const detailsButton = (
+            <button
+              type='button'
+              className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
+              onClick={() => setDialogOpen(true)}
+              title={t('Click to view full details')}
+            >
+              {detailPreview}
+            </button>
+          )
+
           return (
             <>
-              <button
-                type='button'
-                className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
-                onClick={() => setDialogOpen(true)}
-                title={t('Click to view full details')}
-              >
-                {detailPreview}
-              </button>
+              {periodLabel ? (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger render={detailsButton} />
+                    <TooltipContent>{periodLabel}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : (
+                detailsButton
+              )}
               <DetailsDialog
                 log={log}
                 source={source}

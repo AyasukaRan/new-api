@@ -38,6 +38,7 @@ import {
   isDisplayableLogType,
   isTimingLogType,
 } from '../lib/utils'
+import { CacheHitRate } from './cache-hit-rate'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { RequestMetadataTags } from './request-metadata-tags'
 import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
@@ -130,11 +131,12 @@ export function CommonLogMobileCard<TData>(props: {
   const contentCell = props.cells.get('content')
   const channelCell = props.cells.get('channel')
   const cacheRead = other?.cache_tokens || 0
-  const cacheWrite =
+  const cacheWrite = Math.max(
+    other?.cache_write_tokens || 0,
+    other?.cache_creation_tokens || 0,
     (other?.cache_creation_tokens_5m || 0) +
-      (other?.cache_creation_tokens_1h || 0) ||
-    other?.cache_creation_tokens ||
-    0
+      (other?.cache_creation_tokens_1h || 0)
+  )
   const showTokens =
     displayable &&
     props.cells.has('prompt_tokens') &&
@@ -316,6 +318,9 @@ export function CommonLogMobileCard<TData>(props: {
             </span>
           )}
         </div>
+      )}
+      {showTokens && (
+        <CacheHitRate promptTokens={log.prompt_tokens} other={other} />
       )}
       {contentCell && (
         <div className='relative min-w-0 border-t pt-2 [&_button]:min-h-8 [&_button]:w-full [&_button]:max-w-full [&_button]:pr-5 [&_button]:text-sm [&_button>span]:line-clamp-2 [&_button>span]:[overflow-wrap:anywhere] [&_button>span]:whitespace-normal'>

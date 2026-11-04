@@ -86,6 +86,7 @@ import {
   getLogCostEstimate,
   hasAnyCacheTokens,
   isViolationFeeLog,
+  formatFirstResponseTime,
   getFirstResponseTimeColor,
   getResponseTimeColor,
   logTokenName,
@@ -931,7 +932,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
                         )}
                       >
                         {' '}
-                        (FRT: {formatUseTime(other.frt / 1000)})
+                        (FRT: {formatFirstResponseTime(other.frt)})
                       </span>
                     )}
                 </span>

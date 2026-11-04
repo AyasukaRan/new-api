@@ -345,3 +345,15 @@ it('labels historical successful requests as tests in the test records section',
   expect(screen.getByText('Model test')).toBeVisible()
   expect(screen.queryByText('Consume')).not.toBeInTheDocument()
 })
+
+it('shows cache hit-rate progress on mobile and hides it with the token column', () => {
+  const view = renderLogs()
+  expect(
+    screen.getByRole('progressbar', { name: 'Cache hit rate' })
+  ).toHaveAttribute('aria-valuetext', '17.6%')
+  view.unmount()
+  renderLogs({ visibility: { prompt_tokens: false } })
+  expect(
+    screen.queryByRole('progressbar', { name: 'Cache hit rate' })
+  ).not.toBeInTheDocument()
+})

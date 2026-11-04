@@ -33,7 +33,11 @@ import {
 import { formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { getFirstResponseTimeColor, getResponseTimeColor } from '../lib/format'
+import {
+  formatFirstResponseTime,
+  getFirstResponseTimeColor,
+  getResponseTimeColor,
+} from '../lib/format'
 import type { LogOtherData } from '../types'
 
 /**
@@ -70,18 +74,18 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
   const { t } = useTranslation()
   const indicator = props.indicator ?? 'bar'
   const showFirstToken = props.isStream
-  const firstTokenSeconds =
-    props.frtMs != null && props.frtMs > 0 ? props.frtMs / 1000 : null
+  const firstTokenMs =
+    props.frtMs != null && props.frtMs > 0 ? props.frtMs : null
   const firstTokenVariant: StatusVariant =
-    firstTokenSeconds == null
+    firstTokenMs == null
       ? 'neutral'
-      : getFirstResponseTimeColor(firstTokenSeconds)
+      : getFirstResponseTimeColor(firstTokenMs / 1000)
   const totalTimeVariant = getResponseTimeColor(
     props.useTimeSec,
     props.completionTokens
   )
   const firstTokenLabel =
-    firstTokenSeconds == null ? t('N/A') : formatUseTime(firstTokenSeconds)
+    firstTokenMs == null ? t('N/A') : formatFirstResponseTime(firstTokenMs)
   const totalTimeLabel = formatUseTime(props.useTimeSec)
 
   const labels = (

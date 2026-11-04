@@ -210,6 +210,9 @@ export interface LogOtherData {
   text_input?: number
   text_output?: number
   cache_tokens?: number
+  input_tokens_total?: number
+  cache_write_tokens?: number
+  usage_semantic?: string
   image_cache_tokens?: number
   billing_tokens?: Record<string, number>
   cache_creation_tokens?: number
