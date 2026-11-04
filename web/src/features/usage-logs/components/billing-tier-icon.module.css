@@ -20,97 +20,48 @@ For commercial licensing, please contact support@quantumnous.com
   overflow: visible;
 }
 
-.scene svg {
-  overflow: visible;
+.artwork {
+  display: block;
   flex-shrink: 0;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.sun {
-  fill: #f6c75c;
-  stroke: #b77a1b;
-  stroke-width: 1;
-}
-
-.farSlope {
-  fill: #8ccdb5;
-  stroke: #438f7b;
-  stroke-width: 1;
-}
-
-.nearSlope {
-  fill: #57ae98;
-  stroke: #266f66;
-  stroke-width: 1.2;
-}
-
-.snow {
-  fill: #fff4dc;
-}
-
-.ridge {
-  fill: none;
-  stroke: #3b856c;
-  stroke-width: 1.5;
-}
-
-.valleySky {
-  fill: #bde8ee;
-}
-
-.stream {
-  fill: none;
-  stroke: #168eb7;
-  stroke-width: 3.2;
-}
-
-.flatland {
-  fill: #83c9a4;
-}
-
-.field {
-  fill: none;
-  stroke: #3b856c;
-  stroke-width: 1.2;
-}
-
-.summit,
-.stream,
-.horizon {
-  transform-box: fill-box;
-  transform-origin: center bottom;
+  object-fit: contain;
+  transform-origin: center;
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  :global(button.group):is(:hover, :focus-visible) .scene .summit {
-    animation: summit-rise 800ms ease-in-out;
+  :global(button.group):is(:hover, :focus-visible)
+    .scene[data-tier='peak']
+    .artwork {
+    animation: peak-rise 800ms ease-in-out;
   }
 
-  :global(button.group):is(:hover, :focus-visible) .scene .stream {
-    animation: stream-dip 800ms ease-in-out;
+  :global(button.group):is(:hover, :focus-visible)
+    .scene[data-tier='off_peak']
+    .artwork {
+    animation: valley-dip 800ms ease-in-out;
   }
 
-  :global(button.group):is(:hover, :focus-visible) .scene .horizon {
-    animation: horizon-breathe 900ms ease-in-out;
+  :global(button.group):is(:hover, :focus-visible)
+    .scene[data-tier='standard']
+    .artwork {
+    animation: standard-breathe 900ms ease-in-out;
   }
 }
 
-@keyframes summit-rise {
+@keyframes peak-rise {
   50% {
     transform: translateY(-1.5px);
   }
 }
 
-@keyframes stream-dip {
+@keyframes valley-dip {
   50% {
-    transform: translateY(1px) scaleX(1.08);
+    transform: translateY(1px) scale(1.03);
   }
 }
 
-@keyframes horizon-breathe {
+@keyframes standard-breathe {
   50% {
     transform: scale(1.05);
-    opacity: 0.8;
+    opacity: 0.9;
   }
 }

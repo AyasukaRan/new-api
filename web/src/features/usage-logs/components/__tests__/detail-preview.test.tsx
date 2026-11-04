@@ -154,13 +154,13 @@ test('keeps log details open when the parent refreshes with unchanged data', asy
 })
 
 test.each([
-  ['peak', 'Peak hours', '高峰时段'],
-  ['off_peak', 'Off-peak hours', '非高峰时段'],
-  ['standard', 'Standard', '标准'],
-  ['base', 'Standard', '标准'],
+  ['peak', 'Peak hours', '高峰时段', 'peak.png'],
+  ['off_peak', 'Off-peak hours', '非高峰时段', 'off-peak.png'],
+  ['standard', 'Standard', '标准', 'standard.png'],
+  ['base', 'Standard', '标准', 'standard.png'],
 ])(
   'shows the %s tier as a localized icon with a tooltip',
-  async (tier, label, translated) => {
+  async (tier, label, translated, assetName) => {
     const user = userEvent.setup()
     i18n.addResourceBundle('zh', 'translation', zh.translation)
     const preview = renderPreview({
@@ -175,7 +175,14 @@ test.each([
       'data-tier',
       tier === 'base' ? 'standard' : tier
     )
-    expect(icon.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+    const image = icon.querySelector('img')
+    expect(image).toHaveClass('h-full', 'w-full')
+    expect(image).toHaveAttribute('width', '32')
+    expect(image).toHaveAttribute('height', '28')
+    expect(image).toHaveAttribute('src', expect.stringContaining(assetName))
+    expect(image).toHaveAttribute('alt', '')
+    expect(image).toHaveAttribute('aria-hidden', 'true')
+    expect(icon.querySelector('svg')).toBeNull()
     expect(preview).toHaveTextContent('$2 / $8/M')
     expect(preview).not.toHaveTextContent(tier)
     await act(() => i18n.changeLanguage('zh'))
