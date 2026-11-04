@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { GitBranch, Sparkles, KeyRound, Mountain } from 'lucide-react'
+import { GitBranch, Sparkles, KeyRound } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -74,6 +74,7 @@ import {
   isPerCallBilling,
 } from '../../lib/utils'
 import type { LogOtherData, LogSource } from '../../types'
+import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { CacheHitRate } from '../cache-hit-rate'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCostDisplay } from '../log-cost-display'
@@ -84,7 +85,7 @@ import { useUsageLogsContext } from '../usage-logs-provider'
 
 interface DetailSegment {
   text: string
-  period?: 'peak' | 'off_peak'
+  period?: BillingTier
   muted?: boolean
   danger?: boolean
 }
@@ -93,6 +94,9 @@ function tierDetailSegment(label: string, priceText: string): DetailSegment {
   const period = normalizeTierLabel(label)
   if (period === 'peak' || period === 'off_peak') {
     return { text: priceText, period }
+  }
+  if (period === 'standard' || period === 'base') {
+    return { text: priceText, period: 'standard' }
   }
   return { text: `${label} · ${priceText}` }
 }
@@ -306,9 +310,9 @@ function buildTypeDetailSegments(
           formatPriceCompact(inputPriceUSD * other.completion_ratio)
         )
       }
-      segments.push({
-        text: `${t('Standard')} · ${formatPriceList(baseEntries, true)}`,
-      })
+      segments.push(
+        tierDetailSegment('standard', formatPriceList(baseEntries, true))
+      )
 
       if (hasAnyCacheTokens(other)) {
         const cacheEntries = [
@@ -876,8 +880,13 @@ export function useCommonLogsColumns(
           const primary = segments[0]
           const hasMore = segments.length > 1
           let periodLabel = ''
-          if (primary?.period === 'peak') periodLabel = t('Peak hours')
-          if (primary?.period === 'off_peak') periodLabel = t('Off-peak hours')
+          if (primary?.period === 'peak') {
+            periodLabel = t('Peak hours')
+          } else if (primary?.period === 'off_peak') {
+            periodLabel = t('Off-peak hours')
+          } else if (primary?.period === 'standard') {
+            periodLabel = t('Standard')
+          }
           let primaryTextClass = 'text-foreground'
           if (primary?.muted) {
             primaryTextClass = 'text-muted-foreground/60'
@@ -895,16 +904,8 @@ export function useCommonLogsColumns(
                   primaryTextClass
                 )}
               >
-                {periodLabel && (
-                  <Mountain
-                    role='img'
-                    aria-hidden={false}
-                    aria-label={periodLabel}
-                    className={cn(
-                      'mr-1 inline-block size-3.5 align-text-bottom',
-                      primary.period === 'off_peak' && 'rotate-180'
-                    )}
-                  />
+                {primary.period && (
+                  <BillingTierIcon tier={primary.period} label={periodLabel} />
                 )}
                 {primary.text}
                 {hasMore && (

@@ -156,6 +156,8 @@ test('keeps log details open when the parent refreshes with unchanged data', asy
 test.each([
   ['peak', 'Peak hours', '高峰时段'],
   ['off_peak', 'Off-peak hours', '非高峰时段'],
+  ['standard', 'Standard', '标准'],
+  ['base', 'Standard', '标准'],
 ])(
   'shows the %s tier as a localized icon with a tooltip',
   async (tier, label, translated) => {
@@ -166,7 +168,14 @@ test.each([
       matched_tier: tier,
       expr_b64: btoa(`tier("${tier}", p * 2 + c * 8)`),
     })
-    expect(within(preview).getByRole('img', { name: label })).toBeVisible()
+    const icon = within(preview).getByRole('img', { name: label })
+    expect(icon).toBeVisible()
+    expect(icon).toHaveClass('h-7', 'w-8')
+    expect(icon).toHaveAttribute(
+      'data-tier',
+      tier === 'base' ? 'standard' : tier
+    )
+    expect(icon.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
     expect(preview).toHaveTextContent('$2 / $8/M')
     expect(preview).not.toHaveTextContent(tier)
     await act(() => i18n.changeLanguage('zh'))
@@ -234,7 +243,16 @@ test.each([
       matched_tier: 'standard',
       expr_b64: btoa('tier("standard", p * 2 + c * 10)'),
     },
-    expected: 'standard · $2 / $10/M',
+    expected: '$2 / $10/M',
+  },
+  {
+    name: 'custom token tier',
+    other: {
+      billing_mode: 'tiered_expr',
+      matched_tier: 'normal',
+      expr_b64: btoa('tier("normal", p * 2 + c * 10)'),
+    },
+    expected: 'normal · $2 / $10/M',
   },
   {
     name: 'per-call',
@@ -244,7 +262,7 @@ test.each([
   {
     name: 'standard',
     other: { model_ratio: 1, completion_ratio: 2 },
-    expected: 'Standard · $2 / $4/M',
+    expected: '$2 / $4/M',
   },
   {
     name: 'zero price fallback',

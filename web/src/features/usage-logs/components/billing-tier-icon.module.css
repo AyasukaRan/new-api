@@ -1,0 +1,116 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+.scene {
+  overflow: visible;
+}
+
+.scene svg {
+  overflow: visible;
+  flex-shrink: 0;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sun {
+  fill: #f6c75c;
+  stroke: #b77a1b;
+  stroke-width: 1;
+}
+
+.farSlope {
+  fill: #8ccdb5;
+  stroke: #438f7b;
+  stroke-width: 1;
+}
+
+.nearSlope {
+  fill: #57ae98;
+  stroke: #266f66;
+  stroke-width: 1.2;
+}
+
+.snow {
+  fill: #fff4dc;
+}
+
+.ridge {
+  fill: none;
+  stroke: #3b856c;
+  stroke-width: 1.5;
+}
+
+.valleySky {
+  fill: #bde8ee;
+}
+
+.stream {
+  fill: none;
+  stroke: #168eb7;
+  stroke-width: 3.2;
+}
+
+.flatland {
+  fill: #83c9a4;
+}
+
+.field {
+  fill: none;
+  stroke: #3b856c;
+  stroke-width: 1.2;
+}
+
+.summit,
+.stream,
+.horizon {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  :global(button.group):is(:hover, :focus-visible) .scene .summit {
+    animation: summit-rise 800ms ease-in-out;
+  }
+
+  :global(button.group):is(:hover, :focus-visible) .scene .stream {
+    animation: stream-dip 800ms ease-in-out;
+  }
+
+  :global(button.group):is(:hover, :focus-visible) .scene .horizon {
+    animation: horizon-breathe 900ms ease-in-out;
+  }
+}
+
+@keyframes summit-rise {
+  50% {
+    transform: translateY(-1.5px);
+  }
+}
+
+@keyframes stream-dip {
+  50% {
+    transform: translateY(1px) scaleX(1.08);
+  }
+}
+
+@keyframes horizon-breathe {
+  50% {
+    transform: scale(1.05);
+    opacity: 0.8;
+  }
+}
