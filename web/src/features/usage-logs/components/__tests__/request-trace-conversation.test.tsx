@@ -57,6 +57,126 @@ function leg(
 }
 
 describe('request trace conversation', () => {
+  test('labels consecutive assistant fragments once without merging across another role or the final reply', async () => {
+    const user = userEvent.setup()
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg({
+            messages: [
+              { role: 'assistant', content: 'First fragment' },
+              { role: 'assistant', content: 'Second fragment' },
+              { role: 'user', content: 'Another question' },
+              { role: 'assistant', content: 'After the user' },
+              { role: 'system', content: 'Updated instructions' },
+              { role: 'assistant', content: 'After the system' },
+            ],
+          }),
+          leg(null, {
+            seq: 3,
+            direction: 'client_response',
+            rendered: { content: 'Current final reply', stream: false },
+          }),
+        ]}
+      />
+    )
+
+    const assistants = screen.getAllByRole('article', { name: 'Assistant' })
+    expect(assistants.map((article) => article.textContent)).toEqual([
+      expect.stringContaining('First fragment'),
+      expect.stringContaining('Second fragment'),
+      expect.stringContaining('After the user'),
+      expect.stringContaining('After the system'),
+      expect.stringContaining('Current final reply'),
+    ])
+    expect(screen.getAllByText('Assistant', { exact: true })).toHaveLength(4)
+    const continuation = within(assistants[1])
+    expect(continuation.queryByText('Assistant')).not.toBeInTheDocument()
+    const copy = continuation.getByRole('button', { name: 'Copy message' })
+    expect(copy).toHaveClass('absolute', 'focus-visible:opacity-100')
+    copy.focus()
+    await user.keyboard('{Enter}')
+    expect(await navigator.clipboard.readText()).toBe('Second fragment')
+    expect(
+      within(screen.getByRole('region', { name: 'Final response' })).getByText(
+        'Assistant'
+      )
+    ).toBeInTheDocument()
+  })
+
+  test.each([
+    { role: 'system', label: 'System' },
+    { role: 'developer', label: 'Developer' },
+  ])(
+    'collapses $role instructions into a short preview while preserving keyboard expansion and full copy',
+    async ({ role, label }) => {
+      const user = userEvent.setup()
+      const content = `Synthetic ${role} instructions. ${'Keep the fixture concise. '.repeat(12)}\nUnique instruction ending.`
+      render(
+        <RequestTraceConversation
+          legs={[leg({ messages: [{ role, content }] })]}
+        />
+      )
+
+      const article = screen.getByRole('article', { name: label })
+      const message = within(article)
+      const expand = message.getByRole('button', { name: `Expand ${label}` })
+      expect(expand).toHaveAttribute('aria-expanded', 'false')
+      expect(article).toHaveTextContent(`Synthetic ${role} instructions.`)
+      expect(article).not.toHaveTextContent('Unique instruction ending.')
+      await user.click(message.getByRole('button', { name: 'Copy message' }))
+      expect(await navigator.clipboard.readText()).toBe(content)
+      expand.focus()
+      await user.keyboard('{Enter}')
+      expect(
+        message.getByRole('button', { name: `Collapse ${label}` })
+      ).toHaveAttribute('aria-expanded', 'true')
+      expect(article).toHaveTextContent('Unique instruction ending.')
+    }
+  )
+
+  test('keeps paired tool results in a compact assistant continuation without losing the full tool id', async () => {
+    const id = 'synthetic-tool-call-with-a-deliberately-long-identifier'
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg({
+            messages: [
+              { role: 'assistant', content: 'Checking the fixture' },
+              {
+                role: 'assistant',
+                content: '',
+                tool_calls: [
+                  {
+                    id,
+                    type: 'function',
+                    function: {
+                      name: 'lookup',
+                      arguments: '{"query":"fixture"}',
+                    },
+                  },
+                ],
+              },
+              { role: 'tool', tool_call_id: id, content: 'Synthetic result' },
+              { role: 'assistant', content: 'Fixture checked' },
+            ],
+          }),
+        ]}
+      />
+    )
+    expect(screen.getAllByText('Assistant', { exact: true })).toHaveLength(1)
+    expect(
+      screen.queryByRole('article', { name: 'Tool' })
+    ).not.toBeInTheDocument()
+    const call = screen.getByRole('button', { name: `Tool call lookup ${id}` })
+    expect(within(call).getByText(id)).toHaveAttribute('title', id)
+    await userEvent.click(call)
+    expect(
+      screen.getByRole('textbox', { name: 'Tool result' })
+    ).toHaveTextContent('Synthetic result')
+    expect(screen.getByText('Fixture checked')).toBeInTheDocument()
+  })
+
   test.each(['\n', '\r\n'])(
     'preserves recorded request line breaks and spacing with %j separators',
     async (separator) => {
@@ -1757,6 +1877,9 @@ describe('request trace conversation', () => {
     const expand = message.getByRole('button', { name: 'Expand' })
     expect(expand).toHaveAttribute('aria-expanded', 'false')
     expect(message.queryByText(longContent)).not.toBeInTheDocument()
+    expect(message.getByText(/Large captured message/)).toHaveClass(
+      'line-clamp-2'
+    )
 
     await userEvent.click(expand)
 

@@ -40,6 +40,7 @@ import {
   Copy,
   Check,
   FileJson,
+  ChevronDown,
   Route,
   Settings2,
   AlertTriangle,
@@ -52,6 +53,7 @@ import {
   Info,
   LogIn,
 } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
@@ -60,6 +62,11 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { Label } from '@/components/ui/label'
 import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-pricing-breakdown'
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
@@ -572,7 +579,39 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
   )
 }
 
+/** Historical logs without a trace keep their sole payload behind an explicit disclosure. */
 function CapturedRequestBody(props: {
+  log: UsageLog
+  adminInfo: NonNullable<LogOtherData['admin_info']>
+}) {
+  const { t } = useTranslation()
+  const user = useAuthStore((state) => state.auth.user)
+  const [expanded, setExpanded] = useState(false)
+  if ((user?.role ?? 0) < ROLE.ADMIN) return null
+  return (
+    <Collapsible
+      open={expanded}
+      onOpenChange={setExpanded}
+      className='min-w-0 rounded-md border'
+    >
+      <CollapsibleTrigger className='group flex w-full items-center justify-between gap-3 p-2.5 text-left text-xs font-semibold'>
+        <span className='flex items-center gap-1.5'>
+          <FileJson className='size-3.5' aria-hidden='true' />
+          {t('Request Content')}
+        </span>
+        <ChevronDown
+          className='size-3.5 transition-transform group-data-[panel-open]:rotate-180'
+          aria-hidden='true'
+        />
+      </CollapsibleTrigger>
+      <CollapsibleContent className='min-w-0 px-2.5 pb-2.5'>
+        {expanded && <LegacyCapturedRequestBody {...props} />}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+function LegacyCapturedRequestBody(props: {
   log: UsageLog
   adminInfo: NonNullable<LogOtherData['admin_info']>
 }) {
@@ -603,10 +642,7 @@ function CapturedRequestBody(props: {
   if (!canLoad) return null
   const body = inlineBody ?? query.data
   return (
-    <DetailSection
-      icon={<FileJson className='size-3.5' aria-hidden='true' />}
-      label={t('Request Content')}
-    >
+    <>
       {body != null && (
         <div className='bg-muted/50 relative rounded-md border p-3'>
           <CopyButton value={body} className='absolute top-2 right-2 size-8' />
@@ -633,7 +669,7 @@ function CapturedRequestBody(props: {
           )}
         </p>
       )}
-    </DetailSection>
+    </>
   )
 }
 
@@ -1024,11 +1060,16 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        {/* Captured request payload (admin only) */}
+        {/* Trace-backed requests are inspected through the dedicated trace viewer above. */}
         {props.open &&
           props.isAdmin &&
+          !adminInfo?.trace_id?.trim() &&
           (adminInfo?.request_body || adminInfo?.request_body_ref) && (
-            <CapturedRequestBody log={props.log} adminInfo={adminInfo} />
+            <CapturedRequestBody
+              key={`${props.log.id}:${props.log.created_at}:${props.log.request_id ?? ''}:${adminInfo.request_body_ref ?? ''}`}
+              log={props.log}
+              adminInfo={adminInfo}
+            />
           )}
 
         {/* Reject reason (admin only) */}

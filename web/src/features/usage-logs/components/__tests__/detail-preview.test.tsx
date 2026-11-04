@@ -22,11 +22,26 @@ import {
   getCoreRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import { I18nextProvider } from 'react-i18next'
-import { afterAll, afterEach, beforeEach, expect, test, vi } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from 'vitest'
 
 import en from '@/i18n/locales/en.json'
 import zh from '@/i18n/locales/zh.json'
@@ -40,6 +55,7 @@ import {
 import type { UsageLog } from '../../data/schema'
 import type { LogOtherData, LogSource } from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
+import { DetailsDialog } from '../dialogs/details-dialog'
 
 vi.mock('@lobehub/icons', () => ({}))
 vi.hoisted(() => {
@@ -688,6 +704,10 @@ test('an admin loads the captured request only when opening the row and can retr
       expect.anything()
     )
     fireEvent.click(open)
+    expect(get).not.toHaveBeenCalled()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Request Content' })
+    )
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
     const dialog = await screen.findByRole('dialog')
     expect(
@@ -704,4 +724,192 @@ test('an admin loads the captured request only when opening the row and can retr
     get.mockRestore()
     useAuthStore.getState().auth.reset()
   }
+})
+
+describe('request content disclosure in log details', () => {
+  beforeEach(() => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 77, role: 10, username: 'admin' })
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    useAuthStore.getState().auth.reset()
+  })
+
+  test('trace-backed details omit duplicated JSON and truncation warnings without loading the trace until requested', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValue({ data: { success: true, data: { legs: [] } } })
+    fireEvent.click(
+      renderPreview({
+        model_price: 1,
+        admin_info: {
+          trace_id: 'complete-original',
+          request_body: 'Legacy summary',
+          request_body_ref: 'a'.repeat(64),
+          request_body_truncated: 3312033,
+        },
+      })
+    )
+    expect(await screen.findByRole('dialog')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Request Content' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('Legacy summary')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Truncated for storage/)).not.toBeInTheDocument()
+    expect(get).not.toHaveBeenCalled()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View request trace' })
+    )
+    expect(
+      await screen.findByText('No trace records are available.')
+    ).toBeVisible()
+    expect(get).toHaveBeenCalledWith(
+      '/api/log/trace',
+      expect.objectContaining({
+        params: { trace_id: 'complete-original', metadata_only: true },
+      })
+    )
+    expect(get).not.toHaveBeenCalledWith(
+      '/api/log/request_body',
+      expect.anything()
+    )
+  })
+
+  test.each([undefined, '   '])(
+    'historical inline content starts collapsed with trace ID %s and preserves its storage warning only when expanded',
+    async (traceId) => {
+      const get = vi.spyOn(api, 'get')
+      fireEvent.click(
+        renderPreview({
+          model_price: 1,
+          admin_info: {
+            request_body: 'Only historical original',
+            trace_id: traceId,
+            request_body_truncated: 123456,
+          },
+        })
+      )
+      const disclosure = await screen.findByRole('button', {
+        name: 'Request Content',
+      })
+      expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+      expect(
+        screen.queryByText('Only historical original')
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByText(/Truncated for storage/)
+      ).not.toBeInTheDocument()
+      await userEvent.click(disclosure)
+      expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByText('Only historical original')).toBeVisible()
+      expect(screen.getByText(/Truncated for storage/)).toHaveTextContent(
+        '123456'
+      )
+      await userEvent.click(disclosure)
+      expect(
+        screen.queryByText('Only historical original')
+      ).not.toBeInTheDocument()
+      expect(get).not.toHaveBeenCalled()
+    }
+  )
+
+  test('collapsing or closing historical content cancels its on-demand request', async () => {
+    const signals: AbortSignal[] = []
+    const get = vi
+      .spyOn(api, 'get')
+      .mockImplementation(async (_url, config) => {
+        signals.push(config?.signal as AbortSignal)
+        return new Promise(() => undefined)
+      })
+    fireEvent.click(
+      renderPreview({
+        model_price: 1,
+        admin_info: { request_body_ref: 'b'.repeat(64) },
+      })
+    )
+    const disclosure = await screen.findByRole('button', {
+      name: 'Request Content',
+    })
+    expect(get).not.toHaveBeenCalled()
+    await userEvent.click(disclosure)
+    await waitFor(() => expect(signals).toHaveLength(1))
+    await userEvent.click(disclosure)
+    await waitFor(() => expect(signals[0].aborted).toBe(true))
+    await userEvent.click(disclosure)
+    await waitFor(() => expect(signals).toHaveLength(2))
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(signals[1].aborted).toBe(true))
+  })
+
+  test('changing historical records with a reused row ID resets the disclosure before loading the next reference', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValue({ data: { success: true, data: 'First row summary' } })
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <I18nextProvider i18n={i18n}>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </I18nextProvider>
+    )
+    const first = makeLog({ admin_info: { request_body_ref: 'a'.repeat(64) } })
+    const second = makeLog({ admin_info: { request_body_ref: 'b'.repeat(64) } })
+    const { rerender } = render(
+      <DetailsDialog
+        log={first}
+        isAdmin
+        isRoot={false}
+        open
+        onOpenChange={() => undefined}
+      />,
+      { wrapper }
+    )
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Request Content' })
+    )
+    expect(await screen.findByText('First row summary')).toBeVisible()
+    expect(get).toHaveBeenCalledTimes(1)
+    rerender(
+      <DetailsDialog
+        log={second}
+        isAdmin
+        isRoot={false}
+        open
+        onOpenChange={() => undefined}
+      />
+    )
+    expect(
+      screen.getByRole('button', { name: 'Request Content' })
+    ).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('First row summary')).not.toBeInTheDocument()
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([true, false])(
+    'non-administrators have no historical content entry even with isAdmin prop %s',
+    async (isAdmin) => {
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 88, role: 1, username: 'user' })
+      const get = vi.spyOn(api, 'get')
+      fireEvent.click(
+        renderPreview(
+          {
+            model_price: 1,
+            admin_info: {
+              request_body: 'Private history',
+              request_body_ref: 'c'.repeat(64),
+            },
+          },
+          isAdmin
+        )
+      )
+      expect(await screen.findByRole('dialog')).toBeVisible()
+      expect(
+        screen.queryByRole('button', { name: 'Request Content' })
+      ).not.toBeInTheDocument()
+      expect(screen.queryByText('Private history')).not.toBeInTheDocument()
+      expect(get).not.toHaveBeenCalled()
+    }
+  )
 })

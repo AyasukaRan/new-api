@@ -63,6 +63,7 @@ interface TraceConversationEntry {
   id: string
   message: TraceConversationMessage
   parts: { id: string; part: TraceConversationPart }[]
+  continuedAssistant: boolean
 }
 
 function TraceToolResult(props: { value: unknown }) {
@@ -149,7 +150,7 @@ function TraceToolPart(props: {
         aria-label={[label, toolName || t('Unnamed tool'), props.part.id]
           .filter(Boolean)
           .join(' ')}
-        className='group flex w-full items-center justify-between gap-3 p-3 text-left'
+        className='group flex w-full items-center justify-between gap-2 px-3 py-2 text-left'
       >
         <span className='flex min-w-0 flex-wrap items-center gap-2'>
           <Wrench
@@ -161,7 +162,10 @@ function TraceToolPart(props: {
             {toolName || t('Unnamed tool')}
           </span>
           {props.part.id && (
-            <span className='text-muted-foreground font-mono text-xs break-all'>
+            <span
+              className='text-muted-foreground max-w-40 truncate font-mono text-xs'
+              title={props.part.id}
+            >
               {props.part.id}
             </span>
           )}
@@ -265,7 +269,16 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
     [props.entry.parts]
   )
   const isLongMessage = textLength > 8_000
-  const [expanded, setExpanded] = useState(!isLongMessage)
+  const isInstruction =
+    message.role === 'system' || message.role === 'developer'
+  const [expanded, setExpanded] = useState(!isInstruction && !isLongMessage)
+  const previewPart = props.entry.parts.find(
+    ({ part }) => part.type === 'text' || part.type === 'reasoning'
+  )?.part
+  const preview =
+    previewPart?.type === 'text' || previewPart?.type === 'reasoning'
+      ? previewPart.text.slice(0, 200).replaceAll(/\s+/g, ' ').trim()
+      : ''
 
   return (
     <Message
@@ -275,24 +288,54 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
     >
       <MessageContent
         variant='flat'
-        className='w-full min-w-0 gap-3 p-3 group-[.is-user]:py-3'
+        className={cn(
+          'relative w-full min-w-0 gap-2 px-3 py-2 group-[.is-user]:py-3',
+          isInstruction && 'bg-muted/30 border',
+          props.entry.continuedAssistant && 'pt-0 pr-11'
+        )}
       >
-        <div className='flex items-center justify-between gap-2'>
-          <span className='text-muted-foreground text-xs font-medium'>
-            {roles[message.role]}
-          </span>
-          <CopyButton
-            value={copyText}
-            className='size-7'
-            tooltip={t('Copy message')}
-          />
-        </div>
         <Collapsible
           open={expanded}
           onOpenChange={setExpanded}
-          className='space-y-3'
+          className='min-w-0 space-y-2'
         >
-          {isLongMessage && (
+          {props.entry.continuedAssistant ? (
+            <CopyButton
+              value={copyText}
+              className='absolute top-0 right-3 size-7 opacity-70 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100'
+              tooltip={t('Copy message')}
+            />
+          ) : (
+            <div className='flex min-w-0 items-center justify-between gap-2'>
+              {isInstruction ? (
+                <CollapsibleTrigger
+                  aria-label={`${expanded ? t('Collapse') : t('Expand')} ${roles[message.role]}`}
+                  className='text-muted-foreground group focus-visible:ring-ring flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left text-xs outline-none focus-visible:ring-2'
+                >
+                  <ChevronDown
+                    className='size-3.5 shrink-0 -rotate-90 group-data-[panel-open]:rotate-0'
+                    aria-hidden='true'
+                  />
+                  <span className='shrink-0 font-medium'>
+                    {roles[message.role]}
+                  </span>
+                  {!expanded && preview && (
+                    <span className='truncate'>{preview}</span>
+                  )}
+                </CollapsibleTrigger>
+              ) : (
+                <span className='text-muted-foreground text-xs font-medium'>
+                  {roles[message.role]}
+                </span>
+              )}
+              <CopyButton
+                value={copyText}
+                className='size-7'
+                tooltip={t('Copy message')}
+              />
+            </div>
+          )}
+          {isLongMessage && !isInstruction && (
             <CollapsibleTrigger className='text-muted-foreground group flex w-full items-center gap-2 text-xs'>
               <span>{expanded ? t('Collapse') : t('Expand')}</span>
               <ChevronDown
@@ -301,9 +344,14 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
               />
             </CollapsibleTrigger>
           )}
+          {!expanded && !isInstruction && preview && (
+            <p className='text-muted-foreground line-clamp-2 text-sm'>
+              {preview}
+            </p>
+          )}
           <CollapsibleContent
             className={cn(
-              'min-w-0 space-y-3',
+              'min-w-0 space-y-2',
               isLongMessage && 'max-h-[32rem] overflow-auto overscroll-contain'
             )}
           >
@@ -547,7 +595,10 @@ function WindowedTraceConversation(props: {
                 key={row.id}
                 data-index={item.index}
                 ref={virtualizer.measureElement}
-                className='absolute top-0 left-0 w-full pb-4'
+                className={cn(
+                  'absolute top-0 left-0 w-full',
+                  row.type === 'message' ? 'pb-2' : 'pb-3'
+                )}
                 style={{ transform: `translateY(${item.start}px)` }}
               >
                 {row.type === 'message' ? (
@@ -614,9 +665,16 @@ export function RequestTraceConversation(props: {
                 .filter(
                   ({ part }) => part.type !== 'tool-result' || !part.linked
                 )
-              return parts.length === 0 ? [] : [{ id, message, parts }]
+              return parts.length === 0
+                ? []
+                : [{ id, message, parts, continuedAssistant: false }]
             }
           )
+          for (const [index, entry] of entries.entries()) {
+            entry.continuedAssistant =
+              entry.message.role === 'assistant' &&
+              entries[index - 1]?.message.role === 'assistant'
+          }
           return { ...source, entries }
         }
       ),
@@ -654,7 +712,7 @@ export function RequestTraceConversation(props: {
           aria-label={sourceLabels[source.leg.direction]}
         >
           <TraceSourceHeader source={source} />
-          <div className='space-y-4'>
+          <div className='space-y-2'>
             {source.entries.map((entry) => (
               <TraceMessage key={entry.id} entry={entry} />
             ))}
