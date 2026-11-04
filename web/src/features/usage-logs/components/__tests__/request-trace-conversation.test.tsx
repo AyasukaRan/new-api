@@ -16,9 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen, within } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { buildRequestTraceConversation } from '../../lib/request-trace-conversation'
 import type { RequestTraceLeg } from '../../types'
@@ -1854,4 +1860,171 @@ describe('request trace conversation', () => {
       ).toHaveTextContent('First')
     }
   )
+})
+
+describe('windowed long request trace conversations', () => {
+  const originalScrollTo = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'scrollTo'
+  )
+  beforeEach(() => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(
+      function (this: HTMLElement) {
+        return this.getAttribute('role') === 'log' ? 600 : 120
+      }
+    )
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(900)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(
+      function (this: HTMLElement) {
+        if (this.getAttribute('role') !== 'log') return 120
+        return (
+          Number.parseFloat(
+            (this.firstElementChild as HTMLElement | null)?.style.height ?? ''
+          ) || 600
+        )
+      }
+    )
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value(this: HTMLElement, options: ScrollToOptions) {
+        this.scrollTop = options.top ?? this.scrollTop
+        fireEvent.scroll(this)
+      },
+    })
+  })
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    if (originalScrollTo) {
+      Object.defineProperty(HTMLElement.prototype, 'scrollTo', originalScrollTo)
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, 'scrollTo')
+    }
+  })
+
+  test('keeps a bounded message window and can navigate directly to the final reply', async () => {
+    const legs = [
+      leg({
+        messages: Array.from({ length: 240 }, (_, index) => ({
+          role: 'user',
+          content: `Recorded message ${index}`,
+        })),
+      }),
+      leg(null, {
+        seq: 3,
+        direction: 'client_response',
+        rendered: { content: 'Final visible reply', stream: true },
+      }),
+    ]
+    render(
+      <RequestTraceConversation
+        legs={legs}
+        sources={buildRequestTraceConversation(legs)}
+      />
+    )
+    expect(await screen.findByText('Recorded message 0')).toBeInTheDocument()
+    expect(screen.getAllByRole('article').length).toBeLessThan(20)
+    expect(screen.queryByText('Recorded message 239')).not.toBeInTheDocument()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Back to final response' })
+    )
+    expect(await screen.findByText('Final visible reply')).toBeInTheDocument()
+    expect(screen.getAllByRole('article').length).toBeLessThan(20)
+  })
+
+  test('keeps a visible final reply anchored when delayed input history is prepended', async () => {
+    const finalLeg = leg(null, {
+      seq: 3,
+      direction: 'client_response',
+      rendered: { content: 'Reply received before history', stream: true },
+    })
+    const { rerender } = render(
+      <RequestTraceConversation
+        legs={[finalLeg]}
+        sources={buildRequestTraceConversation([finalLeg])}
+      />
+    )
+    expect(
+      await screen.findByText('Reply received before history')
+    ).toBeInTheDocument()
+    const input = leg({
+      messages: Array.from({ length: 220 }, (_, index) => ({
+        role: 'user',
+        content: `Delayed history ${index}`,
+      })),
+    })
+    const legs = [input, finalLeg]
+    rerender(
+      <RequestTraceConversation
+        legs={legs}
+        sources={buildRequestTraceConversation(legs)}
+      />
+    )
+    expect(
+      await screen.findByText('Reply received before history')
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Delayed history 0')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('log', { name: 'Conversation' }).scrollTop
+    ).toBeGreaterThan(0)
+  })
+
+  test('preserves an expanded message when completed parsing inserts system instructions before it', async () => {
+    const content = 'Recorded long message '.repeat(500)
+    const input = leg({ messages: [{ role: 'user', content }] })
+    const { rerender } = render(
+      <RequestTraceConversation
+        legs={[input]}
+        sources={buildRequestTraceConversation([input])}
+      />
+    )
+    await userEvent.click(await screen.findByRole('button', { name: 'Expand' }))
+    expect(screen.getByRole('button', { name: 'Collapse' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    const completed = leg({
+      messages: [
+        {
+          role: 'system',
+          content: 'Instructions received after streamed messages',
+        },
+        { role: 'user', content },
+      ],
+    })
+    rerender(
+      <RequestTraceConversation
+        legs={[completed]}
+        sources={buildRequestTraceConversation([completed])}
+      />
+    )
+    expect(
+      await screen.findByRole('button', { name: 'Collapse' })
+    ).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  test('renders an oversized structured response in the existing code viewport and preserves its complete copy', async () => {
+    const content = JSON.stringify({
+      rows: [{ text: 'Large recorded value '.repeat(8_000) }],
+    })
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(null, {
+            direction: 'client_response',
+            rendered: { content, stream: false },
+          }),
+        ]}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Expand' }))
+    expect(
+      screen.getByRole('textbox', { name: 'Raw payload' })
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('list', { name: 'JSON tree' })
+    ).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Copy message' }))
+    expect(await navigator.clipboard.readText()).toBe(content)
+  })
 })

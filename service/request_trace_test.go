@@ -4,16 +4,118 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/gin-gonic/gin"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTraceCaptureSpoolsCompletePayloadAndScrubsBeforeStorage(t *testing.T) {
+	previous := common.GetDiskCacheConfig()
+	config := previous
+	config.Path = t.TempDir()
+	common.SetDiskCacheConfig(config)
+	t.Cleanup(func() { common.SetDiskCacheConfig(previous) })
+
+	secret := "sk-capture-secret-boundary"
+	payload := strings.Repeat("x", tracePreviewBytes-4) + secret + strings.Repeat("中文🙂", 10000)
+	buffer := newTraceCaptureBuffer(4 << 20)
+	t.Cleanup(buffer.Close)
+	previousStats := common.GetDiskCacheStats()
+	tee := &traceBodyTee{ReadCloser: io.NopCloser(strings.NewReader(payload)), collector: &requestTraceCollector{}, sink: buffer}
+	relayed, err := io.ReadAll(tee)
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(relayed), "capture must not change forwarded bytes")
+	path := buffer.filePath
+	require.NotEmpty(t, path)
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	assert.Equal(t, previousStats.ActiveDiskFiles+1, common.GetDiskCacheStats().ActiveDiskFiles)
+	assert.Equal(t, previousStats.CurrentDiskUsageBytes+int64(len(payload)), common.GetDiskCacheStats().CurrentDiskUsageBytes)
+	oldTime := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(path, oldTime, oldTime))
+	require.NoError(t, common.CleanupOldDiskCacheFiles(10*time.Minute))
+	_, err = os.Stat(path)
+	require.NoError(t, err, "cache cleanup must not remove an active long-running capture")
+	preview, size, truncated := buffer.Payload()
+	assert.EqualValues(t, len(payload), size)
+	assert.True(t, truncated)
+	assert.Less(t, len(preview), tracePreviewBytes+100)
+	complete, ok := buffer.CompletePayload()
+	require.True(t, ok)
+	assert.Equal(t, payload, complete)
+	collector := &requestTraceCollector{}
+	collector.addSecret(secret)
+	assert.Equal(t, strings.ReplaceAll(payload, secret, redactedPlaceholder), collector.scrub(complete))
+	buffer.Close()
+	_, err = os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "the complete capture must not leave a temporary payload behind")
+	assert.Equal(t, previousStats.ActiveDiskFiles, common.GetDiskCacheStats().ActiveDiskFiles)
+	assert.Equal(t, previousStats.CurrentDiskUsageBytes, common.GetDiskCacheStats().CurrentDiskUsageBytes)
+}
+
+func TestTraceCaptureQueueOverloadCleansFilesWithoutChangingResponse(t *testing.T) {
+	buffer := newTraceCaptureBuffer(4 << 20)
+	t.Cleanup(buffer.Close)
+	buffer.Write([]byte(strings.Repeat("x", tracePreviewBytes+1)))
+	path := buffer.filePath
+	require.NotEmpty(t, path)
+	for range cap(requestTraceQueueSlots) {
+		requestTraceQueueSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cap(requestTraceQueueSlots) {
+			<-requestTraceQueueSlots
+		}
+	})
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set(requestTraceContextKey, &requestTraceCollector{clientTo: buffer})
+	c.String(http.StatusOK, "original response")
+	FinishRequestTrace(c)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "original response", recorder.Body.String())
+	_, err := os.Stat(path)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestTraceCaptureOverLimitOrFailedSpoolRetainsHonestPreview(t *testing.T) {
+	for _, mode := range []string{"limit", "disk write failure"} {
+		t.Run(mode, func(t *testing.T) {
+			buffer := newTraceCaptureBuffer(2 << 20)
+			t.Cleanup(buffer.Close)
+			buffer.Write([]byte("HEAD" + strings.Repeat("x", tracePreviewBytes)))
+			path := buffer.filePath
+			require.NotEmpty(t, path)
+			if mode == "disk write failure" {
+				require.NoError(t, buffer.file.Close())
+				buffer.Write([]byte("TAIL"))
+			} else {
+				buffer.Write([]byte(strings.Repeat("y", tracePreviewBytes) + "TAIL"))
+			}
+			_, complete := buffer.CompletePayload()
+			assert.False(t, complete)
+			preview, _, truncated := buffer.Payload()
+			assert.True(t, truncated)
+			assert.True(t, strings.HasPrefix(preview, "HEAD"))
+			assert.True(t, strings.HasSuffix(preview, "TAIL"))
+			_, err := os.Stat(path)
+			assert.True(t, os.IsNotExist(err))
+		})
+	}
+}
 
 func TestTraceBufferKeepsWholePayloadUnderCap(t *testing.T) {
 	buffer := newTraceBuffer(1024)
@@ -39,6 +141,22 @@ func TestTraceBufferKeepsHeadAndTailWhenOversized(t *testing.T) {
 	assert.True(t, strings.HasSuffix(payload, "TAIL"))
 	assert.Contains(t, payload, "bytes elided")
 	assert.Less(t, len(payload), 2048)
+}
+
+func TestTraceBufferBoundsMemoryForLargeAndStreamedWrites(t *testing.T) {
+	payload := []byte(strings.Repeat("0123456789abcdef", 2<<20))
+	for _, chunkSize := range []int{len(payload), 4093} {
+		buffer := newTraceBuffer(tracePreviewBytes)
+		for start := 0; start < len(payload); start += chunkSize {
+			buffer.Write(payload[start:min(start+chunkSize, len(payload))])
+		}
+		assert.LessOrEqual(t, cap(buffer.head)+cap(buffer.tail), tracePreviewBytes, "a preview must not retain the large Write backing allocation")
+		preview, total, truncated := buffer.Payload()
+		assert.EqualValues(t, len(payload), total)
+		assert.True(t, truncated)
+		assert.True(t, strings.HasPrefix(preview, string(payload[:tracePreviewBytes/2])))
+		assert.True(t, strings.HasSuffix(preview, string(payload[len(payload)-tracePreviewBytes/2:])))
+	}
 }
 
 func TestTraceBufferPreservesUTF8AcrossElisionAndWrites(t *testing.T) {
@@ -282,6 +400,7 @@ func TestRenderTraceResponseAcrossFormats(t *testing.T) {
 			assert.Equal(t, testCase.content, rendered.Content)
 			assert.Equal(t, testCase.finishReason, rendered.FinishReason)
 			assert.Equal(t, testCase.stream, rendered.Stream)
+			assert.False(t, rendered.HasAlternatives, "tool and content-block indices are not alternative replies")
 			if testCase.toolName == "" {
 				assert.Empty(t, rendered.ToolCalls)
 				return
@@ -304,6 +423,7 @@ func TestRenderTraceResponseHandlesAlternativesAndArrayContent(t *testing.T) {
 			`{"index":1,"message":{"content":"alternative",`+
 			`"tool_calls":[{"id":"c2","function":{"name":"other","arguments":"{}"}}]},"finish_reason":"stop"}]}`)
 	require.NotNil(t, rendered)
+	assert.True(t, rendered.HasAlternatives)
 	assert.Equal(t, "primary", rendered.Content)
 	assert.Equal(t, "tool_calls", rendered.FinishReason)
 	require.Len(t, rendered.ToolCalls, 1)
@@ -313,7 +433,20 @@ func TestRenderTraceResponseHandlesAlternativesAndArrayContent(t *testing.T) {
 		`{"candidates":[{"index":0,"content":{"parts":[{"text":"primary"}]},"finishReason":"STOP"},`+
 			`{"index":1,"content":{"parts":[{"text":"alternative"}]},"finishReason":"STOP"}]}`)
 	require.NotNil(t, gemini)
+	assert.True(t, gemini.HasAlternatives)
 	assert.Equal(t, "primary", gemini.Content)
+	for _, test := range []struct{ format, body string }{
+		{"openai", "data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"alternative\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"primary\"}}]}\n\n"},
+		{"gemini", "data: {\"candidates\":[{\"index\":1,\"content\":{\"parts\":[{\"text\":\"alternative\"}]}}]}\n\ndata: {\"candidates\":[{\"index\":0,\"content\":{\"parts\":[{\"text\":\"primary\"}]}}]}\n\n"},
+	} {
+		t.Run(test.format+" separate stream alternatives", func(t *testing.T) {
+			rendered := RenderTraceResponse(test.format, test.body)
+			require.NotNil(t, rendered)
+			assert.True(t, rendered.HasAlternatives)
+			assert.True(t, rendered.Stream)
+			assert.Equal(t, "primary", rendered.Content)
+		})
+	}
 }
 
 func TestRenderTraceResponseIgnoresUnusablePayloads(t *testing.T) {

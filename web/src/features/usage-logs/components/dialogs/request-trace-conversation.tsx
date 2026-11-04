@@ -16,8 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { ChevronDown, Wrench } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Message, MessageContent } from '@/components/ai-elements/message'
@@ -33,6 +34,7 @@ import { JsonViewer } from '@/components/json-viewer'
 import { isStructuredJson } from '@/components/json-viewer/json-source'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import {
   Collapsible,
   CollapsibleContent,
@@ -44,6 +46,7 @@ import {
   buildRequestTraceConversation,
   type TraceConversationMessage,
   type TraceConversationPart,
+  type TraceConversationSource,
 } from '../../lib/request-trace-conversation'
 import {
   getTraceJsonContent,
@@ -51,7 +54,10 @@ import {
   requestTraceMarkdown,
 } from '../../lib/request-trace-json'
 import type { RequestTraceLeg } from '../../types'
-import { RequestTraceContent } from './request-trace-content'
+import {
+  MAX_TRACE_CONTENT_CHARACTERS,
+  RequestTraceContent,
+} from './request-trace-content'
 
 interface TraceConversationEntry {
   id: string
@@ -69,7 +75,7 @@ function TraceToolResult(props: { value: unknown }) {
     if (
       typeof props.value !== 'string' ||
       !code ||
-      code.length > 2_000_000 ||
+      code.length > MAX_TRACE_CONTENT_CHARACTERS ||
       !/[{[`~]/.test(code) ||
       isStructuredJson(code)
     ) {
@@ -95,6 +101,14 @@ function TraceToolResult(props: { value: unknown }) {
       }
     })
   }, [code, props.value])
+
+  if (code && code.length > MAX_TRACE_CONTENT_CHARACTERS) {
+    return (
+      <div className='p-3'>
+        <RequestTraceContent content={code} title={t('Tool result')} />
+      </div>
+    )
+  }
 
   return (
     <div className='p-3'>
@@ -176,8 +190,9 @@ function TraceToolPart(props: {
       <ToolContent>
         {isCall && (
           <div className='p-3'>
-            <JsonViewer
-              code={
+            <RequestTraceContent
+              format='json'
+              content={
                 props.part.rawArguments ??
                 (typeof props.part.value === 'string'
                   ? props.part.value
@@ -205,25 +220,33 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
     unknown: t('Unknown role'),
   }
   const message = props.entry.message
-  const copyText = props.entry.parts
-    .map(({ part }) => {
-      if (part.type === 'text' || part.type === 'reasoning') return part.text
-      if (part.type === 'tool-call' || part.type === 'tool-result') {
-        return JSON.stringify(
-          {
-            id: part.id,
-            name: part.name ?? part.result?.name,
-            [part.type]: part.value,
-            ...(part.result ? { 'tool-result': part.result.value } : {}),
-            ...(part.isError || part.result?.isError ? { is_error: true } : {}),
-          },
-          null,
-          2
-        )
-      }
-      return JSON.stringify(part.value, null, 2)
-    })
-    .join('\n\n')
+  const copyText = useMemo(
+    () =>
+      props.entry.parts
+        .map(({ part }) => {
+          if (part.type === 'text' || part.type === 'reasoning') {
+            return part.text
+          }
+          if (part.type === 'tool-call' || part.type === 'tool-result') {
+            return JSON.stringify(
+              {
+                id: part.id,
+                name: part.name ?? part.result?.name,
+                [part.type]: part.value,
+                ...(part.result ? { 'tool-result': part.result.value } : {}),
+                ...(part.isError || part.result?.isError
+                  ? { is_error: true }
+                  : {}),
+              },
+              null,
+              2
+            )
+          }
+          return JSON.stringify(part.value, null, 2)
+        })
+        .join('\n\n'),
+    [props.entry.parts]
+  )
   // JSON and tools own bounded disclosures. Only long prose needs
   // another message-level collapse; a JSON reply should immediately show its tree.
   const textLength = useMemo(
@@ -232,7 +255,8 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
         if (part.type === 'reasoning') return length + part.text.length
         if (
           part.type === 'text' &&
-          getTraceJsonContent(part.text) === undefined
+          (part.text.length > MAX_TRACE_CONTENT_CHARACTERS ||
+            getTraceJsonContent(part.text) === undefined)
         ) {
           return length + part.text.length
         }
@@ -313,9 +337,10 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
               if (part.type === 'raw') {
                 const code = JSON.stringify(part.value, null, 2)
                 return (
-                  <JsonViewer
+                  <RequestTraceContent
                     key={entry.id}
-                    code={code}
+                    format='json'
+                    content={code}
                     title={t('Other content')}
                   />
                 )
@@ -329,27 +354,273 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
   )
 }
 
-export function RequestTraceConversation(props: { legs: RequestTraceLeg[] }) {
+type TraceConversationSourceEntries = TraceConversationSource & {
+  entries: TraceConversationEntry[]
+}
+
+function TraceSourceHeader(props: { source: TraceConversationSource }) {
+  const { t } = useTranslation()
+  const sourceLabels = {
+    client_request: t('Input history'),
+    client_response: t('Final response'),
+    upstream_request: t('Upstream input'),
+    upstream_response: t('Upstream response'),
+  }
+  return (
+    <div className='space-y-3'>
+      <h3 className='text-muted-foreground text-xs font-medium'>
+        {sourceLabels[props.source.leg.direction]}
+      </h3>
+      {props.source.leg.direction.startsWith('upstream_') && (
+        <Alert>
+          <AlertDescription>
+            {t(
+              'Client payload was not captured. Showing the final upstream attempt.'
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+      {props.source.referencedHistory && (
+        <Alert>
+          <AlertDescription>
+            {t(
+              'History referenced by an ID or cache is not included in this capture.'
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+      {props.source.hasAlternatives && (
+        <Alert>
+          <AlertDescription>
+            {t(
+              'Only the first response alternative is shown. The raw payload contains all alternatives.'
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+      {props.source.leg.truncated && (
+        <Alert>
+          <AlertDescription>
+            {t(
+              'This payload was truncated. The conversation may be incomplete.'
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  )
+}
+
+function TraceSourceFallback(props: { source: TraceConversationSource }) {
+  const { t } = useTranslation()
+  if (!props.source.rawFallback) return null
+  return (
+    <div className='space-y-2'>
+      {props.source.messages.length === 0 && (
+        <p className='text-muted-foreground text-sm'>
+          {t(
+            'This payload cannot be shown as a conversation. Inspect its raw content in Exchange details.'
+          )}
+        </p>
+      )}
+      {props.source.leg.body &&
+        (props.source.leg.body.length > MAX_TRACE_CONTENT_CHARACTERS ? (
+          <RequestTraceContent
+            content={props.source.leg.body}
+            title={t('Raw payload')}
+          />
+        ) : (
+          <JsonViewer code={props.source.leg.body} title={t('Raw payload')} />
+        ))}
+    </div>
+  )
+}
+
+type ConversationRow =
+  | {
+      id: string
+      type: 'header' | 'fallback'
+      source: TraceConversationSourceEntries
+    }
+  | { id: string; type: 'message'; entry: TraceConversationEntry }
+
+function WindowedTraceConversation(props: {
+  sources: TraceConversationSourceEntries[]
+}) {
+  const { t } = useTranslation()
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const anchorRef = useRef<{ key: string; offset: number } | null>(null)
+  const rows = useMemo(
+    () =>
+      props.sources.flatMap((source): ConversationRow[] => [
+        { id: `header:${source.leg.seq}`, type: 'header', source },
+        ...source.entries.map(
+          (entry): ConversationRow => ({ id: entry.id, type: 'message', entry })
+        ),
+        ...(source.rawFallback
+          ? [
+              {
+                id: `fallback:${source.leg.seq}`,
+                type: 'fallback' as const,
+                source,
+              },
+            ]
+          : []),
+      ]),
+    [props.sources]
+  )
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => rows[index].id,
+    estimateSize: () => 180,
+    overscan: 3,
+    useFlushSync: false,
+    initialRect: { width: 900, height: 600 },
+  })
+  // Keep the visible semantic row when delayed input history is inserted before
+  // a final response that the administrator has already started reading.
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current
+    if (anchor) {
+      const index = rows.findIndex((row) => row.id === anchor.key)
+      const target =
+        index < 0 ? undefined : virtualizer.getOffsetForIndex(index, 'start')
+      if (target) virtualizer.scrollToOffset(target[0] + anchor.offset)
+    } else if (rows[0]) {
+      anchorRef.current = { key: rows[0].id, offset: 0 }
+    }
+  }, [rows, virtualizer])
+  const finalIndex = rows.findIndex(
+    (row) =>
+      row.type === 'header' && row.source.leg.direction.endsWith('response')
+  )
+
+  return (
+    <div className='mx-auto flex h-full min-h-0 w-full max-w-4xl flex-col gap-3'>
+      <div className='flex shrink-0 items-center justify-between gap-3'>
+        <p className='text-muted-foreground text-xs leading-relaxed'>
+          {t(
+            'Conversation history sent with this request and its final response.'
+          )}
+        </p>
+        {finalIndex >= 0 && (
+          <Button
+            size='sm'
+            variant='ghost'
+            onClick={() => {
+              anchorRef.current = { key: rows[finalIndex].id, offset: 0 }
+              virtualizer.scrollToIndex(finalIndex, { align: 'start' })
+            }}
+          >
+            {t('Back to final response')}
+          </Button>
+        )}
+      </div>
+      <div
+        ref={scrollRef}
+        role='log'
+        aria-label={t('Conversation')}
+        tabIndex={0}
+        className='min-h-0 flex-1 overflow-y-auto overscroll-contain'
+        onScroll={() => {
+          const offset = scrollRef.current?.scrollTop ?? 0
+          const visible = virtualizer
+            .getVirtualItems()
+            .find((item) => item.end > offset)
+          if (visible) {
+            anchorRef.current = {
+              key: String(visible.key),
+              offset: offset - visible.start,
+            }
+          }
+        }}
+      >
+        <div
+          className='relative w-full'
+          style={{ height: virtualizer.getTotalSize() }}
+        >
+          {virtualizer.getVirtualItems().map((item) => {
+            const row = rows[item.index]
+            return (
+              <div
+                key={row.id}
+                data-index={item.index}
+                ref={virtualizer.measureElement}
+                className='absolute top-0 left-0 w-full pb-4'
+                style={{ transform: `translateY(${item.start}px)` }}
+              >
+                {row.type === 'message' ? (
+                  <TraceMessage entry={row.entry} />
+                ) : null}
+                {row.type === 'header' ? (
+                  <TraceSourceHeader source={row.source} />
+                ) : null}
+                {row.type === 'fallback' ? (
+                  <TraceSourceFallback source={row.source} />
+                ) : null}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function RequestTraceConversation(props: {
+  legs: RequestTraceLeg[]
+  sources?: TraceConversationSource[]
+}) {
   const { t } = useTranslation()
   const sources = useMemo(
     () =>
-      buildRequestTraceConversation(props.legs).map((source) => ({
-        ...source,
-        // The capture sequence and positions identify immutable messages and blocks.
-        entries: source.messages.flatMap(
-          (message, position): TraceConversationEntry[] => {
-            const parts = message.parts
-              .map((part, block) => ({
-                id: `${source.leg.seq}:${position}:${block}`,
-                part,
-              }))
-              .filter(({ part }) => part.type !== 'tool-result' || !part.linked)
-            if (parts.length === 0) return []
-            return [{ id: `${source.leg.seq}:${position}`, message, parts }]
-          }
-        ),
-      })),
-    [props.legs]
+      (props.sources ?? buildRequestTraceConversation(props.legs)).map(
+        (source) => {
+          const occurrences = new Map<string, number>()
+          const entries = source.messages.flatMap(
+            (message): TraceConversationEntry[] => {
+              // Late top-level instructions can be inserted before streamed history.
+              // Identify messages by bounded content samples, never their changing index.
+              const signature = JSON.stringify([
+                message.role,
+                ...message.parts.map((part) => {
+                  if (part.type === 'text' || part.type === 'reasoning') {
+                    return [
+                      part.type,
+                      part.text.length,
+                      part.text.slice(0, 80),
+                      part.text.slice(-80),
+                    ]
+                  }
+                  if (
+                    part.type === 'tool-call' ||
+                    part.type === 'tool-result'
+                  ) {
+                    return [part.type, part.id, part.name]
+                  }
+                  return [
+                    part.type,
+                    typeof part.value,
+                    String(part.value).slice(0, 80),
+                  ]
+                }),
+              ])
+              const occurrence = occurrences.get(signature) ?? 0
+              occurrences.set(signature, occurrence + 1)
+              const id = `${source.leg.seq}:${signature}:${occurrence}`
+              const parts = message.parts
+                .map((part, block) => ({ id: `${id}:${block}`, part }))
+                .filter(
+                  ({ part }) => part.type !== 'tool-result' || !part.linked
+                )
+              return parts.length === 0 ? [] : [{ id, message, parts }]
+            }
+          )
+          return { ...source, entries }
+        }
+      ),
+    [props.legs, props.sources]
   )
   const sourceLabels = {
     client_request: t('Input history'),
@@ -360,6 +631,13 @@ export function RequestTraceConversation(props: { legs: RequestTraceLeg[] }) {
 
   if (sources.length === 0) {
     return <EmptyState title={t('No conversation was captured.')} />
+  }
+
+  if (
+    props.sources ||
+    sources.reduce((count, source) => count + source.entries.length, 0) > 60
+  ) {
+    return <WindowedTraceConversation sources={sources} />
   }
 
   return (
@@ -375,64 +653,13 @@ export function RequestTraceConversation(props: { legs: RequestTraceLeg[] }) {
           className='min-w-0 space-y-3'
           aria-label={sourceLabels[source.leg.direction]}
         >
-          <h3 className='text-muted-foreground text-xs font-medium'>
-            {sourceLabels[source.leg.direction]}
-          </h3>
-          {source.leg.direction.startsWith('upstream_') && (
-            <Alert>
-              <AlertDescription>
-                {t(
-                  'Client payload was not captured. Showing the final upstream attempt.'
-                )}
-              </AlertDescription>
-            </Alert>
-          )}
-          {source.referencedHistory && (
-            <Alert>
-              <AlertDescription>
-                {t(
-                  'History referenced by an ID or cache is not included in this capture.'
-                )}
-              </AlertDescription>
-            </Alert>
-          )}
-          {source.hasAlternatives && (
-            <Alert>
-              <AlertDescription>
-                {t(
-                  'Only the first response alternative is shown. The raw payload contains all alternatives.'
-                )}
-              </AlertDescription>
-            </Alert>
-          )}
-          {source.leg.truncated && (
-            <Alert>
-              <AlertDescription>
-                {t(
-                  'This payload was truncated. The conversation may be incomplete.'
-                )}
-              </AlertDescription>
-            </Alert>
-          )}
+          <TraceSourceHeader source={source} />
           <div className='space-y-4'>
             {source.entries.map((entry) => (
               <TraceMessage key={entry.id} entry={entry} />
             ))}
           </div>
-          {source.rawFallback && (
-            <div className='space-y-2'>
-              {source.messages.length === 0 && (
-                <p className='text-muted-foreground text-sm'>
-                  {t(
-                    'This payload cannot be shown as a conversation. Inspect its raw content in Exchange details.'
-                  )}
-                </p>
-              )}
-              {source.leg.body && (
-                <JsonViewer code={source.leg.body} title={t('Raw payload')} />
-              )}
-            </div>
-          )}
+          <TraceSourceFallback source={source} />
         </section>
       ))}
     </div>

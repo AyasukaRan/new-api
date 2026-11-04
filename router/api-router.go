@@ -17,7 +17,8 @@ import (
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
 	apiRouter.Use(middleware.RouteTag("api"))
-	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression))
+	// This gzip version does not flush compressed streams incrementally.
+	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPathsRegexs([]string{`^/api/log/trace/body$`})))
 	apiRouter.Use(middleware.AccessTokenAudit())
 	apiRouter.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
@@ -334,6 +335,7 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/request_body", middleware.DisableCache(), middleware.AdminAuth(), controller.GetLogRequestBody)
 		logRoute.GET("/trace", middleware.DisableCache(), middleware.AdminAuth(), controller.GetRequestTrace)
+		logRoute.GET("/trace/body", middleware.DisableCache(), middleware.AdminAuth(), controller.GetRequestTraceBody)
 		logRoute.GET("/trace/object", middleware.DisableCache(), middleware.AdminAuth(), controller.GetRequestTraceObject)
 		logRoute.GET("/self", middleware.UserAuth(), controller.GetUserLogs)
 		logRoute.GET("/export", middleware.AdminAuth(), controller.ExportAllLogs)

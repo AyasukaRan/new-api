@@ -111,6 +111,11 @@ func IncrementDiskFiles(size int64) {
 	atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, size)
 }
 
+// AddDiskCacheBytes accounts for a registered file while it is still growing.
+func AddDiskCacheBytes(size int64) {
+	atomic.AddInt64(&diskCacheStats.CurrentDiskUsageBytes, size)
+}
+
 // DecrementDiskFiles 减少磁盘文件计数
 func DecrementDiskFiles(size int64) {
 	if atomic.AddInt64(&diskCacheStats.ActiveDiskFiles, -1) < 0 {

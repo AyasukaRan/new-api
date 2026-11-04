@@ -21,10 +21,11 @@ type TraceToolCall struct {
 // response, whether that response arrived as one JSON document or as a stream
 // of fragments.
 type TraceRenderedResponse struct {
-	Reasoning    string          `json:"reasoning,omitempty"`
-	Content      string          `json:"content,omitempty"`
-	ToolCalls    []TraceToolCall `json:"tool_calls,omitempty"`
-	FinishReason string          `json:"finish_reason,omitempty"`
+	Reasoning       string          `json:"reasoning,omitempty"`
+	Content         string          `json:"content,omitempty"`
+	ToolCalls       []TraceToolCall `json:"tool_calls,omitempty"`
+	FinishReason    string          `json:"finish_reason,omitempty"`
+	HasAlternatives bool            `json:"has_alternatives,omitempty"`
 	// Stream reports whether the payload was reassembled from fragments, which
 	// is worth showing because a truncated stream renders as a partial turn.
 	Stream bool `json:"stream"`
@@ -201,8 +202,10 @@ func renderOpenAIChatResponse(events []string) *TraceRenderedResponse {
 		if err := common.UnmarshalJsonStr(event, &payload); err != nil {
 			continue
 		}
+		rendered.HasAlternatives = rendered.HasAlternatives || len(payload.Choices) > 1
 		for _, choice := range payload.Choices {
 			if choice.Index != 0 {
+				rendered.HasAlternatives = true
 				continue
 			}
 			if choice.FinishReason != "" {
@@ -363,8 +366,10 @@ func renderGeminiResponse(events []string) *TraceRenderedResponse {
 			documents = append(documents, single)
 		}
 		for _, document := range documents {
+			rendered.HasAlternatives = rendered.HasAlternatives || len(document.Candidates) > 1
 			for _, candidate := range document.Candidates {
 				if candidate.Index != 0 {
+					rendered.HasAlternatives = true
 					continue
 				}
 				if candidate.FinishReason != "" {

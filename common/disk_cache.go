@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,19 @@ const (
 
 // 统一的缓存目录名
 const diskCacheDir = "new-api-body-cache"
+
+var activeDiskCacheFiles sync.Map
+
+// SetDiskCacheFileActive prevents age-based cleanup from removing a capture
+// still being streamed or waiting for persistence. Crashed processes leave no
+// active registration, so their orphaned files remain eligible for cleanup.
+func SetDiskCacheFileActive(path string, active bool) {
+	if active {
+		activeDiskCacheFiles.Store(path, struct{}{})
+	} else {
+		activeDiskCacheFiles.Delete(path)
+	}
+}
 
 // GetDiskCacheDir 获取统一的磁盘缓存目录
 // 注意：每次调用都会重新计算，以响应配置变化
@@ -122,6 +136,10 @@ func CleanupOldDiskCacheFiles(maxAge time.Duration) error {
 		if entry.IsDir() {
 			continue
 		}
+		path := filepath.Join(dir, entry.Name())
+		if _, active := activeDiskCacheFiles.Load(path); active {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
@@ -129,7 +147,7 @@ func CleanupOldDiskCacheFiles(maxAge time.Duration) error {
 		if now.Sub(info.ModTime()) > maxAge {
 			// 注意：后台清理任务删除文件时，由于无法得知原始 base64Size，
 			// 只能按磁盘文件大小扣减。这在目前 base64 存储模式下是准确的。
-			if err := os.Remove(filepath.Join(dir, entry.Name())); err == nil {
+			if err := os.Remove(path); err == nil {
 				DecrementDiskFiles(info.Size())
 			}
 		}

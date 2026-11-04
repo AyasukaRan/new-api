@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import { useQuery } from '@tanstack/react-query'
 import { MessageSquare, Route } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -32,7 +33,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import { getRequestTrace } from '../../api'
 import type { LogOtherData } from '../../types'
 import { RequestMetadataTags } from '../request-metadata-tags'
-import { RequestTraceConversation } from './request-trace-conversation'
+import { RequestTraceConversationLoader } from './request-trace-conversation-loader'
 import { RequestTraceExchange } from './request-trace-exchange'
 
 export default function RequestTraceViewer(props: {
@@ -145,9 +146,9 @@ export default function RequestTraceViewer(props: {
       </div>
       <TabsContent
         value='conversation'
-        className='min-h-0 overflow-y-auto overscroll-contain pt-4'
+        className='min-h-0 overflow-hidden pt-4'
       >
-        <RequestTraceConversation legs={legs} />
+        <RequestTraceConversationLoader traceId={props.traceId} legs={legs} />
       </TabsContent>
       <TabsContent value='exchange' className='min-h-0 overflow-hidden pt-3'>
         <RequestTraceExchange traceId={props.traceId} legs={legs} />

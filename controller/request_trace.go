@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type requestTraceLeg struct {
@@ -26,6 +28,7 @@ type requestTraceLeg struct {
 	Status    int                 `json:"status"`
 	Headers   map[string][]string `json:"headers"`
 	Body      string              `json:"body"`
+	HasBody   bool                `json:"has_body"`
 	BodySize  int64               `json:"body_size"`
 	Truncated bool                `json:"truncated"`
 	// HasObject marks a binary payload held in object storage rather than
@@ -46,7 +49,14 @@ func GetRequestTrace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "缺少 trace_id"})
 		return
 	}
-	traces, err := model.GetRequestTraces(traceId)
+	metadataOnly := c.Query("metadata_only") == "true"
+	var traces []*model.RequestTrace
+	var err error
+	if metadataOnly {
+		traces, err = model.GetRequestTraceMetadata(traceId)
+	} else {
+		traces, err = model.GetRequestTraces(traceId)
+	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -64,6 +74,7 @@ func GetRequestTrace(c *gin.Context) {
 			Url:         trace.Url,
 			Status:      trace.Status,
 			Body:        trace.Body,
+			HasBody:     trace.HasBody || trace.Body != "",
 			BodySize:    trace.BodySize,
 			Truncated:   trace.Truncated,
 			HasObject:   trace.ObjectKey != "",
@@ -75,13 +86,60 @@ func GetRequestTrace(c *gin.Context) {
 				leg.Headers = headers
 			}
 		}
-		if trace.Direction == model.TraceDirectionUpstreamResponse || trace.Direction == model.TraceDirectionClientResponse {
+		if !metadataOnly && (trace.Direction == model.TraceDirectionUpstreamResponse || trace.Direction == model.TraceDirectionClientResponse) {
 			leg.Rendered = service.RenderTraceResponse(trace.Format, trace.Body)
 		}
 		legs = append(legs, leg)
 	}
 
 	common.ApiSuccess(c, gin.H{"trace_id": traceId, "legs": legs})
+}
+
+// GetRequestTraceBody validates one complete leg before sending any text. A
+// damaged chunk must produce an HTTP error, never an apparently valid prefix.
+func GetRequestTraceBody(c *gin.Context) {
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	traceID := c.Query("trace_id")
+	seq, err := strconv.Atoi(c.Query("seq"))
+	view := c.Query("view")
+	if traceID == "" || err != nil || seq < 0 || (view != "" && view != "rendered") {
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
+		return
+	}
+	trace, err := model.GetRequestTraceLegContext(c.Request.Context(), traceID, seq)
+	if c.Request.Context().Err() != nil {
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && trace == nil) {
+		common.ApiErrorStatus(c, http.StatusNotFound, common.NewMessage("This trace has expired or was never recorded."))
+		return
+	}
+	if err != nil {
+		logger.LogWarn(c.Request.Context(), common.LogText("request trace body load failed: %s", err.Error()))
+		common.ApiErrorStatus(c, http.StatusInternalServerError, common.NewMessage("Failed to load the request trace"))
+		return
+	}
+	if view == "rendered" {
+		if trace.Direction != model.TraceDirectionUpstreamResponse && trace.Direction != model.TraceDirectionClientResponse {
+			common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
+			return
+		}
+		common.ApiSuccess(c, gin.H{"rendered": service.RenderTraceResponse(trace.Format, trace.Body)})
+		return
+	}
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	for start := 0; start < len(trace.Body); start += 64 << 10 {
+		if c.Request.Context().Err() != nil {
+			return
+		}
+		if _, err := io.WriteString(c.Writer, trace.Body[start:min(start+(64<<10), len(trace.Body))]); err != nil {
+			return
+		}
+		c.Writer.Flush()
+	}
 }
 
 // traceObjectDispositions maps the viewer's intent onto a Content-Disposition.

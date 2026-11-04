@@ -16,15 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import { AlertTriangle } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useMediaQuery } from '@/hooks/use-media-query'
 
+import { useTracePayload } from '../../hooks/use-trace-payload'
+import type { TracePayloadView } from '../../lib/request-trace-payload'
 import type { RequestTraceDirection, RequestTraceLeg } from '../../types'
 import {
   RequestTraceRawLeg,
@@ -121,7 +127,9 @@ export function RequestTraceExchange(props: {
           value={leg.seq}
           className='min-h-0 min-w-0 overflow-y-auto overscroll-contain md:pl-1'
         >
-          <RequestTraceExchangeDetail traceId={props.traceId} leg={leg} />
+          {leg.seq === selectedLeg.seq && (
+            <RequestTraceExchangeDetail traceId={props.traceId} leg={leg} />
+          )}
         </TabsContent>
       ))}
     </Tabs>
@@ -134,6 +142,12 @@ function RequestTraceExchangeDetail(props: {
 }) {
   const { t } = useTranslation()
   const leg = props.leg
+  const hasRendered = Boolean(
+    leg.rendered || (leg.has_body && leg.direction.endsWith('_response'))
+  )
+  const [view, setView] = useState<TracePayloadView | 'headers'>(
+    hasRendered ? 'rendered' : 'body'
+  )
   return (
     <div className='min-w-0 space-y-4 px-1 pb-2'>
       <div className='space-y-2'>
@@ -179,25 +193,36 @@ function RequestTraceExchangeDetail(props: {
           </AlertDescription>
         </Alert>
       )}
-      <Tabs defaultValue={leg.rendered ? 'rendered' : 'body'}>
+      <Tabs
+        value={view}
+        onValueChange={(value) => setView(value as typeof view)}
+      >
         <TabsList variant='line' aria-label={t('Payload views')}>
-          {leg.rendered && (
+          {hasRendered && (
             <TabsTrigger value='rendered'>{t('Rendered')}</TabsTrigger>
           )}
           <TabsTrigger value='body'>{t('Body')}</TabsTrigger>
           <TabsTrigger value='headers'>{t('Headers')}</TabsTrigger>
         </TabsList>
-        {leg.rendered && (
+        {hasRendered && (
           <TabsContent value='rendered' className='min-w-0 pt-2'>
-            <RequestTraceRenderedLeg
-              leg={leg}
-              label={DIRECTION_LABELS[leg.direction]}
-              showAttempt={leg.direction.startsWith('upstream_')}
-            />
+            {view === 'rendered' && (
+              <TraceExchangePayload
+                traceId={props.traceId}
+                leg={leg}
+                view='rendered'
+              />
+            )}
           </TabsContent>
         )}
         <TabsContent value='body' className='min-w-0 pt-2'>
-          <RequestTraceRawLeg traceId={props.traceId} leg={leg} view='body' />
+          {view === 'body' && (
+            <TraceExchangePayload
+              traceId={props.traceId}
+              leg={leg}
+              view='body'
+            />
+          )}
         </TabsContent>
         <TabsContent value='headers' className='min-w-0 pt-2'>
           <RequestTraceRawLeg
@@ -207,6 +232,95 @@ function RequestTraceExchangeDetail(props: {
           />
         </TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+function TraceExchangePayload(props: {
+  traceId: string
+  leg: RequestTraceLeg
+  view: 'body' | 'rendered'
+}) {
+  const { t } = useTranslation()
+  const query = useTracePayload(props.traceId, props.leg, props.view)
+  if (props.leg.has_body && query.isPending) return <LoadingState size='sm' />
+  if (props.leg.has_body && query.isError) {
+    return (
+      <ErrorState
+        title={t('Failed to load the request trace')}
+        onRetry={() => void query.refetch()}
+      />
+    )
+  }
+  const leg = query.data?.leg ?? props.leg
+  if (props.view === 'rendered') {
+    if (!leg.rendered) {
+      return (
+        <p className='text-muted-foreground text-sm'>
+          {t(
+            'This payload cannot be shown as a conversation. Inspect its raw content in Exchange details.'
+          )}
+        </p>
+      )
+    }
+    return (
+      <RequestTraceRenderedLeg
+        leg={leg}
+        label={DIRECTION_LABELS[leg.direction]}
+        showAttempt={leg.direction.startsWith('upstream_')}
+      />
+    )
+  }
+  if (query.data?.download) {
+    return (
+      <TraceRawPreview
+        body={leg.body}
+        blob={query.data.download}
+        traceId={props.traceId}
+        seq={leg.seq}
+      />
+    )
+  }
+  return <RequestTraceRawLeg traceId={props.traceId} leg={leg} view='body' />
+}
+
+function TraceRawPreview(props: {
+  body: string
+  blob: Blob
+  traceId: string
+  seq: number
+}) {
+  const { t } = useTranslation()
+  const [url, setUrl] = useState<string>()
+  useEffect(() => {
+    const objectUrl = URL.createObjectURL(props.blob)
+    setUrl(objectUrl)
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [props.blob])
+  return (
+    <div className='space-y-3'>
+      <p className='text-muted-foreground text-sm'>
+        {t(
+          'Large payload: showing a text preview. Download the full captured payload to inspect every byte.'
+        )}
+      </p>
+      <Button
+        variant='outline'
+        size='sm'
+        disabled={!url}
+        onClick={() => {
+          if (!url) return
+          const link = document.createElement('a')
+          link.href = url
+          link.download = `trace-${props.traceId}-${props.seq}.txt`
+          link.click()
+        }}
+      >
+        {t('Download')}
+      </Button>
+      <pre className='max-h-96 overflow-auto rounded-md border p-3 font-mono text-xs break-all whitespace-pre-wrap'>
+        {props.body}
+      </pre>
     </div>
   )
 }

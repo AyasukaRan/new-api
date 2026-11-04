@@ -272,7 +272,7 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'A larger payload keeps its beginning and its end, with the middle elided.'
+                        'Payloads within this limit are stored in full. Larger payloads retain only their beginning and end and are marked incomplete.'
                       )}
                     </FormDescription>
                     <FormMessage />

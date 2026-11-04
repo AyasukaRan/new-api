@@ -50,7 +50,7 @@ const defaultOperationsSettings: OperationsSettings = {
   LogRequestBodyEnabled: false,
   RequestTraceEnabled: false,
   RequestTraceRetentionDays: 3,
-  RequestTraceMaxBytes: 1048576,
+  RequestTraceMaxBytes: 32 * 1024 * 1024,
   'log_setting.user_export_enabled': true,
   'log_setting.max_range_days': 365,
   'performance_setting.disk_cache_enabled': false,

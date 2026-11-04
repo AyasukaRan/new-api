@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 /**
  * Type definitions for usage logs
  */
@@ -588,6 +589,7 @@ export interface RequestTraceRendered {
   content?: string
   tool_calls?: RequestTraceToolCall[]
   finish_reason?: string
+  has_alternatives?: boolean
   stream: boolean
 }
 
@@ -602,6 +604,8 @@ export interface RequestTraceLeg {
   status: number
   headers: Record<string, string[]> | null
   body: string
+  /** Metadata-only responses fetch this text separately. */
+  has_body?: boolean
   /** Payload size before truncation, so the viewer can say what was dropped. */
   body_size: number
   truncated: boolean

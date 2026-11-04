@@ -17,8 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMemo, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
+import { CodeBlock } from '@/components/ai-elements/code-block'
 import { Response } from '@/components/ai-elements/response'
+import { CopyButton } from '@/components/copy-button'
 import { JsonViewer } from '@/components/json-viewer'
 import { isStructuredJson } from '@/components/json-viewer/json-source'
 
@@ -27,6 +30,8 @@ import {
   isJsonFenceLanguage,
   requestTraceMarkdown,
 } from '../../lib/request-trace-json'
+
+export const MAX_TRACE_CONTENT_CHARACTERS = 128_000
 
 function renderTraceCodeBlock(code: string, language: string): ReactNode {
   const normalized = language.trim().toLowerCase()
@@ -40,12 +45,33 @@ function renderTraceCodeBlock(code: string, language: string): ReactNode {
   return undefined
 }
 
-export function RequestTraceContent(props: { content: string }) {
-  const json = useMemo(
-    () => getTraceJsonContent(props.content),
-    [props.content]
-  )
-  if (json !== undefined) return <JsonViewer code={json} />
+export function RequestTraceContent(props: {
+  content: string
+  title?: string
+  format?: 'json'
+}) {
+  const { t } = useTranslation()
+  const isLarge = props.content.length > MAX_TRACE_CONTENT_CHARACTERS
+  const json = useMemo(() => {
+    if (isLarge) return undefined
+    if (props.format === 'json') return props.content
+    return getTraceJsonContent(props.content)
+  }, [isLarge, props.content, props.format])
+  if (isLarge) {
+    return (
+      <CodeBlock
+        code={props.content}
+        language='plaintext'
+        title={props.title ?? t('Raw payload')}
+        showToolbar
+        showLineNumbers
+        maxExpandedLines={20}
+      >
+        <CopyButton value={props.content} />
+      </CodeBlock>
+    )
+  }
+  if (json !== undefined) return <JsonViewer code={json} title={props.title} />
 
   const hasJsonBlock =
     /(`{3,}|~{3,})[ \t]*(?:(?:application\/)?json\b|\r?\n\s*(?:>\s*)*[{[])/i.test(

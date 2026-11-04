@@ -123,10 +123,10 @@ var RequestTraceRetentionDays = 3
 // Zero disables the offload; it also has no effect without object storage.
 var RequestTraceMaxObjectBytes = 8 << 20
 
-// RequestTraceMaxBytes caps a single captured payload. An oversized payload
-// keeps its head and its tail with the middle elided, because a stream carries
-// the usage block and finish_reason at the very end.
-var RequestTraceMaxBytes = 1 << 20
+// RequestTraceMaxBytes caps a complete captured payload. Large payloads spill
+// to temporary disk and are stored as reusable compressed chunks. Only bodies
+// above this limit (or failed capture/storage) fall back to a head/tail preview.
+var RequestTraceMaxBytes = 32 << 20
 
 var TLSInsecureSkipVerify bool
 var InsecureTLSConfig = &tls.Config{InsecureSkipVerify: true}

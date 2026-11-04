@@ -59,11 +59,12 @@ const minRedactableSecretLength = 8
 // usage block and finish_reason at the very end, which is usually the part an
 // administrator opened the trace to read.
 type traceBuffer struct {
-	head    []byte
-	tail    []byte
-	headCap int
-	tailCap int
-	total   int64
+	head      []byte
+	tail      []byte
+	headCap   int
+	tailCap   int
+	tailStart int
+	total     int64
 }
 
 func newTraceBuffer(limit int) *traceBuffer {
@@ -81,20 +82,43 @@ func (b *traceBuffer) Write(p []byte) {
 	b.total += int64(len(p))
 	if room := b.headCap - len(b.head); room > 0 {
 		take := min(room, len(p))
+		if needed := len(b.head) + take; needed > cap(b.head) {
+			head := make([]byte, len(b.head), min(b.headCap, max(needed, 2*cap(b.head))))
+			copy(head, b.head)
+			b.head = head
+		}
 		b.head = append(b.head, p[:take]...)
 		p = p[take:]
 		if len(p) == 0 {
 			return
 		}
 	}
-	b.tail = append(b.tail, p...)
-	// Trim lazily. Dropping the excess on every call would memmove the whole
-	// tail budget per write, and a stream arrives as thousands of small writes
-	// — one SSE frame is several — so the cost would be O(stream x cap) rather
-	// than O(stream). Letting the tail grow to twice the budget before
-	// compacting amortizes the copy to O(1) per byte and still bounds memory.
-	if len(b.tail) >= 2*b.tailCap {
-		b.tail = append(b.tail[:0], b.tail[len(b.tail)-b.tailCap:]...)
+	if len(p) >= b.tailCap {
+		if cap(b.tail) < b.tailCap {
+			b.tail = make([]byte, b.tailCap)
+		} else {
+			b.tail = b.tail[:b.tailCap]
+		}
+		copy(b.tail, p[len(p)-b.tailCap:])
+		b.tailStart = 0
+		return
+	}
+	if room := b.tailCap - len(b.tail); room > 0 {
+		take := min(room, len(p))
+		if needed := len(b.tail) + take; needed > cap(b.tail) {
+			tail := make([]byte, len(b.tail), min(b.tailCap, max(needed, 2*cap(b.tail))))
+			copy(tail, b.tail)
+			b.tail = tail
+		}
+		b.tail = append(b.tail, p[:take]...)
+		p = p[take:]
+	}
+	// A fixed-size ring avoids retaining the full backing array of a large
+	// Write, and avoids shifting the whole tail for every streamed frame.
+	if len(p) > 0 {
+		n := copy(b.tail[b.tailStart:], p)
+		copy(b.tail, p[n:])
+		b.tailStart = (b.tailStart + len(p)) % b.tailCap
 	}
 }
 
@@ -103,8 +127,10 @@ func (b *traceBuffer) Write(p []byte) {
 func (b *traceBuffer) Payload() (string, int64, bool) {
 	head := b.head
 	tail := b.tail
-	if len(tail) > b.tailCap {
-		tail = tail[len(tail)-b.tailCap:]
+	if b.tailStart > 0 {
+		tail = make([]byte, len(b.tail))
+		n := copy(tail, b.tail[b.tailStart:])
+		copy(tail[n:], b.tail[:b.tailStart])
 	}
 	truncated := b.total > int64(len(head)+len(tail))
 	var payload string
@@ -138,9 +164,7 @@ func (b *traceBuffer) Payload() (string, int64, bool) {
 	}
 	// Upstreams can mislabel arbitrary bytes as text. Normalize only the saved
 	// diagnostic copy; UTF-8 and NUL restrictions must not affect the relay.
-	payload = strings.ToValidUTF8(payload, "\uFFFD")
-	payload = strings.ReplaceAll(payload, "\x00", "\uFFFD")
-	return payload, b.total, truncated
+	return normalizeTraceText(payload), b.total, truncated
 }
 
 // traceSink accepts captured bytes. Text payloads go to a traceBuffer that
@@ -182,7 +206,7 @@ func (b *traceObjectBuffer) Write(p []byte) {
 // only turned into a payload once the exchange is over.
 type traceLeg struct {
 	record *model.RequestTrace
-	buffer *traceBuffer
+	buffer *traceCaptureBuffer
 	object *traceObjectBuffer
 	// objectContentType is the media type the payload was served with, kept so
 	// the viewer can play or display it rather than offering a blind download.
@@ -193,8 +217,9 @@ type requestTraceCollector struct {
 	mu       sync.Mutex
 	traceId  string
 	format   string
+	userID   int
 	legs     []*traceLeg
-	clientTo *traceBuffer
+	clientTo *traceCaptureBuffer
 	// secrets are scrubbed out of every header value, URL and body before
 	// anything is stored. Collected as the request progresses because the
 	// channel key is only known once a channel has been picked.
@@ -331,7 +356,8 @@ func BeginRequestTrace(c *gin.Context, relayFormat string) string {
 	collector := &requestTraceCollector{
 		traceId:  common.NewRequestId(),
 		format:   relayFormat,
-		clientTo: newTraceBuffer(common.RequestTraceMaxBytes),
+		userID:   c.GetInt("id"),
+		clientTo: newTraceCaptureBuffer(common.RequestTraceMaxBytes),
 	}
 	if tokenKey := common.GetContextKeyString(c, constant.ContextKeyTokenKey); tokenKey != "" {
 		collector.addSecret(tokenKey)
@@ -386,10 +412,10 @@ func CaptureUpstreamRequest(c *gin.Context, info *relaycommon.RelayInfo, req *ht
 		// body the transport is about to send.
 		if body, err := req.GetBody(); err == nil && body != nil {
 			if bodyCapturable(contentType) {
-				buffer := newTraceBuffer(common.RequestTraceMaxBytes)
-				copyIntoTraceSink(buffer, body)
-				record.Body, record.BodySize, record.Truncated = buffer.Payload()
-				record.Body = collector.scrub(record.Body)
+				leg.buffer = newTraceCaptureBuffer(common.RequestTraceMaxBytes)
+				if err := copyIntoTraceSink(leg.buffer, body); err != nil {
+					leg.buffer.failed = true
+				}
 			} else if objectCapturable(contentType) {
 				leg.object = newTraceObjectBuffer(common.RequestTraceMaxObjectBytes)
 				leg.objectContentType = contentType
@@ -439,7 +465,7 @@ func CaptureUpstreamResponse(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	contentType := resp.Header.Get("Content-Type")
 	if resp.Body != nil {
 		if bodyCapturable(contentType) {
-			leg.buffer = newTraceBuffer(common.RequestTraceMaxBytes)
+			leg.buffer = newTraceCaptureBuffer(common.RequestTraceMaxBytes)
 			resp.Body = &traceBodyTee{ReadCloser: resp.Body, collector: collector, sink: leg.buffer}
 		} else if objectCapturable(contentType) {
 			leg.object = newTraceObjectBuffer(common.RequestTraceMaxObjectBytes)
@@ -476,6 +502,23 @@ func FinishRequestTrace(c *gin.Context) {
 	legs := collector.legs
 	collector.legs = nil
 	collector.mu.Unlock()
+	// Bound waiting work too: a stalled log database must not accumulate an
+	// unlimited number of open files and diagnostic previews. Traces are best
+	// effort; rejecting an overloaded capture never changes the API response.
+	select {
+	case requestTraceQueueSlots <- struct{}{}:
+	default:
+		if collector.clientTo != nil {
+			collector.clientTo.Close()
+		}
+		for _, leg := range legs {
+			if leg.buffer != nil {
+				leg.buffer.Close()
+			}
+		}
+		common.SysError("request trace write queue is full; capture discarded")
+		return
+	}
 
 	ordered := make([]*traceLeg, 0, len(legs)+2)
 	ordered = append(ordered, collector.clientRequestLeg(c))
@@ -502,6 +545,7 @@ func FinishRequestTrace(c *gin.Context) {
 		stored = append(stored, leg)
 	}
 	if len(stored) == 0 {
+		<-requestTraceQueueSlots
 		return
 	}
 
@@ -510,9 +554,33 @@ func FinishRequestTrace(c *gin.Context) {
 	// fail the request. context.Background rather than the request's: this
 	// outlives the handler that produced it.
 	gopool.Go(func() {
+		defer func() { <-requestTraceQueueSlots }()
+		defer func() {
+			for _, leg := range stored {
+				if leg.buffer != nil {
+					leg.buffer.Close()
+				}
+			}
+		}()
+		// Waiting writers retain files and small previews, not full bodies.
+		requestTraceWriteSlots <- struct{}{}
+		defer func() { <-requestTraceWriteSlots }()
 		ctx := context.Background()
 		records := make([]*model.RequestTrace, 0, len(stored))
 		for _, leg := range stored {
+			if leg.buffer != nil {
+				body, complete := leg.buffer.CompletePayload()
+				if complete {
+					body = collector.scrub(body)
+					if err := model.StoreRequestTraceBody(leg.record, body, collector.userID); err != nil {
+						common.SysError("failed to store complete request trace payload: " + err.Error())
+					} else {
+						leg.record.Truncated = false
+					}
+				}
+				leg.buffer.Close()
+				leg.buffer = nil
+			}
 			uploadTraceObject(ctx, leg)
 			records = append(records, leg.record)
 		}
@@ -521,6 +589,10 @@ func FinishRequestTrace(c *gin.Context) {
 		}
 	})
 }
+
+// Bound simultaneous materialization and compression of complete payloads.
+var requestTraceWriteSlots = make(chan struct{}, 4)
+var requestTraceQueueSlots = make(chan struct{}, 32)
 
 // uploadTraceObject offloads a retained binary payload. A failure leaves the
 // row without an object reference rather than losing the leg: the headers,
@@ -587,10 +659,10 @@ func (t *requestTraceCollector) clientRequestLeg(c *gin.Context) *traceLeg {
 		copyIntoTraceSink(leg.object, reader)
 		return leg
 	}
-	buffer := newTraceBuffer(common.RequestTraceMaxBytes)
-	copyIntoTraceSink(buffer, reader)
-	record.Body, record.BodySize, record.Truncated = buffer.Payload()
-	record.Body = t.scrub(record.Body)
+	leg.buffer = newTraceCaptureBuffer(common.RequestTraceMaxBytes)
+	if err := copyIntoTraceSink(leg.buffer, reader); err != nil {
+		leg.buffer.failed = true
+	}
 	return leg
 }
 
@@ -602,14 +674,12 @@ func (t *requestTraceCollector) clientResponseLeg(c *gin.Context) *traceLeg {
 		Status:    c.Writer.Status(),
 		Headers:   t.encodeHeaders(c.Writer.Header(), nil),
 	}
-	record.Body, record.BodySize, record.Truncated = t.clientTo.Payload()
-	record.Body = t.scrub(record.Body)
-	return &traceLeg{record: record}
+	return &traceLeg{record: record, buffer: t.clientTo}
 }
 
 // copyIntoTraceSink drains a reader into the sink without materializing a
 // disk-backed payload in one allocation.
-func copyIntoTraceSink(sink traceSink, reader io.Reader) {
+func copyIntoTraceSink(sink traceSink, reader io.Reader) error {
 	chunk := make([]byte, 32*1024)
 	for {
 		n, err := reader.Read(chunk)
@@ -617,7 +687,10 @@ func copyIntoTraceSink(sink traceSink, reader io.Reader) {
 			sink.Write(chunk[:n])
 		}
 		if err != nil {
-			return
+			if err == io.EOF {
+				return nil
+			}
+			return err
 		}
 	}
 }

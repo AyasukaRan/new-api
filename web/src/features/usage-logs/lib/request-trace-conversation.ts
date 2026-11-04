@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import type { RequestTraceLeg } from '../types'
 
 export type TraceConversationPart =
@@ -434,7 +435,9 @@ function partialRequestBody(
   return body
 }
 
-function conversationSource(leg: RequestTraceLeg): TraceConversationSource {
+export function conversationSource(
+  leg: RequestTraceLeg
+): TraceConversationSource {
   const source: TraceConversationSource = {
     leg,
     messages: [],
@@ -568,9 +571,9 @@ function conversationSource(leg: RequestTraceLeg): TraceConversationSource {
 }
 
 /** One captured request's history plus its final reply; retries are not turns. */
-export function buildRequestTraceConversation(
+export function selectConversationLegs(
   legs: RequestTraceLeg[]
-): TraceConversationSource[] {
+): RequestTraceLeg[] {
   const sorted = [...legs].sort((a, b) => a.seq - b.seq)
   const clientInput = sorted.find((leg) => leg.direction === 'client_request')
   const reversed = [...sorted].reverse()
@@ -590,10 +593,28 @@ export function buildRequestTraceConversation(
   )
   const input = clientInput ?? upstreamInput
   const output = clientOutput ?? upstreamOutput
-  const sources = [input, output]
-    .filter((leg): leg is RequestTraceLeg => Boolean(leg))
-    .map(conversationSource)
+  return [input, output].filter((leg): leg is RequestTraceLeg => Boolean(leg))
+}
 
+export function buildRequestTraceConversation(
+  legs: RequestTraceLeg[]
+): TraceConversationSource[] {
+  return pairConversationTools(
+    selectConversationLegs(legs).map(conversationSource)
+  )
+}
+
+/** Sources can arrive independently; never mutate cached worker results. */
+export function pairConversationTools(
+  input: TraceConversationSource[]
+): TraceConversationSource[] {
+  const sources = input.map((source) => ({
+    ...source,
+    messages: source.messages.map((message) => ({
+      ...message,
+      parts: message.parts.map((part) => ({ ...part })),
+    })),
+  }))
   type ToolPart = Extract<
     TraceConversationPart,
     { type: 'tool-call' | 'tool-result' }

@@ -1,6 +1,8 @@
 package model
 
 import (
+	"context"
+
 	"github.com/QuantumNous/new-api/common"
 )
 
@@ -41,6 +43,9 @@ type RequestTrace struct {
 	Status  int    `json:"status"`
 	Headers string `json:"headers" gorm:"type:text"`
 	Body    string `json:"body" gorm:"type:text"`
+	// Empty for historical inline bodies; chunk manifests are materialized on read.
+	BodyEncoding string `json:"-" gorm:"type:varchar(24)"`
+	HasBody      bool   `json:"-" gorm:"->;-:migration"`
 	// BodySize is the payload's size before truncation, so the reader can say
 	// how much was dropped.
 	BodySize  int64 `json:"body_size"`
@@ -67,17 +72,17 @@ func (requestTraceMySQLSchema) TableName() string { return "request_traces" }
 // LOG_SQL_DSN is unset, which is the default deployment.
 func MigrateRequestTraces() error {
 	if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
-		return LOG_DB.AutoMigrate(&requestTraceMySQLSchema{})
+		return LOG_DB.AutoMigrate(&requestTraceMySQLSchema{}, &RequestTracePayloadChunk{})
 	}
 	if !common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		return LOG_DB.AutoMigrate(&RequestTrace{})
+		return LOG_DB.AutoMigrate(&RequestTrace{}, &RequestTracePayloadChunk{})
 	}
 	if err := LOG_DB.Exec(`CREATE TABLE IF NOT EXISTS request_traces (
 		id Int64 DEFAULT 0, trace_id String, seq Int32, attempt Int32, direction String,
 		created_at Int64, request_id String, channel_id Int32, format String,
 		method String, url String, status Int32,
 		headers String, body String, body_size Int64, truncated UInt8,
-		object_key String, content_type String
+		object_key String, content_type String, body_encoding String
 	) ENGINE = MergeTree()
 	PARTITION BY toYYYYMM(toDateTime(created_at))
 	ORDER BY (created_at, trace_id)`).Error; err != nil {
@@ -86,12 +91,16 @@ func MigrateRequestTraces() error {
 	// CREATE TABLE IF NOT EXISTS is a no-op on an install that already has the
 	// table, so a column added after the first release needs its own statement
 	// or every insert naming it would fail. ClickHouse has no AutoMigrate.
-	for _, column := range []string{"object_key String", "content_type String"} {
+	for _, column := range []string{"object_key String", "content_type String", "body_encoding String"} {
 		if err := LOG_DB.Exec("ALTER TABLE request_traces ADD COLUMN IF NOT EXISTS " + column).Error; err != nil {
 			return err
 		}
 	}
-	return nil
+	return LOG_DB.Exec(`CREATE TABLE IF NOT EXISTS request_trace_payload_chunks (
+		owner String, bucket Int64, digest String, size Int32, data String
+	) ENGINE = ReplacingMergeTree()
+	PARTITION BY toYYYYMM(toDateTime(bucket))
+	ORDER BY (owner, bucket, digest)`).Error
 }
 
 // RequestTraceObjectKeysBefore lists the stored objects belonging to traces
@@ -125,19 +134,49 @@ func GetRequestTraces(traceId string) ([]*RequestTrace, error) {
 		return nil, nil
 	}
 	var traces []*RequestTrace
-	err := LOG_DB.Where("trace_id = ?", traceId).Order("seq asc").Find(&traces).Error
+	if err := LOG_DB.Where("trace_id = ?", traceId).Order("seq asc").Find(&traces).Error; err != nil {
+		return nil, err
+	}
+	for _, trace := range traces {
+		if err := materializeRequestTraceBody(context.Background(), trace); err != nil {
+			return nil, err
+		}
+	}
+	return traces, nil
+}
+
+// Metadata reads never transfer stored bodies or manifests from the database.
+// The explicit presence flag also covers historical inline rows without sizes.
+func GetRequestTraceMetadata(traceId string) ([]*RequestTrace, error) {
+	if traceId == "" {
+		return nil, nil
+	}
+	var traces []*RequestTrace
+	err := LOG_DB.Model(&RequestTrace{}).
+		Select(`seq, attempt, direction, channel_id, format, method, url, status,
+			headers, body_size, truncated, object_key, content_type,
+			CASE WHEN body_size > 0 AND content_type = '' THEN 1
+			WHEN body_encoding <> '' THEN 1 WHEN body <> '' THEN 1 ELSE 0 END AS has_body`).
+		Where("trace_id = ?", traceId).Order("seq asc").Find(&traces).Error
 	return traces, err
 }
 
 // GetRequestTraceLeg fetches one leg, which is how a stored payload is served:
 // the key is never taken from the caller, only the trace and leg it belongs to.
 func GetRequestTraceLeg(traceId string, seq int) (*RequestTrace, error) {
+	return GetRequestTraceLegContext(context.Background(), traceId, seq)
+}
+
+func GetRequestTraceLegContext(ctx context.Context, traceId string, seq int) (*RequestTrace, error) {
 	if traceId == "" {
 		return nil, nil
 	}
 	var trace RequestTrace
-	err := LOG_DB.Where("trace_id = ? AND seq = ?", traceId, seq).First(&trace).Error
+	err := LOG_DB.WithContext(ctx).Where("trace_id = ? AND seq = ?", traceId, seq).First(&trace).Error
 	if err != nil {
+		return nil, err
+	}
+	if err := materializeRequestTraceBody(ctx, &trace); err != nil {
 		return nil, err
 	}
 	return &trace, nil
@@ -147,7 +186,14 @@ func DeleteRequestTracesBefore(cutoff int64) error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		// ClickHouse has no DELETE; a mutation is the supported equivalent and
 		// mutations_sync makes it observable to the caller.
-		return LOG_DB.Exec("ALTER TABLE request_traces DELETE WHERE created_at < ? SETTINGS mutations_sync = 1", cutoff).Error
+		if err := LOG_DB.Exec("ALTER TABLE request_traces DELETE WHERE created_at < ? SETTINGS mutations_sync = 1", cutoff).Error; err != nil {
+			return err
+		}
+		return LOG_DB.Exec("ALTER TABLE request_trace_payload_chunks DELETE WHERE bucket < ? SETTINGS mutations_sync = 1", cutoff-requestTraceBucketSeconds).Error
 	}
-	return LOG_DB.Where("created_at < ?", cutoff).Delete(&RequestTrace{}).Error
+	if err := LOG_DB.Where("created_at < ?", cutoff).Delete(&RequestTrace{}).Error; err != nil {
+		return err
+	}
+	// A whole UTC bucket expires only after every trace that could reference it.
+	return LOG_DB.Where("bucket < ?", cutoff-requestTraceBucketSeconds).Delete(&RequestTracePayloadChunk{}).Error
 }

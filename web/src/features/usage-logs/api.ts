@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import { api, getFreshAuthHeaders, type ApiRequestConfig } from '@/lib/api'
 import { withBasePath } from '@/lib/base-path'
 import { createServerError } from '@/lib/server-error-message'
@@ -206,7 +207,7 @@ export async function getTaskArtifacts(taskId: string) {
 
 export async function getRequestTrace(traceId: string, signal?: AbortSignal) {
   const response = await api.get<RequestTraceResponse>('/api/log/trace', {
-    params: { trace_id: traceId },
+    params: { trace_id: traceId, metadata_only: true },
     signal,
     disableDuplicate: true,
   })
@@ -233,5 +234,29 @@ export async function getRequestTraceObject(
     signal,
     disableDuplicate: true,
   })
+  return response.data
+}
+
+/** Shared fetch adapter keeps console authentication and cancellation intact. */
+export async function getRequestTraceBodyStream(
+  traceId: string,
+  seq: number,
+  view: 'body' | 'rendered',
+  signal: AbortSignal
+) {
+  const response = await api.get<ReadableStream<Uint8Array>>(
+    '/api/log/trace/body',
+    {
+      params: {
+        trace_id: traceId,
+        seq,
+        ...(view === 'rendered' ? { view } : {}),
+      },
+      adapter: 'fetch',
+      responseType: 'stream',
+      signal,
+      disableDuplicate: true,
+    }
+  )
   return response.data
 }
