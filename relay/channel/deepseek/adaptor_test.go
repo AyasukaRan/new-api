@@ -184,6 +184,137 @@ func TestDeepSeekThinkingHistoryKeepsPassthroughAndOtherProvidersUntouched(t *te
 	}
 }
 
+func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
+	const blank = `{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":" "}]}`
+	const user = `{"role":"user","content":"Find this"}`
+	const assistant = `{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checking"}],"unknown":9007199254740993}`
+	const call = `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"你好\\nworld\"}","extra":{"keep":false}}`
+	const output = `{"type":"function_call_output","call_id":"call_1","output":"Result"}`
+	const call2 = `{"type":"function_call","call_id":"call_2","name":"lookup","arguments":"{}"}`
+	const output2 = `{"type":"function_call_output","call_id":"call_2","output":"Second result"}`
+	const real = `{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Summary"}],"content":[{"type":"reasoning_text","text":"Original thoughts\n思考"}],"encrypted_content":"opaque"}`
+	const summary = `{"type":"reasoning","id":"rs_2","summary":[{"type":"summary_text","text":"Keep summary"}],"encrypted_content":"opaque"}`
+	const summaryCompleted = `{"type":"reasoning","id":"rs_2","summary":[{"type":"summary_text","text":"Keep summary"}],"encrypted_content":"opaque","content":[{"type":"reasoning_text","text":" "}]}`
+	for _, test := range []struct {
+		name     string
+		model    string
+		upstream string
+		effort   string
+		tools    string
+		input    string
+		want     string
+	}{
+		{name: "reported function history without tool definitions", input: `[` + user + `,` + assistant + `,` + call + `,` + output + `]`, want: `[` + user + `,` + blank + `,` + assistant + `,` + call + `,` + output + `]`},
+		{name: "parallel calls share one reasoning item", input: `[` + call + `,` + call2 + `,` + output + `,` + output2 + `]`, want: `[` + blank + `,` + call + `,` + call2 + `,` + output + `,` + output2 + `]`},
+		{name: "tool outputs begin another assistant turn", input: `[` + call + `,` + output + `,` + assistant + `,` + call2 + `,` + output2 + `]`, want: `[` + blank + `,` + call + `,` + output + `,` + blank + `,` + assistant + `,` + call2 + `,` + output2 + `]`},
+		{name: "keep real reasoning and repair only missing round", input: `[` + real + `,` + call + `,` + output + `,` + assistant + `]`, want: `[` + real + `,` + call + `,` + output + `,` + blank + `,` + assistant + `]`},
+		{name: "complete existing summary and encrypted item", input: `[` + summary + `,` + call + `]`, want: `[` + summaryCompleted + `,` + call + `]`},
+		{name: "complete empty reasoning text", input: `[{"type":"reasoning","content":[{"type":"reasoning_text","text":"","extra":true}]},` + call + `]`, want: `[{"type":"reasoning","content":[{"type":"reasoning_text","text":" ","extra":true}]},` + call + `]`},
+		{name: "complete missing text and retain other content", input: `[{"type":"reasoning","content":[{"type":"other","keep":true},{"type":"reasoning_text"}]},` + call + `]`, want: `[{"type":"reasoning","content":[{"type":"other","keep":true},{"type":"reasoning_text","text":" "}]},` + call + `]`},
+		{name: "complete multiple empty parts without replacing real text", input: `[{"type":"reasoning","id":"rs_many","content":[{"type":"reasoning_text","text":"","id":"part_1"},{"type":"other","keep":{"number":9007199254740993}},{"type":"reasoning_text","text":"Exact thoughts\n思考"},{"type":"reasoning_text","text":null,"extra":false},{"type":"reasoning_text"}]},` + call + `]`, want: `[{"type":"reasoning","id":"rs_many","content":[{"type":"reasoning_text","text":" ","id":"part_1"},{"type":"other","keep":{"number":9007199254740993}},{"type":"reasoning_text","text":"Exact thoughts\n思考"},{"type":"reasoning_text","text":" ","extra":false},{"type":"reasoning_text","text":" "}]},` + call + `]`},
+		{name: "append reasoning text to existing content array", input: `[{"type":"reasoning","content":[{"type":"other","text":"Keep"}]},` + call + `]`, want: `[{"type":"reasoning","content":[{"type":"other","text":"Keep"},{"type":"reasoning_text","text":" "}]},` + call + `]`},
+		{name: "complete null content", input: `[{"type":"reasoning","content":null},` + call + `]`, want: `[{"type":"reasoning","content":[{"type":"reasoning_text","text":" "}]},` + call + `]`},
+		{name: "all real reasoning remains byte identical", input: `[ ` + real + `, ` + call + ` ]`},
+		{name: "tool definitions require prior assistant reasoning", tools: `[{"type":"function","name":"lookup"}]`, input: `[{"role":"assistant","content":"Earlier answer"},` + user + `]`, want: `[` + blank + `,{"role":"assistant","content":"Earlier answer"},` + user + `]`},
+		{name: "custom tool turns", input: `[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"Done"},` + assistant + `]`, want: `[` + blank + `,{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"Done"},` + blank + `,` + assistant + `]`},
+		{name: "mapped model enables repair", model: "application-model", upstream: "deepseek-flash", input: `[` + call + `]`, want: `[` + blank + `,` + call + `]`},
+		{name: "explicit effort enables alias", model: "provider-alias", effort: "max", input: `[` + call + `]`, want: `[` + blank + `,` + call + `]`},
+		{name: "none effort stays unchanged", effort: "none", input: `[` + call + `]`},
+		{name: "none suffix stays unchanged", model: "deepseek-flash-none", input: `[` + call + `]`},
+		{name: "legacy nonthinking model stays unchanged", model: "deepseek-chat", input: `[` + call + `]`},
+		{name: "unknown alias stays unchanged", model: "provider-alias", input: `[` + call + `]`},
+		{name: "plain chat without tools stays unchanged", input: `[` + user + `,` + assistant + `]`},
+		{name: "empty tool definitions are not tools", tools: `[]`, input: `[` + assistant + `]`},
+		{name: "only user input stays unchanged", tools: `[{"type":"function","name":"lookup"}]`, input: `[` + user + `]`},
+		{name: "string input stays unchanged", tools: `[{"type":"function","name":"lookup"}]`, input: `"Hello"`},
+		{name: "invalid input item is not rewritten", tools: `[{"type":"function","name":"lookup"}]`, input: `[42,` + assistant + `]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := test.model
+			if model == "" {
+				model = "deepseek-flash"
+			}
+			upstream := test.upstream
+			if upstream == "" {
+				upstream = model
+			}
+			request := dto.OpenAIResponsesRequest{Model: model, Input: json.RawMessage(test.input), Tools: json.RawMessage(test.tools)}
+			if test.effort != "" {
+				request.Reasoning = &dto.Reasoning{Effort: test.effort}
+			}
+			info := &relaycommon.RelayInfo{OriginModelName: model, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: upstream}}
+			converted, err := (&deepseek.Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, request)
+			require.NoError(t, err)
+			actual, ok := converted.(dto.OpenAIResponsesRequest)
+			require.True(t, ok)
+			if test.want == "" {
+				assert.Equal(t, test.input, string(actual.Input), "history that needs no repair keeps its original bytes")
+			} else {
+				assert.JSONEq(t, test.want, string(actual.Input))
+			}
+			assert.Equal(t, test.input, string(request.Input), "retry input must remain untouched")
+			assert.Equal(t, test.tools, string(actual.Tools))
+			if strings.Contains(test.input, `9007199254740993`) {
+				assert.Contains(t, string(actual.Input), `9007199254740993`, "unknown integer precision must survive repair")
+			}
+			again, err := (&deepseek.Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, actual)
+			require.NoError(t, err)
+			assert.Equal(t, actual.Input, again.(dto.OpenAIResponsesRequest).Input, "repeated conversion must not duplicate reasoning")
+		})
+	}
+}
+
+func TestDeepSeekResponsesHistoryRespectsProviderAndPassthrough(t *testing.T) {
+	settings := model_setting.GetGlobalSettings()
+	original := *settings
+	t.Cleanup(func() { *settings = original })
+	for _, test := range []struct {
+		name        string
+		channelType int
+		globalPass  bool
+		channelPass bool
+		wantFilled  bool
+	}{
+		{name: "DeepSeek converted body", channelType: constant.ChannelTypeDeepSeek, wantFilled: true},
+		{name: "global passthrough", channelType: constant.ChannelTypeDeepSeek, globalPass: true},
+		{name: "channel passthrough", channelType: constant.ChannelTypeDeepSeek, channelPass: true},
+		{name: "OpenAI provider", channelType: constant.ChannelTypeOpenAI},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := `{"model":"application-model","reasoning":{"effort":"max"},"input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":"Result"}]}`
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+			c.Request.Header.Set("Content-Type", "application/json")
+			t.Cleanup(func() { common.CleanupBodyStorage(c) })
+			common.SetContextKey(c, constant.ContextKeyChannelType, test.channelType)
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, "application-model")
+			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: test.channelPass})
+			common.SetContextKey(c, constant.ContextKeyChannelModelMapping, `{"application-model":"deepseek-flash"}`)
+			request := &dto.OpenAIResponsesRequest{}
+			require.NoError(t, common.UnmarshalJsonStr(payload, request))
+			input := string(request.Input)
+			info := &relaycommon.RelayInfo{OriginModelName: "application-model", RelayFormat: types.RelayFormatOpenAIResponses, RelayMode: relayconstant.RelayModeResponses, RequestURLPath: "/v1/responses", Request: request}
+			settings.PassThroughRequestEnabled = test.globalPass
+			_, body, closer, apiErr := relay.PrepareResponsesRequest(c, info, request)
+			require.Nil(t, apiErr)
+			defer closer.Close()
+			wire, err := io.ReadAll(body)
+			require.NoError(t, err)
+			if test.globalPass || test.channelPass {
+				assert.Equal(t, payload, string(wire))
+			}
+			if test.wantFilled {
+				assert.Equal(t, "reasoning", ojson.GetBytes(wire, "input.0.type").String())
+				assert.Equal(t, " ", ojson.GetBytes(wire, "input.0.content.0.text").String())
+				assert.Equal(t, "deepseek-flash", ojson.GetBytes(wire, "model").String())
+			} else {
+				assert.JSONEq(t, input, ojson.GetBytes(wire, "input").Raw)
+			}
+			assert.Equal(t, input, string(request.Input))
+		})
+	}
+}
+
 // The -none/-low/-max tails of deepseek-flash and deepseek-v4-* reach DeepSeek
 // as its own thinking switch and effort in each upstream format, with the base
 // name; a bare name keeps DeepSeek's default, and a blacklisted name is sent
