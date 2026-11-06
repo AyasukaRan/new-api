@@ -494,7 +494,7 @@ func identifyClientTool(header http.Header) string {
 			continue
 		}
 		switch {
-		case product == "codex_cli_rs", product == "codex-cli", product == "codex-tui":
+		case product == "codex_cli_rs", product == "codex-cli", product == "codex-tui", product == "codex_exec":
 			return "Codex CLI"
 		case product == "codex_vscode":
 			return "Codex VS Code"
@@ -539,6 +539,7 @@ func identifyClientTool(header http.Header) string {
 		return "Sub2-authorized-native-search-test"
 	}
 	application, sdk, httpClient, runtime := "", "", "", ""
+	hasClaude, hasElectron := false, false
 	for field := range strings.FieldsSeq(userAgent) {
 		token := strings.Trim(field, "();,")
 		product, version, hasVersion := strings.Cut(token, "/")
@@ -547,6 +548,12 @@ func identifyClientTool(header http.Header) string {
 		}
 		if !hasVersion && token != "n8n" && token != "node-fetch" && token != "undici" && token != "node" && token != "ruby" {
 			continue
+		}
+		switch product {
+		case "claude":
+			hasClaude = true
+		case "electron":
+			hasElectron = true
 		}
 		if application == "" {
 			application = requestSourceApplications[product]
@@ -568,6 +575,9 @@ func identifyClientTool(header http.Header) string {
 	}
 	if application != "" {
 		return application
+	}
+	if hasClaude && hasElectron {
+		return "Claude Desktop"
 	}
 	// Extension origins are an exact product allowlist, never an authentication
 	// signal. A path, joined origins, or repeated header is not a single origin.
@@ -627,6 +637,8 @@ var desktopChromiumUserAgent = regexp.MustCompile(`^mozilla/5\.0 \((windows nt [
 var requestSourceApplications = map[string]string{
 	"codewhale":          "CodeWhale",
 	"dsprobe":            "dsprobe",
+	"omp":                "Oh My Pi",
+	"qbankstudio":        "QBankStudio",
 	"workbuddy":          "WorkBuddy",
 	"workbuddy-ai":       "WorkBuddy",
 	"grok-pager":         "grok-pager",
@@ -686,6 +698,7 @@ var requestSourceHTTPClients = map[string]string{
 
 var requestSourceRuntimes = map[string]string{
 	"dart":              "Dart",
+	"bun":               "Bun",
 	"python":            "Python",
 	"node":              "Node.js",
 	"ruby":              "Ruby",
