@@ -66,14 +66,13 @@ async function renderFilter(
     premium: { desc: '', ratio: 2 },
   }
 ) {
-  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
     const request = new URL(url, 'http://localhost')
     if (
       request.pathname === '/api/user/' ||
       request.pathname === '/api/user/search'
     ) {
-      const keyword =
-        request.searchParams.get('keyword') ?? config?.params?.keyword
+      const keyword = request.searchParams.get('keyword')
       const username =
         request.pathname === '/api/user/' ? 'recent-user' : 'older-user'
       const items =
