@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 )
@@ -23,7 +24,7 @@ func responsesToolUsage(raw []byte) map[string]int {
 		{"tool_search", SearchToolPriceKey}, {"tool_fetch", FetchToolPriceKey},
 	} {
 		value := usage.Get(key.field)
-		if value.Type != ojson.Number {
+		if value.Type != ojson.Number || strings.ContainsAny(value.Raw, ".eE") {
 			continue
 		}
 		count, err := strconv.ParseUint(value.Raw, 10, 64)

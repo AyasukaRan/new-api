@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -452,6 +453,8 @@ func TestServerSideSearchBillingKeys(t *testing.T) {
 		{"no successful operations", `{` + output + `,"usage":{"total_tokens":64}}`, map[string]int{}},
 		{"stream ended without usage", "", map[string]int{}},
 		{"zero search", `{"usage":{"server_tool_use":{"tool_search":0,"tool_fetch":2}}}`, map[string]int{deepseek.SearchToolPriceKey: 0, deepseek.FetchToolPriceKey: 2}},
+		{"overflowing integer", `{"usage":{"server_tool_use":{"tool_search":99999999999999999999999}}}`, map[string]int{deepseek.SearchToolPriceKey: math.MaxInt}},
+		{"large mantissa with exponent", `{"usage":{"server_tool_use":{"tool_search":100000000000000000000e-20}}}`, map[string]int{}},
 		{"invalid counts", `{"usage":{"server_tool_use":{"tool_search":-1,"tool_fetch":1.5}}}`, map[string]int{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
