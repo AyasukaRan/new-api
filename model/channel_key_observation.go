@@ -186,6 +186,16 @@ func SanitizeChannelObservationError(channel *Channel, key, message string) stri
 	return string(runes)
 }
 
+// Both identities matter: a raw model can share a probe route with an alias,
+// and a live configuration change may give that raw model its own probe route.
+type channelKeyObservationTarget struct {
+	database           *gorm.DB
+	observationID      string
+	probeObservationID string
+}
+
+var channelKeySuccessWrites common.CoalescedWrites[channelKeyObservationTarget, ChannelKeyObservation]
+
 func RecordChannelKeyObservation(channel *Channel, modelName, key string, observedAt int64, success *bool, statusCode int, errorMessage, source string) error {
 	if success == nil {
 		return nil
@@ -202,27 +212,46 @@ func RecordChannelKeyObservation(channel *Channel, modelName, key string, observ
 	}
 	if *success {
 		errorMessage = ""
+	} else {
+		errorMessage = SanitizeChannelObservationError(channel, key, errorMessage)
 	}
-	row := ChannelKeyObservation{ID: id, ChannelID: channel.Id, ModelName: modelName, ObservedAt: observedAt, Success: *success, StatusCode: statusCode, ErrorText: SanitizeChannelObservationError(channel, key, errorMessage), Source: source}
+	row := ChannelKeyObservation{ID: id, ChannelID: channel.Id, ModelName: modelName, ObservedAt: observedAt, Success: *success, StatusCode: statusCode, ErrorText: errorMessage, Source: source}
 	probeModel := channel.probeModelName(modelName)
-	probeObservationID, err := ChannelKeyObservationID(channel, probeModel, key)
-	if err != nil {
-		return err
+	target := channelKeyObservationTarget{database: DB, observationID: id, probeObservationID: id}
+	if probeModel != modelName {
+		target.probeObservationID, err = ChannelKeyObservationID(channel, probeModel, key)
+		if err != nil {
+			return err
+		}
 	}
-	stateID := channelProbeStateID(probeObservationID)
+	if source == "request" && row.Success {
+		return channelKeySuccessWrites.Write(target, row, func(earlier, later ChannelKeyObservation) ChannelKeyObservation {
+			if earlier.ObservedAt > later.ObservedAt {
+				return earlier
+			}
+			return later
+		}, func(observation ChannelKeyObservation) error {
+			return target.persist(channel, probeModel, key, observation)
+		})
+	}
+	return target.persist(channel, probeModel, key, row)
+}
+
+func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, key string, row ChannelKeyObservation) error {
+	stateID := channelProbeStateID(target.probeObservationID)
 	_, stateKnown := channelProbeObservations(channel, probeModel)[stateID]
 	committed := []ChannelKeyObservation{row}
-	database := DB
+	database := target.database
 	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
 	defer cancel()
-	err = database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var previous []ChannelKeyObservation
 		if !stateKnown {
 			// Preserve pre-upgrade probe state before a first in-flight request
 			// overwrites the normal observation. Once dedicated state exists,
 			// the cache avoids this compatibility read on the hot path.
 			legacyID, _ := LegacyChannelKeyObservationID(channel, probeModel, key)
-			if err := tx.Where("id IN ?", []string{id, probeObservationID, legacyID}).Find(&previous).Error; err != nil {
+			if err := tx.Where("id IN ?", []string{row.ID, target.probeObservationID, legacyID}).Find(&previous).Error; err != nil {
 				return err
 			}
 		}
@@ -239,7 +268,7 @@ func RecordChannelKeyObservation(channel *Channel, modelName, key string, observ
 			}
 			committed = append(committed, existing)
 		}
-		if source != "probe" && !row.Success {
+		if row.Source != "probe" && !row.Success {
 			return nil
 		}
 		// Keep probe/recovery state independent from newer request failures.

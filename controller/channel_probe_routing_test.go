@@ -53,6 +53,57 @@ func requireProbeRoutingError(t *testing.T, apiErr *types.NewAPIError, message s
 	assert.Nil(t, perfmetrics.RelayObservation(nil, info, apiErr))
 }
 
+func TestConcurrentKeySuccessRespectsProbe(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "fixture-key-success", Models: "flash"}
+			require.NoError(t, db.Create(channel).Error)
+			t.Cleanup(func() { model.InvalidateChannelProbeRouting(channel.Id) })
+			const alias = "flash@effort:high"
+			const newest = 1000
+			results := make(chan error, newest+1)
+			start := make(chan struct{})
+			for call := 1; call <= newest; call++ {
+				go func() {
+					<-start
+					code := 200
+					if call == newest {
+						code = 201
+					}
+					results <- model.RecordChannelKeyObservation(channel, alias, channel.Key, int64(call), common.GetPointer(true), code, "", "request")
+				}()
+			}
+			go func() {
+				<-start
+				results <- model.RecordChannelKeyObservation(channel, "flash", channel.Key, newest, common.GetPointer(false), 503, "unavailable", "probe")
+			}()
+			close(start)
+			var firstError error
+			for range cap(results) {
+				if err := <-results; err != nil && firstError == nil {
+					firstError = err
+				}
+			}
+			require.NoError(t, firstError)
+			rows, err := model.GetChannelKeyObservations([]int{channel.Id}, alias)
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			assert.EqualValues(t, newest, rows[0].ObservedAt)
+			assert.Equal(t, 201, rows[0].StatusCode)
+			model.InvalidateChannelProbeRouting(channel.Id)
+			require.NotNil(t, channel.RelayProbeError(alias, nil), "the probe wins the tie regardless of commit order")
+			require.NoError(t, model.RecordChannelKeyObservation(channel, alias, channel.Key, newest+1, common.GetPointer(false), 502, "request failed", "request"))
+			require.NotNil(t, channel.RelayProbeError(alias, nil))
+			require.NoError(t, model.RecordChannelKeyObservation(channel, alias, channel.Key, newest+2, common.GetPointer(true), 200, "", "request"))
+			require.Nil(t, channel.RelayProbeError(alias, nil), "later success immediately recovers the shared route")
+		})
+	}
+}
+
 func TestChannelProbeRoutingDatabaseMatrix(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {

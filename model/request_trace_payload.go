@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -59,6 +60,13 @@ var requestTraceGear = func() [256]uint64 {
 	}
 	return table
 }()
+
+// Each checked-out compressor is private to one trace writer. Drop its output
+// buffer on return so the pool retains only the compressor's reusable state.
+var requestTraceCompressors = sync.Pool{New: func() any {
+	writer, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+	return writer
+}}
 
 // StoreRequestTraceBody persists sanitized text before publishing its manifest.
 // A failed insert leaves the caller's fallback body unchanged; orphaned chunks
@@ -120,32 +128,32 @@ func StoreRequestTraceBody(trace *RequestTrace, body string, userID int) error {
 		}
 	}
 	// Each compressed/base64 chunk stays below MySQL's 64 KiB TEXT limit.
-	missing := make([]RequestTracePayloadChunk, 0, len(chunks))
-	var compressed bytes.Buffer
-	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
-	if err != nil {
-		return err
-	}
-	for _, digest := range digests {
-		body, missingChunk := chunks[digest]
-		if !missingChunk {
-			continue
+	if len(chunks) > 0 {
+		var compressed bytes.Buffer
+		writer := requestTraceCompressors.Get().(*gzip.Writer)
+		defer func() {
+			writer.Reset(io.Discard)
+			requestTraceCompressors.Put(writer)
+		}()
+		missing := make([]RequestTracePayloadChunk, 0, len(chunks))
+		for _, digest := range digests {
+			chunk, ok := chunks[digest]
+			if !ok {
+				continue
+			}
+			compressed.Reset()
+			writer.Reset(&compressed)
+			if _, err := io.WriteString(writer, chunk); err != nil {
+				return err
+			}
+			if err := writer.Close(); err != nil {
+				return err
+			}
+			missing = append(missing, RequestTracePayloadChunk{
+				Owner: owner, Bucket: manifest.Bucket, Digest: digest, Size: len(chunk),
+				Data: base64.StdEncoding.EncodeToString(compressed.Bytes()),
+			})
 		}
-		compressed.Reset()
-		writer.Reset(&compressed)
-		if _, err := io.WriteString(writer, body); err != nil {
-			_ = writer.Close()
-			return err
-		}
-		if err := writer.Close(); err != nil {
-			return err
-		}
-		missing = append(missing, RequestTracePayloadChunk{
-			Owner: owner, Bucket: manifest.Bucket, Digest: digest, Size: len(body),
-			Data: base64.StdEncoding.EncodeToString(compressed.Bytes()),
-		})
-	}
-	if len(missing) > 0 {
 		query := LOG_DB
 		if !common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 			query = query.Clauses(clause.OnConflict{DoNothing: true})

@@ -311,6 +311,25 @@ func verifyRequestTraceChunkStorage(t *testing.T) {
 		assert.Equal(t, firstSize, requestTraceStoredBytes(t, "u:44"), "SQL uniqueness must prevent duplicate chunks")
 	}
 
+	// Retries may mix many small legs with an oversized legacy/diagnostic
+	// preview. Every leg must survive packet-safe batching in sequence.
+	legs := make([]*model.RequestTrace, 23)
+	for i := range legs {
+		payload := fmt.Sprintf("leg %d 含 'quote' and \\ escape", i)
+		if i == 2 {
+			payload = strings.Repeat(payload, 14_000)
+		}
+		legs[i] = &model.RequestTrace{TraceId: "mixed-retry", Seq: i, Body: payload, BodySize: int64(len(payload)), CreatedAt: now}
+	}
+	require.NoError(t, model.SaveRequestTraces(legs))
+	mixed, err := model.GetRequestTraces("mixed-retry")
+	require.NoError(t, err)
+	require.Len(t, mixed, len(legs))
+	for i, leg := range mixed {
+		assert.Equal(t, i, leg.Seq)
+		assert.Equal(t, legs[i].Body, leg.Body)
+	}
+
 	// Simulate database failure without changing any body or encoding fallback.
 	require.NoError(t, model.LOG_DB.Callback().Create().Before("gorm:create").Register("trace_payload_test_failure", func(db *gorm.DB) {
 		if db.Statement.Table == "request_trace_payload_chunks" {
@@ -318,7 +337,7 @@ func verifyRequestTraceChunkStorage(t *testing.T) {
 		}
 	}))
 	fallback := model.RequestTrace{TraceId: "failed-chunks", Body: "retained preview", Truncated: true}
-	err := model.StoreRequestTraceBody(&fallback, body, 45)
+	err = model.StoreRequestTraceBody(&fallback, body, 45)
 	require.NoError(t, model.LOG_DB.Callback().Create().Remove("trace_payload_test_failure"))
 	require.Error(t, err)
 	assert.Equal(t, "retained preview", fallback.Body)

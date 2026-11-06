@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -114,17 +115,29 @@ func RequestTraceObjectKeysBefore(cutoff int64) ([]string, error) {
 }
 
 func SaveRequestTraces(traces []*RequestTrace) error {
-	if len(traces) == 0 {
-		return nil
-	}
-	// One statement per leg: PostgreSQL runs with PreferSimpleProtocol so the
-	// payload is inlined into the SQL text, and MySQL's max_allowed_packet
-	// defaults to 4MB. Batching four multi-megabyte legs risks a rejection
-	// that would lose the whole trace instead of one leg of it.
-	for _, trace := range traces {
-		if err := LOG_DB.Create(trace).Error; err != nil {
+	// Keep normal exchanges in one INSERT. PostgreSQL can inline escaped SQL
+	// parameters and MySQL limits packet size, so send oversized legs alone.
+	const maxRows, maxBytes = 16, 256 << 10
+	for len(traces) > 0 {
+		rows, size := 0, 0
+		for _, leg := range traces[:min(len(traces), maxRows)] {
+			if leg == nil {
+				return errors.New("request trace is nil")
+			}
+			rowSize := 256 + len(leg.TraceId) + len(leg.Direction) + len(leg.RequestId) +
+				len(leg.Format) + len(leg.Method) + len(leg.Url) + len(leg.Headers) +
+				len(leg.Body) + len(leg.BodyEncoding) + len(leg.ObjectKey) + len(leg.ContentType)
+			if rows > 0 && rowSize > maxBytes-size {
+				break
+			}
+			rows++
+			size += rowSize
+		}
+		batch := traces[:rows]
+		if err := LOG_DB.Create(&batch).Error; err != nil {
 			return err
 		}
+		traces = traces[rows:]
 	}
 	return nil
 }

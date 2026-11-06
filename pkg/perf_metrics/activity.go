@@ -25,12 +25,7 @@ type channelActiveRequests struct {
 	ioMu          sync.RWMutex
 }
 
-type channelActivityBatch struct {
-	row     model.ChannelModelActivity
-	writing bool
-	done    chan struct{}
-	err     error
-}
+var channelActivityWrites common.CoalescedWrites[channelActivityPair, model.ChannelModelActivity]
 
 // One worker renews leases for all active pairs in this process. SQL remains
 // authoritative across instances.
@@ -39,8 +34,7 @@ var channelRequestActivity = struct {
 	once    sync.Once
 	wake    chan struct{}
 	entries map[channelActivityPair]*channelActiveRequests
-	writes  map[channelActivityPair]*channelActivityBatch
-}{wake: make(chan struct{}, 1), entries: make(map[channelActivityPair]*channelActiveRequests), writes: make(map[channelActivityPair]*channelActivityBatch)}
+}{wake: make(chan struct{}, 1), entries: make(map[channelActivityPair]*channelActiveRequests)}
 
 // BeginChannelRequest captures the attempt's pair before retries can change
 // RelayInfo. Cancellation and the returned completion callback are idempotent.
@@ -132,59 +126,27 @@ func BeginChannelRequest(ctx context.Context, info *relaycommon.RelayInfo, chann
 	}
 }
 
-// A busy route has one in-flight upsert and at most one pending batch.
-// The first caller of each batch performs the write; its peers only wait for
-// that batch. No flush timer or goroutine outlives a completed observation.
 func recordChannelRequestActivity(pair channelActivityPair, at, activeUntil int64, success *bool) error {
-	channelRequestActivity.Lock()
-	previous := channelRequestActivity.writes[pair]
-	batch := previous
-	leader := previous == nil || previous.writing
-	if leader {
-		batch = &channelActivityBatch{
-			row:     model.ChannelModelActivity{ChannelID: pair.channelID, ModelName: pair.modelName},
-			writing: previous == nil, done: make(chan struct{}),
-		}
-		channelRequestActivity.writes[pair] = batch
-	}
-	row := &batch.row
-	row.LastRequestAt = max(row.LastRequestAt, at)
-	row.RequestActiveUntil = max(row.RequestActiveUntil, activeUntil)
-	if success != nil && at >= row.LastResultAt {
+	row := model.ChannelModelActivity{ChannelID: pair.channelID, ModelName: pair.modelName, LastRequestAt: at, RequestActiveUntil: activeUntil}
+	if success != nil {
 		row.LastResultAt, row.LastResultSuccess = at, *success
 	}
-	channelRequestActivity.Unlock()
-
-	if !leader {
-		<-batch.done
-		return batch.err
-	}
-	if previous != nil {
-		<-previous.done
-		channelRequestActivity.Lock()
-		batch.writing = true
-		if previous.err != nil {
-			// Carry a failed write into the waiting batch. Newer outcomes win.
-			old := &previous.row
-			row.LastRequestAt = max(row.LastRequestAt, old.LastRequestAt)
-			row.RequestActiveUntil = max(row.RequestActiveUntil, old.RequestActiveUntil)
-			if old.LastResultAt > row.LastResultAt {
-				row.LastResultAt, row.LastResultSuccess = old.LastResultAt, old.LastResultSuccess
-			}
+	return channelActivityWrites.Write(pair, row, mergeRequestActivity, func(row model.ChannelModelActivity) error {
+		err := model.RecordChannelModelRequestBatch(row)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel activity persistence failed: channel_id=%d model=%q error=%v", row.ChannelID, row.ModelName, err))
 		}
-		channelRequestActivity.Unlock()
+		return err
+	})
+}
+
+func mergeRequestActivity(earlier, later model.ChannelModelActivity) model.ChannelModelActivity {
+	later.LastRequestAt = max(earlier.LastRequestAt, later.LastRequestAt)
+	later.RequestActiveUntil = max(earlier.RequestActiveUntil, later.RequestActiveUntil)
+	if earlier.LastResultAt > later.LastResultAt {
+		later.LastResultAt, later.LastResultSuccess = earlier.LastResultAt, earlier.LastResultSuccess
 	}
-	batch.err = model.RecordChannelModelRequestBatch(*row)
-	if batch.err != nil {
-		common.SysError(fmt.Sprintf("channel activity persistence failed: channel_id=%d model=%q error=%v", pair.channelID, pair.modelName, batch.err))
-	}
-	channelRequestActivity.Lock()
-	if channelRequestActivity.writes[pair] == batch {
-		delete(channelRequestActivity.writes, pair)
-	}
-	close(batch.done)
-	channelRequestActivity.Unlock()
-	return batch.err
+	return later
 }
 
 func renewChannelRequestActivity() {
