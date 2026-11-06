@@ -403,6 +403,30 @@ func verifyRequestTraceChunkStorage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "短消息🙂", loaded.Body)
 
+	// A short streamed reply needs no chunk lookups. Requests of the same size
+	// must still deduplicate conversation history, and larger replies must round trip.
+	const responseLimit = 32 << 10
+	for _, tc := range []struct {
+		direction string
+		size      int
+		inline    bool
+	}{
+		{model.TraceDirectionClientResponse, responseLimit, true},
+		{model.TraceDirectionUpstreamResponse, responseLimit, true},
+		{model.TraceDirectionUpstreamResponse, responseLimit + 1, false},
+		{model.TraceDirectionClientRequest, responseLimit, false},
+		{model.TraceDirectionUpstreamRequest, responseLimit, false},
+	} {
+		payload := strings.Repeat("x", tc.size)
+		trace := &model.RequestTrace{TraceId: fmt.Sprintf("boundary-%s-%d", tc.direction, tc.size), Direction: tc.direction, BodySize: int64(tc.size), CreatedAt: now}
+		require.NoError(t, model.StoreRequestTraceBody(trace, payload, 49))
+		assert.Equal(t, tc.inline, trace.BodyEncoding == "", trace.TraceId)
+		require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{trace}))
+		stored, err := model.GetRequestTraceLeg(trace.TraceId, 0)
+		require.NoError(t, err)
+		assert.Equal(t, payload, stored.Body)
+	}
+
 	// Future, deterministic buckets avoid depending on when midnight falls
 	// while proving that an expired ancestor never owns a survivor's payload.
 	bucket := (now/86400 + 2) * 86400

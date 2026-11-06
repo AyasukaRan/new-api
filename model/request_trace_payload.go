@@ -21,13 +21,14 @@ import (
 )
 
 const (
-	requestTraceChunksEncoding = "chunks_v1"
-	requestTraceInlineBytes    = 4 << 10
-	requestTraceChunkMinBytes  = 2 << 10
-	requestTraceChunkMaxBytes  = 32 << 10
-	requestTraceBodyMaxBytes   = 32 << 20
-	requestTraceBucketSeconds  = int64(24 * 60 * 60)
-	requestTraceChunkBatch     = 128
+	requestTraceChunksEncoding      = "chunks_v1"
+	requestTraceInlineBytes         = 4 << 10
+	requestTraceResponseInlineBytes = 32 << 10
+	requestTraceChunkMinBytes       = 2 << 10
+	requestTraceChunkMaxBytes       = 32 << 10
+	requestTraceBodyMaxBytes        = 32 << 20
+	requestTraceBucketSeconds       = int64(24 * 60 * 60)
+	requestTraceChunkBatch          = 128
 )
 
 // Chunks are immutable and scoped to one user and UTC day. Every trace keeps
@@ -78,7 +79,14 @@ func StoreRequestTraceBody(trace *RequestTrace, body string, userID int) error {
 	if len(body) > requestTraceBodyMaxBytes {
 		return errors.New("request trace body exceeds the storage limit")
 	}
-	if len(body) <= requestTraceInlineBytes {
+	// Short responses can be saved with the rest of the exchange in one write.
+	// Keep the lower threshold for requests so repeated conversation history
+	// still shares chunks across turns.
+	inlineLimit := requestTraceInlineBytes
+	if trace.Direction == TraceDirectionClientResponse || trace.Direction == TraceDirectionUpstreamResponse {
+		inlineLimit = requestTraceResponseInlineBytes
+	}
+	if len(body) <= inlineLimit {
 		trace.Body, trace.BodyEncoding = body, ""
 		return nil
 	}
