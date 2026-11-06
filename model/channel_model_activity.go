@@ -28,34 +28,48 @@ const channelActivityDatabaseTimeout = 2 * time.Second
 
 func RecordChannelModelRequest(channelID int, modelName string, at, activeUntil int64, success *bool) error {
 	row := ChannelModelActivity{ChannelID: channelID, ModelName: modelName, LastRequestAt: at, RequestActiveUntil: activeUntil}
-	updates := map[string]any{
-		"last_request_at":      gorm.Expr("CASE WHEN channel_model_activities.last_request_at < ? THEN ? ELSE channel_model_activities.last_request_at END", at, at),
-		"request_active_until": gorm.Expr("CASE WHEN channel_model_activities.request_active_until < ? THEN ? ELSE channel_model_activities.request_active_until END", activeUntil, activeUntil),
+	if success != nil {
+		row.LastResultAt, row.LastResultSuccess = at, *success
 	}
-	return recordChannelModelActivity(row, at, success, updates)
+	return RecordChannelModelRequestBatch(row)
+}
+
+// RecordChannelModelRequestBatch accepts concurrent observations of one route.
+// A later heartbeat or cancellation may postdate its latest known outcome.
+func RecordChannelModelRequestBatch(row ChannelModelActivity) error {
+	if row.LastProbeAt != 0 || row.LastResultAt < 0 || row.LastResultAt > row.LastRequestAt {
+		return errors.New("invalid channel request observation")
+	}
+	updates := map[string]any{
+		"last_request_at":      gorm.Expr("CASE WHEN channel_model_activities.last_request_at < ? THEN ? ELSE channel_model_activities.last_request_at END", row.LastRequestAt, row.LastRequestAt),
+		"request_active_until": gorm.Expr("CASE WHEN channel_model_activities.request_active_until < ? THEN ? ELSE channel_model_activities.request_active_until END", row.RequestActiveUntil, row.RequestActiveUntil),
+	}
+	return recordChannelModelActivity(row, row.LastRequestAt, updates)
 }
 
 func RecordChannelModelProbe(channelID int, modelName string, at int64, success *bool) error {
 	row := ChannelModelActivity{ChannelID: channelID, ModelName: modelName, LastProbeAt: at}
+	if success != nil {
+		row.LastResultAt, row.LastResultSuccess = at, *success
+	}
 	updates := map[string]any{
 		"last_probe_at": gorm.Expr("CASE WHEN channel_model_activities.last_probe_at < ? THEN ? ELSE channel_model_activities.last_probe_at END", at, at),
 	}
-	return recordChannelModelActivity(row, at, success, updates)
+	return recordChannelModelActivity(row, at, updates)
 }
 
-func recordChannelModelActivity(row ChannelModelActivity, at int64, success *bool, updates map[string]any) error {
+func recordChannelModelActivity(row ChannelModelActivity, at int64, updates map[string]any) error {
 	if DB == nil {
 		return errors.New("channel activity database is unavailable")
 	}
 	if row.ChannelID <= 0 || strings.TrimSpace(row.ModelName) == "" || utf8.RuneCountInString(row.ModelName) > 128 || at <= 0 || row.RequestActiveUntil < 0 {
 		return errors.New("invalid channel model activity")
 	}
-	if success != nil {
-		row.LastResultAt, row.LastResultSuccess = at, *success
-		updates["last_result_at"] = gorm.Expr("CASE WHEN channel_model_activities.last_result_at < ? THEN ? ELSE channel_model_activities.last_result_at END", at, at)
+	if row.LastResultAt > 0 {
+		updates["last_result_at"] = gorm.Expr("CASE WHEN channel_model_activities.last_result_at < ? THEN ? ELSE channel_model_activities.last_result_at END", row.LastResultAt, row.LastResultAt)
 		// <= also works with MySQL's left-to-right assignment evaluation:
 		// last_result_at may already have advanced to this observation's time.
-		updates["last_result_success"] = gorm.Expr("CASE WHEN channel_model_activities.last_result_at <= ? THEN ? ELSE channel_model_activities.last_result_success END", at, *success)
+		updates["last_result_success"] = gorm.Expr("CASE WHEN channel_model_activities.last_result_at <= ? THEN ? ELSE channel_model_activities.last_result_success END", row.LastResultAt, row.LastResultSuccess)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
 	defer cancel()

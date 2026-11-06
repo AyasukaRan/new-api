@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
@@ -131,7 +132,14 @@ func TestRedisBatchReserveNeverFallsBackToStaleDatabaseBalance(t *testing.T) {
 	assert.False(t, reserved)
 	assert.Equal(t, 9, getTokenFromDB(t, token.Id).RemainQuota)
 
-	batchUpdate()
+	previousInterval := common.BatchUpdateInterval
+	common.BatchUpdateInterval = 3600
+	t.Cleanup(func() { common.BatchUpdateInterval = previousInterval })
+	stop := InitBatchUpdater()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, stop(ctx))
+	require.NoError(t, stop(ctx), "a second stop must not reapply the deltas")
 	assert.Equal(t, 2, getUserQuotaFromDB(t, user.Id))
 	reloadedToken := getTokenFromDB(t, token.Id)
 	assert.Equal(t, 2, reloadedToken.RemainQuota)

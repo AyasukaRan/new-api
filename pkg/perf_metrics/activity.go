@@ -21,17 +21,26 @@ type channelActivityPair struct {
 type channelActiveRequests struct {
 	count         int
 	nextHeartbeat time.Time
-	ioMu          sync.Mutex
+	started       chan struct{}
+	ioMu          sync.RWMutex
+}
+
+type channelActivityBatch struct {
+	row     model.ChannelModelActivity
+	writing bool
+	done    chan struct{}
+	err     error
 }
 
 // One worker renews leases for all active pairs in this process. SQL remains
-// authoritative across instances; the map only coalesces in-flight heartbeats.
+// authoritative across instances.
 var channelRequestActivity = struct {
 	sync.Mutex
 	once    sync.Once
 	wake    chan struct{}
 	entries map[channelActivityPair]*channelActiveRequests
-}{wake: make(chan struct{}, 1), entries: make(map[channelActivityPair]*channelActiveRequests)}
+	writes  map[channelActivityPair]*channelActivityBatch
+}{wake: make(chan struct{}, 1), entries: make(map[channelActivityPair]*channelActiveRequests), writes: make(map[channelActivityPair]*channelActivityBatch)}
 
 // BeginChannelRequest captures the attempt's pair before retries can change
 // RelayInfo. Cancellation and the returned completion callback are idempotent.
@@ -49,7 +58,6 @@ func BeginChannelRequest(ctx context.Context, info *relaycommon.RelayInfo, chann
 	pair := channelActivityPair{channelID: channelID, modelName: info.OriginModelName}
 	now := time.Now()
 	lease := min(30*time.Second, operation_setting.ChannelTestInterval())
-	recordChannelRequestActivity(pair, now.UnixMilli(), now.Add(lease).UnixMilli(), nil)
 	channelRequestActivity.Lock()
 	entry := channelRequestActivity.entries[pair]
 	if entry == nil {
@@ -57,11 +65,28 @@ func BeginChannelRequest(ctx context.Context, info *relaycommon.RelayInfo, chann
 		channelRequestActivity.entries[pair] = entry
 	}
 	entry.count++
+	first := entry.started == nil
+	if first {
+		entry.started = make(chan struct{})
+	}
+	started := entry.started
 	next := time.Now().Add(lease / 3)
 	if entry.nextHeartbeat.IsZero() || next.Before(entry.nextHeartbeat) {
 		entry.nextHeartbeat = next
 	}
 	channelRequestActivity.Unlock()
+	// All overlapping requests share the same renewable lease. Publish it
+	// before returning from Begin, including on nodes other than the scheduler.
+	if first {
+		if err := recordChannelRequestActivity(pair, now.UnixMilli(), now.Add(lease).UnixMilli(), nil); err != nil {
+			channelRequestActivity.Lock()
+			entry.started = nil // The next arrival retries the initial lease.
+			channelRequestActivity.Unlock()
+		}
+		close(started)
+	} else {
+		<-started
+	}
 	channelRequestActivity.once.Do(func() { go renewChannelRequestActivity() })
 	select {
 	case channelRequestActivity.wake <- struct{}{}:
@@ -82,9 +107,9 @@ func BeginChannelRequest(ctx context.Context, info *relaycommon.RelayInfo, chann
 			channelRequestActivity.Unlock()
 			// Wait for a previously selected heartbeat before returning. A
 			// finished pair can never be written later by a queued heartbeat.
-			entry.ioMu.Lock()
+			entry.ioMu.RLock()
 			recordChannelRequestActivity(pair, completedAt, 0, success)
-			entry.ioMu.Unlock()
+			entry.ioMu.RUnlock()
 			select {
 			case channelRequestActivity.wake <- struct{}{}:
 			default:
@@ -99,18 +124,67 @@ func BeginChannelRequest(ctx context.Context, info *relaycommon.RelayInfo, chann
 		resultOnce.Do(func() {
 			stopCancellation()
 			if !finish(success) && success != nil {
-				entry.ioMu.Lock()
+				entry.ioMu.RLock()
 				recordChannelRequestActivity(pair, time.Now().UnixMilli(), 0, success)
-				entry.ioMu.Unlock()
+				entry.ioMu.RUnlock()
 			}
 		})
 	}
 }
 
-func recordChannelRequestActivity(pair channelActivityPair, at, activeUntil int64, success *bool) {
-	if err := model.RecordChannelModelRequest(pair.channelID, pair.modelName, at, activeUntil, success); err != nil {
-		common.SysError(fmt.Sprintf("channel activity persistence failed: channel_id=%d model=%q error=%v", pair.channelID, pair.modelName, err))
+// A busy route has one in-flight upsert and at most one pending batch.
+// The first caller of each batch performs the write; its peers only wait for
+// that batch. No flush timer or goroutine outlives a completed observation.
+func recordChannelRequestActivity(pair channelActivityPair, at, activeUntil int64, success *bool) error {
+	channelRequestActivity.Lock()
+	previous := channelRequestActivity.writes[pair]
+	batch := previous
+	leader := previous == nil || previous.writing
+	if leader {
+		batch = &channelActivityBatch{
+			row:     model.ChannelModelActivity{ChannelID: pair.channelID, ModelName: pair.modelName},
+			writing: previous == nil, done: make(chan struct{}),
+		}
+		channelRequestActivity.writes[pair] = batch
 	}
+	row := &batch.row
+	row.LastRequestAt = max(row.LastRequestAt, at)
+	row.RequestActiveUntil = max(row.RequestActiveUntil, activeUntil)
+	if success != nil && at >= row.LastResultAt {
+		row.LastResultAt, row.LastResultSuccess = at, *success
+	}
+	channelRequestActivity.Unlock()
+
+	if !leader {
+		<-batch.done
+		return batch.err
+	}
+	if previous != nil {
+		<-previous.done
+		channelRequestActivity.Lock()
+		batch.writing = true
+		if previous.err != nil {
+			// Carry a failed write into the waiting batch. Newer outcomes win.
+			old := &previous.row
+			row.LastRequestAt = max(row.LastRequestAt, old.LastRequestAt)
+			row.RequestActiveUntil = max(row.RequestActiveUntil, old.RequestActiveUntil)
+			if old.LastResultAt > row.LastResultAt {
+				row.LastResultAt, row.LastResultSuccess = old.LastResultAt, old.LastResultSuccess
+			}
+		}
+		channelRequestActivity.Unlock()
+	}
+	batch.err = model.RecordChannelModelRequestBatch(*row)
+	if batch.err != nil {
+		common.SysError(fmt.Sprintf("channel activity persistence failed: channel_id=%d model=%q error=%v", pair.channelID, pair.modelName, batch.err))
+	}
+	channelRequestActivity.Lock()
+	if channelRequestActivity.writes[pair] == batch {
+		delete(channelRequestActivity.writes, pair)
+	}
+	close(batch.done)
+	channelRequestActivity.Unlock()
+	return batch.err
 }
 
 func renewChannelRequestActivity() {

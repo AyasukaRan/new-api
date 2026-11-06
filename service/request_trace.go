@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -19,7 +20,6 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 
-	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 )
 
@@ -59,12 +59,13 @@ const minRedactableSecretLength = 8
 // usage block and finish_reason at the very end, which is usually the part an
 // administrator opened the trace to read.
 type traceBuffer struct {
-	head      []byte
-	tail      []byte
-	headCap   int
-	tailCap   int
-	tailStart int
-	total     int64
+	head            []byte
+	tail            []byte
+	allocationLimit int // maximum combined backing capacity of head and tail
+	headCap         int
+	tailCap         int
+	tailStart       int
+	total           int64
 }
 
 func newTraceBuffer(limit int) *traceBuffer {
@@ -72,7 +73,7 @@ func newTraceBuffer(limit int) *traceBuffer {
 		limit = 1024
 	}
 	headCap := limit / 2
-	return &traceBuffer{headCap: headCap, tailCap: limit - headCap}
+	return &traceBuffer{headCap: headCap, tailCap: limit - headCap, allocationLimit: limit}
 }
 
 func (b *traceBuffer) Write(p []byte) {
@@ -83,7 +84,7 @@ func (b *traceBuffer) Write(p []byte) {
 	if room := b.headCap - len(b.head); room > 0 {
 		take := min(room, len(p))
 		if needed := len(b.head) + take; needed > cap(b.head) {
-			head := make([]byte, len(b.head), min(b.headCap, max(needed, 2*cap(b.head))))
+			head := make([]byte, len(b.head), min(b.headCap, b.allocationLimit-cap(b.tail), max(needed, 2*cap(b.head))))
 			copy(head, b.head)
 			b.head = head
 		}
@@ -106,7 +107,7 @@ func (b *traceBuffer) Write(p []byte) {
 	if room := b.tailCap - len(b.tail); room > 0 {
 		take := min(room, len(p))
 		if needed := len(b.tail) + take; needed > cap(b.tail) {
-			tail := make([]byte, len(b.tail), min(b.tailCap, max(needed, 2*cap(b.tail))))
+			tail := make([]byte, len(b.tail), min(b.tailCap, b.allocationLimit-cap(b.head), max(needed, 2*cap(b.tail))))
 			copy(tail, b.tail)
 			b.tail = tail
 		}
@@ -125,6 +126,10 @@ func (b *traceBuffer) Write(p []byte) {
 // Payload reports the retained bytes and whether anything was dropped. When the
 // whole payload fit, head and tail concatenate back to it exactly.
 func (b *traceBuffer) Payload() (string, int64, bool) {
+	return b.payload(nil)
+}
+
+func (b *traceBuffer) payload(redactor *requestTraceCollector) (string, int64, bool) {
 	head := b.head
 	tail := b.tail
 	if b.tailStart > 0 {
@@ -138,6 +143,9 @@ func (b *traceBuffer) Payload() (string, int64, bool) {
 		// Join before decoding: the head/tail split can be inside a valid rune
 		// even when the complete payload fits and no bytes were discarded.
 		payload = string(head) + string(tail)
+		if redactor != nil {
+			payload = redactor.scrub(payload)
+		}
 	} else {
 		// Trim only incomplete characters at the elision boundaries. Otherwise
 		// PostgreSQL rejects the partial UTF-8 sequence and loses the trace leg.
@@ -155,11 +163,19 @@ func (b *traceBuffer) Payload() (string, int64, bool) {
 		}
 		elided := b.total - int64(len(head)+len(tail))
 		var builder strings.Builder
-		builder.Write(head)
+		if redactor != nil {
+			builder.WriteString(redactor.scrubPreviewEdge(string(head), true))
+		} else {
+			builder.Write(head)
+		}
 		builder.WriteString("\n\n... [")
 		builder.WriteString(strconv.FormatInt(elided, 10))
 		builder.WriteString(" bytes elided] ...\n\n")
-		builder.Write(tail)
+		if redactor != nil {
+			builder.WriteString(redactor.scrubPreviewEdge(string(tail), false))
+		} else {
+			builder.Write(tail)
+		}
 		payload = builder.String()
 	}
 	// Upstreams can mislabel arbitrary bytes as text. Normalize only the saved
@@ -179,6 +195,7 @@ type traceSink interface {
 // truncated media file is not something an administrator can open, so keeping
 // part of it only costs memory and storage.
 type traceObjectBuffer struct {
+	memory   traceBufferReservation
 	data     []byte
 	limit    int
 	total    int64
@@ -194,12 +211,23 @@ func (b *traceObjectBuffer) Write(p []byte) {
 	if b.overflow {
 		return
 	}
-	if len(b.data)+len(p) > b.limit {
+	needed := len(b.data) + len(p)
+	if needed > b.limit || !b.memory.grow(needed, b.limit) {
 		b.overflow = true
-		b.data = nil
+		b.Close()
 		return
 	}
+	if needed > cap(b.data) {
+		data := make([]byte, len(b.data), int(b.memory))
+		copy(data, b.data)
+		b.data = data
+	}
 	b.data = append(b.data, p...)
+}
+
+func (b *traceObjectBuffer) Close() {
+	b.data = nil
+	b.memory.release()
 }
 
 // traceLeg is one captured direction. Streaming legs keep a live buffer that is
@@ -251,6 +279,29 @@ func (t *requestTraceCollector) scrub(value string) string {
 		}
 	}
 	return value
+}
+
+// A credential crossing the elision is no longer a complete string. Mask its
+// visible prefix at the end of the head and its visible suffix at the tail.
+func (t *requestTraceCollector) scrubPreviewEdge(text string, head bool) string {
+	text = t.scrub(text)
+	overlap := 0
+	for _, secret := range t.secrets {
+		limit := min(len(text), len(secret)-1)
+		for n := limit; n > overlap; n-- {
+			if (head && strings.HasSuffix(text, secret[:n])) || (!head && strings.HasPrefix(text, secret[len(secret)-n:])) {
+				overlap = n
+				break
+			}
+		}
+	}
+	if overlap == 0 {
+		return text
+	}
+	if head {
+		return text[:len(text)-overlap] + redactedPlaceholder
+	}
+	return redactedPlaceholder + text[overlap:]
 }
 
 // encodeHeaders renders a header map as JSON with every credential removed.
@@ -502,97 +553,208 @@ func FinishRequestTrace(c *gin.Context) {
 	legs := collector.legs
 	collector.legs = nil
 	collector.mu.Unlock()
-	// Bound waiting work too: a stalled log database must not accumulate an
-	// unlimited number of open files and diagnostic previews. Traces are best
-	// effort; rejecting an overloaded capture never changes the API response.
-	select {
-	case requestTraceQueueSlots <- struct{}{}:
-	default:
-		if collector.clientTo != nil {
-			collector.clientTo.Close()
-		}
-		for _, leg := range legs {
-			if leg.buffer != nil {
-				leg.buffer.Close()
-			}
-		}
-		common.SysError("request trace write queue is full; capture discarded")
-		return
-	}
 
+	// Client request storage belongs to gin and is released after the handler.
+	// Take only the captured legs and immutable redaction context into the queue.
 	ordered := make([]*traceLeg, 0, len(legs)+2)
 	ordered = append(ordered, collector.clientRequestLeg(c))
 	ordered = append(ordered, legs...)
 	ordered = append(ordered, collector.clientResponseLeg(c))
-
-	stored := make([]*traceLeg, 0, len(ordered))
-	for _, leg := range ordered {
-		if leg == nil || leg.record == nil {
-			continue
+	job := traceWriteJob{legs: ordered, userID: collector.userID, secrets: collector.secrets}
+	for seq, leg := range ordered {
+		leg.record.Seq, leg.record.CreatedAt, leg.record.RequestId = seq, now, requestId
+	}
+	if !requestTraceWrites.submit(job) {
+		job.close()
+		dropped := requestTraceWrites.dropped.Add(1)
+		last := requestTraceWrites.lastDropReport.Load()
+		if now-last >= 10 && requestTraceWrites.lastDropReport.CompareAndSwap(last, now) {
+			common.SysError(fmt.Sprintf("request trace write queue is full; capture discarded (%d total)", dropped))
 		}
+	}
+}
+
+type traceWriteJob struct {
+	legs    []*traceLeg
+	userID  int
+	secrets []string
+	bytes   int
+}
+
+func (job *traceWriteJob) close() {
+	for _, leg := range job.legs {
 		if leg.buffer != nil {
-			leg.record.Body, leg.record.BodySize, leg.record.Truncated = leg.buffer.Payload()
-			leg.record.Body = collector.scrub(leg.record.Body)
+			leg.buffer.Close()
+		}
+		if leg.object != nil {
+			leg.object.Close()
+		}
+	}
+}
+
+func (job *traceWriteJob) persist() {
+	records := make([]*model.RequestTrace, 0, len(job.legs))
+	redactor := requestTraceCollector{secrets: job.secrets}
+	for _, leg := range job.legs {
+		if b := leg.buffer; b != nil {
+			leg.record.BodySize = b.preview.total
+			body, complete := b.CompletePayload()
+			if complete {
+				body = redactor.scrub(body)
+				if err := model.StoreRequestTraceBody(leg.record, body, job.userID); err != nil {
+					common.SysError("failed to store complete request trace payload: " + err.Error())
+					complete = false
+				}
+			}
+			// Materialize the preview only when the complete body is unavailable.
+			if !complete {
+				leg.record.Body, _, leg.record.Truncated = b.payload(&redactor)
+			}
+			b.Close()
 		}
 		if leg.object != nil {
 			leg.record.BodySize = leg.object.total
 			leg.record.Truncated = leg.object.overflow
 			leg.record.ContentType = leg.objectContentType
+			uploadTraceObject(context.Background(), leg)
+			leg.object.Close()
 		}
-		leg.record.Seq = len(stored)
-		leg.record.CreatedAt = now
-		leg.record.RequestId = requestId
-		stored = append(stored, leg)
+		records = append(records, leg.record)
 	}
-	if len(stored) == 0 {
-		<-requestTraceQueueSlots
-		return
+	if err := model.SaveRequestTraces(records); err != nil {
+		common.SysError("failed to store request trace: " + err.Error())
 	}
-
-	// Best effort and off the response path: a slow log database or object
-	// store must never hold a relay open, and a failed trace write must never
-	// fail the request. context.Background rather than the request's: this
-	// outlives the handler that produced it.
-	gopool.Go(func() {
-		defer func() { <-requestTraceQueueSlots }()
-		defer func() {
-			for _, leg := range stored {
-				if leg.buffer != nil {
-					leg.buffer.Close()
-				}
-			}
-		}()
-		// Waiting writers retain files and small previews, not full bodies.
-		requestTraceWriteSlots <- struct{}{}
-		defer func() { <-requestTraceWriteSlots }()
-		ctx := context.Background()
-		records := make([]*model.RequestTrace, 0, len(stored))
-		for _, leg := range stored {
-			if leg.buffer != nil {
-				body, complete := leg.buffer.CompletePayload()
-				if complete {
-					body = collector.scrub(body)
-					if err := model.StoreRequestTraceBody(leg.record, body, collector.userID); err != nil {
-						common.SysError("failed to store complete request trace payload: " + err.Error())
-					} else {
-						leg.record.Truncated = false
-					}
-				}
-				leg.buffer.Close()
-				leg.buffer = nil
-			}
-			uploadTraceObject(ctx, leg)
-			records = append(records, leg.record)
-		}
-		if err := model.SaveRequestTraces(records); err != nil {
-			common.SysError("failed to store request trace: " + err.Error())
-		}
-	})
 }
 
-// Bound simultaneous materialization and compression of complete payloads.
-var requestTraceWriteSlots = make(chan struct{}, 4)
-var requestTraceQueueSlots = make(chan struct{}, 32)
+// Reserve capacity separately so queued long conversations cannot displace
+// a burst of small API calls. At most four jobs materialize bodies or use the DB.
+const (
+	traceSmallJobBytes   = 64 << 10
+	traceSmallJobs       = 1024
+	traceLargeJobs       = 32
+	traceLargeQueueBytes = 128 << 20
+)
+
+type traceWriteQueue struct {
+	dropped                  atomic.Uint64
+	lastDropReport           atomic.Int64
+	persist                  func(*traceWriteJob)
+	drained                  chan struct{}
+	mu                       sync.Mutex
+	start                    sync.Once
+	small, large, largeBytes int
+	jobs                     chan traceWriteJob
+}
+
+var requestTraceWrites = traceWriteQueue{jobs: make(chan traceWriteJob, traceSmallJobs+traceLargeJobs), persist: (*traceWriteJob).persist}
+
+func (q *traceWriteQueue) reserve(size int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.drained != nil {
+		return false
+	}
+	if size <= traceSmallJobBytes {
+		if q.small >= traceSmallJobs {
+			return false
+		}
+		q.small++
+		return true
+	}
+	if q.large >= traceLargeJobs || size > traceLargeQueueBytes-q.largeBytes {
+		return false
+	}
+	q.large++
+	q.largeBytes += size
+	return true
+}
+
+func (q *traceWriteQueue) release(size int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if size <= traceSmallJobBytes {
+		q.small--
+	} else {
+		q.large--
+		q.largeBytes -= size
+	}
+	if q.drained != nil && q.small+q.large == 0 {
+		close(q.jobs)
+		close(q.drained)
+	}
+}
+
+// DrainRequestTraces stops admitting work after the HTTP shutdown. A stalled
+// database can consume only the time left in the server's shutdown deadline.
+func DrainRequestTraces(ctx context.Context) error {
+	return requestTraceWrites.drain(ctx)
+}
+
+func (q *traceWriteQueue) drain(ctx context.Context) error {
+	q.mu.Lock()
+	if q.drained == nil {
+		q.drained = make(chan struct{})
+		if q.small+q.large == 0 {
+			close(q.jobs)
+			close(q.drained)
+		}
+	}
+	if q.small+q.large == 0 {
+		q.mu.Unlock()
+		return nil
+	}
+	done := q.drained
+	q.mu.Unlock()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (q *traceWriteQueue) submit(job traceWriteJob) bool {
+	for _, secret := range job.secrets {
+		job.bytes += len(secret)
+	}
+	for _, leg := range job.legs {
+		r := leg.record
+		job.bytes += 512 + len(r.Headers) + len(r.Url) + len(r.Format) + len(r.RequestId) + len(r.TraceId) + len(leg.objectContentType)
+		if b := leg.buffer; b != nil {
+			job.bytes += cap(b.preview.head) + cap(b.preview.tail)
+		}
+		if leg.object != nil {
+			job.bytes += cap(leg.object.data)
+		}
+	}
+	if !q.reserve(job.bytes) {
+		return false
+	}
+	q.start.Do(func() {
+		for range 4 {
+			go q.worker()
+		}
+	})
+	q.jobs <- job // reserve guarantees channel capacity, including active jobs.
+	return true
+}
+
+func (q *traceWriteQueue) worker() {
+	for job := range q.jobs {
+		q.write(&job)
+	}
+}
+
+func (q *traceWriteQueue) write(job *traceWriteJob) {
+	defer q.release(job.bytes)
+	defer job.close()
+	defer func() {
+		if recover() != nil {
+			common.SysError("panic while persisting request trace")
+		}
+	}()
+	q.persist(job)
+}
 
 // uploadTraceObject offloads a retained binary payload. A failure leaves the
 // row without an object reference rather than losing the leg: the headers,

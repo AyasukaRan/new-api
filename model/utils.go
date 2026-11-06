@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"math"
 	"sync"
@@ -31,13 +32,37 @@ func init() {
 	}
 }
 
-func InitBatchUpdater() {
+// InitBatchUpdater returns a shutdown function that flushes the last interval's
+// quota and usage deltas on the same worker as periodic writes.
+func InitBatchUpdater() func(context.Context) error {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	requestStop := sync.OnceFunc(func() { close(stop) })
+	interval := time.Duration(common.BatchUpdateInterval) * time.Second
 	gopool.Go(func() {
+		defer close(done)
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
 		for {
-			time.Sleep(time.Duration(common.BatchUpdateInterval) * time.Second)
-			batchUpdate()
+			select {
+			case <-stop:
+				batchUpdate()
+				return
+			case <-timer.C:
+				batchUpdate()
+				timer.Reset(interval)
+			}
 		}
 	})
+	return func(ctx context.Context) error {
+		requestStop()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func addNewRecord(type_ int, id int, value int) {

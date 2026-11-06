@@ -2,19 +2,24 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,14 +76,8 @@ func TestTraceCaptureQueueOverloadCleansFilesWithoutChangingResponse(t *testing.
 	buffer.Write([]byte(strings.Repeat("x", tracePreviewBytes+1)))
 	path := buffer.filePath
 	require.NotEmpty(t, path)
-	for range cap(requestTraceQueueSlots) {
-		requestTraceQueueSlots <- struct{}{}
-	}
-	t.Cleanup(func() {
-		for range cap(requestTraceQueueSlots) {
-			<-requestTraceQueueSlots
-		}
-	})
+	require.True(t, requestTraceWrites.reserve(traceLargeQueueBytes))
+	t.Cleanup(func() { requestTraceWrites.release(traceLargeQueueBytes) })
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
@@ -89,6 +88,162 @@ func TestTraceCaptureQueueOverloadCleansFilesWithoutChangingResponse(t *testing.
 	assert.Equal(t, "original response", recorder.Body.String())
 	_, err := os.Stat(path)
 	assert.True(t, os.IsNotExist(err))
+}
+
+// Hold all persistence workers to reproduce simultaneous completions during a
+// slow database write. Oversized captures have a separate admission budget.
+func TestTraceWriteQueueAdmitsSmallCompletionsDuringLargeBacklog(t *testing.T) {
+	unblock := make(chan struct{})
+	started := make(chan struct{}, 4)
+	persisted := make(chan struct{}, 1100)
+	q := traceWriteQueue{
+		jobs: make(chan traceWriteJob, traceSmallJobs+traceLargeJobs),
+		persist: func(*traceWriteJob) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-unblock
+			persisted <- struct{}{}
+		},
+	}
+	var once sync.Once
+	t.Cleanup(func() {
+		once.Do(func() { close(unblock) })
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, q.drain(ctx))
+	})
+	large := traceWriteJob{legs: []*traceLeg{{record: &model.RequestTrace{Headers: strings.Repeat("h", 6<<20)}}}}
+	for range 21 {
+		require.True(t, q.submit(large))
+	}
+	for range 4 {
+		<-started
+	}
+	require.False(t, q.submit(large), "exceeding the heavy byte budget must shed heavy captures")
+	small := traceWriteJob{legs: []*traceLeg{{record: &model.RequestTrace{Headers: "small"}}}}
+	outcomes := make(chan bool, 1024)
+	for range cap(outcomes) {
+		go func() { outcomes <- q.submit(small) }()
+	}
+	for range cap(outcomes) {
+		require.True(t, <-outcomes)
+	}
+	require.False(t, q.submit(small), "the small backlog must also be bounded")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, q.drain(ctx), context.Canceled)
+	require.False(t, q.submit(small), "shutdown must close admission")
+	once.Do(func() { close(unblock) })
+	require.NoError(t, q.drain(t.Context()))
+	for range 1024 + 21 {
+		<-persisted
+	}
+}
+
+func TestTraceCaptureStreamingAllocationsStayWithinReservation(t *testing.T) {
+	buffer := newTraceCaptureBuffer(160 << 10)
+	t.Cleanup(buffer.Close)
+	var original bytes.Buffer
+	for _, size := range []int{200, 40, 37 << 10, 10 << 10, 22 << 10, 15 << 10, 10 << 10, 5 << 10, 20 << 10} {
+		part := bytes.Repeat([]byte("x"), size)
+		buffer.Write(part)
+		original.Write(part)
+		require.LessOrEqual(t, cap(buffer.preview.head)+cap(buffer.preview.tail), int(buffer.memory))
+	}
+	body, complete := buffer.CompletePayload()
+	require.True(t, complete)
+	assert.Equal(t, original.String(), body)
+}
+
+func TestTraceCaptureMemoryPressurePreservesPreviewAndOtherSmallBodies(t *testing.T) {
+	require.True(t, traceLargeBuffers.TryAcquire(128<<20))
+	t.Cleanup(func() { traceLargeBuffers.Release(128 << 20) })
+	payload := "HEAD" + strings.Repeat("a", tracePreviewBytes) + "TAIL"
+	buffer := newTraceCaptureBuffer(4 << 20)
+	t.Cleanup(buffer.Close)
+	buffer.Write([]byte(payload[:1024]))
+	buffer.Write([]byte(payload[1024:]))
+	body, size, truncated := buffer.Payload()
+	assert.True(t, truncated)
+	assert.EqualValues(t, len(payload), size)
+	assert.True(t, strings.HasPrefix(body, "HEAD"))
+	assert.True(t, strings.HasSuffix(body, "TAIL"))
+	_, complete := buffer.CompletePayload()
+	assert.False(t, complete)
+	assert.Empty(t, buffer.filePath)
+
+	small := newTraceCaptureBuffer(4 << 20)
+	t.Cleanup(small.Close)
+	small.Write([]byte("next short request"))
+	body, complete = small.CompletePayload()
+	assert.True(t, complete)
+	assert.Equal(t, "next short request", body)
+	object := newTraceObjectBuffer(2 << 20)
+	t.Cleanup(object.Close)
+	object.Write([]byte(payload))
+	assert.True(t, object.overflow)
+	assert.Empty(t, object.data)
+}
+
+func TestTraceWriterPersistsRedactedBodiesAndZeroMemoryFallback(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	driver, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, driver.Close()) })
+	require.NoError(t, db.AutoMigrate(&model.RequestTrace{}))
+	prev := model.LOG_DB
+	model.LOG_DB = db
+	t.Cleanup(func() { model.LOG_DB = prev })
+	secret := "sensitive-client-token"
+	full := newTraceCaptureBuffer(1024)
+	full.Write([]byte("input " + secret))
+	partial := newTraceCaptureBuffer(1024)
+	prefix, suffix := secret[:len(secret)-1], secret[1:]
+	partialInput := strings.Repeat("a", 512-len(prefix)) + secret + strings.Repeat("x", 1024) + secret + strings.Repeat("b", 512-len(suffix))
+	partial.Write([]byte(partialInput))
+	job := traceWriteJob{secrets: []string{secret}, legs: []*traceLeg{
+		{buffer: full, record: &model.RequestTrace{TraceId: "scrubbed", Seq: 0}},
+		{buffer: partial, record: &model.RequestTrace{TraceId: "scrubbed", Seq: 1}},
+	}}
+	t.Cleanup(job.close)
+	job.persist()
+	var saved []model.RequestTrace
+	require.NoError(t, db.Order("seq").Find(&saved).Error)
+	require.Len(t, saved, 2)
+	assert.Equal(t, "input "+redactedPlaceholder, saved[0].Body)
+	assert.False(t, saved[0].Truncated)
+	assert.True(t, saved[1].Truncated)
+	assert.NotContains(t, saved[1].Body, secret)
+	assert.NotContains(t, saved[1].Body, prefix)
+	assert.NotContains(t, saved[1].Body, suffix)
+	assert.Equal(t, 2, strings.Count(saved[1].Body, redactedPlaceholder))
+	assert.EqualValues(t, len(partialInput), saved[1].BodySize)
+	// Both budgets are occupied before the first write. Continue to count
+	// original bytes across subsequent writes without allocating a body.
+	require.True(t, traceSmallBuffers.TryAcquire(96<<20))
+	t.Cleanup(func() { traceSmallBuffers.Release(96 << 20) })
+	require.True(t, traceLargeBuffers.TryAcquire(128<<20))
+	t.Cleanup(func() { traceLargeBuffers.Release(128 << 20) })
+	for range cap(traceEmergencyPreviews) {
+		traceEmergencyPreviews <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cap(traceEmergencyPreviews) {
+			<-traceEmergencyPreviews
+		}
+	})
+	zero := newTraceCaptureBuffer(4 << 20)
+	t.Cleanup(zero.Close)
+	zero.Write([]byte("one"))
+	zero.Write([]byte("two"))
+	body, size, truncated := zero.Payload()
+	assert.True(t, truncated)
+	assert.EqualValues(t, 6, size)
+	assert.Contains(t, body, "6 bytes elided")
+	assert.NotContains(t, body, "one")
 }
 
 func TestTraceCaptureOverLimitOrFailedSpoolRetainsHonestPreview(t *testing.T) {
@@ -461,6 +616,7 @@ func TestRenderTraceResponseIgnoresUnusablePayloads(t *testing.T) {
 // exceeding the budget must drop what was collected rather than store a stub.
 func TestTraceObjectBufferKeepsWholePayloadOrNothing(t *testing.T) {
 	within := newTraceObjectBuffer(1024)
+	t.Cleanup(within.Close)
 	within.Write([]byte("ID3"))
 	within.Write(bytes.Repeat([]byte("a"), 100))
 	assert.False(t, within.overflow)

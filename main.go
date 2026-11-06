@@ -145,10 +145,11 @@ func main() {
 	controller.RegisterScheduledSystemTasks()
 	service.StartSystemTaskRunner()
 
+	var stopBatchUpdater func(context.Context) error
 	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
 		common.BatchUpdateEnabled = true
 		common.SysLog(common.LogText("batch update enabled with interval %ss", strconv.Itoa(common.BatchUpdateInterval)))
-		model.InitBatchUpdater()
+		stopBatchUpdater = model.InitBatchUpdater()
 	}
 
 	if os.Getenv("ENABLE_PPROF") == "true" {
@@ -213,12 +214,20 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(common.LogText("server forced to shutdown: %v", err))
 	}
+	if stopBatchUpdater != nil {
+		if err := stopBatchUpdater(ctx); err != nil {
+			common.SysError("pending quota updates did not finish before shutdown: " + err.Error())
+		}
+	}
 	if err := perfmetrics.Flush(); err != nil {
 		common.SysError("failed to persist performance metrics during shutdown: " + err.Error())
 	}
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()
+	}
+	if err := service.DrainRequestTraces(ctx); err != nil {
+		common.SysError("request trace writes did not finish before shutdown: " + err.Error())
 	}
 	common.SysLog(common.LogText("server exited"))
 }

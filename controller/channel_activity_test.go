@@ -90,6 +90,14 @@ func TestChannelModelActivityDatabaseMatrix(t *testing.T) {
 					state, err = model.GetChannelModelActivity(1, "model-a")
 					require.NoError(t, err)
 					assert.Equal(t, model.ChannelModelActivity{ChannelID: 1, ModelName: "model-a", LastRequestAt: 420, LastProbeAt: 430, RequestActiveUntil: 470, LastResultAt: 430, LastResultSuccess: false}, state)
+					// A later cancellation in the same batch must not date its
+					// older result after a probe already committed by another node.
+					require.NoError(t, model.RecordChannelModelRequestBatch(model.ChannelModelActivity{
+						ChannelID: 1, ModelName: "model-a", LastRequestAt: 460, RequestActiveUntil: 490, LastResultAt: 425, LastResultSuccess: true,
+					}))
+					state, err = model.GetChannelModelActivity(1, "model-a")
+					require.NoError(t, err)
+					assert.Equal(t, model.ChannelModelActivity{ChannelID: 1, ModelName: "model-a", LastRequestAt: 460, LastProbeAt: 430, RequestActiveUntil: 490, LastResultAt: 430, LastResultSuccess: false}, state)
 					require.NoError(t, model.RecordChannelModelRequest(1, "model-b", 500, 600, nil))
 					require.NoError(t, model.RecordChannelModelRequest(2, "model-a", 700, 800, &succeeded))
 					all, err := model.GetChannelModelActivities([]int{1, 2})
@@ -722,6 +730,52 @@ func TestChannelRequestActivityLifecycle(t *testing.T) {
 			var probes int64
 			require.NoError(t, db.Model(&model.ChannelPerfMetric{}).Count(&probes).Error)
 			assert.Zero(t, probes, "activity is independent of the disabled metrics feature")
+		})
+	}
+}
+
+func TestChannelRequestBurstSharesLease(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.ChannelModelActivity{}))
+			var starts atomic.Int64
+			require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:activity_lease", func(tx *gorm.DB) {
+				if row, ok := tx.Statement.Dest.(*model.ChannelModelActivity); ok && row.RequestActiveUntil > 0 && starts.Add(1) == 1 {
+					tx.AddError(context.DeadlineExceeded)
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, db.Callback().Create().Remove("test:activity_lease")) })
+			info := &relaycommon.RelayInfo{OriginModelName: "busy-model"}
+			// Simulate 1,000 overlapping calls on one channel. The failed
+			// initial write is retried by the next caller, not by every caller.
+			finish := make([]func(*bool), 1000)
+			for i := range finish {
+				finish[i] = perfmetrics.BeginChannelRequest(t.Context(), info, 11)
+			}
+			assert.EqualValues(t, 2, starts.Load())
+			state, err := model.GetChannelModelActivity(11, "busy-model")
+			require.NoError(t, err)
+			assert.Greater(t, state.RequestActiveUntil, state.LastRequestAt)
+
+			var callers sync.WaitGroup
+			gate := make(chan struct{})
+			for _, complete := range finish[:len(finish)-1] {
+				callers.Go(func() { <-gate; complete(common.GetPointer(true)) })
+			}
+			close(gate)
+			callers.Wait()
+			state, err = model.GetChannelModelActivity(11, "busy-model")
+			require.NoError(t, err)
+			assert.True(t, state.LastResultSuccess)
+			finish[len(finish)-1](common.GetPointer(false))
+			state, err = model.GetChannelModelActivity(11, "busy-model")
+			require.NoError(t, err)
+			assert.Equal(t, state.LastRequestAt, state.LastResultAt)
+			assert.False(t, state.LastResultSuccess)
 		})
 	}
 }
