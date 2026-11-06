@@ -147,6 +147,44 @@ func TestSQLiteKeyObservationPreservesConcurrentProbe(t *testing.T) {
 	assert.Equal(t, 503, blocked.StatusCode)
 }
 
+func TestSQLiteKeyObservationRetriesBusyCommit(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	pool, err := db.DB()
+	require.NoError(t, err)
+	pool.SetMaxOpenConns(1)
+	require.NoError(t, db.Exec("PRAGMA busy_timeout=0").Error)
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Models: "flash"}
+	require.NoError(t, db.Create(channel).Error)
+	t.Cleanup(func() { model.InvalidateChannelProbeRouting(channel.Id) })
+
+	replica, err := gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{})
+	require.NoError(t, err)
+	readerPool, err := replica.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, readerPool.Close()) })
+	reader := replica.Begin()
+	require.NoError(t, reader.Error)
+	defer reader.Rollback()
+	var rows int64
+	require.NoError(t, reader.Model(&model.ChannelKeyObservation{}).Count(&rows).Error)
+
+	// A rollback-journal reader can coexist with the write, but prevents its
+	// commit. Release the reader once the observation retries on the same pool.
+	writes := 0
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:release_reader", func(tx *gorm.DB) {
+		writes++
+		if writes == 2 {
+			tx.AddError(reader.Rollback().Error)
+		}
+	}))
+	require.NoError(t, model.RecordChannelKeyObservation(channel, "flash", channel.Key, 20, common.GetPointer(false), 502, "request failed", "request"))
+	observations, err := model.GetChannelKeyObservations([]int{channel.Id}, "flash")
+	require.NoError(t, err)
+	require.Len(t, observations, 1)
+	assert.EqualValues(t, 20, observations[0].ObservedAt)
+	assert.Equal(t, 502, observations[0].StatusCode)
+}
+
 func TestChannelProbeRoutingDatabaseMatrix(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {

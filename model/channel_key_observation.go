@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"net/url"
 	"regexp"
@@ -282,10 +284,38 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 		committed = append(committed, state)
 		return upsertChannelKeyObservation(tx, state, state.Success)
 	}
+	var err error
+	txDB := database.WithContext(ctx)
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		err = sqliteKeyObservationTransaction(txDB, write)
+	} else {
+		err = txDB.Transaction(write)
+	}
+	if err == nil {
+		cacheCommittedChannelObservations(database, committed)
+	}
+	return err
+}
+
+func sqliteKeyObservationTransaction(database *gorm.DB, write func(*gorm.DB) error) error {
+	ctx := database.Statement.Context
 	for delay := time.Millisecond; ; delay = min(2*delay, 50*time.Millisecond) {
-		err := database.WithContext(ctx).Transaction(write)
+		err := database.Connection(func(connection *gorm.DB) error {
+			wrote := false
+			err := connection.Transaction(func(tx *gorm.DB) error {
+				err := write(tx)
+				wrote = err == nil
+				return err
+			})
+			if err != nil && wrote {
+				// A busy COMMIT leaves SQLite's transaction open, while database/sql
+				// marks its Tx done. Discard the pinned connection to roll it back.
+				conn := connection.Statement.ConnPool.(*sql.Conn)
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
+			return err
+		})
 		if err == nil {
-			cacheCommittedChannelObservations(database, committed)
 			return nil
 		}
 		// SQLite cannot upgrade a stale read snapshot. Release it and repeat
