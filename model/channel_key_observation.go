@@ -7,12 +7,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/pkg/modelmapping"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	sqlitedriver "github.com/glebarez/go-sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -244,7 +246,8 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 	database := target.database
 	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
 	defer cancel()
-	err := database.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	write := func(tx *gorm.DB) error {
+		committed = committed[:1]
 		var previous []ChannelKeyObservation
 		if !stateKnown {
 			// Preserve pre-upgrade probe state before a first in-flight request
@@ -274,14 +277,34 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 		// Keep probe/recovery state independent from newer request failures.
 		// Both rows commit together so cache invalidation never exposes a
 		// partially recorded result. Ordinary monitoring retains its raw name.
-		row.ID, row.ModelName, row.Source = stateID, probeModel, channelProbeStateSource
-		committed = append(committed, row)
-		return upsertChannelKeyObservation(tx, row, row.Success)
-	})
-	if err == nil {
-		cacheCommittedChannelObservations(database, committed)
+		state := row
+		state.ID, state.ModelName, state.Source = stateID, probeModel, channelProbeStateSource
+		committed = append(committed, state)
+		return upsertChannelKeyObservation(tx, state, state.Success)
 	}
-	return err
+	for delay := time.Millisecond; ; delay = min(2*delay, 50*time.Millisecond) {
+		err := database.WithContext(ctx).Transaction(write)
+		if err == nil {
+			cacheCommittedChannelObservations(database, committed)
+			return nil
+		}
+		// SQLite cannot upgrade a stale read snapshot. Release it and repeat
+		// the compatibility read so another replica's probe is preserved.
+		sqliteErr, ok := errors.AsType[*sqlitedriver.Error](err)
+		if !ok {
+			return err
+		}
+		const sqliteBusy, sqliteLocked = 5, 6
+		code := sqliteErr.Code() & 0xff // Primary result code, including BUSY_SNAPSHOT.
+		if code != sqliteBusy && code != sqliteLocked {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
 }
 
 func upsertChannelKeyObservation(tx *gorm.DB, row ChannelKeyObservation, strictlyNewer bool) error {

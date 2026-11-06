@@ -24,9 +24,11 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func probeRoutingContext(modelName, group string) (*gin.Context, *httptest.ResponseRecorder) {
@@ -102,6 +104,47 @@ func TestConcurrentKeySuccessRespectsProbe(t *testing.T) {
 			require.Nil(t, channel.RelayProbeError(alias, nil), "later success immediately recovers the shared route")
 		})
 	}
+}
+
+func TestSQLiteKeyObservationPreservesConcurrentProbe(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	require.NoError(t, db.Exec("PRAGMA journal_mode=WAL").Error)
+	replica, err := gorm.Open(sqlite.Open(common.SQLitePath), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := replica.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Models: "flash"}
+	require.NoError(t, db.Create(channel).Error)
+	t.Cleanup(func() { model.InvalidateChannelProbeRouting(channel.Id) })
+	id, err := model.ChannelKeyObservationID(channel, "flash", channel.Key)
+	require.NoError(t, err)
+
+	// An older replica commits its probe between the compatibility read and
+	// the first write. SQLite must discard that read snapshot and see the probe.
+	wroteProbe := false
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("test:concurrent_probe", func(tx *gorm.DB) {
+		if _, inTransaction := tx.Statement.ConnPool.(gorm.TxCommitter); !inTransaction || wroteProbe {
+			return
+		}
+		wroteProbe = true
+		tx.AddError(replica.Create(&model.ChannelKeyObservation{
+			ID: id, ChannelID: channel.Id, ModelName: "flash", ObservedAt: 10,
+			Success: false, StatusCode: 503, ErrorText: "probe unavailable", Source: "probe",
+		}).Error)
+	}))
+	require.NoError(t, model.RecordChannelKeyObservation(channel, "flash", channel.Key, 20, common.GetPointer(false), 502, "request failed", "request"))
+	require.True(t, wroteProbe)
+	rows, err := model.GetChannelKeyObservations([]int{channel.Id}, "flash")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.EqualValues(t, 20, rows[0].ObservedAt)
+	assert.Equal(t, "request", rows[0].Source)
+	model.InvalidateChannelProbeRouting(channel.Id)
+	blocked := channel.RelayCredentialProbeError("flash", channel.Key)
+	require.NotNil(t, blocked)
+	assert.EqualValues(t, 10, blocked.ObservedAt)
+	assert.Equal(t, 503, blocked.StatusCode)
 }
 
 func TestChannelProbeRoutingDatabaseMatrix(t *testing.T) {
