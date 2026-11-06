@@ -3,7 +3,6 @@ package model
 import (
 	"context"
 	"io"
-	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -970,30 +969,7 @@ func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFin
 		return stat, err
 	}
 	if includeFinance && filter.Source != LogSourceTest {
-		stat.Finance = &DashboardFinance{}
-		var count int64
-		// Keep memory bounded and read quota/cost from the same cursor snapshot.
-		// Rows without a cost candidate need not transfer captured request bodies.
-		err = streamLogs(tx.Select("quota, CASE WHEN other LIKE ? THEN other ELSE '' END AS other", `%"cost"%`), "logs.created_at desc, logs.id desc", func(log *Log) error {
-			if (log.Quota > 0 && stat.Quota > math.MaxInt-log.Quota) || (log.Quota < 0 && stat.Quota < math.MinInt-log.Quota) {
-				return common.NewMessage("Failed to query statistics")
-			}
-			stat.Quota += log.Quota
-			count++
-			var metadata struct {
-				AdminInfo struct {
-					Cost *dashboardCostSnapshot `json:"cost"`
-				} `json:"admin_info"`
-			}
-			if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
-				return nil
-			}
-			if finance, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost); valid {
-				stat.Finance.add(finance)
-			}
-			return nil
-		})
-		stat.Finance.UnrecordedCount = count - stat.Finance.RecordedCount
+		stat, err = logFinanceStat(tx)
 	} else {
 		err = tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error
 	}

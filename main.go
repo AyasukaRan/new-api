@@ -115,6 +115,18 @@ func main() {
 
 	// 数据看板
 	go model.UpdateQuotaData()
+	if common.IsMasterNode && model.DashboardFinanceRollupEnabled() {
+		financeCtx, stopFinance := context.WithCancel(context.Background())
+		financeDone := make(chan struct{})
+		go func() {
+			defer close(financeDone)
+			model.WarmDashboardFinanceHours(financeCtx)
+		}()
+		defer func() {
+			stopFinance()
+			<-financeDone
+		}()
+	}
 
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()

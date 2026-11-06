@@ -240,6 +240,7 @@ func InitLogDB() (err error) {
 		if common.IsMasterNode {
 			return migrateLogSideTables()
 		}
+		detectDashboardFinanceRollup()
 		return
 	}
 	db, dbType, err := chooseDB("LOG_SQL_DSN", true)
@@ -265,6 +266,7 @@ func InitLogDB() (err error) {
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
 		if !common.IsMasterNode {
+			detectDashboardFinanceRollup()
 			return nil
 		}
 		common.SysLog(common.LogText("database migration started"))
@@ -414,17 +416,21 @@ func migrateLogSideTables() error {
 	if err := MigrateAuditLogs(); err != nil {
 		return err
 	}
-	return MigrateRequestTraces()
+	if err := MigrateRequestTraces(); err != nil {
+		return err
+	}
+	return MigrateDashboardFinance()
 }
 
 func migrateLOGDB() error {
-	if err := migrateLogSideTables(); err != nil {
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		if err := migrateClickHouseLogDB(); err != nil {
+			return err
+		}
+	} else if err := LOG_DB.AutoMigrate(&Log{}); err != nil {
 		return err
 	}
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		return migrateClickHouseLogDB()
-	}
-	return LOG_DB.AutoMigrate(&Log{})
+	return migrateLogSideTables()
 }
 
 func migrateClickHouseLogDB() error {

@@ -52,6 +52,7 @@ func TestDashboardFinanceDatabaseMatrix(t *testing.T) {
 				t.Cleanup(func() { _ = conn.Close() })
 			} else {
 				require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+				require.NoError(t, model.MigrateDashboardFinance())
 			}
 			var version string
 			versionSQL := "SELECT version()"
@@ -268,6 +269,7 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 			})
 			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}, &model.User{}))
 			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+			require.NoError(t, model.MigrateDashboardFinance())
 			now := common.GetTimestamp()
 			start := now - 600
 			actual := `{"admin_info":{"cost":{"cost_ratio":1.3,"base_quota":50,"cost_quota":65,"revenue_quota":100,"profit_quota":35,"estimated":false,"source":"upstream_bill"}}}`
@@ -361,6 +363,27 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 					assert.NotContains(t, recorder.Body.String(), `"finance"`)
 				})
 			}
+			// A report must include pending logs alongside already indexed ones. The
+			// same filter remains exact after an operator revises a historical bill.
+			hour := start - start%3600
+			require.NoError(t, model.AttachQuotaFinance(context.Background(), nil, hour, hour+7199, "", false))
+			filter := model.LogFilter{StartTimestamp: start, EndTimestamp: start + 4}
+			warm, err := model.SumUsedQuota(context.Background(), filter, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, allFinance, warm.Finance)
+			late := model.Log{CreatedAt: start + 2, Type: model.LogTypeConsume, Quota: 50, Other: zero}
+			require.NoError(t, logDB.Create(&late).Error)
+			require.NoError(t, logDB.Model(&model.Log{}).Where("request_id = ?", "loss").Update("other", "{}").Error)
+			mixed, err := model.SumUsedQuota(context.Background(), filter, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, 470, mixed.Quota)
+			assert.Equal(t, &model.DashboardFinance{CostQuota: 65, CoveredRevenueQuota: 200, ProfitQuota: 135, RecordedCount: 3, ActualCount: 1, EstimatedCount: 2, UnrecordedCount: 3}, mixed.Finance)
+			require.NoError(t, logDB.Delete(&late).Error)
+			require.NoError(t, model.AttachQuotaFinance(context.Background(), nil, hour, hour+7199, "", false))
+			repaired, err := model.SumUsedQuota(context.Background(), filter, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, 420, repaired.Quota)
+			assert.Equal(t, &model.DashboardFinance{CostQuota: 65, CoveredRevenueQuota: 150, ProfitQuota: 85, RecordedCount: 2, ActualCount: 1, EstimatedCount: 1, UnrecordedCount: 3}, repaired.Finance)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			stat, err := model.SumUsedQuota(ctx, model.LogFilter{Source: model.LogSourceUsage, StartTimestamp: start, EndTimestamp: start + 4}, nil, true)

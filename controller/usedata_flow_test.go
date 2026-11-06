@@ -25,6 +25,7 @@ func setupFlowControllerTestDB(t *testing.T) {
 	model.LOG_DB = db
 	t.Cleanup(func() { model.LOG_DB = previousLogDB })
 	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.QuotaData{}, &model.Log{}))
+	require.NoError(t, model.MigrateDashboardFinance())
 	require.NoError(t, model.DB.Create(&model.Channel{Id: 1, Name: "east"}).Error)
 	require.NoError(t, model.DB.Create(&model.Token{Id: 11, UserId: 1, Key: "sk-primary", Name: "primary"}).Error)
 	require.NoError(t, model.DB.Create(&model.Token{Id: 22, UserId: 2, Key: "sk-backup", Name: "backup"}).Error)

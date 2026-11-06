@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/samber/hot"
 	"golang.org/x/sync/singleflight"
+	"gorm.io/gorm"
 )
 
 // DashboardFinance contains only recorded costs. Unrecorded calls never count
@@ -82,20 +84,44 @@ func recordedLogFinance(quota int, cost *dashboardCostSnapshot) (DashboardFinanc
 	return finance, true
 }
 
+func recordedLogFinanceJSON(quota int, raw string) (DashboardFinance, bool) {
+	var metadata struct {
+		AdminInfo struct {
+			Cost *dashboardCostSnapshot `json:"cost"`
+		} `json:"admin_info"`
+	}
+	if common.UnmarshalJsonStr(raw, &metadata) != nil {
+		return DashboardFinance{}, false
+	}
+	return recordedLogFinance(quota, metadata.AdminInfo.Cost)
+}
+
 var dashboardFinanceCache = hot.NewHotCache[string, map[dashboardFinanceKey]DashboardFinance](hot.LRU, 8).
 	WithTTL(15 * time.Second).Build()
 var dashboardFinanceLoads singleflight.Group
 
-// getDashboardFinance streams candidate snapshots once, without materializing log batches.
-// The bounded short-lived cache shares the result between the dashboard's charts.
-// Parsing in Go also handles legacy invalid JSON without database-specific casts.
 func getDashboardFinance(ctx context.Context, startTime, endTime int64, username string) (map[dashboardFinanceKey]DashboardFinance, error) {
 	if startTime < 0 || endTime < startTime || endTime > math.MaxInt64-3599 {
 		return nil, fmt.Errorf("invalid time range")
 	}
 	// quota_data stores hourly bucket starts, including the entire end bucket.
 	startTime = ((startTime + 3599) / 3600) * 3600
-	endTime = (endTime/3600)*3600 + 3599
+	endTime -= endTime % 3600
+	if startTime > endTime {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if DashboardFinanceRollupEnabled() {
+		return loadDashboardFinanceHours(ctx, startTime, endTime, username)
+	}
+
+	endTime += 3599
+	if !common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		return scanDashboardFinance(ctx, startTime, endTime, username)
+	}
+
+	// ClickHouse keeps its append-only log schema and uses a shared short-lived result.
 	cacheKey := fmt.Sprintf("%p:%d:%d:%s", LOG_DB, startTime, endTime, username)
 	if cached, found, _ := dashboardFinanceCache.Get(cacheKey); found {
 		return cached, nil
@@ -104,44 +130,7 @@ func getDashboardFinance(ctx context.Context, startTime, endTime int64, username
 		if cached, found, _ := dashboardFinanceCache.Get(cacheKey); found {
 			return cached, nil
 		}
-		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		costs := make(map[dashboardFinanceKey]DashboardFinance)
-		query := applyLogSourceFilter(LOG_DB.WithContext(ctx).Model(&Log{})).
-			Select([]string{"created_at", "user_id", "username", "model_name", "channel_id", "token_id", "group", "quota", "other"}).
-			Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, startTime, endTime).
-			Where("other LIKE ?", `%"cost"%`)
-		if username != "" {
-			query = query.Where("username = ?", username)
-		}
-		err := streamLogs(query, "logs.created_at ASC, logs.id ASC", func(log *Log) error {
-			var metadata struct {
-				ClientTool string `json:"client_tool"`
-				AdminInfo  struct {
-					Cost *dashboardCostSnapshot `json:"cost"`
-				} `json:"admin_info"`
-				RootInfo struct {
-					NodeName *string `json:"node_name"`
-				} `json:"root_info"`
-			}
-			if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
-				return nil
-			}
-			recorded, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost)
-			if !valid {
-				return nil
-			}
-			other := NewLogOther()
-			other.SetPublic("client_tool", metadata.ClientTool)
-			key := dashboardFinanceKey{CreatedAt: log.CreatedAt - log.CreatedAt%3600, UserID: log.UserId, Username: log.Username, ModelName: log.ModelName, ClientTool: other.ClientTool(), UseGroup: log.Group, TokenID: log.TokenId, ChannelID: log.ChannelId, NodeKnown: metadata.RootInfo.NodeName != nil}
-			if key.NodeKnown {
-				key.NodeName = *metadata.RootInfo.NodeName
-			}
-			finance := costs[key]
-			finance.add(recorded)
-			costs[key] = finance
-			return nil
-		})
+		costs, err := scanDashboardFinance(ctx, startTime, endTime, username)
 		if err != nil {
 			return nil, err
 		}
@@ -155,6 +144,79 @@ func getDashboardFinance(ctx context.Context, startTime, endTime int64, username
 		return nil, err
 	}
 	return result.(map[dashboardFinanceKey]DashboardFinance), nil
+}
+
+// Scan the authoritative logs when the database cannot maintain projections.
+func scanDashboardFinance(ctx context.Context, startTime, endTime int64, username string) (map[dashboardFinanceKey]DashboardFinance, error) {
+	costs := make(map[dashboardFinanceKey]DashboardFinance)
+	query := applyLogSourceFilter(LOG_DB.WithContext(ctx).Model(&Log{})).
+		Select([]string{"created_at", "user_id", "username", "model_name", "channel_id", "token_id", "group", "quota", "other"}).
+		Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, startTime, endTime).
+		Where("other LIKE ?", `%"cost"%`)
+	if username != "" {
+		query = query.Where("username = ?", username)
+	}
+	err := streamLogs(query, "logs.created_at ASC, logs.id ASC", func(log *Log) error {
+		projectDashboardLogFinance(log, costs)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return costs, nil
+}
+
+// logFinanceStat preserves the exact log filters, including partial hours. A single
+// statement sees both indexed and pending logs in one snapshot. Only pending
+// rows need their original JSON, including while an earlier hour is being repaired.
+func logFinanceStat(tx *gorm.DB) (Stat, error) {
+	const pendingColumns = "1 AS calls, COALESCE(logs.quota,0) AS quota, 0 AS cost, 0 AS revenue, 0 AS recorded, 0 AS estimated, "
+	var query *gorm.DB
+	if !DashboardFinanceRollupEnabled() {
+		query = tx.Session(&gorm.Session{}).Select(pendingColumns+"CASE WHEN logs.other LIKE ? THEN logs.other ELSE '' END AS raw", `%"cost"%`)
+	} else {
+		ready := tx.Session(&gorm.Session{}).
+			Joins("JOIN dashboard_finance_entries f ON f.log_id = logs.id").
+			Select(`COUNT(*) AS calls, COALESCE(SUM(logs.quota),0) AS quota,
+				COALESCE(SUM(f.cost_quota),0) AS cost,
+				COALESCE(SUM(CASE WHEN f.cost_quota IS NOT NULL THEN logs.quota ELSE 0 END),0) AS revenue,
+				COUNT(f.cost_quota) AS recorded,
+				COUNT(CASE WHEN f.cost_quota IS NOT NULL AND f.estimated THEN 1 END) AS estimated, NULL AS raw`)
+		pending := tx.Session(&gorm.Session{}).Select(pendingColumns + "logs.other AS raw").
+			Where("NOT EXISTS (SELECT 1 FROM dashboard_finance_entries f WHERE f.log_id = logs.id)")
+		query = tx.Session(&gorm.Session{NewDB: true}).Raw("? UNION ALL ?", ready, pending)
+	}
+	rows, err := query.Rows()
+	if err != nil {
+		return Stat{}, err
+	}
+	defer rows.Close()
+	stat := Stat{Finance: &DashboardFinance{}}
+	var calls int64
+	for rows.Next() {
+		var n int64
+		var quota int
+		var raw sql.NullString
+		var finance DashboardFinance
+		if err := rows.Scan(&n, &quota, &finance.CostQuota, &finance.CoveredRevenueQuota, &finance.RecordedCount, &finance.EstimatedCount, &raw); err != nil {
+			return Stat{}, err
+		}
+		if (quota > 0 && stat.Quota > math.MaxInt-quota) || (quota < 0 && stat.Quota < math.MinInt-quota) {
+			return Stat{}, common.NewMessage("Failed to query statistics")
+		}
+		if raw.Valid {
+			finance, _ = recordedLogFinanceJSON(quota, raw.String)
+		}
+		finance.ActualCount = finance.RecordedCount - finance.EstimatedCount
+		stat.Finance.add(finance)
+		stat.Quota += quota
+		calls += n
+	}
+	if err := rows.Err(); err != nil {
+		return Stat{}, err
+	}
+	stat.Finance.UnrecordedCount = calls - stat.Finance.RecordedCount
+	return stat, nil
 }
 
 // AttachQuotaFinance is used only by administrator model/user report handlers.
