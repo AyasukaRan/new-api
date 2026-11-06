@@ -1165,17 +1165,20 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 					require.Len(t, legacy, 1)
 					assert.EqualValues(t, 1, legacy[0].RequestCount)
 					assert.Equal(t, wantSuccess, legacy[0].SuccessCount)
-					if test.disable {
-						require.Len(t, observations, 1, "manual diagnosis of a disabled channel only records the physical probe")
-						assert.Equal(t, perfmetrics.SourceProbe, observations[0].Source, "disabled channels cannot contribute route or availability state")
-					} else {
-						require.Len(t, observations, 4, "one physical probe, one channel observation, one group round and one model-wide round")
+					wantSources := []string{perfmetrics.SourceProbe}
+					if !test.disable {
+						// Enabled routes also persist the round and its covered physical
+						// probe so viewer-specific availability counts the round once.
+						wantSources = append(wantSources, perfmetrics.SourceRouteState, perfmetrics.SourceAvailability,
+							perfmetrics.SourceAvailabilityAll, "round_probed", "covered_probe")
 					}
+					var sources []string
 					for _, observation := range observations {
-						assert.Contains(t, []string{perfmetrics.SourceProbe, perfmetrics.SourceRouteState, perfmetrics.SourceAvailability, perfmetrics.SourceAvailabilityAll}, observation.Source)
+						sources = append(sources, observation.Source)
 						assert.EqualValues(t, 1, observation.RequestCount, "failed key attempts cannot dilute a recovered channel's availability")
 						assert.Equal(t, wantSuccess, observation.SuccessCount)
 					}
+					assert.ElementsMatch(t, wantSources, sources, "each applicable monitoring source must record exactly one outcome")
 					if wantSuccess > 0 {
 						var log model.Log
 						require.NoError(t, db.Where("model_name = ?", name).First(&log).Error)
