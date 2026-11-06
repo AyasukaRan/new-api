@@ -42,6 +42,9 @@ func (info *RelayInfo) CountBillableToolCall(itemType string, functionName strin
 
 	switch itemType {
 	case dto.BuildInCallWebSearchCall:
+		if info.WebSearchBilledByUsage {
+			return
+		}
 		info.incrementBillableToolCall(cmp.Or(info.WebSearchBillingKey, resolveWebSearchToolName(info.ResponsesUsageInfo.BuiltInTools)))
 	case dto.BuildInCallFileSearchCall:
 		info.incrementBillableToolCall(dto.BuildInToolFileSearch)

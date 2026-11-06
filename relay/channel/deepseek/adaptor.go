@@ -69,6 +69,7 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 	info.WebSearchBillingKey = SearchToolPriceKey
 	info.WebFetchBillingKey = FetchToolPriceKey
 	if info.RelayMode == constant.RelayModeResponses {
+		info.WebSearchBilledByUsage = true
 		info.VendorToolUsage = responsesToolUsage
 	}
 }

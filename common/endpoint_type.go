@@ -55,9 +55,12 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 			constant.EndpointTypeOpenAIAlphaSearch,
 		}
 	default:
-		if IsOpenAIResponseOnlyModel(modelName) {
+		switch {
+		case channelType == constant.ChannelTypeDeepSeek && (modelName == "deepseek-v4-pro" || modelName == "deepseek-flash"):
+			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse}
+		case IsOpenAIResponseOnlyModel(modelName):
 			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIResponse}
-		} else {
+		default:
 			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI}
 		}
 	}

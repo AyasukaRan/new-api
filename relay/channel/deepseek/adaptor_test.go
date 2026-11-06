@@ -264,6 +264,48 @@ func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
 	}
 }
 
+func TestCodexLiveWebSearchUsesNativeDeepSeekResponses(t *testing.T) {
+	const call = `{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","queries":["DeepSeek","ws_call_id=call_01"]}}`
+	const tools = `[{"type":"web_search","external_web_access":true}]`
+	const input = `[` + call + `,{"role":"user","content":"Open the result"}]`
+	const payload = `{"model":"deepseek-v4-pro","stream":true,"input":` + input + `,"tools":` + tools + `}`
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+	common.SetContextKey(c, constant.ContextKeyChannelType, constant.ChannelTypeDeepSeek)
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, constant.ChannelBaseURLs[constant.ChannelTypeDeepSeek])
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, "deepseek-v4-pro")
+	var request dto.OpenAIResponsesRequest
+	require.NoError(t, common.UnmarshalJsonStr(payload, &request))
+	info := &relaycommon.RelayInfo{OriginModelName: request.Model, RelayFormat: types.RelayFormatOpenAIResponses,
+		RelayMode: relayconstant.RelayModeResponses, RequestURLPath: "/v1/responses", Request: &request, IsStream: true, DisablePing: true}
+	adaptor, body, closer, apiErr := relay.PrepareResponsesRequest(c, info, &request)
+	require.Nil(t, apiErr)
+	defer closer.Close()
+	upstreamURL, err := adaptor.GetRequestURL(info)
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.deepseek.com/responses", upstreamURL)
+	wire, err := io.ReadAll(body)
+	require.NoError(t, err)
+	assert.JSONEq(t, payload, string(wire))
+
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+	var sse strings.Builder
+	for _, event := range []string{
+		`{"type":"response.web_search_call.searching","output_index":0,"item_id":"ws_1","sequence_number":1}`,
+		`{"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":` + call + `}`,
+		`{"type":"response.completed","sequence_number":3,"response":{"status":"completed","output":[` + call + `],"usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25,"server_tool_use":{"tool_search":1,"tool_fetch":0}}}}`,
+	} {
+		fmt.Fprintf(&sse, "event: %s\ndata: %s\n\n", ojson.Get(event, "type").String(), event)
+	}
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sse.String())), Header: http.Header{"Content-Type": {"text/event-stream"}}}
+	_, apiErr = adaptor.DoResponse(c, resp, info)
+	require.Nil(t, apiErr)
+	assert.Equal(t, sse.String(), writer.Body.String())
+}
+
 func TestDeepSeekResponsesHistoryRespectsProviderAndPassthrough(t *testing.T) {
 	settings := model_setting.GetGlobalSettings()
 	original := *settings
@@ -381,11 +423,6 @@ func TestThinkingSuffixUpstreamFields(t *testing.T) {
 	}
 }
 
-// DeepSeek runs Claude Code and Codex searches server-side and bills them as
-// Search and Fetch API calls, whatever model name the client sent. On the
-// Responses API the completed web_search_call items of the whole response
-// replace the items counted while streaming: open_page is a Fetch call, a
-// failed call is free, and an empty output keeps the streamed count.
 func TestServerSideSearchBillingKeys(t *testing.T) {
 	for _, tc := range []struct {
 		format types.RelayFormat
@@ -402,32 +439,29 @@ func TestServerSideSearchBillingKeys(t *testing.T) {
 		assert.Equal(t, tc.mode == relayconstant.RelayModeResponses, info.VendorToolUsage != nil, tc.format)
 	}
 
-	const output = `[
-		{"type":"web_search_call","status":"completed","action":{"type":"search","queries":["deepseek","ws_call_id=call_01"]}},
-		{"type":"web_search_call","status":"completed","action":{"type":"open_page","url":"https://example.com/"}},
-		{"type":"web_search_call","status":"failed","action":{"type":"open_page","url":"https://api-docs.deepseek.com/"}},
-		{"type":"message","status":"completed"}]`
-	for _, raw := range []string{
-		`{"status":"completed","output":` + output + `}`,
-		`{"type":"response.completed","response":{"status":"completed","output":` + output + `}}`,
+	const usage = `"usage":{"server_tool_use":{"tool_search":3,"tool_fetch":2}}`
+	const output = `"output":[{"type":"web_search_call","status":"completed","action":{"type":"search"}},{"type":"tool_search_call"}]`
+	for _, tc := range []struct {
+		name, raw string
+		want      map[string]int
+	}{
+		{"nonstream", `{` + output + `,` + usage + `}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
+		{"stream complete", `{"type":"response.completed","response":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
+		{"stream incomplete", `{"type":"response.incomplete","response":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
+		{"stream failed", `{"type":"response.failed","response":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
+		{"no successful operations", `{` + output + `,"usage":{"total_tokens":64}}`, map[string]int{}},
+		{"stream ended without usage", "", map[string]int{}},
+		{"zero search", `{"usage":{"server_tool_use":{"tool_search":0,"tool_fetch":2}}}`, map[string]int{deepseek.SearchToolPriceKey: 0, deepseek.FetchToolPriceKey: 2}},
+		{"invalid counts", `{"usage":{"server_tool_use":{"tool_search":-1,"tool_fetch":1.5}}}`, map[string]int{}},
 	} {
-		info := &relaycommon.RelayInfo{
-			OriginModelName: "gpt-5.1-codex",
-			RelayFormat:     types.RelayFormatOpenAIResponses,
-			RelayMode:       relayconstant.RelayModeResponses,
-			ChannelMeta:     &relaycommon.ChannelMeta{},
-		}
-		(&deepseek.Adaptor{}).Init(info)
-		for range 3 {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIResponses, RelayMode: relayconstant.RelayModeResponses, ChannelMeta: &relaycommon.ChannelMeta{}}
+			(&deepseek.Adaptor{}).Init(info)
 			info.CountBillableToolCall(dto.BuildInCallWebSearchCall, "")
-		}
-		assert.Equal(t, map[string]int{deepseek.SearchToolPriceKey: 3}, toolCounts(info), "streamed items bill under the Search key")
-
-		info.ApplyVendorToolUsage([]byte(`{"type":"response.failed","response":{"status":"failed","output":[]}}`))
-		assert.Equal(t, map[string]int{deepseek.SearchToolPriceKey: 3}, toolCounts(info), "an empty output keeps the streamed count")
-
-		info.ApplyVendorToolUsage([]byte(raw))
-		assert.Equal(t, map[string]int{deepseek.SearchToolPriceKey: 1, deepseek.FetchToolPriceKey: 1}, toolCounts(info), raw)
+			info.CountBillableToolCall("tool_search_call", "")
+			info.ApplyVendorToolUsage([]byte(tc.raw))
+			assert.Equal(t, tc.want, toolCounts(info))
+		})
 	}
 }
 
