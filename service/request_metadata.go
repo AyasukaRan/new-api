@@ -482,7 +482,11 @@ func requestReasoningLabel(info *relaycommon.RelayInfo) string {
 func identifyClientTool(header http.Header) string {
 	// Inspect original request headers only. Adaptors can inject a different
 	// User-Agent/originator upstream, which does not identify the caller.
-	userAgent := strings.ToLower(header.Get("User-Agent"))
+	rawUserAgent := header.Get("User-Agent")
+	userAgent := strings.ToLower(rawUserAgent)
+	if version, ok := strings.CutPrefix(userAgent, "codex desktop/"); ok && len(version) > 0 && version[0] >= '0' && version[0] <= '9' {
+		return "Codex Desktop"
+	}
 	for token := range strings.FieldsSeq(userAgent) {
 		product, version, ok := strings.Cut(token, "/")
 		if !ok || version == "" {
@@ -530,6 +534,9 @@ func identifyClientTool(header http.Header) string {
 
 	// Product names are allowlisted: a generic HTTP client cannot identify the
 	// application built on top of it. Keep the most specific observed source.
+	if rawUserAgent == "Sub2-authorized-native-search-test" {
+		return "Sub2-authorized-native-search-test"
+	}
 	application, sdk, httpClient, runtime := "", "", "", ""
 	for field := range strings.FieldsSeq(userAgent) {
 		token := strings.Trim(field, "();,")
@@ -611,6 +618,13 @@ func identifyClientTool(header http.Header) string {
 // content. Applications which hide behind an SDK can opt in with X-Client-Name.
 var requestSourceApplications = map[string]string{
 	"codewhale":          "CodeWhale",
+	"dsprobe":            "dsprobe",
+	"workbuddy":          "WorkBuddy",
+	"workbuddy-ai":       "WorkBuddy",
+	"grok-pager":         "grok-pager",
+	"grok-shell":         "grok-shell",
+	"zcode":              "ZCode",
+	"sub2-api":           "Sub2-API",
 	"n8n":                "n8n",
 	"dify":               "Dify",
 	"flowise":            "Flowise",
@@ -663,6 +677,7 @@ var requestSourceHTTPClients = map[string]string{
 }
 
 var requestSourceRuntimes = map[string]string{
+	"dart":              "Dart",
 	"python":            "Python",
 	"node":              "Node.js",
 	"ruby":              "Ruby",
