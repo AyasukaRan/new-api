@@ -20,12 +20,17 @@ import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff } from 'lucide-react'
-import { useState, useCallback, useMemo } from 'react'
+import {
+  useState,
+  useCallback,
+  useMemo,
+  type KeyboardEventHandler,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Combobox } from '@/components/ui/combobox'
+import { ComboboxInput } from '@/components/ui/combobox-input'
 import {
   Select,
   SelectContent,
@@ -39,8 +44,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { getGroups } from '@/features/users/api'
-import { useMediaQuery } from '@/hooks'
+import { getGroups, getUsers, searchUsers } from '@/features/users/api'
+import { useDebounce, useMediaQuery } from '@/hooks'
 import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { getUserGroups } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
@@ -117,6 +122,55 @@ interface CommonLogsFilterBarProps<TData> {
   table: Table<TData>
 }
 
+function LogUsernameFilter(props: {
+  value?: string
+  onValueChange: (value: string) => void
+  onKeyDown: KeyboardEventHandler<HTMLInputElement>
+  maskClass?: string
+}) {
+  const { t } = useTranslation()
+  const scope = useModelAccessScope()
+  const [search, setSearch] = useState<string | null>(null)
+  const term = search?.trim() ?? ''
+  const debounced = useDebounce(term, 250)
+  const keyword = term ? debounced : ''
+  const { data, isFetching } = useQuery({
+    queryKey: ['log-username-options', ...scope, keyword],
+    enabled: search !== null && keyword === term,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const page = { p: 1, page_size: 50 }
+      const response = keyword
+        ? await searchUsers({ ...page, keyword })
+        : await getUsers(page)
+      const users = requireServerSuccess(response).data?.items ?? []
+      return users.map(({ username }) => ({ value: username, label: username }))
+    },
+  })
+  return (
+    <LogsFilterField className={props.maskClass}>
+      <ComboboxInput
+        options={data ?? []}
+        allowCustomValue
+        showEmptyOnOpen
+        aria-label={t('Username')}
+        placeholder={t('Username')}
+        emptyText={
+          isFetching || keyword !== term
+            ? t('Loading...')
+            : t('No matching results')
+        }
+        className='h-8 min-w-0 text-sm leading-5'
+        popupClassName={props.maskClass}
+        value={props.value}
+        onSearchChange={setSearch}
+        onValueChange={props.onValueChange}
+        onKeyDown={props.onKeyDown}
+      />
+    </LogsFilterField>
+  )
+}
+
 export function CommonLogsFilterBar<TData>(
   props: CommonLogsFilterBarProps<TData>
 ) {
@@ -131,17 +185,18 @@ export function CommonLogsFilterBar<TData>(
   const section = isTest ? 'test' : 'common'
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
-  const { data: adminGroups } = useQuery({
+  const { data: adminGroups, isLoading: loadingAdminGroups } = useQuery({
     queryKey: ['groups'],
     queryFn: async () => requireServerSuccess(await getGroups()),
     enabled: isAdmin,
   })
-  const { data: userGroups } = useQuery({
+  const { data: userGroups, isLoading: loadingUserGroups } = useQuery({
     queryKey: ['user-groups', ...scope],
     queryFn: async ({ signal }) =>
       requireServerSuccess(await getUserGroups(signal)),
     enabled: !isAdmin,
   })
+  const loadingGroups = isAdmin ? loadingAdminGroups : loadingUserGroups
   const groupOptions = useMemo(() => {
     const groups = isAdmin
       ? (adminGroups?.data ?? [])
@@ -353,16 +408,17 @@ export function CommonLogsFilterBar<TData>(
   )
   const groupFilter = (
     <LogsFilterField className={sensitiveInputClass}>
-      <Combobox
+      <ComboboxInput
         options={groupOptions}
         allowCustomValue
+        showEmptyOnOpen
         aria-label={t('Group')}
-        emptyText={t('No group found.')}
+        emptyText={loadingGroups ? t('Loading...') : t('No group found.')}
         placeholder={t('Group')}
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={sensitiveInputClass}
         value={filters.group || ''}
-        onValueChange={(value) => handleChange('group', value ?? '')}
+        onValueChange={(value) => handleChange('group', value)}
         onKeyDown={handleKeyDown}
       />
     </LogsFilterField>
@@ -452,15 +508,12 @@ export function CommonLogsFilterBar<TData>(
         />
       </LogsFilterField>
       {isAdmin && (
-        <LogsFilterField>
-          <LogsFilterInput
-            placeholder={t('Username')}
-            className={sensitiveInputClass}
-            value={filters.username || ''}
-            onChange={(e) => handleChange('username', e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-        </LogsFilterField>
+        <LogUsernameFilter
+          value={filters.username}
+          maskClass={sensitiveInputClass}
+          onValueChange={(value) => handleChange('username', value)}
+          onKeyDown={handleKeyDown}
+        />
       )}
       {isAdmin && (
         <LogsFilterField>

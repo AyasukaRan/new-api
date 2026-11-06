@@ -36,8 +36,11 @@ interface ComboboxInputProps {
   options: readonly ComboboxInputOption[]
   value?: string
   onValueChange: (value: string) => void
+  // An open list starts with all choices. Null suspends remote suggestions.
+  onSearchChange?: (query: string | null) => void
   placeholder?: string
   emptyText?: string
+  showEmptyOnOpen?: boolean
   className?: string
   popupClassName?: string
   id?: string
@@ -54,8 +57,10 @@ export function ComboboxInput({
   options,
   value = '',
   onValueChange,
+  onSearchChange,
   placeholder = 'Select or type...',
   emptyText = 'No option found.',
+  showEmptyOnOpen = false,
   className,
   popupClassName,
   id,
@@ -92,6 +97,11 @@ export function ComboboxInput({
     [options, value]
   )
   const displayValue = open ? searchValue : (selectedOption?.label ?? value)
+
+  const query = searchChanged ? searchValue : ''
+  React.useEffect(() => {
+    onSearchChange?.(open ? query : null)
+  }, [onSearchChange, open, query])
 
   const filteredOptions = React.useMemo(() => {
     if (!searchChanged || !searchValue.trim()) return options
@@ -220,7 +230,9 @@ export function ComboboxInput({
   const showDropdown =
     open &&
     !disabled &&
-    (filteredOptions.length > 0 || (allowCustomValue && searchValue.trim()))
+    (filteredOptions.length > 0 ||
+      showEmptyOnOpen ||
+      (allowCustomValue && searchValue.trim()))
 
   return (
     <div ref={containerRef} className='relative'>
@@ -234,11 +246,11 @@ export function ComboboxInput({
         aria-labelledby={ariaLabelledBy}
         aria-invalid={ariaInvalid}
         aria-expanded={!!showDropdown}
-        aria-controls={
-          showDropdown && filteredOptions.length > 0 ? listId : undefined
-        }
+        aria-controls={showDropdown ? listId : undefined}
         aria-activedescendant={
-          showDropdown && highlightedIndex >= 0
+          showDropdown &&
+          highlightedIndex >= 0 &&
+          highlightedIndex < filteredOptions.length
             ? `${listId}-${highlightedIndex}`
             : undefined
         }
@@ -300,45 +312,44 @@ export function ComboboxInput({
               popupClassName
             )}
           >
-            {filteredOptions.length > 0 ? (
-              <ul
-                ref={listRef}
-                id={listId}
-                role='listbox'
-                className='max-h-[200px] overflow-y-auto p-1'
-              >
-                {filteredOptions.map((option, index) => (
-                  <li
-                    key={option.value}
-                    id={`${listId}-${index}`}
-                    role='option'
-                    aria-selected={value === option.value}
-                    data-highlighted={index === highlightedIndex}
+            <ul
+              ref={listRef}
+              id={listId}
+              role='listbox'
+              className='max-h-[200px] overflow-y-auto p-1 empty:p-0'
+            >
+              {filteredOptions.map((option, index) => (
+                <li
+                  key={option.value}
+                  id={`${listId}-${index}`}
+                  role='option'
+                  aria-selected={value === option.value}
+                  data-highlighted={index === highlightedIndex}
+                  className={cn(
+                    'relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none',
+                    index === highlightedIndex &&
+                      'bg-accent text-accent-foreground',
+                    value === option.value && 'font-medium'
+                  )}
+                  onMouseEnter={() => setHighlightedIndex(index)}
+                  onMouseDown={(e) => {
+                    e.preventDefault() // Prevent blur
+                    handleSelect(option.value)
+                  }}
+                >
+                  <Check
                     className={cn(
-                      'relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none',
-                      index === highlightedIndex &&
-                        'bg-accent text-accent-foreground',
-                      value === option.value && 'font-medium'
+                      'size-4 shrink-0',
+                      value === option.value ? 'opacity-100' : 'opacity-0'
                     )}
-                    onMouseEnter={() => setHighlightedIndex(index)}
-                    onMouseDown={(e) => {
-                      e.preventDefault() // Prevent blur
-                      handleSelect(option.value)
-                    }}
-                  >
-                    <Check
-                      className={cn(
-                        'size-4 shrink-0',
-                        value === option.value ? 'opacity-100' : 'opacity-0'
-                      )}
-                    />
-                    {option.icon && <span aria-hidden>{option.icon}</span>}
-                    <span className='truncate'>{option.label}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className='px-2 py-6 text-center text-sm'>
+                  />
+                  {option.icon && <span aria-hidden>{option.icon}</span>}
+                  <span className='truncate'>{option.label}</span>
+                </li>
+              ))}
+            </ul>
+            {filteredOptions.length === 0 && (
+              <div role='status' className='px-2 py-6 text-center text-sm'>
                 {t(emptyText)}
                 {allowCustomValue && searchValue.trim() && (
                   <div className='text-muted-foreground mt-1 text-xs'>

@@ -66,7 +66,20 @@ async function renderFilter(
     premium: { desc: '', ratio: 2 },
   }
 ) {
-  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+    const request = new URL(url, 'http://localhost')
+    if (
+      request.pathname === '/api/user/' ||
+      request.pathname === '/api/user/search'
+    ) {
+      const keyword =
+        request.searchParams.get('keyword') ?? config?.params?.keyword
+      const username =
+        request.pathname === '/api/user/' ? 'recent-user' : 'older-user'
+      const items =
+        !keyword || username.includes(keyword) ? [{ id: 12, username }] : []
+      return { data: { success: true, data: { items, total: items.length } } }
+    }
     if (url === '/api/user/self/groups' || url === '/api/group/') {
       if (groups === null) throw new Error('Group loading failed')
       return {
@@ -141,8 +154,9 @@ it('loads personal groups and filters choices without submitting until Search', 
       page: 1,
     })
   )
-  expect(api.get).toHaveBeenCalledWith('/api/user/self/groups')
-  expect(api.get).not.toHaveBeenCalledWith('/api/group/')
+  const paths = vi.mocked(api.get).mock.calls.map(([url]) => url)
+  expect(paths).toContain('/api/user/self/groups')
+  expect(paths).not.toContain('/api/group/')
 })
 
 it('loads all groups in the administrator view', async () => {
@@ -150,8 +164,9 @@ it('loads all groups in the administrator view', async () => {
   await renderFilter()
   await userEvent.click(screen.getByRole('combobox', { name: 'Group' }))
   expect(await screen.findByRole('option', { name: 'premium' })).toBeVisible()
-  expect(api.get).toHaveBeenCalledWith('/api/group/')
-  expect(api.get).not.toHaveBeenCalledWith('/api/user/self/groups')
+  const paths = vi.mocked(api.get).mock.calls.map(([url]) => url)
+  expect(paths).toContain('/api/group/')
+  expect(paths).not.toContain('/api/user/self/groups')
 })
 
 it('confirms a keyboard choice before Enter submits the selected group', async () => {
@@ -193,6 +208,15 @@ it.each([{}, null])(
     )
   }
 )
+
+it('opens the group dropdown and explains when there are no configured groups', async () => {
+  await renderFilter('/usage-logs/common', {})
+  const input = screen.getByRole('combobox', { name: 'Group' })
+  await userEvent.click(input)
+  expect(input).toHaveAttribute('aria-expanded', 'true')
+  expect(await screen.findByText('No group found.')).toBeVisible()
+  expect(screen.queryByRole('option')).not.toBeInTheDocument()
+})
 
 it('resets the selected group and restores a group from URL navigation', async () => {
   const router = await renderFilter('/usage-logs/common?group=premium')
@@ -301,4 +325,78 @@ it('keeps historical auto values editable when auto is the only available group'
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({ group: 'retired' })
   )
+})
+
+it('searches the user directory beyond the initial suggestions and applies the username with a group', async () => {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 100 })
+  const router = await renderFilter()
+  await userEvent.click(screen.getByRole('button', { name: 'Expand' }))
+  const username = screen.getByRole('combobox', { name: 'Username' })
+  expect(
+    vi.mocked(api.get).mock.calls.some(([url]) => url.startsWith('/api/user/'))
+  ).toBe(false)
+  await userEvent.click(screen.getByRole('button', { name: /^Hide$/ }))
+  await userEvent.click(username)
+  const recent = await screen.findByRole('option', { name: 'recent-user' })
+  expect(recent.closest('.\\[-webkit-text-security\\:disc\\]')).not.toBeNull()
+  await userEvent.type(username, 'older')
+  expect(
+    await screen.findByRole('option', { name: 'older-user' })
+  ).toBeVisible()
+  await userEvent.keyboard('{ArrowDown}{Enter}')
+  expect(username).toHaveValue('older-user')
+  expect(username).toHaveAttribute('aria-expanded', 'false')
+  const group = screen.getByRole('combobox', { name: 'Group' })
+  await userEvent.click(group)
+  await userEvent.click(await screen.findByRole('option', { name: 'premium' }))
+  expect(router.state.location.search).not.toHaveProperty('username')
+  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      username: 'older-user',
+      group: 'premium',
+      page: 1,
+    })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Reset' }))
+  await waitFor(() => expect(username).toHaveValue(''))
+  expect(group).toHaveValue('')
+  expect(router.state.location.search).not.toHaveProperty('username')
+})
+
+it('accepts a historical username outside the directory and clears it on the next search', async () => {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 100 })
+  const router = await renderFilter('/usage-logs/common?username=retired')
+  await userEvent.click(screen.getByRole('button', { name: /^Expand/ }))
+  const username = screen.getByRole('combobox', { name: 'Username' })
+  expect(username).toHaveValue('retired')
+  await userEvent.clear(username)
+  await userEvent.type(username, 'former-user')
+  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      username: 'former-user',
+    })
+  )
+  await userEvent.clear(username)
+  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+  await waitFor(() =>
+    expect(router.state.location.search).not.toHaveProperty('username')
+  )
+})
+
+it('keeps the account directory private when a regular user expands personal log filters', async () => {
+  useAuthStore.getState().auth.setUser({ id: 7, username: 'viewer', role: 1 })
+  await renderFilter()
+  await userEvent.click(screen.getByRole('button', { name: 'Expand' }))
+  expect(
+    screen.queryByRole('combobox', { name: 'Username' })
+  ).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('combobox', { name: 'Group' }))
+  expect(await screen.findByRole('option', { name: 'default' })).toBeVisible()
+  expect(
+    vi
+      .mocked(api.get)
+      .mock.calls.some(([url]) => /^\/api\/user\/(?:\?|$|search)/.test(url))
+  ).toBe(false)
 })
