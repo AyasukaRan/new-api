@@ -195,6 +195,7 @@ func TestRequestMetadataIsolatesRetriedChannelAttempts(t *testing.T) {
 
 func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) {
 	const readFrogOrigin = "chrome-extension://modkelfkcfjpgbfmnbnllalkiogfofhb"
+	const desktopChromium = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 	const browserUserAgent = "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36"
 	for _, test := range []struct {
 		name         string
@@ -307,6 +308,11 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 		{name: "unknown runtime never becomes a label", headers: map[string]string{"X-Stainless-Lang": "js", "X-Stainless-Runtime": "internal-secret"}, want: "JavaScript"},
 		{name: "platform substring not trusted", headers: map[string]string{"User-Agent": "not-n8n/1.0.0"}},
 		{name: "CodeWhale substring not trusted", headers: map[string]string{"User-Agent": "Mozilla/5.0 (compatible; not-codewhale/0.9.11; +https://github.com/Hmbown/CodeWhale)"}},
+		{name: "desktop Chromium browser", headers: map[string]string{"User-Agent": desktopChromium}, want: "Chromium browser"},
+		{name: "Edge suffix is not generic Chromium", headers: map[string]string{"User-Agent": desktopChromium + " Edg/128.0.0.0"}},
+		{name: "Opera suffix is not generic Chromium", headers: map[string]string{"User-Agent": desktopChromium + " OPR/128.0.0.0"}},
+		{name: "extension wins over browser", headers: map[string]string{"User-Agent": desktopChromium, "Origin": readFrogOrigin}, want: "Read Frog"},
+		{name: "SDK wins over browser", headers: map[string]string{"User-Agent": desktopChromium, "X-Stainless-Lang": "python"}, want: "Python"},
 		{name: "browser does not imply automation", headers: map[string]string{"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36"}},
 		{name: "unknown product is not copied", headers: map[string]string{"User-Agent": "private-product-secret/1.0"}},
 		{name: "URL is not a client name", headers: map[string]string{"X-Client-Name": "https://private.example/path", "User-Agent": "curl/8.12.0"}, want: "curl"},

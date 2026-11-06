@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -602,6 +603,9 @@ func identifyClientTool(header http.Header) string {
 	if source := requestSourceLanguages[language]; source != "" {
 		return source
 	}
+	if desktopChromiumUserAgent.MatchString(userAgent) {
+		return "Chromium browser"
+	}
 	// Unrecognized declarations stay unknown; only requests without any source
 	// declaration are ordinary HTTP requests.
 	for _, key := range []string{"User-Agent", "Originator", "Editor-Version", "X-Title", "HTTP-Referer", "X-Client-Name", "X-Stainless-Lang", "X-Stainless-Runtime"} {
@@ -613,6 +617,10 @@ func identifyClientTool(header http.Header) string {
 	}
 	return "Normal HTTP"
 }
+
+// The shared desktop Chromium signature does not distinguish Chrome from other
+// browsers using the same user agent. Extra products (e.g. Edg or OPR) do not match.
+var desktopChromiumUserAgent = regexp.MustCompile(`^mozilla/5\.0 \((windows nt [0-9.]+(; (win64|wow64|x64|x86|arm64))*|macintosh; intel mac os x [0-9_.]+|x11; (linux|cros) [a-z0-9_ .-]+)\) applewebkit/[0-9]+\.[0-9]+ \(khtml, like gecko\) chrome/[0-9]+(\.[0-9]+){3} safari/[0-9]+\.[0-9]+$`)
 
 // These names describe an explicitly declared product, not a guess from request
 // content. Applications which hide behind an SDK can opt in with X-Client-Name.
