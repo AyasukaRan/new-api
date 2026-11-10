@@ -195,7 +195,16 @@ export function SummaryCards() {
         nextResetTime = reset
       }
     }
-    return { count: active.length, remaining, used, unlimited, nextResetTime }
+    return {
+      count: active.length,
+      remaining,
+      used,
+      unlimited,
+      nextResetTime,
+      freeOnly:
+        active.length > 0 &&
+        active.every((subscription) => subscription.free_allowance),
+    }
   }, [subscriptionsQuery.data])
   const hasSubscriptions = subscriptionSummary.count > 0
 
@@ -293,19 +302,31 @@ export function SummaryCards() {
   let timingValue = runwayDisplay
   let TimingIcon = ShieldCheck
   if (hasSubscriptions) {
-    creditTitle = t('Subscription remaining')
+    creditTitle = t(
+      subscriptionSummary.freeOnly
+        ? 'Free allowance remaining'
+        : 'Subscription remaining'
+    )
     creditValue = subscriptionSummary.unlimited
       ? t('Unlimited')
       : formatQuota(subscriptionSummary.remaining)
     creditStatus = t('Active')
     creditDotClass = 'bg-success'
     if (!subscriptionSummary.unlimited && subscriptionSummary.remaining <= 0) {
-      creditStatus = t('Subscription quota depleted')
+      creditStatus = t(
+        subscriptionSummary.freeOnly
+          ? 'Free allowance depleted'
+          : 'Subscription quota depleted'
+      )
       creditDotClass = 'bg-destructive'
     }
     usageLabel = t('Current period usage')
     usageValue = formatQuota(subscriptionSummary.used)
-    timingLabel = t('Next subscription refresh')
+    timingLabel = t(
+      subscriptionSummary.freeOnly
+        ? 'Next allowance refresh'
+        : 'Next subscription refresh'
+    )
     timingValue =
       subscriptionSummary.nextResetTime > 0
         ? formatTimestamp(subscriptionSummary.nextResetTime)

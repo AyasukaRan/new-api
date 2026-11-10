@@ -80,7 +80,7 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			model.DB, model.LOG_DB = db, logDB
 			common.SetDatabaseTypes(dialect.name, dialect.name)
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLogDB; common.SetDatabaseTypes(oldMainType, oldLogType) })
-			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}))
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.UserSubscription{}))
 			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
 			versionQuery := "select version()"
 			if dialect.name == common.DatabaseTypeSQLite {
@@ -331,14 +331,51 @@ func TestUpstreamCostEstimateBounds(t *testing.T) {
 	for _, tc := range []struct {
 		base, ratio float64
 		revenue     int
+		free        int64
 	}{
 		{base: -1, ratio: 1.3}, {base: math.NaN(), ratio: 1.3}, {base: math.Inf(1), ratio: 1.3},
 		{base: common.MaxQuota + 1, ratio: 0}, {base: common.MaxQuota, ratio: 2},
 		{base: 1, ratio: math.NaN()}, {base: 1, ratio: -1}, {base: 1, ratio: 10001}, {base: 1, ratio: 1.3, revenue: -1},
+		{base: 100, ratio: 0, revenue: 100, free: -1}, {base: 100, ratio: 0, revenue: 100, free: 101},
 	} {
 		other := model.NewLogOther()
-		appendUpstreamCostInfo(&relaycommon.RelayInfo{UpstreamCostRatio: &tc.ratio}, other, tc.base, tc.revenue)
+		appendUpstreamCostInfo(&relaycommon.RelayInfo{UpstreamCostRatio: &tc.ratio, FreeQuotaConsumed: tc.free}, other, tc.base, tc.revenue)
 		assert.NotContains(t, other.JSONString(), "cost_quota", "invalid cost must remain unknown")
+	}
+	for _, tc := range []struct {
+		name, source  string
+		free, wallet  int64
+		ratio, profit float64
+	}{
+		{"free DeepSeek", "free_allowance", 100, 0, 0, 0},
+		{"partial allowance", "free_allowance", 60, 40, 0.1, 30},
+		{"paid subscription", "subscription", 0, 0, 0.1, 90},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{BillingSource: tc.source, UpstreamCostRatio: &tc.ratio, FreeQuotaConsumed: tc.free, WalletQuotaDeducted: tc.wallet}
+			other := model.NewLogOther()
+			appendBillingInfo(info, other)
+			appendUpstreamCostInfo(info, other, 100, 100)
+			var stored struct {
+				FreeQuota   int64 `json:"free_quota"`
+				WalletQuota int64 `json:"wallet_quota_deducted"`
+				Admin       struct {
+					Cost struct {
+						FreeQuota int64   `json:"free_quota"`
+						Cost      float64 `json:"cost_quota"`
+						Revenue   int64   `json:"revenue_quota"`
+						Profit    float64 `json:"profit_quota"`
+					} `json:"cost"`
+				} `json:"admin_info"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &stored))
+			assert.Equal(t, tc.free, stored.FreeQuota)
+			assert.Equal(t, tc.wallet, stored.WalletQuota)
+			assert.Equal(t, tc.free, stored.Admin.Cost.FreeQuota)
+			assert.Equal(t, tc.ratio*100, stored.Admin.Cost.Cost)
+			assert.Equal(t, 100-tc.free, stored.Admin.Cost.Revenue)
+			assert.Equal(t, tc.profit, stored.Admin.Cost.Profit)
+		})
 	}
 }
 

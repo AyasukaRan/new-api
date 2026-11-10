@@ -45,6 +45,10 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if plan.FreeAllowance {
+		common.ApiErrorT(c, "Free allowance plans can only be granted by an administrator")
+		return
+	}
 	if !plan.Enabled {
 		common.ApiErrorT(c, "Subscription plan is not enabled")
 		return

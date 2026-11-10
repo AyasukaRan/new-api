@@ -33,6 +33,17 @@ import { buildQuotaAuditOperation } from './quota-audit-operation'
 
 export { normalizeTierLabel }
 
+/** The free portion is public billing information, independent of cost coverage. */
+export function getLogFreeQuota(
+  other: LogOtherData | null,
+  quota: number
+): number {
+  const free = other?.free_quota
+  return typeof free === 'number' && Number.isFinite(free)
+    ? Math.min(Math.max(0, quota), Math.max(0, free))
+    : 0
+}
+
 /** Only recorded, finite costs with a known provenance can be displayed. */
 export function getLogCostEstimate(
   other: LogOtherData | null

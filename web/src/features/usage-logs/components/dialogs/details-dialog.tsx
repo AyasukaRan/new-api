@@ -91,6 +91,7 @@ import {
   decodeBillingExprB64,
   getTieredBillingSummary,
   getLogCostEstimate,
+  getLogFreeQuota,
   hasAnyCacheTokens,
   isViolationFeeLog,
   formatFirstResponseTime,
@@ -423,6 +424,22 @@ function BillingBreakdown(props: {
         value={formatLogQuota(log.quota)}
         mono
       />
+      {getLogFreeQuota(other, log.quota) > 0 && (
+        <>
+          <DetailRow
+            label={t('Free allowance deduction')}
+            value={formatLogQuota(getLogFreeQuota(other, log.quota))}
+            mono
+          />
+          <DetailRow
+            label={t('Wallet charge')}
+            value={formatLogQuota(
+              log.quota - getLogFreeQuota(other, log.quota)
+            )}
+            mono
+          />
+        </>
+      )}
       {isAdmin && props.showCostEstimate && (
         <>
           {cost && (
@@ -451,7 +468,7 @@ function BillingBreakdown(props: {
           />
           <p className='text-muted-foreground text-xs'>
             {t(
-              'Gross profit is billed usage minus upstream cost. Subscription usage is not cash revenue.'
+              'Gross profit excludes free allowance deductions and subtracts upstream cost. Subscription usage is not cash revenue.'
             )}
           </p>
         </>
@@ -693,7 +710,9 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const isConsume = isConsumeLogType(props.log.type)
   const isTopup = props.log.type === 1
   const isManage = props.log.type === 3
-  const isSubscription = other?.billing_source === 'subscription'
+  const isSubscription =
+    other?.billing_source === 'subscription' ||
+    other?.billing_source === 'free_allowance'
   const isTieredBilling =
     isConsume &&
     !isViolation &&
@@ -1482,7 +1501,13 @@ export function DetailsDialog(props: DetailsDialogProps) {
 
         {/* Subscription billing details */}
         {isSubscription && other && (
-          <DetailSection label={t('Subscription Billing')}>
+          <DetailSection
+            label={t(
+              other.billing_source === 'free_allowance'
+                ? 'Free allowance'
+                : 'Subscription Billing'
+            )}
+          >
             {other.subscription_plan_id && (
               <DetailRow
                 label={t('Plan')}

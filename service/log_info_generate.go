@@ -25,21 +25,26 @@ func appendUpstreamCostInfo(info *relaycommon.RelayInfo, other *model.LogOther, 
 		return
 	}
 	ratio := *info.UpstreamCostRatio
-	if !(ratio >= 0 && ratio <= 10000) || !(base >= 0 && base <= common.MaxQuota) || revenue < 0 || revenue > common.MaxQuota {
+	if !(ratio >= 0 && ratio <= 10000) || !(base >= 0 && base <= common.MaxQuota) || revenue < 0 || revenue > common.MaxQuota || info.FreeQuotaConsumed < 0 || info.FreeQuotaConsumed > int64(revenue) {
 		return
 	}
 	cost := decimal.NewFromFloat(base).Mul(decimal.NewFromFloat(ratio))
 	if cost.GreaterThan(decimal.NewFromInt(common.MaxQuota)) {
 		return
 	}
-	other.SetAdmin("cost", map[string]any{
+	revenue -= int(info.FreeQuotaConsumed)
+	snapshot := map[string]any{
 		"cost_ratio":    ratio,
 		"base_quota":    base,
 		"cost_quota":    cost.InexactFloat64(),
 		"revenue_quota": revenue,
 		"profit_quota":  decimal.NewFromInt(int64(revenue)).Sub(cost).InexactFloat64(),
 		"estimated":     true,
-	})
+	}
+	if info.FreeQuotaConsumed > 0 {
+		snapshot["free_quota"] = info.FreeQuotaConsumed
+	}
+	other.SetAdmin("cost", snapshot)
 }
 
 // attachQuotaSaturationToOther nests a quota saturation marker under
@@ -214,14 +219,17 @@ func appendBillingInfo(relayInfo *relaycommon.RelayInfo, other *model.LogOther) 
 	if relayInfo == nil || other == nil {
 		return
 	}
-	// billing_source: "wallet" or "subscription"
+	// The source describes the settled wallet, subscription or free allowance.
 	if relayInfo.BillingSource != "" {
 		other.SetPublic("billing_source", relayInfo.BillingSource)
 	}
 	if relayInfo.UserSetting.BillingPreference != "" {
 		other.SetPublic("billing_preference", relayInfo.UserSetting.BillingPreference)
 	}
-	if relayInfo.BillingSource == "subscription" {
+	if relayInfo.FreeQuotaConsumed > 0 {
+		other.SetPublic("free_quota", relayInfo.FreeQuotaConsumed)
+	}
+	if relayInfo.BillingSource == "subscription" || relayInfo.BillingSource == "free_allowance" {
 		if relayInfo.SubscriptionId != 0 {
 			other.SetPublic("subscription_id", relayInfo.SubscriptionId)
 		}
@@ -256,8 +264,12 @@ func appendBillingInfo(relayInfo *relaycommon.RelayInfo, other *model.LogOther) 
 		if consumed > 0 {
 			other.SetPublic("subscription_consumed", consumed)
 		}
-		// Wallet quota is not deducted when billed from subscription.
-		other.SetPublic("wallet_quota_deducted", 0)
+		// Free allowances can share one request with a paid wallet remainder.
+		walletQuota := int64(0)
+		if relayInfo.BillingSource == "free_allowance" {
+			walletQuota = relayInfo.WalletQuotaDeducted
+		}
+		other.SetPublic("wallet_quota_deducted", walletQuota)
 	}
 }
 

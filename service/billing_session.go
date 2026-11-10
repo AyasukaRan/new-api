@@ -51,7 +51,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		return nil
 	}
 	delta := actualQuota - s.preConsumedQuota
-	if delta == 0 {
+	if delta == 0 && s.funding.Source() != BillingSourceFreeAllowance {
 		s.settled = true
 		return nil
 	}
@@ -64,7 +64,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	}
 	// 2) 调整令牌额度
 	var tokenErr error
-	if !s.relayInfo.IsPlayground {
+	if !s.relayInfo.IsPlayground && delta != 0 {
 		if delta > 0 {
 			tokenErr = model.DecreaseTokenQuota(s.relayInfo.TokenId, s.relayInfo.TokenKey, delta)
 		} else {
@@ -79,6 +79,11 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	// 3) 更新 relayInfo 上的订阅 PostDelta（用于日志）
 	if s.funding.Source() == BillingSourceSubscription {
 		s.relayInfo.SubscriptionPostDelta += int64(delta)
+	}
+	if free, ok := s.funding.(*FreeAllowanceFunding); ok && free.result != nil && free.result.Settled {
+		s.relayInfo.FreeQuotaConsumed = free.result.FreeQuota
+		s.relayInfo.WalletQuotaDeducted = free.result.WalletQuota
+		s.relayInfo.SubscriptionPostDelta = free.result.FreeQuota - s.relayInfo.SubscriptionPreConsumed
 	}
 	s.settled = true
 	return tokenErr
@@ -145,6 +150,9 @@ func (s *BillingSession) needsRefundLocked() bool {
 	}
 	// 订阅可能在 tokenConsumed=0 时仍预扣了额度
 	if sub, ok := s.funding.(*SubscriptionFunding); ok && sub.preConsumed > 0 {
+		return true
+	}
+	if free, ok := s.funding.(*FreeAllowanceFunding); ok && free.result != nil {
 		return true
 	}
 	return false
@@ -236,7 +244,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 			s.tokenConsumed = 0
 		}
 		// TODO: model 层应定义哨兵错误（如 ErrNoActiveSubscription），用 errors.Is 替代字符串匹配
-		if errors.Is(err, ErrInsufficientWalletQuota) {
+		if errors.Is(err, ErrInsufficientWalletQuota) || errors.Is(err, model.ErrFreeAllowanceWalletInsufficient) {
 			userQuota, quotaErr := model.GetUserQuota(s.relayInfo.UserId, false)
 			if quotaErr != nil {
 				userQuota = 0
@@ -263,6 +271,11 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 
 func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) error {
 	switch funding := s.funding.(type) {
+	case *FreeAllowanceFunding:
+		if err := funding.PreConsume(s.preConsumedQuota + delta); err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		return nil
 	case *WalletFunding:
 		if requireAvailableQuota {
 			// Image quantities and task retry prices are known before
@@ -302,6 +315,10 @@ func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) e
 
 func (s *BillingSession) rollbackFundingReserve(delta int) {
 	switch funding := s.funding.(type) {
+	case *FreeAllowanceFunding:
+		if err := funding.PreConsume(s.preConsumedQuota); err != nil {
+			common.SysError(common.LogText("failed to roll back free allowance reserve: %s", err.Error()))
+		}
 	case *WalletFunding:
 		if err := model.IncreaseUserQuota(funding.userId, delta, false); err != nil {
 			common.SysLog(common.LogText("error rolling back wallet funding reserve: %s", err.Error()))
@@ -375,6 +392,14 @@ func (s *BillingSession) syncRelayInfo() {
 		info.SubscriptionAmountUsedAfterPreConsume = sub.AmountUsedAfter + int64(s.extraReserved)
 		info.SubscriptionPlanId = sub.PlanId
 		info.SubscriptionPlanTitle = sub.PlanTitle
+	} else if free, ok := s.funding.(*FreeAllowanceFunding); ok && free.result != nil {
+		info.SubscriptionId = free.result.SubscriptionID
+		info.SubscriptionPlanId = free.result.PlanID
+		info.SubscriptionPlanTitle = free.result.PlanTitle
+		info.SubscriptionPreConsumed = free.result.FreeQuota
+		info.SubscriptionPostDelta = 0
+		info.SubscriptionAmountTotal = free.result.AmountTotal
+		info.SubscriptionAmountUsedAfterPreConsume = free.result.AmountUsed
 	} else {
 		info.SubscriptionId = 0
 		info.SubscriptionPreConsumed = 0
@@ -391,6 +416,26 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
+	// A designated gift applies before the user's paid-source preference.
+	if !relayInfo.IsChannelTest && relayInfo.TaskRelayInfo == nil {
+		matched, err := model.HasMatchingFreeAllowance(relayInfo.UserId, relayInfo.GetBillingModelName())
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
+		}
+		if matched {
+			userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+			if err != nil {
+				return nil, types.NewError(err, types.ErrorCodeQueryDataError, types.ErrOptionWithSkipRetry())
+			}
+			relayInfo.UserQuota = userQuota
+			session := &BillingSession{relayInfo: relayInfo, lang: i18n.StatedLang(c), funding: &FreeAllowanceFunding{requestID: relayInfo.RequestId, userID: relayInfo.UserId, modelName: relayInfo.GetBillingModelName()}}
+			if apiErr := session.preConsume(c, preConsumedQuota); apiErr == nil {
+				return session, nil
+			} else if !errors.Is(apiErr, model.ErrNoFreeAllowance) {
+				return nil, apiErr
+			}
+		}
+	}
 	pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
 
 	// 钱包路径需要先检查用户额度

@@ -118,6 +118,7 @@ export interface ToolSurchargeItem {
 }
 
 export interface LogCostEstimate {
+  free_quota?: number
   cost_ratio: number
   base_quota: number
   cost_quota: number
@@ -278,6 +279,8 @@ export interface LogOtherData {
   is_system_prompt_overwritten?: boolean
   po?: string[]
   billing_source?: string
+  free_quota?: number
+  wallet_quota_deducted?: number
   group?: string
   stream_status?: {
     status?: string

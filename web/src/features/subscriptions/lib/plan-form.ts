@@ -24,33 +24,89 @@ import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 import type { SubscriptionPlan, PlanPayload } from '../types'
 
 export function getPlanFormSchema(t: TFunction) {
-  return z.object({
-    title: z.string().min(1, t('Please enter plan title')),
-    subtitle: z.string().optional(),
-    price_amount: z.coerce.number().min(0, t('Please enter amount')),
-    duration_unit: z.enum(['year', 'month', 'day', 'hour', 'custom']),
-    duration_value: z.coerce.number().min(1),
-    custom_seconds: z.coerce.number().min(0).optional(),
-    quota_reset_period: z.enum([
-      'never',
-      'daily',
-      'weekly',
-      'monthly',
-      'custom',
-    ]),
-    quota_reset_custom_seconds: z.coerce.number().min(0).optional(),
-    enabled: z.boolean(),
-    sort_order: z.coerce.number(),
-    allow_balance_pay: z.boolean(),
-    allow_wallet_overflow: z.boolean(),
-    max_purchase_per_user: z.coerce.number().min(0),
-    total_amount: z.coerce.number().min(0),
-    upgrade_group: z.string().optional(),
-    downgrade_group: z.string().optional(),
-    stripe_price_id: z.string().optional(),
-    creem_product_id: z.string().optional(),
-    waffo_pancake_product_id: z.string().optional(),
-  })
+  return z
+    .object({
+      title: z.string().min(1, t('Please enter plan title')),
+      subtitle: z.string().optional(),
+      free_allowance: z.boolean(),
+      applicable_models: z.string(),
+      price_amount: z.coerce.number().min(0, t('Please enter amount')),
+      duration_unit: z.enum([
+        'year',
+        'month',
+        'day',
+        'hour',
+        'custom',
+        'forever',
+      ]),
+      duration_value: z.coerce.number().min(1),
+      custom_seconds: z.coerce.number().min(0).optional(),
+      quota_reset_period: z.enum([
+        'never',
+        'daily',
+        'weekly',
+        'monthly',
+        'custom',
+      ]),
+      quota_reset_custom_seconds: z.coerce.number().min(0).optional(),
+      enabled: z.boolean(),
+      sort_order: z.coerce.number(),
+      allow_balance_pay: z.boolean(),
+      allow_wallet_overflow: z.boolean(),
+      max_purchase_per_user: z.coerce.number().min(0),
+      total_amount: z.coerce.number().min(0),
+      upgrade_group: z.string().optional(),
+      downgrade_group: z.string().optional(),
+      stripe_price_id: z.string().optional(),
+      creem_product_id: z.string().optional(),
+      waffo_pancake_product_id: z.string().optional(),
+    })
+    .superRefine((values, ctx) => {
+      if (!values.free_allowance) {
+        if (values.duration_unit === 'forever') {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['duration_unit'],
+            message: t(
+              'Unlimited duration is only available for free allowances'
+            ),
+          })
+        }
+        return
+      }
+      const patterns = values.applicable_models
+        .split(/[,\n]/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+      if (values.total_amount <= 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['total_amount'],
+          message: t(
+            'Free allowance requires a positive quota and at least one model pattern'
+          ),
+        })
+      }
+      if (patterns.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['applicable_models'],
+          message: t(
+            'Free allowance requires a positive quota and at least one model pattern'
+          ),
+        })
+      } else if (
+        patterns.some(
+          (pattern) => pattern === '*' || pattern.slice(0, -1).includes('*')
+        )
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['applicable_models'],
+          message: t('Model patterns only support a trailing *'),
+        })
+      }
+    })
 }
 
 export type PlanFormValues = z.infer<ReturnType<typeof getPlanFormSchema>>
@@ -58,6 +114,8 @@ export type PlanFormValues = z.infer<ReturnType<typeof getPlanFormSchema>>
 export const PLAN_FORM_DEFAULTS: PlanFormValues = {
   title: '',
   subtitle: '',
+  free_allowance: false,
+  applicable_models: '',
   price_amount: 0,
   duration_unit: 'month',
   duration_value: 1,
@@ -81,6 +139,8 @@ export function planToFormValues(plan: SubscriptionPlan): PlanFormValues {
   return {
     title: plan.title || '',
     subtitle: plan.subtitle || '',
+    free_allowance: plan.free_allowance === true,
+    applicable_models: plan.applicable_models || '',
     price_amount: Number(plan.price_amount || 0),
     duration_unit: plan.duration_unit || 'month',
     duration_value: Number(plan.duration_value || 1),
@@ -105,7 +165,20 @@ export function formValuesToPlanPayload(values: PlanFormValues): PlanPayload {
   return {
     plan: {
       ...values,
-      price_amount: Number(values.price_amount || 0),
+      price_amount: values.free_allowance
+        ? 0
+        : Number(values.price_amount || 0),
+      applicable_models: values.free_allowance
+        ? values.applicable_models.trim()
+        : '',
+      allow_balance_pay: !values.free_allowance && values.allow_balance_pay,
+      allow_wallet_overflow:
+        values.free_allowance || values.allow_wallet_overflow,
+      stripe_price_id: values.free_allowance ? '' : values.stripe_price_id,
+      creem_product_id: values.free_allowance ? '' : values.creem_product_id,
+      waffo_pancake_product_id: values.free_allowance
+        ? ''
+        : values.waffo_pancake_product_id,
       currency: 'USD',
       duration_value: Number(values.duration_value || 0),
       custom_seconds: Number(values.custom_seconds || 0),
@@ -117,8 +190,10 @@ export function formValuesToPlanPayload(values: PlanFormValues): PlanPayload {
       sort_order: Number(values.sort_order || 0),
       max_purchase_per_user: Number(values.max_purchase_per_user || 0),
       total_amount: parseQuotaFromDollars(Number(values.total_amount || 0)),
-      upgrade_group: values.upgrade_group || '',
-      downgrade_group: values.downgrade_group || '',
+      upgrade_group: values.free_allowance ? '' : values.upgrade_group || '',
+      downgrade_group: values.free_allowance
+        ? ''
+        : values.downgrade_group || '',
     },
   }
 }

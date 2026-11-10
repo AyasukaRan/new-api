@@ -38,8 +38,14 @@ export const RESET_PERIODS = [
   { value: 'custom', labelKey: 'Custom (seconds)' },
 ] as const
 
-export function getDurationUnitOptions(t: TFunction) {
-  return DURATION_UNITS.map((u) => ({ value: u.value, label: t(u.labelKey) }))
+export function getDurationUnitOptions(t: TFunction, freeAllowance = false) {
+  return [
+    ...DURATION_UNITS.map((u) => ({
+      value: u.value as string,
+      label: t(u.labelKey),
+    })),
+    ...(freeAllowance ? [{ value: 'forever', label: t('Never expires') }] : []),
+  ]
 }
 
 export function getResetPeriodOptions(t: TFunction) {

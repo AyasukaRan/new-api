@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -13,9 +14,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// DashboardFinance contains only recorded costs. Unrecorded calls never count
-// as zero-cost sales, and profit uses only the revenue of covered calls.
+// FreeQuota includes every recorded allowance deduction, independently of cost.
+// Profit uses only paid revenue and costs of requests with valid cost snapshots.
 type DashboardFinance struct {
+	FreeQuota           int64   `json:"free_quota"`
 	CostQuota           float64 `json:"cost_quota"`
 	ProfitQuota         float64 `json:"profit_quota"`
 	CoveredRevenueQuota float64 `json:"covered_revenue_quota"`
@@ -26,6 +28,7 @@ type DashboardFinance struct {
 }
 
 func (f *DashboardFinance) add(other DashboardFinance) {
+	f.FreeQuota += other.FreeQuota
 	f.CostQuota += other.CostQuota
 	f.CoveredRevenueQuota += other.CoveredRevenueQuota
 	f.ProfitQuota = f.CoveredRevenueQuota - f.CostQuota
@@ -48,6 +51,7 @@ type dashboardFinanceKey struct {
 }
 
 type dashboardCostSnapshot struct {
+	FreeQuota    int64    `json:"free_quota"`
 	CostRatio    *float64 `json:"cost_ratio"`
 	BaseQuota    *float64 `json:"base_quota"`
 	CostQuota    *float64 `json:"cost_quota"`
@@ -59,23 +63,31 @@ type dashboardCostSnapshot struct {
 
 // recordedLogFinance validates a stored cost against the fee actually recorded
 // on that request. Reports never infer missing costs from today's prices.
-func recordedLogFinance(quota int, cost *dashboardCostSnapshot) (DashboardFinance, bool) {
+func recordedLogFinance(quota int, cost *dashboardCostSnapshot, freeQuota int64) (DashboardFinance, bool) {
+	finance := DashboardFinance{}
+	if quota < 0 || quota > common.MaxQuota || freeQuota < 0 || freeQuota > int64(quota) {
+		return finance, false
+	}
+	finance.FreeQuota = freeQuota
 	if cost == nil || cost.Estimated == nil || (!*cost.Estimated && cost.Source != "upstream_bill") {
-		return DashboardFinance{}, false
+		return finance, false
 	}
 	for _, amount := range []*float64{cost.CostRatio, cost.BaseQuota, cost.CostQuota, cost.RevenueQuota} {
 		if amount == nil || math.IsNaN(*amount) || math.IsInf(*amount, 0) || *amount < 0 || *amount > common.MaxQuota {
-			return DashboardFinance{}, false
+			return finance, false
 		}
 	}
-	if *cost.CostRatio > 10000 || quota < 0 || quota > common.MaxQuota || *cost.RevenueQuota != float64(quota) {
-		return DashboardFinance{}, false
+	if *cost.CostRatio > 10000 || cost.FreeQuota != freeQuota || *cost.RevenueQuota != float64(int64(quota)-freeQuota) {
+		return finance, false
 	}
-	profit := float64(quota) - *cost.CostQuota
+	profit := *cost.RevenueQuota - *cost.CostQuota
 	if cost.ProfitQuota == nil || math.IsNaN(*cost.ProfitQuota) || math.IsInf(*cost.ProfitQuota, 0) || math.Abs(*cost.ProfitQuota-profit) > 0.000001 {
-		return DashboardFinance{}, false
+		return finance, false
 	}
-	finance := DashboardFinance{CostQuota: *cost.CostQuota, ProfitQuota: profit, CoveredRevenueQuota: float64(quota), RecordedCount: 1}
+	finance.CostQuota = *cost.CostQuota
+	finance.ProfitQuota = profit
+	finance.CoveredRevenueQuota = *cost.RevenueQuota
+	finance.RecordedCount = 1
 	if *cost.Estimated {
 		finance.EstimatedCount = 1
 	} else {
@@ -86,14 +98,19 @@ func recordedLogFinance(quota int, cost *dashboardCostSnapshot) (DashboardFinanc
 
 func recordedLogFinanceJSON(quota int, raw string) (DashboardFinance, bool) {
 	var metadata struct {
-		AdminInfo struct {
-			Cost *dashboardCostSnapshot `json:"cost"`
-		} `json:"admin_info"`
+		FreeQuota int64           `json:"free_quota"`
+		AdminInfo json.RawMessage `json:"admin_info"`
 	}
 	if common.UnmarshalJsonStr(raw, &metadata) != nil {
 		return DashboardFinance{}, false
 	}
-	return recordedLogFinance(quota, metadata.AdminInfo.Cost)
+	var admin struct {
+		Cost *dashboardCostSnapshot `json:"cost"`
+	}
+	if len(metadata.AdminInfo) > 0 && common.Unmarshal(metadata.AdminInfo, &admin) != nil {
+		return recordedLogFinance(quota, nil, metadata.FreeQuota)
+	}
+	return recordedLogFinance(quota, admin.Cost, metadata.FreeQuota)
 }
 
 var dashboardFinanceCache = hot.NewHotCache[string, map[dashboardFinanceKey]DashboardFinance](hot.LRU, 8).
@@ -152,7 +169,7 @@ func scanDashboardFinance(ctx context.Context, startTime, endTime int64, usernam
 	query := applyLogSourceFilter(LOG_DB.WithContext(ctx).Model(&Log{})).
 		Select([]string{"created_at", "user_id", "username", "model_name", "channel_id", "token_id", "group", "quota", "other"}).
 		Where("type = ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, startTime, endTime).
-		Where("other LIKE ?", `%"cost"%`)
+		Where("other LIKE ? OR other LIKE ?", `%"cost"%`, `%"free_quota"%`)
 	if username != "" {
 		query = query.Where("username = ?", username)
 	}
@@ -170,16 +187,17 @@ func scanDashboardFinance(ctx context.Context, startTime, endTime int64, usernam
 // statement sees both indexed and pending logs in one snapshot. Only pending
 // rows need their original JSON, including while an earlier hour is being repaired.
 func logFinanceStat(tx *gorm.DB) (Stat, error) {
-	const pendingColumns = "1 AS calls, COALESCE(logs.quota,0) AS quota, 0 AS cost, 0 AS revenue, 0 AS recorded, 0 AS estimated, "
+	const pendingColumns = "1 AS calls, COALESCE(logs.quota,0) AS quota, 0 AS cost, 0 AS revenue, 0 AS free, 0 AS recorded, 0 AS estimated, "
 	var query *gorm.DB
 	if !DashboardFinanceRollupEnabled() {
-		query = tx.Session(&gorm.Session{}).Select(pendingColumns+"CASE WHEN logs.other LIKE ? THEN logs.other ELSE '' END AS raw", `%"cost"%`)
+		query = tx.Session(&gorm.Session{}).Select(pendingColumns+"CASE WHEN logs.other LIKE ? OR logs.other LIKE ? THEN logs.other ELSE '' END AS raw", `%"cost"%`, `%"free_quota"%`)
 	} else {
 		ready := tx.Session(&gorm.Session{}).
 			Joins("JOIN dashboard_finance_entries f ON f.log_id = logs.id").
 			Select(`COUNT(*) AS calls, COALESCE(SUM(logs.quota),0) AS quota,
 				COALESCE(SUM(f.cost_quota),0) AS cost,
-				COALESCE(SUM(CASE WHEN f.cost_quota IS NOT NULL THEN logs.quota ELSE 0 END),0) AS revenue,
+				COALESCE(SUM(CASE WHEN f.cost_quota IS NOT NULL THEN logs.quota - COALESCE(f.free_quota,0) ELSE 0 END),0) AS revenue,
+				COALESCE(SUM(f.free_quota),0) AS free,
 				COUNT(f.cost_quota) AS recorded,
 				COUNT(CASE WHEN f.cost_quota IS NOT NULL AND f.estimated THEN 1 END) AS estimated, NULL AS raw`)
 		pending := tx.Session(&gorm.Session{}).Select(pendingColumns + "logs.other AS raw").
@@ -198,7 +216,7 @@ func logFinanceStat(tx *gorm.DB) (Stat, error) {
 		var quota int
 		var raw sql.NullString
 		var finance DashboardFinance
-		if err := rows.Scan(&n, &quota, &finance.CostQuota, &finance.CoveredRevenueQuota, &finance.RecordedCount, &finance.EstimatedCount, &raw); err != nil {
+		if err := rows.Scan(&n, &quota, &finance.CostQuota, &finance.CoveredRevenueQuota, &finance.FreeQuota, &finance.RecordedCount, &finance.EstimatedCount, &raw); err != nil {
 			return Stat{}, err
 		}
 		if (quota > 0 && stat.Quota > math.MaxInt-quota) || (quota < 0 && stat.Quota < math.MinInt-quota) {

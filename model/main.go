@@ -535,6 +535,8 @@ func ensureSubscriptionPlanTableSQLite() error {
 	if !DB.Migrator().HasTable(tableName) {
 		createSQL := `CREATE TABLE ` + "`" + tableName + "`" + ` (
 ` + "`id`" + ` integer,
+` + "`free_allowance`" + ` numeric NOT NULL DEFAULT 0,
+` + "`applicable_models`" + ` text,
 ` + "`title`" + ` varchar(128) NOT NULL,
 ` + "`subtitle`" + ` varchar(255) DEFAULT '',
 ` + "`price_amount`" + ` decimal(10,6) NOT NULL,
@@ -572,6 +574,8 @@ PRIMARY KEY (` + "`id`" + `)
 		existing[c.Name] = struct{}{}
 	}
 	required := []sqliteColumnDef{
+		{Name: "free_allowance", DDL: "`free_allowance` numeric NOT NULL DEFAULT 0"},
+		{Name: "applicable_models", DDL: "`applicable_models` text"},
 		{Name: "title", DDL: "`title` varchar(128) NOT NULL"},
 		{Name: "subtitle", DDL: "`subtitle` varchar(255) DEFAULT ''"},
 		{Name: "price_amount", DDL: "`price_amount` decimal(10,6) NOT NULL"},

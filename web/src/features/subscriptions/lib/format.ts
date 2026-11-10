@@ -20,13 +20,14 @@ import type { TFunction } from 'i18next'
 
 import dayjs from '@/lib/dayjs'
 
-import type { SubscriptionPlan } from '../types'
+import type { SubscriptionPlan, UserSubscription } from '../types'
 
 export function formatDuration(
   plan: Partial<SubscriptionPlan>,
   t: TFunction
 ): string {
   const unit = plan?.duration_unit || 'month'
+  if (unit === 'forever') return t('Never expires')
   const value = plan?.duration_value || 1
   const unitLabels: Record<string, string> = {
     year: t('years'),
@@ -65,4 +66,13 @@ export function formatResetPeriod(
 export function formatTimestamp(ts: number): string {
   if (!ts) return '-'
   return dayjs(ts * 1000).format('YYYY-MM-DD HH:mm:ss')
+}
+
+export function isUnlimitedSubscription(
+  subscription: Pick<UserSubscription, 'free_allowance' | 'end_time'>
+): boolean {
+  return (
+    subscription.free_allowance === true &&
+    subscription.end_time >= 253402300799
+  )
 }

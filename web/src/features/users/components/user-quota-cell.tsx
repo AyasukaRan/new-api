@@ -136,6 +136,14 @@ export function UserQuotaCell(props: UserQuotaCellProps) {
                   : t('Unlimited')}
               </span>
             </div>
+            {subscription.free_allowance && (
+              <p className='text-muted-foreground'>
+                {t('Free allowance')}
+                {subscription.applicable_models
+                  ? ` · ${subscription.applicable_models}`
+                  : ''}
+              </p>
+            )}
             <div className='text-muted-foreground flex flex-wrap gap-x-1'>
               {subscription.next_reset_time > 0 ? (
                 <>

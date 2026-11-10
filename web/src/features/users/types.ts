@@ -36,6 +36,8 @@ export const userSubscriptionSummarySchema = z.object({
   id: z.number(),
   plan_id: z.number(),
   plan_title: z.string(),
+  free_allowance: z.boolean().optional(),
+  applicable_models: z.string().optional(),
   amount_used: z.number(),
   amount_total: z.number(),
   next_reset_time: z.number(),

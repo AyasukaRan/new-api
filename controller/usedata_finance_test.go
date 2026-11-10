@@ -228,6 +228,71 @@ func TestDashboardFinanceDatabaseMatrix(t *testing.T) {
 				handler(ctx)
 				assert.NotContains(t, recorder.Body.String(), `"finance"`)
 			}
+
+			// The original usage is retained, while only the paid remainder is
+			// revenue. Missing cost must not turn an allowance into paid income.
+			const allowanceHour int64 = 14400
+			free := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"free_allowance","free_quota":100,"admin_info":{"cost":{"cost_ratio":0,"base_quota":100,"free_quota":100,"cost_quota":0,"revenue_quota":0,"profit_quota":0,"estimated":true}}}`
+			mixed := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"free_allowance","free_quota":60,"admin_info":{"cost":{"cost_ratio":0.1,"base_quota":100,"free_quota":60,"cost_quota":10,"revenue_quota":40,"profit_quota":30,"estimated":true}}}`
+			missingCost := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"free_allowance","free_quota":25}`
+			paid := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"subscription","admin_info":{"cost":{"cost_ratio":0.1,"base_quota":100,"cost_quota":10,"revenue_quota":100,"profit_quota":90,"estimated":true}}}`
+			allowanceLogs := make([]model.Log, 0, 4)
+			for i, other := range []string{free, mixed, missingCost, paid} {
+				allowanceLogs = append(allowanceLogs, model.Log{UserId: 7, Username: "allowance", ModelName: "deepseek-flash", CreatedAt: allowanceHour + int64(i), Type: model.LogTypeConsume, Quota: 100, ChannelId: 1, TokenId: 11, Group: "deepseek", Other: other})
+			}
+			require.NoError(t, logDB.Create(&allowanceLogs).Error)
+			require.NoError(t, mainDB.Create(&model.QuotaData{UserID: 7, Username: "allowance", ModelName: "deepseek-flash", CreatedAt: allowanceHour, UseGroup: "deepseek", TokenID: 11, ChannelID: 1, NodeName: "allowance-node", ClientTool: "curl", Count: 4, Quota: 400}).Error)
+			wantAllowance := model.DashboardFinance{FreeQuota: 185, CostQuota: 20, CoveredRevenueQuota: 140, ProfitQuota: 120, RecordedCount: 3, EstimatedCount: 3, UnrecordedCount: 1}
+			filter := model.LogFilter{StartTimestamp: allowanceHour, EndTimestamp: allowanceHour + 3599}
+			pending, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, 400, pending.Quota)
+			assert.Equal(t, &wantAllowance, pending.Finance)
+			for _, handler := range []gin.HandlerFunc{GetAllQuotaDates, GetQuotaDatesByUser, GetAllSourceQuotaDates, GetAllFlowQuotaDates} {
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Set("role", common.RoleRootUser)
+				ctx.Set("id", 7)
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data?start_timestamp=14400&end_timestamp=17999&username=allowance&time_series=true", nil)
+				handler(ctx)
+				var payload struct {
+					Success bool `json:"success"`
+					Data    []struct {
+						Quota   int                     `json:"quota"`
+						Finance *model.DashboardFinance `json:"finance"`
+					} `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+				require.True(t, payload.Success, recorder.Body.String())
+				require.Len(t, payload.Data, 1)
+				assert.Equal(t, 400, payload.Data[0].Quota)
+				assert.Equal(t, &wantAllowance, payload.Data[0].Finance)
+			}
+			warmAllowance, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, pending, warmAllowance)
+			if dialect.kind != common.DatabaseTypeClickHouse {
+				lateAllowance := allowanceLogs[2]
+				lateAllowance.Id = 0
+				require.NoError(t, logDB.Create(&lateAllowance).Error)
+				wantAllowance.FreeQuota += 25
+				wantAllowance.UnrecordedCount++
+				mixedAllowance, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+				require.NoError(t, err)
+				assert.Equal(t, 500, mixedAllowance.Quota)
+				assert.Equal(t, &wantAllowance, mixedAllowance.Finance)
+				require.NoError(t, logDB.Model(&allowanceLogs[0]).Update("other", paid).Error)
+				wantAllowance.FreeQuota -= 100
+				wantAllowance.CostQuota += 10
+				wantAllowance.CoveredRevenueQuota += 100
+				wantAllowance.ProfitQuota += 90
+				for range 2 {
+					updated, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+					require.NoError(t, err)
+					assert.Equal(t, &wantAllowance, updated.Finance)
+					require.NoError(t, model.AttachQuotaFinance(t.Context(), nil, allowanceHour, allowanceHour+3599, "", false))
+				}
+			}
 		})
 	}
 }

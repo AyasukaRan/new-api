@@ -836,6 +836,7 @@ describe('administrator flow costs', () => {
       selectedUsers: ['user:1'],
     })
     expect(data.summary.finance).toEqual({
+      free_quota: 0,
       cost_quota: 130,
       profit_quota: -30,
       covered_revenue_quota: 100,

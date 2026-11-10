@@ -22,6 +22,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Skeleton } from '@/components/ui/skeleton'
+import { getDashboardMetricValue } from '@/features/dashboard/lib/finance'
 import { formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -159,6 +160,31 @@ export function CommonLogsStats() {
       />
       {showFinance && (
         <>
+          {(finance?.free_quota ?? 0) > 0 && currentStats && (
+            <>
+              <StatBadge
+                label={t('Free allowance deduction')}
+                value={
+                  sensitiveVisible
+                    ? formatLogQuota(finance?.free_quota ?? 0)
+                    : '••••'
+                }
+                accent='bg-sky-500/70'
+              />
+              <StatBadge
+                label={t('Revenue')}
+                value={
+                  sensitiveVisible
+                    ? formatLogQuota(
+                        getDashboardMetricValue(currentStats, 'quota') ?? 0
+                      )
+                    : '••••'
+                }
+                accent='bg-emerald-500/70'
+              />
+            </>
+          )}
+
           <StatBadge
             label={t('Upstream cost')}
             value={sensitiveVisible ? costValue : '••••'}

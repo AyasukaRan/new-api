@@ -19,13 +19,20 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import i18next from 'i18next'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import { SubscriptionPlansCard } from '@/features/wallet/components/subscription-plans-card'
 import { api } from '@/lib/api'
 import { formatQuota, formatTimestamp } from '@/lib/format'
 
+import {
+  getPlanFormSchema,
+  formValuesToPlanPayload,
+  PLAN_FORM_DEFAULTS,
+} from '../../../lib/plan-form'
 import type { PlanRecord } from '../../../types'
 import {
   SubscriptionsProvider,
@@ -351,4 +358,110 @@ it('disables confirmation while a reset is pending and prevents duplicate submis
   await waitFor(() =>
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   )
+})
+
+it('validates model-scoped free quotas and clears paid-plan settings from the payload', () => {
+  const schema = getPlanFormSchema(i18next.t)
+  const values = {
+    ...PLAN_FORM_DEFAULTS,
+    title: 'Monthly DS',
+    free_allowance: true,
+    applicable_models: 'deepseek-*',
+    duration_unit: 'forever' as const,
+    quota_reset_period: 'monthly' as const,
+    total_amount: 200,
+    price_amount: 20,
+    upgrade_group: 'vip',
+    stripe_price_id: 'price_old',
+  }
+  expect(schema.safeParse(values).success).toBe(true)
+  const payload = formValuesToPlanPayload(values).plan
+  expect(payload).toMatchObject({
+    free_allowance: true,
+    applicable_models: 'deepseek-*',
+    total_amount: 100000000,
+    price_amount: 0,
+    duration_unit: 'forever',
+    allow_balance_pay: false,
+    allow_wallet_overflow: true,
+    upgrade_group: '',
+    stripe_price_id: '',
+  })
+  for (const invalid of [
+    { total_amount: 0 },
+    { applicable_models: '' },
+    { applicable_models: '*' },
+    { applicable_models: 'deep*seek-*' },
+    { free_allowance: false },
+  ]) {
+    expect(schema.safeParse({ ...values, ...invalid }).success).toBe(false)
+  }
+})
+
+it('shows an administrator-granted free quota with its model scope and a readable lifetime', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/subscription/admin/plans'
+          ? [{ plan: { ...plan.plan, free_allowance: true } }]
+          : [
+              {
+                subscription: {
+                  ...subscription,
+                  free_allowance: true,
+                  applicable_models: 'deepseek-*',
+                  end_time: 253402300799,
+                },
+              },
+            ],
+    },
+  }))
+  renderDialog()
+  expect(
+    await screen.findByText('Never expires', { exact: false })
+  ).toBeVisible()
+  expect(screen.getByText('Free allowance · deepseek-*')).toBeVisible()
+  expect(screen.queryByText(/9999/)).not.toBeInTheDocument()
+})
+
+it('shows private free quotas in the wallet without making them purchasable', async () => {
+  const freeSubscription = {
+    subscription: {
+      ...subscription,
+      free_allowance: true,
+      applicable_models: 'deepseek-*',
+      end_time: 253402300799,
+    },
+  }
+  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data:
+        url === '/api/subscription/plans'
+          ? []
+          : {
+              billing_preference: 'wallet_only',
+              subscriptions: [freeSubscription],
+              all_subscriptions: [freeSubscription],
+            },
+    },
+  }))
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      }
+    >
+      <SubscriptionPlansCard topupInfo={null} />
+    </QueryClientProvider>
+  )
+  expect(await screen.findByText('Free allowance #11')).toBeVisible()
+  expect(screen.getByText('Never expires')).toBeVisible()
+  expect(screen.getByText('Applicable models: deepseek-*')).toBeVisible()
+  expect(screen.getByText(/Next reset/)).toBeVisible()
+  expect(screen.queryByText(/9999/)).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: /Purchase/ })
+  ).not.toBeInTheDocument()
 })

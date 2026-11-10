@@ -185,6 +185,8 @@ function mergeFlowFinance(
 ): DashboardFinance | undefined {
   if (!previous.finance && !incoming.finance) return undefined
   return {
+    free_quota:
+      (previous.finance?.free_quota ?? 0) + (incoming.finance?.free_quota ?? 0),
     cost_quota:
       (previous.finance?.cost_quota ?? 0) + (incoming.finance?.cost_quota ?? 0),
     profit_quota:

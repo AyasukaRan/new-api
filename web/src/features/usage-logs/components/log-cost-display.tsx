@@ -35,7 +35,11 @@ import {
 import { formatLogQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { getLogCostEstimate, hasToolSurcharge } from '../lib/format'
+import {
+  getLogCostEstimate,
+  getLogFreeQuota,
+  hasToolSurcharge,
+} from '../lib/format'
 import type { LogOtherData } from '../types'
 
 interface LogCostDisplayProps {
@@ -84,10 +88,14 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
   const { t } = useTranslation()
   const cost = props.isAdmin ? getLogCostEstimate(props.other) : null
   const isSubscription = props.other?.billing_source === 'subscription'
+  const freeQuota = getLogFreeQuota(props.other, props.quota)
   const showToolSurcharge = hasToolSurcharge(props.other)
-  const quota = isSubscription
-    ? (props.other?.subscription_consumed ?? props.quota)
-    : props.quota
+  let quota = props.quota
+  if (freeQuota > 0) {
+    quota = Math.max(0, props.quota - freeQuota)
+  } else if (isSubscription) {
+    quota = props.other?.subscription_consumed ?? props.quota
+  }
   let source: string | undefined
 
   // A log billed to a subscription always names its funding source: that
@@ -108,7 +116,9 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
       <div
         className={cn(
           'inline-flex w-fit',
-          props.isAdmin ? 'flex-col items-start gap-1' : 'items-center gap-1.5'
+          props.isAdmin || freeQuota > 0
+            ? 'flex-col items-start gap-1'
+            : 'items-center gap-1.5'
         )}
       >
         <div className='inline-flex items-center gap-1.5'>
@@ -145,6 +155,14 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
           </StatusBadge>
           {showToolSurcharge ? <ToolSurchargeMarker /> : null}
         </div>
+        {freeQuota > 0 && (
+          <div className='text-muted-foreground flex gap-2 text-[11px]'>
+            <span>{t('Free allowance deduction')}</span>
+            <span className='font-mono tabular-nums'>
+              {formatLogQuota(freeQuota)}
+            </span>
+          </div>
+        )}
         {props.isAdmin && (
           <dl className='text-muted-foreground grid grid-cols-[auto_auto] gap-x-2 gap-y-0.5 text-[11px]'>
             <dt>{t('Upstream cost')}</dt>

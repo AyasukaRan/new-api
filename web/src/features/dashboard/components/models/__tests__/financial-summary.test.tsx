@@ -20,7 +20,11 @@ import { cleanup, render, screen, within } from '@testing-library/react'
 import i18next from 'i18next'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 
-import { summarizeDashboardFinance } from '@/features/dashboard/lib/finance'
+import {
+  getDashboardMetricValue,
+  summarizeDashboardFinance,
+} from '@/features/dashboard/lib/finance'
+import { buildDashboardFlowData } from '@/features/dashboard/lib/flow'
 import type { QuotaDataItem } from '@/features/dashboard/types'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -117,4 +121,70 @@ it('marks wholly missing cost as unrecorded rather than zero', () => {
       'Not recorded'
     )
   ).toBeVisible()
+})
+
+it('excludes free allowances from revenue even when cost is not recorded', () => {
+  const rows: QuotaDataItem[] = [
+    {
+      created_at: 0,
+      count: 2,
+      quota: 1500000,
+      finance: {
+        cost_quota: 0,
+        profit_quota: 0,
+        covered_revenue_quota: 0,
+        recorded_count: 0,
+        actual_count: 0,
+        estimated_count: 0,
+        unrecorded_count: 2,
+        free_quota: 1000000,
+      },
+    },
+  ]
+  expect(summarizeDashboardFinance(rows).revenue_quota).toBe(500000)
+  expect(getDashboardMetricValue(rows[0], 'quota')).toBe(500000)
+  expect(getDashboardMetricValue(rows[0], 'requests')).toBe(2)
+  expect(getDashboardMetricValue(rows[0], 'profit')).toBeNull()
+  render(<FinancialSummary data={rows} />)
+  expect(
+    within(screen.getByRole('group', { name: 'Revenue' })).getByText('$1')
+  ).toBeVisible()
+})
+
+it('preserves free deductions when aggregating flow rows into the financial summary', () => {
+  if (!data[0].finance) throw new Error('Missing finance fixture')
+  const finance = {
+    ...data[0].finance,
+    free_quota: 250000,
+    profit_quota: -400000,
+    covered_revenue_quota: 250000,
+  }
+  const flow = buildDashboardFlowData(
+    [
+      {
+        user_id: 1,
+        username: 'member',
+        model_name: 'deepseek-flash',
+        channel_id: 2,
+        use_group: 'DeepSeek',
+        quota: 500000,
+        count: 1,
+        token_used: 100,
+        finance,
+      },
+    ],
+    'quota',
+    { role: 'admin' }
+  )
+  expect(flow.summary.quota).toBe(500000)
+  expect(flow.summary.finance?.free_quota).toBe(250000)
+  expect(
+    summarizeDashboardFinance([
+      {
+        quota: flow.summary.quota,
+        count: flow.summary.requests,
+        finance: flow.summary.finance,
+      },
+    ]).revenue_quota
+  ).toBe(250000)
 })

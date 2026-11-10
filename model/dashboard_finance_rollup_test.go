@@ -78,6 +78,28 @@ func TestDashboardFinanceRollup(t *testing.T) {
 				assert.Equal(t, float64(n)*100-cost, recorded.ProfitQuota)
 			}
 			check("alice", first, 1, 25)
+			// Upgrade the released projection table, retaining its existing
+			// facts and treating absent allowance deductions as zero.
+			type legacyFinanceEntry struct {
+				LogID     int `gorm:"primaryKey;autoIncrement:false"`
+				CostQuota *float64
+				Estimated bool
+			}
+			require.NoError(t, db.Migrator().DropTable(&DashboardFinanceEntry{}))
+			require.NoError(t, db.Table("dashboard_finance_entries").Migrator().CreateTable(&legacyFinanceEntry{}))
+			legacyCost := float64(25)
+			require.NoError(t, db.Table("dashboard_finance_entries").Create(&legacyFinanceEntry{LogID: a.Id, CostQuota: &legacyCost, Estimated: true}).Error)
+			require.NoError(t, MigrateDashboardFinance())
+			require.NoError(t, MigrateDashboardFinance())
+			var upgraded DashboardFinanceEntry
+			require.NoError(t, db.First(&upgraded, "log_id = ?", a.Id).Error)
+			assert.Nil(t, upgraded.FreeQuota)
+			require.NotNil(t, upgraded.CostQuota)
+			assert.Equal(t, legacyCost, *upgraded.CostQuota)
+			assert.Error(t, db.Create(&DashboardFinanceEntry{LogID: a.Id}).Error, "migration must retain log ID uniqueness")
+			upgradeStat, err := SumUsedQuota(t.Context(), LogFilter{StartTimestamp: first, EndTimestamp: first + 3599}, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, &DashboardFinance{CostQuota: 25, CoveredRevenueQuota: 100, ProfitQuota: 75, RecordedCount: 1, EstimatedCount: 1}, upgradeStat.Finance)
 			if kind == common.DatabaseTypeMySQL {
 				check("ALICE", first, 1, 25)
 			} else {
@@ -160,6 +182,36 @@ func TestDashboardFinanceRollup(t *testing.T) {
 			assert.EqualValues(t, 2, total.RecordedCount)
 			assert.Equal(t, 30.0, total.CostQuota)
 
+		})
+	}
+}
+
+func TestRecordedLogFinanceAllowance(t *testing.T) {
+	const cost = `"admin_info":{"cost":{"cost_ratio":0,"base_quota":100,"free_quota":100,"cost_quota":0,"revenue_quota":0,"profit_quota":0,"estimated":true}}`
+	for _, tc := range []struct {
+		name, other string
+		free        int64
+		known       bool
+	}{
+		{"fully free", `{"free_quota":100,` + cost + `}`, 100, true},
+		{"missing cost", `{"free_quota":100}`, 100, false},
+		{"invalid cost", `{"free_quota":100,"admin_info":{"cost":"invalid"}}`, 100, false},
+		{"cost mismatch", `{"free_quota":50,` + cost + `}`, 50, false},
+		{"cost cannot imply free", `{` + cost + `}`, 0, false},
+		{"negative allowance", `{"free_quota":-1}`, 0, false},
+		{"allowance exceeds usage", `{"free_quota":101}`, 0, false},
+		{"fractional allowance", `{"free_quota":0.5}`, 0, false},
+		{"invalid source metadata", `{"client_tool":{},"free_quota":100,` + cost + `}`, 100, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			finance, known := recordedLogFinanceJSON(100, tc.other)
+			assert.Equal(t, tc.known, known)
+			assert.Equal(t, tc.free, finance.FreeQuota)
+			assert.Zero(t, finance.ProfitQuota)
+			entry := projectDashboardLogFinance(&Log{Quota: 100, Other: tc.other}, make(map[dashboardFinanceKey]DashboardFinance))
+			require.NotNil(t, entry.FreeQuota)
+			assert.Equal(t, tc.free, *entry.FreeQuota)
+			assert.Equal(t, tc.known, entry.CostQuota != nil)
 		})
 	}
 }

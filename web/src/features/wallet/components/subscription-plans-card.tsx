@@ -51,7 +51,11 @@ import {
   updateBillingPreference,
 } from '@/features/subscriptions/api'
 import { SubscriptionPurchaseDialog } from '@/features/subscriptions/components/dialogs/subscription-purchase-dialog'
-import { formatDuration, formatResetPeriod } from '@/features/subscriptions/lib'
+import {
+  formatDuration,
+  formatResetPeriod,
+  isUnlimitedSubscription,
+} from '@/features/subscriptions/lib'
 import type {
   PlanRecord,
   UserSubscriptionRecord,
@@ -193,7 +197,12 @@ export function SubscriptionPlansCard({
   const hasActive = activeSubscriptions.length > 0
   const hasAny = allSubscriptions.length > 0
   const isAvailable = loading || plans.length > 0 || hasAny
-  const disablePref = !hasActive
+  const hasFreeAllowance = activeSubscriptions.some(
+    ({ subscription }) => subscription.free_allowance
+  )
+  const disablePref = !activeSubscriptions.some(
+    ({ subscription }) => !subscription.free_allowance
+  )
   const isSubPref =
     billingPreference === 'subscription_first' ||
     billingPreference === 'subscription_only'
@@ -380,7 +389,15 @@ export function SubscriptionPlansCard({
             </div>
           </div>
 
-          {disablePref && isSubPref && (
+          {hasFreeAllowance && (
+            <p className='text-muted-foreground mt-2 text-xs'>
+              {t(
+                'Free allowance is used first for matching models; excess usage is charged to the wallet.'
+              )}
+            </p>
+          )}
+
+          {disablePref && isSubPref && !hasFreeAllowance && (
             <p className='text-muted-foreground mt-2 text-xs'>
               {billingPreference === 'subscription_only'
                 ? t(
@@ -400,6 +417,10 @@ export function SubscriptionPlansCard({
               <div className='max-h-64 space-y-3 overflow-y-auto pr-1'>
                 {allSubscriptions.map((sub) => {
                   const subscription = sub.subscription
+                  const isUnlimited = isUnlimitedSubscription(subscription)
+                  const subscriptionLabel = subscription.free_allowance
+                    ? t('Free allowance')
+                    : t('Subscription')
                   const totalAmount = Number(subscription?.amount_total || 0)
                   const usedAmount = Number(subscription?.amount_used || 0)
                   const remainAmount =
@@ -455,25 +476,36 @@ export function SubscriptionPlansCard({
                         <div className='flex items-center gap-2'>
                           <span className='font-medium'>
                             {planTitle
-                              ? `${planTitle} · ${t('Subscription')} #${subscription?.id}`
-                              : `${t('Subscription')} #${subscription?.id}`}
+                              ? `${planTitle} · ${subscriptionLabel} #${subscription?.id}`
+                              : `${subscriptionLabel} #${subscription?.id}`}
                           </span>
                           {statusBadge}
                         </div>
                         {isActive && (
                           <span className='text-muted-foreground'>
-                            {t('{{count}} days remaining', {
-                              count: remainDays,
-                            })}
+                            {isUnlimited
+                              ? t('Never expires')
+                              : t('{{count}} days remaining', {
+                                  count: remainDays,
+                                })}
                           </span>
                         )}
                       </div>
-                      <div className='text-muted-foreground mt-1.5'>
-                        {endTimeLabel}{' '}
-                        {new Date(
-                          (subscription?.end_time || 0) * 1000
-                        ).toLocaleString()}
-                      </div>
+                      {!isUnlimited && (
+                        <div className='text-muted-foreground mt-1.5'>
+                          {endTimeLabel}{' '}
+                          {new Date(
+                            (subscription?.end_time || 0) * 1000
+                          ).toLocaleString()}
+                        </div>
+                      )}
+                      {subscription.free_allowance &&
+                        subscription.applicable_models && (
+                          <div className='text-muted-foreground mt-1'>
+                            {t('Applicable models')}:{' '}
+                            {subscription.applicable_models}
+                          </div>
+                        )}
                       {isActive && nextResetTime > 0 && (
                         <div className='text-muted-foreground mt-1'>
                           {t('Next reset')}:{' '}

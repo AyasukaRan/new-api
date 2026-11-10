@@ -64,7 +64,7 @@ import {
   deleteUserSubscription,
   resetUserSubscriptionsByPlan,
 } from '../../api'
-import { formatTimestamp } from '../../lib'
+import { formatTimestamp, isUnlimitedSubscription } from '../../lib'
 import type { UserSubscriptionRecord } from '../../types'
 
 interface Props {
@@ -264,7 +264,9 @@ export function UserSubscriptionsDialog(props: Props) {
               <Combobox
                 options={(plansQuery.data || []).map((p) => ({
                   value: String(p.plan.id),
-                  label: `${p.plan.title} ($${Number(p.plan.price_amount || 0).toFixed(2)})`,
+                  label: p.plan.free_allowance
+                    ? `${p.plan.title} · ${t('Free allowance')}`
+                    : `${p.plan.title} ($${Number(p.plan.price_amount || 0).toFixed(2)})`,
                 }))}
                 value={selectedPlanId}
                 onValueChange={(v) => v !== null && setSelectedPlanId(v)}
@@ -322,7 +324,12 @@ export function UserSubscriptionsDialog(props: Props) {
                             {planTitleMap.get(sub.plan_id) || `#${sub.plan_id}`}
                           </div>
                           <div className='text-muted-foreground text-sm'>
-                            {t('Source')}: {sub.source || '-'}
+                            {sub.free_allowance
+                              ? t('Free allowance')
+                              : `${t('Source')}: ${sub.source || '-'}`}
+                            {sub.free_allowance && sub.applicable_models
+                              ? ` · ${sub.applicable_models}`
+                              : ''}
                           </div>
                         </div>
                       )
@@ -350,7 +357,10 @@ export function UserSubscriptionsDialog(props: Props) {
                             {t('Start')}: {formatTimestamp(sub.start_time)}
                           </div>
                           <div>
-                            {t('End')}: {formatTimestamp(sub.end_time)}
+                            {t('End')}:{' '}
+                            {isUnlimitedSubscription(sub)
+                              ? t('Never expires')
+                              : formatTimestamp(sub.end_time)}
                           </div>
                         </div>
                       )

@@ -19,11 +19,15 @@ For commercial licensing, please contact support@quantumnous.com
 import type { DashboardFinance, DashboardMetric, QuotaDataItem } from '../types'
 
 export function getDashboardMetricValue(
-  item: QuotaDataItem,
+  item: Pick<QuotaDataItem, 'quota' | 'count' | 'finance'>,
   metric: DashboardMetric
 ): number | null {
   if (metric === 'requests') return Number(item.count) || 0
-  if (metric === 'quota') return Number(item.quota) || 0
+  if (metric === 'quota') {
+    const quota = Number(item.quota) || 0
+    const free = Number(item.finance?.free_quota) || 0
+    return Math.max(0, quota - Math.max(0, free))
+  }
   if (!item.finance || item.finance.recorded_count <= 0) return null
   const value =
     metric === 'cost' ? item.finance.cost_quota : item.finance.profit_quota
@@ -45,7 +49,7 @@ export function summarizeDashboardFinance(
     unrecorded_count: 0,
   }
   for (const row of data) {
-    summary.revenue_quota += Number(row.quota) || 0
+    summary.revenue_quota += getDashboardMetricValue(row, 'quota') ?? 0
     summary.count += Number(row.count) || 0
     if (!row.finance) {
       summary.unrecorded_count += Number(row.count) || 0

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -19,6 +20,7 @@ import (
 type DashboardFinanceEntry struct {
 	LogID     int `gorm:"primaryKey;autoIncrement:false"`
 	CostQuota *float64
+	FreeQuota *int64
 	Estimated bool
 }
 
@@ -191,8 +193,9 @@ func loadDashboardFinanceHours(ctx context.Context, start, end int64, username s
 func projectDashboardLogFinance(log *Log, costs map[dashboardFinanceKey]DashboardFinance) DashboardFinanceEntry {
 	entry := DashboardFinanceEntry{LogID: log.Id}
 	var metadata struct {
+		FreeQuota int64 `json:"free_quota"`
 		AdminInfo struct {
-			Cost *dashboardCostSnapshot `json:"cost"`
+			Cost json.RawMessage `json:"cost"`
 		} `json:"admin_info"`
 		ClientTool string `json:"client_tool"`
 		RootInfo   struct {
@@ -200,18 +203,27 @@ func projectDashboardLogFinance(log *Log, costs map[dashboardFinanceKey]Dashboar
 		} `json:"root_info"`
 	}
 	if common.UnmarshalJsonStr(log.Other, &metadata) != nil {
-		if finance, valid := recordedLogFinanceJSON(log.Quota, log.Other); valid {
+		finance, valid := recordedLogFinanceJSON(log.Quota, log.Other)
+		entry.FreeQuota = &finance.FreeQuota
+		if valid {
 			entry.CostQuota = &finance.CostQuota
 			entry.Estimated = finance.EstimatedCount == 1
 		}
 		return entry
 	}
-	finance, valid := recordedLogFinance(log.Quota, metadata.AdminInfo.Cost)
-	if !valid {
+	var cost *dashboardCostSnapshot
+	if len(metadata.AdminInfo.Cost) > 0 && common.Unmarshal(metadata.AdminInfo.Cost, &cost) != nil {
+		cost = nil
+	}
+	finance, valid := recordedLogFinance(log.Quota, cost, metadata.FreeQuota)
+	entry.FreeQuota = &finance.FreeQuota
+	if !valid && finance.FreeQuota == 0 {
 		return entry
 	}
-	entry.CostQuota = metadata.AdminInfo.Cost.CostQuota
-	entry.Estimated = *metadata.AdminInfo.Cost.Estimated
+	if valid {
+		entry.CostQuota = cost.CostQuota
+		entry.Estimated = *cost.Estimated
+	}
 	other := NewLogOther()
 	other.SetPublic("client_tool", metadata.ClientTool)
 	key := dashboardFinanceKey{CreatedAt: log.CreatedAt - log.CreatedAt%3600, UserID: log.UserId, Username: log.Username, ModelName: log.ModelName, ClientTool: other.ClientTool(), UseGroup: log.Group, TokenID: log.TokenId, ChannelID: log.ChannelId, NodeKnown: metadata.RootInfo.NodeName != nil}
@@ -309,7 +321,7 @@ func refreshDashboardFinanceHour(ctx context.Context, hour int64) error {
 				if len(entries) == 0 || reset {
 					return nil
 				}
-				return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "log_id"}}, DoUpdates: clause.AssignmentColumns([]string{"cost_quota", "estimated"})}).Create(&entries).Error
+				return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "log_id"}}, DoUpdates: clause.AssignmentColumns([]string{"cost_quota", "free_quota", "estimated"})}).Create(&entries).Error
 			})
 			if errors.Is(err, errFinanceHourChanged) {
 				break

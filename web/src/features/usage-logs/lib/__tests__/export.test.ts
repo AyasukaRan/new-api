@@ -108,6 +108,8 @@ describe('usage log CSV export', () => {
       '1906',
       '15',
       '$0.5',
+      '$0',
+      '$0.5',
       '3s',
       '203.0.113.9',
       'req-1',
@@ -232,3 +234,24 @@ test.each([3500, -1500])(
     expect(getLogCsvRow(log, false, t)).not.toContain('$0.013')
   }
 )
+
+test('exports free deductions apart from paid revenue without exposing admin costs to users', async () => {
+  const t = await chineseTranslator()
+  const log = {
+    ...consumeLog,
+    quota: 1500000,
+    other: JSON.stringify({
+      billing_source: 'free_allowance',
+      free_quota: 1000000,
+      wallet_quota_deducted: 500000,
+    }),
+  }
+  const adminHeader = getLogCsvHeader(true, t)
+  const adminRow = getLogCsvRow(log, true, t)
+  expect(adminRow[adminHeader.indexOf('Revenue')]).toBe('$1')
+  expect(adminRow[adminHeader.indexOf('Free allowance deduction')]).toBe('$2')
+  expect(adminRow[adminHeader.indexOf('Wallet charge')]).toBe('$1')
+  expect(adminRow[adminHeader.indexOf('Upstream cost')]).toBe('Not recorded')
+  expect(getLogCsvHeader(false, t)).not.toContain('Revenue')
+  expect(getLogCsvHeader(false, t)).not.toContain('Gross profit')
+})

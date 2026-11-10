@@ -286,3 +286,22 @@ it('offers a retry when subscription loading fails without claiming the wallet i
   await user.click(within(card).getByRole('button', { name: 'Retry' }))
   expect(await within(card).findByText('Subscription remaining')).toBeVisible()
 })
+
+it('names the free allowance and its monthly refresh separately from the wallet', async () => {
+  mockSubscriptions([
+    {
+      ...subscription,
+      free_allowance: true,
+      applicable_models: 'deepseek-*',
+      end_time: 253402300799,
+    },
+  ])
+  await renderSummary()
+  const card = await screen.findByRole('group', { name: 'Credit remaining' })
+  expect(
+    await within(card).findByText('Free allowance remaining')
+  ).toBeVisible()
+  expect(within(card).getByText(formatQuota(750000))).toBeVisible()
+  expect(within(card).getByText('Next allowance refresh')).toBeVisible()
+  expect(within(card).getByText(formatTimestamp(now + 86400))).toBeVisible()
+})

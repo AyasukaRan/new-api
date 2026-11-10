@@ -17,11 +17,12 @@ import (
 
 // Subscription duration units
 const (
-	SubscriptionDurationYear   = "year"
-	SubscriptionDurationMonth  = "month"
-	SubscriptionDurationDay    = "day"
-	SubscriptionDurationHour   = "hour"
-	SubscriptionDurationCustom = "custom"
+	SubscriptionDurationYear    = "year"
+	SubscriptionDurationMonth   = "month"
+	SubscriptionDurationDay     = "day"
+	SubscriptionDurationHour    = "hour"
+	SubscriptionDurationCustom  = "custom"
+	SubscriptionDurationForever = "forever"
 )
 
 // Subscription quota reset period
@@ -144,7 +145,9 @@ func InvalidateSubscriptionPlanCache(planId int) {
 
 // Subscription plan
 type SubscriptionPlan struct {
-	Id int `json:"id"`
+	FreeAllowance    bool   `json:"free_allowance" gorm:"not null;default:false"`
+	ApplicableModels string `json:"applicable_models" gorm:"type:text"`
+	Id               int    `json:"id"`
 
 	Title    string `json:"title" gorm:"type:varchar(128);not null"`
 	Subtitle string `json:"subtitle" gorm:"type:varchar(255);default:''"`
@@ -251,9 +254,12 @@ func GetSubscriptionOrderByTradeNo(tradeNo string) *SubscriptionOrder {
 
 // User subscription instance
 type UserSubscription struct {
-	Id     int `json:"id"`
-	UserId int `json:"user_id" gorm:"index;index:idx_user_sub_active,priority:1"`
-	PlanId int `json:"plan_id" gorm:"index"`
+	ResetGeneration  int64  `json:"-" gorm:"not null;default:0"`
+	FreeAllowance    bool   `json:"free_allowance" gorm:"not null;default:false"`
+	ApplicableModels string `json:"applicable_models" gorm:"type:text"`
+	Id               int    `json:"id"`
+	UserId           int    `json:"user_id" gorm:"index;index:idx_user_sub_active,priority:1"`
+	PlanId           int    `json:"plan_id" gorm:"index"`
 
 	AmountTotal int64 `json:"amount_total" gorm:"type:bigint;not null;default:0"`
 	AmountUsed  int64 `json:"amount_used" gorm:"type:bigint;not null;default:0"`
@@ -298,15 +304,17 @@ type SubscriptionSummary struct {
 
 // UserSubscriptionUsage is the read-only subscription projection shown in user lists.
 type UserSubscriptionUsage struct {
-	Id            int    `json:"id"`
-	UserId        int    `json:"-"`
-	PlanId        int    `json:"plan_id"`
-	PlanTitle     string `json:"plan_title"`
-	AmountUsed    int64  `json:"amount_used"`
-	AmountTotal   int64  `json:"amount_total"`
-	LastResetTime int64  `json:"last_reset_time"`
-	NextResetTime int64  `json:"next_reset_time"`
-	EndTime       int64  `json:"end_time"`
+	FreeAllowance    bool   `json:"free_allowance"`
+	ApplicableModels string `json:"applicable_models"`
+	Id               int    `json:"id"`
+	UserId           int    `json:"-"`
+	PlanId           int    `json:"plan_id"`
+	PlanTitle        string `json:"plan_title"`
+	AmountUsed       int64  `json:"amount_used"`
+	AmountTotal      int64  `json:"amount_total"`
+	LastResetTime    int64  `json:"last_reset_time"`
+	NextResetTime    int64  `json:"next_reset_time"`
+	EndTime          int64  `json:"end_time"`
 }
 
 type SubscriptionResetResult struct {
@@ -322,6 +330,12 @@ type SubscriptionResetResult struct {
 func calcPlanEndTime(start time.Time, plan *SubscriptionPlan) (int64, error) {
 	if plan == nil {
 		return 0, errors.New("plan is nil")
+	}
+	if plan.DurationUnit == SubscriptionDurationForever {
+		if !plan.FreeAllowance {
+			return 0, common.NewMessage("Unlimited duration is only available for free allowances")
+		}
+		return 253402300799, nil
 	}
 	if plan.DurationValue <= 0 && plan.DurationUnit != SubscriptionDurationCustom {
 		return 0, errors.New("duration_value must be > 0")
@@ -515,6 +529,12 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 			return nil, common.NewMessage("Purchase limit for this plan has been reached")
 		}
 	}
+	if err := plan.ValidateFreeAllowance(); err != nil {
+		return nil, err
+	}
+	if plan.FreeAllowance && source != "admin" {
+		return nil, common.NewMessage("Free allowance plans can only be granted by an administrator")
+	}
 	nowUnix := GetDBTimestampTx(tx)
 	now := time.Unix(nowUnix, 0)
 	endUnix, err := calcPlanEndTime(now, plan)
@@ -547,6 +567,8 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		allowWalletOverflow = *plan.AllowWalletOverflow
 	}
 	sub := &UserSubscription{
+		FreeAllowance:       plan.FreeAllowance,
+		ApplicableModels:    plan.ApplicableModels,
 		UserId:              userId,
 		PlanId:              plan.Id,
 		AmountTotal:         plan.TotalAmount,
@@ -593,6 +615,10 @@ func GrantDefaultSubscriptionTx(tx *gorm.DB, userId int) error {
 	}
 	if !plan.Enabled {
 		common.SysError(fmt.Sprintf("默认订阅套餐 %d 已停用，用户 %d 未获得订阅", planId, userId))
+		return nil
+	}
+	if plan.FreeAllowance {
+		common.SysError(common.LogText("default subscription plan %d is an administrator-only free allowance; skipped for user %d", planId, userId))
 		return nil
 	}
 	if _, err := CreateUserSubscriptionFromPlanTx(tx, userId, &plan, "auto"); err != nil {
@@ -814,6 +840,9 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		if err != nil {
 			return err
 		}
+		if plan.FreeAllowance {
+			return common.NewMessage("Free allowance plans can only be granted by an administrator")
+		}
 		if !plan.Enabled {
 			return common.NewMessage("Subscription plan is not enabled")
 		}
@@ -918,7 +947,7 @@ func GetActiveSubscriptionUsageByUserIDs(userIDs []int) (map[int][]UserSubscript
 	}
 	var subscriptions []UserSubscriptionUsage
 	err := DB.Table("user_subscriptions AS subscriptions").
-		Select("subscriptions.id, subscriptions.user_id, subscriptions.plan_id, plans.title AS plan_title, subscriptions.amount_used, subscriptions.amount_total, subscriptions.last_reset_time, subscriptions.next_reset_time, subscriptions.end_time").
+		Select("subscriptions.id, subscriptions.user_id, subscriptions.plan_id, plans.title AS plan_title, subscriptions.amount_used, subscriptions.amount_total, subscriptions.last_reset_time, subscriptions.next_reset_time, subscriptions.end_time, subscriptions.free_allowance, subscriptions.applicable_models").
 		Joins("LEFT JOIN subscription_plans AS plans ON plans.id = subscriptions.plan_id").
 		Where("subscriptions.user_id IN ? AND subscriptions.status = ? AND subscriptions.end_time > ?", userIDs, "active", common.GetTimestamp()).
 		Order("subscriptions.end_time ASC, subscriptions.id ASC").
@@ -941,6 +970,7 @@ func HasActiveUserSubscription(userId int) (bool, error) {
 	now := common.GetTimestamp()
 	var count int64
 	if err := DB.Model(&UserSubscription{}).
+		Where("free_allowance = ? OR free_allowance IS NULL", false).
 		Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
 		Count(&count).Error; err != nil {
 		return false, err
@@ -958,6 +988,7 @@ func UserActiveSubscriptionsAllowWalletOverflow(userId int) (bool, error) {
 	now := common.GetTimestamp()
 	var strictCount int64
 	if err := DB.Model(&UserSubscription{}).
+		Where("free_allowance = ? OR free_allowance IS NULL", false).
 		Where("user_id = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
 			userId, "active", now, false).
 		Count(&strictCount).Error; err != nil {
@@ -1056,6 +1087,15 @@ func AdminDeleteUserSubscription(userSubscriptionId int) (*common.Message, error
 			return err
 		}
 		userId = sub.UserId
+		if sub.FreeAllowance {
+			var pending int64
+			if err := tx.Model(&SubscriptionPreConsumeRecord{}).Where("user_subscription_id = ? AND free_allowance = ? AND status = ?", sub.Id, true, "reserved").Count(&pending).Error; err != nil {
+				return err
+			}
+			if pending > 0 {
+				return common.NewMessage("A free allowance with pending requests cannot be deleted; cancel it first")
+			}
+		}
 		target, err := downgradeUserGroupForSubscriptionTx(tx, &sub, now)
 		if err != nil {
 			return err
@@ -1086,6 +1126,7 @@ func resetUserSubscriptionTx(tx *gorm.DB, sub *UserSubscription, plan *Subscript
 		return errors.New("invalid reset args")
 	}
 	sub.AmountUsed = 0
+	sub.ResetGeneration++
 	if advanceResetTime {
 		nextReset := calcNextResetTime(time.Unix(now, 0), plan, sub.EndTime)
 		sub.NextResetTime = nextReset
@@ -1308,6 +1349,11 @@ func ExpireDueSubscriptions(limit int) (int, error) {
 
 // SubscriptionPreConsumeRecord stores idempotent pre-consume operations per request.
 type SubscriptionPreConsumeRecord struct {
+	PeriodGeneration   int64  `json:"period_generation" gorm:"not null;default:0"`
+	FreeAllowance      bool   `json:"free_allowance" gorm:"not null;default:false"`
+	PeriodStart        int64  `json:"period_start" gorm:"not null;default:0"`
+	WalletQuota        int64  `json:"wallet_quota" gorm:"not null;default:0"`
+	SettledQuota       int64  `json:"settled_quota" gorm:"not null;default:0"`
 	Id                 int    `json:"id"`
 	RequestId          string `json:"request_id" gorm:"type:varchar(64);uniqueIndex"`
 	UserId             int    `json:"user_id" gorm:"index"`
@@ -1361,6 +1407,7 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 		return nil
 	}
 	sub.AmountUsed = 0
+	sub.ResetGeneration++
 	sub.LastResetTime = base.Unix()
 	sub.NextResetTime = next
 	return tx.Save(sub).Error
@@ -1388,6 +1435,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 			return query.Error
 		}
 		if query.RowsAffected > 0 {
+			if existing.FreeAllowance {
+				return errors.New("request already belongs to a free allowance")
+			}
 			if existing.Status == "refunded" {
 				return errors.New("subscription pre-consume already refunded")
 			}
@@ -1405,6 +1455,7 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 
 		var subs []UserSubscription
 		if err := lockForUpdate(tx).
+			Where("free_allowance = ? OR free_allowance IS NULL", false).
 			Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
 			Order("end_time asc, id asc").
 			Find(&subs).Error; err != nil {

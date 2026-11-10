@@ -148,3 +148,40 @@ func refundWithRetry(fn func() error) error {
 	}
 	return lastErr
 }
+
+// FreeAllowanceFunding keeps the gift and wallet portions in one idempotent ledger.
+type FreeAllowanceFunding struct {
+	requestID string
+	userID    int
+	modelName string
+	reserved  int64
+	result    *model.FreeAllowanceResult
+}
+
+func (f *FreeAllowanceFunding) Source() string { return BillingSourceFreeAllowance }
+
+func (f *FreeAllowanceFunding) PreConsume(amount int) error {
+	result, err := model.UpdateFreeAllowanceFunding(f.requestID, f.userID, f.modelName, int64(amount), "reserve")
+	if err != nil {
+		return err
+	}
+	f.result = result
+	f.reserved = result.FreeQuota + result.WalletQuota
+	return nil
+}
+
+func (f *FreeAllowanceFunding) Settle(delta int) error {
+	result, err := model.UpdateFreeAllowanceFunding(f.requestID, f.userID, f.modelName, f.reserved+int64(delta), "settle")
+	if err != nil {
+		return err
+	}
+	f.result = result
+	return nil
+}
+
+func (f *FreeAllowanceFunding) Refund() error {
+	return refundWithRetry(func() error {
+		_, err := model.UpdateFreeAllowanceFunding(f.requestID, f.userID, f.modelName, 0, "refund")
+		return err
+	})
+}

@@ -23,6 +23,7 @@ import type { TimeGranularity } from '@/lib/time'
 // ============================================================================
 
 export interface DashboardFinance {
+  free_quota?: number
   cost_quota: number
   profit_quota: number
   covered_revenue_quota: number

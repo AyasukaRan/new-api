@@ -348,4 +348,19 @@ describe('log cost display', () => {
     expect(screen.getByText('$0.007')).toBeVisible()
     expect(screen.queryByText('Revenue')).not.toBeInTheDocument()
   })
+
+  test('shows the wallet remainder and free deduction separately for a mixed allowance call', () => {
+    renderCost({
+      quota: 1500000,
+      other: {
+        billing_source: 'free_allowance',
+        free_quota: 1000000,
+        wallet_quota_deducted: 500000,
+      },
+    })
+    expect(screen.getByText('$1')).toBeVisible()
+    expect(screen.getByText('Free allowance deduction')).toBeVisible()
+    expect(screen.getByText('$2')).toBeVisible()
+    expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
+  })
 })

@@ -300,3 +300,24 @@ it('shows zero financial totals for an explicitly empty filtered result', async 
   ).toBeVisible()
   expect(screen.queryByText('Not recorded')).not.toBeInTheDocument()
 })
+
+it('keeps full usage while showing the free deduction and net revenue to administrators', async () => {
+  const data = {
+    ...stats,
+    finance: { ...stats.finance, free_quota: 100000, profit_quota: -250000 },
+  }
+  vi.spyOn(api, 'get').mockResolvedValue(response(data))
+  await renderStats()
+  const free = await screen.findByRole('group', {
+    name: 'Free allowance deduction',
+  })
+  expect(within(free).getByText('$0.2')).toBeVisible()
+  expect(
+    within(screen.getByRole('group', { name: 'Revenue' })).getByText('$0.8')
+  ).toBeVisible()
+  expect(
+    within(screen.getByRole('group', { name: 'Usage' })).getByText('$1')
+  ).toBeVisible()
+  await userEvent.click(screen.getByRole('button', { name: 'Toggle amounts' }))
+  expect(within(free).getByText('••••')).toBeVisible()
+})

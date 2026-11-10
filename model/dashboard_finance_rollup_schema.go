@@ -58,7 +58,7 @@ func detectDashboardFinanceRollup() {
 		common.SysError(common.LogText("failed to verify finance triggers; using raw logs: %s", err.Error()))
 		return
 	}
-	if len(names) == 2 && LOG_DB.Migrator().HasTable(&DashboardFinanceHour{}) && LOG_DB.Migrator().HasTable(&DashboardFinanceEntry{}) {
+	if len(names) == 2 && LOG_DB.Migrator().HasTable(&DashboardFinanceHour{}) && LOG_DB.Migrator().HasTable(&DashboardFinanceEntry{}) && LOG_DB.Migrator().HasColumn(&DashboardFinanceEntry{}, "FreeQuota") {
 		ready, err := financeRollupReady()
 		if err == nil && ready {
 			dashboardFinanceDB.Store(LOG_DB)

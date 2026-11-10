@@ -150,6 +150,7 @@ export function SubscriptionsMutateDrawer({
     }
   }, [open, currentRow, form])
 
+  const freeAllowance = form.watch('free_allowance')
   const durationUnit = form.watch('duration_unit')
   const resetPeriod = form.watch('quota_reset_period')
   // Gate "+ Create on Pancake" on the same checks the mint handler runs.
@@ -259,7 +260,7 @@ export function SubscriptionsMutateDrawer({
     }
   }
 
-  const durationUnitOpts = getDurationUnitOptions(t)
+  const durationUnitOpts = getDurationUnitOptions(t, freeAllowance)
   const resetPeriodOpts = getResetPeriodOptions(t)
 
   return (
@@ -299,6 +300,62 @@ export function SubscriptionsMutateDrawer({
                 </IconBadge>
                 {t('Basic Info')}
               </h3>
+
+              <FormField
+                control={form.control}
+                name='free_allowance'
+                render={({ field }) => (
+                  <FormItem className={sideDrawerSwitchItemClassName()}>
+                    <div>
+                      <FormLabel>{t('Free allowance')}</FormLabel>
+                      <FormDescription>
+                        {t(
+                          'Granted by administrators only. Matching model usage is deducted first, then charged to the wallet.'
+                        )}
+                      </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={(checked) => {
+                          field.onChange(checked)
+                          if (checked) {
+                            form.setValue('price_amount', 0)
+                            form.setValue('allow_balance_pay', false)
+                            form.setValue('allow_wallet_overflow', true)
+                            form.setValue('upgrade_group', '')
+                            form.setValue('downgrade_group', '')
+                          } else if (
+                            form.getValues('duration_unit') === 'forever'
+                          ) {
+                            form.setValue('duration_unit', 'month')
+                          }
+                        }}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+              {freeAllowance && (
+                <FormField
+                  control={form.control}
+                  name='applicable_models'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Applicable models')}</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder='deepseek-*' />
+                      </FormControl>
+                      <FormDescription>
+                        {t(
+                          'Comma-separated model names or prefixes ending in *, for example deepseek-*.'
+                        )}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
 
               <FormField
                 control={form.control}
@@ -342,6 +399,7 @@ export function SubscriptionsMutateDrawer({
                         <Input
                           {...field}
                           type='number'
+                          disabled={freeAllowance}
                           step='0.01'
                           min={0}
                           onChange={(e) =>
@@ -391,7 +449,9 @@ export function SubscriptionsMutateDrawer({
                       </FormControl>
                       <FormDescription>
                         {t(
-                          'Total quota included in the plan, usable per billing period. 0 means unlimited.'
+                          freeAllowance
+                            ? 'Free quota per reset period. Unused quota does not carry over.'
+                            : 'Total quota included in the plan, usable per billing period. 0 means unlimited.'
                         )}
                       </FormDescription>
                       <FormMessage />
@@ -409,6 +469,7 @@ export function SubscriptionsMutateDrawer({
                       <FormLabel>{t('Upgrade Group')}</FormLabel>
                       <FormControl>
                         <Combobox
+                          disabled={freeAllowance}
                           options={[
                             { value: '__none__', label: t('No Upgrade') },
                             ...groupOptions.map((g) => ({
@@ -437,6 +498,7 @@ export function SubscriptionsMutateDrawer({
                       <FormLabel>{t('Downgrade Group')}</FormLabel>
                       <FormControl>
                         <Combobox
+                          disabled={freeAllowance}
                           options={[
                             {
                               value: '__none__',
@@ -543,6 +605,7 @@ export function SubscriptionsMutateDrawer({
                       </FormLabel>
                       <FormControl>
                         <Switch
+                          disabled={freeAllowance}
                           checked={field.value}
                           onCheckedChange={field.onChange}
                         />
@@ -561,6 +624,7 @@ export function SubscriptionsMutateDrawer({
                       </FormLabel>
                       <FormControl>
                         <Switch
+                          disabled={freeAllowance}
                           checked={field.value}
                           onCheckedChange={field.onChange}
                         />
@@ -615,7 +679,7 @@ export function SubscriptionsMutateDrawer({
                   )}
                 />
 
-                {durationUnit === 'custom' ? (
+                {durationUnit === 'custom' && (
                   <FormField
                     control={form.control}
                     name='custom_seconds'
@@ -638,7 +702,8 @@ export function SubscriptionsMutateDrawer({
                       </FormItem>
                     )}
                   />
-                ) : (
+                )}
+                {durationUnit !== 'custom' && durationUnit !== 'forever' && (
                   <FormField
                     control={form.control}
                     name='duration_value'
@@ -736,94 +801,96 @@ export function SubscriptionsMutateDrawer({
             </SideDrawerSection>
 
             {/* Payment Config */}
-            <SideDrawerSection>
-              <h3 className='flex items-center gap-2 text-sm font-medium'>
-                <IconBadge tone='warning' size='xs'>
-                  <CreditCard />
-                </IconBadge>
-                {t('Third-party Payment Config')}
-              </h3>
+            {!freeAllowance && (
+              <SideDrawerSection>
+                <h3 className='flex items-center gap-2 text-sm font-medium'>
+                  <IconBadge tone='warning' size='xs'>
+                    <CreditCard />
+                  </IconBadge>
+                  {t('Third-party Payment Config')}
+                </h3>
 
-              <FormField
-                control={form.control}
-                name='stripe_price_id'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Stripe Price ID</FormLabel>
-                    <FormControl>
-                      <Input {...field} placeholder='price_...' />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name='creem_product_id'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Creem Product ID</FormLabel>
-                    <FormControl>
-                      <Input {...field} placeholder='prod_...' />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name='waffo_pancake_product_id'
-                render={({ field }) => {
-                  // Raw-ID fallback for IDs not yet in the catalog.
-                  const items = pancakeProducts.map((p) => ({
-                    value: p.id,
-                    label: `${p.name} (${p.id})`,
-                  }))
-                  if (
-                    field.value &&
-                    !pancakeProducts.some((p) => p.id === field.value)
-                  ) {
-                    items.push({ value: field.value, label: field.value })
-                  }
-                  return (
+                <FormField
+                  control={form.control}
+                  name='stripe_price_id'
+                  render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Waffo Pancake Product ID</FormLabel>
-                      <div className='flex gap-2'>
-                        <Combobox
-                          options={items}
-                          value={field.value || ''}
-                          onValueChange={(v) => field.onChange(v)}
-                          disabled={items.length === 0}
-                          className='w-full flex-1'
-                          placeholder={t('Select a product')}
-                        />
-                        <Button
-                          type='button'
-                          variant='outline'
-                          onClick={handleCreatePancakeProduct}
-                          disabled={
-                            creatingPancakeProduct || !pancakeCreateReady
-                          }
-                          className='shrink-0'
-                        >
-                          {creatingPancakeProduct
-                            ? t('Creating...')
-                            : `+ ${t('Create')}`}
-                        </Button>
-                      </div>
-                      <FormDescription>
-                        {t(
-                          'Creates a Pancake product in the saved store using this plan’s title and price. Requires Waffo Pancake to be fully configured in Payment settings first.'
-                        )}
-                      </FormDescription>
+                      <FormLabel>Stripe Price ID</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder='price_...' />
+                      </FormControl>
                       <FormMessage />
                     </FormItem>
-                  )
-                }}
-              />
-            </SideDrawerSection>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name='creem_product_id'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Creem Product ID</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder='prod_...' />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name='waffo_pancake_product_id'
+                  render={({ field }) => {
+                    // Raw-ID fallback for IDs not yet in the catalog.
+                    const items = pancakeProducts.map((p) => ({
+                      value: p.id,
+                      label: `${p.name} (${p.id})`,
+                    }))
+                    if (
+                      field.value &&
+                      !pancakeProducts.some((p) => p.id === field.value)
+                    ) {
+                      items.push({ value: field.value, label: field.value })
+                    }
+                    return (
+                      <FormItem>
+                        <FormLabel>Waffo Pancake Product ID</FormLabel>
+                        <div className='flex gap-2'>
+                          <Combobox
+                            options={items}
+                            value={field.value || ''}
+                            onValueChange={(v) => field.onChange(v)}
+                            disabled={items.length === 0}
+                            className='w-full flex-1'
+                            placeholder={t('Select a product')}
+                          />
+                          <Button
+                            type='button'
+                            variant='outline'
+                            onClick={handleCreatePancakeProduct}
+                            disabled={
+                              creatingPancakeProduct || !pancakeCreateReady
+                            }
+                            className='shrink-0'
+                          >
+                            {creatingPancakeProduct
+                              ? t('Creating...')
+                              : `+ ${t('Create')}`}
+                          </Button>
+                        </div>
+                        <FormDescription>
+                          {t(
+                            'Creates a Pancake product in the saved store using this plan’s title and price. Requires Waffo Pancake to be fully configured in Payment settings first.'
+                          )}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )
+                  }}
+                />
+              </SideDrawerSection>
+            )}
           </form>
         </Form>
         <SheetFooter className={sideDrawerFooterClassName()}>
