@@ -228,7 +228,7 @@ func TestUserSubscriptionUsageAdminFlow(t *testing.T) {
 			require.NoError(t, db.Order("id").Find(&afterRead).Error)
 			assert.Equal(t, subscriptions, afterRead, "listing must not trigger overdue automatic resets")
 
-			for _, parameter := range []string{"", `,"advance_reset_time":false`} {
+			for resetIndex, parameter := range []string{"", `,"advance_reset_time":false`} {
 				recorder := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(recorder)
 				c.Request = httptest.NewRequest(http.MethodPost, "/api/subscription/admin/users/7101/subscriptions/reset", strings.NewReader(`{"plan_id":7201`+parameter+`}`))
@@ -251,9 +251,10 @@ func TestUserSubscriptionUsageAdminFlow(t *testing.T) {
 				for i, expected := range subscriptions {
 					if expected.Id == 7301 || expected.Id == 7302 {
 						expected.AmountUsed = 0
+						expected.ResetGeneration += int64(resetIndex + 1)
 					}
 					expected.UpdatedAt = saved[i].UpdatedAt
-					assert.Equal(t, expected, saved[i], "only matching active subscriptions' usage may change")
+					assert.Equal(t, expected, saved[i], "only matching active subscriptions' usage and reset generation may change")
 				}
 				// A late refund remains bounded at zero; subsequent usage keeps the original schedule.
 				require.NoError(t, model.PostConsumeUserSubscriptionDelta(7301, -400))
