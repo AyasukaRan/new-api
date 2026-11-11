@@ -616,7 +616,7 @@ func TestResponsesReasoningReplay(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		data, err = (&Adaptor{}).FinalizeResponsesRequest(info, data)
+		data, err = (&deepseek.Adaptor{}).FinalizeResponsesRequest(info, data)
 		if err != nil {
 			return nil, err
 		}
@@ -725,12 +725,13 @@ func BenchmarkResponsesReasoningReplay(b *testing.B) {
 					fmt.Fprintf(&input, `{"type":"function_call","name":"probe","call_id":"c%d","arguments":"{}"},{"type":"function_call_output","call_id":"c%d","output":"%s"}`, i, i, strings.Repeat("synthetic result ", 256))
 				}
 				input.WriteByte(']')
-				data := []byte(input.String())
+				data := []byte(`{"model":"deepseek-flash","input":` + input.String() + `}`)
+				adaptor := &deepseek.Adaptor{}
 				b.ReportAllocs()
 				b.SetBytes(int64(len(data)))
 				b.ResetTimer()
 				for b.Loop() {
-					_, err := normalizeResponsesReasoningReplay(data)
+					_, err := adaptor.FinalizeResponsesRequest(nil, data)
 					if err != nil {
 						b.Fatal(err)
 					}

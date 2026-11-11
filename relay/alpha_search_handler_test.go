@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -95,13 +96,14 @@ func (*recordedSettlement) Reserve(int) error        { return nil }
 func (*recordedSettlement) ReserveBeforeSubmit(int) error { return nil }
 
 // /v1/tools/search and /v1/tools/fetch follow /v1/alpha/search: the raw body
-// reaches /v1/tools/* unchanged and the response returns unchanged. With only
+// reaches /v1/tools/* unchanged and the response keeps its JSON values. With only
 // the built-in prices, a response DeepSeek bills (results, page content)
 // settles one call at the routing name's request price and no tokens, an
 // empty one releases the reservation, an upstream error keeps its status, and
 // a channel that cannot relay the endpoint fails retryably without sending
 // anything.
 func TestDeepSeekToolsHelper(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	service.InitHttpClient()
 	gin.SetMode(gin.TestMode)
 	batch, logConsume := common.BatchUpdateEnabled, common.LogConsumeEnabled
@@ -115,6 +117,7 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 		channelType, status        int
 		settled                    []int
 		refunded                   bool
+		invalidResponse            bool
 	}{
 		{name: "search with results", path: search, body: `{"query":"deepseek","count":2,"future_field":{"nested":true}}`,
 			response: results, channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, settled: []int{375}},
@@ -125,7 +128,7 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 		{name: "queued search is free", path: search, body: `{"query":"deepseek"}`,
 			response: results, channelType: constant.ChannelTypeDeepSeek, status: http.StatusAccepted, refunded: true},
 		{name: "invalid search response is free", path: search, body: `{"query":"deepseek"}`,
-			response: results + "truncated", channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true},
+			response: results + "truncated", channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true, invalidResponse: true},
 		{name: "fetch without readable content is free", path: fetch, body: `{"url":"https://example.com/"}`,
 			response: `{"content":"   "}`, channelType: constant.ChannelTypeDeepSeek, status: http.StatusOK, refunded: true},
 		{name: "fetch with non-text content is free", path: fetch, body: `{"url":"https://example.com/"}`,
@@ -180,8 +183,21 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 			}
 			assert.Equal(t, tc.path, gotPath)
 			assert.Equal(t, tc.body, string(gotBody))
+			if tc.invalidResponse {
+				// Invalid provider JSON must not bypass the identifier privacy
+				// boundary. Exercise the controller's final-error refund path.
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+				assert.Equal(t, types.ErrorCodeReadResponseBodyFailed, apiErr.GetErrorCode())
+				assert.True(t, types.IsSkipRetryError(apiErr))
+				assert.Empty(t, recorder.Body.String())
+				require.NotNil(t, RefundFailedRequestBilling(c, info, apiErr))
+			}
 			assert.Equal(t, tc.settled, settlement.settled)
 			assert.Equal(t, tc.refunded, settlement.refunded)
+			if tc.invalidResponse {
+				return
+			}
 			if tc.status < 200 || tc.status >= 300 {
 				require.NotNil(t, apiErr)
 				assert.Equal(t, tc.status, apiErr.StatusCode)
@@ -189,7 +205,7 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 			}
 			require.Nil(t, apiErr)
 			assert.Equal(t, tc.status, recorder.Code)
-			assert.Equal(t, tc.response, recorder.Body.String())
+			assert.JSONEq(t, tc.response, recorder.Body.String())
 		})
 	}
 }

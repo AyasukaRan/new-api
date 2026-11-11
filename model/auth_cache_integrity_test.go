@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -54,7 +55,7 @@ func TestAuthCacheFenceCompatibility(t *testing.T) {
 			count, err := common.RDB.Exists(t.Context(), keys...).Result()
 			require.NoError(t, err)
 			require.Zero(t, count, "compatibility fixture keys must be unused")
-			t.Cleanup(func() { assert.NoError(t, common.RDB.Del(t.Context(), keys...).Err()) })
+			t.Cleanup(func() { assert.NoError(t, common.RDB.Del(context.Background(), keys...).Err()) })
 			require.NoError(t, populateUserCache(user))
 			_, err = cacheInitToken(token)
 			require.NoError(t, err)
