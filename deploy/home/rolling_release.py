@@ -50,7 +50,7 @@ def command(*args, input=None, stderr=False, timeout=180):
 def inspect(name, image=False, optional=False):
     args = ['docker', *(['image', 'inspect'] if image else ['inspect']), name]
     result = subprocess.run(args, capture_output=True, text=True, timeout=30)
-    if optional and result.returncode and 'No such' in result.stderr:
+    if optional and result.returncode and 'no such' in result.stderr.lower():
         return None
     check(result.returncode == 0, 'inspect_failed')
     return json.loads(result.stdout)[0]

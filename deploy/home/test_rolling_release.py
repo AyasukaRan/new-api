@@ -111,6 +111,19 @@ class FakeRollout(release.Rollout):
 
 
 class RollingReleaseTests(unittest.TestCase):
+    def test_optional_inspect_accepts_missing_case_variants_but_not_daemon_errors(self):
+        for message in ('Error: No such object: fixture-bridge', 'error: no such object: fixture-bridge'):
+            result = release.subprocess.CompletedProcess([], 1, stdout='[]', stderr=message)
+            with patch.object(release.subprocess, 'run', return_value=result):
+                self.assertIsNone(release.inspect('fixture-bridge', optional=True))
+                with self.assertRaisesRegex(RuntimeError, 'inspect_failed'):
+                    release.inspect('fixture-bridge')
+        for message in ('Cannot connect to the Docker daemon', 'permission denied'):
+            result = release.subprocess.CompletedProcess([], 1, stdout='', stderr=message)
+            with patch.object(release.subprocess, 'run', return_value=result):
+                with self.assertRaisesRegex(RuntimeError, 'inspect_failed'):
+                    release.inspect('fixture-bridge', optional=True)
+
     def run_fake(self, flow):
         with patch.object(release, 'inspect', side_effect=flow.inspect):
             return flow.run()
