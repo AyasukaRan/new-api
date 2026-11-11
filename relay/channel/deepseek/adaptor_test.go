@@ -255,7 +255,9 @@ func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
 			inputBeforeFinalization := ojson.GetBytes(wire, "input").Raw
 			wire, err = (&deepseek.Adaptor{}).FinalizeResponsesRequest(info, wire)
 			require.NoError(t, err)
-			require.NoError(t, common.Unmarshal(wire, &actual))
+			var finalized dto.OpenAIResponsesRequest
+			require.NoError(t, common.Unmarshal(wire, &finalized))
+			actual = finalized
 			if test.want == "" {
 				assert.Equal(t, inputBeforeFinalization, string(actual.Input), "history that needs no repair keeps its wire bytes")
 			} else {
