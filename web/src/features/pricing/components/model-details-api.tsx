@@ -472,8 +472,9 @@ function buildSample(
   endpointType: string,
   ctx: SampleContext
 ): string {
-  if (isDeepSeekToolEndpoint(endpointType))
+  if (isDeepSeekToolEndpoint(endpointType)) {
     return buildDeepSeekToolSample(lang, ctx)
+  }
   if (endpointType === 'anthropic') return buildAnthropicSample(lang, ctx)
   if (endpointType === 'gemini') return buildGeminiSample(lang, ctx)
   if (endpointType === 'embeddings' || endpointType === 'jina-rerank') {
