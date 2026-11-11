@@ -533,14 +533,16 @@ export function CommonLogsFilterBar<TData>(
           onKeyDown={handleKeyDown}
         />
       </LogsFilterField>
-      <LogsFilterField>
-        <LogsFilterInput
-          placeholder={t('Upstream Request ID')}
-          value={filters.upstreamRequestId || ''}
-          onChange={(e) => handleChange('upstreamRequestId', e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-      </LogsFilterField>
+      {isAdmin && (
+        <LogsFilterField>
+          <LogsFilterInput
+            placeholder={t('Upstream Request ID')}
+            value={filters.upstreamRequestId || ''}
+            onChange={(e) => handleChange('upstreamRequestId', e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        </LogsFilterField>
+      )}
     </>
   )
 

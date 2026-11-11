@@ -479,6 +479,15 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 			policy.String())
 	}
 
+	if info.ChannelMeta != nil && info.ChannelType == appconstant.ChannelTypeDeepSeek {
+		requestID := c.GetString(common2.RequestIdKey)
+		if requestID == "" {
+			requestID = common2.NewRequestId()
+			c.Set(common2.RequestIdKey, requestID)
+		}
+		c.Header(common2.RequestIdKey, requestID)
+		c.Header("X-Request-Id", requestID)
+	}
 	if info.IsStream {
 		helper.SetEventStreamHeaders(c)
 		// 处理流式请求的 ping 保活
@@ -523,9 +532,13 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	// stream: the SSE scanner discards comments, event lines and blank lines
 	// before any handler is given a chance to look at them.
 	service.CaptureUpstreamResponse(c, info, resp)
-
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()
+	if err := protectDeepSeekResponse(c, info, resp); err != nil {
+		service.CloseResponseBodyGracefully(resp)
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody, types.ErrOptionWithSkipRetry())
+	}
+
 	return resp, nil
 }
 

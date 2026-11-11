@@ -153,6 +153,32 @@ function renderPreview(other: LogOtherData, isAdmin = true, type?: number) {
   return screen.getByRole('button', { name: /./ })
 }
 
+test.each([true, false])(
+  'only shows the upstream ID in administrator details (isAdmin %s)',
+  async (isAdmin) => {
+    const log = { ...makeLog({}), upstream_request_id: 'private-upstream-id' }
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueryClientProvider client={client}>
+          <DetailsDialog
+            log={log}
+            isAdmin={isAdmin}
+            isRoot={false}
+            open
+            onOpenChange={() => undefined}
+          />
+        </QueryClientProvider>
+      </I18nextProvider>
+    )
+    expect(await screen.findByText('req-1')).toBeVisible()
+    if (isAdmin) {
+      expect(screen.getByText('private-upstream-id')).toBeVisible()
+    } else {
+      expect(screen.queryByText('private-upstream-id')).not.toBeInTheDocument()
+    }
+  }
+)
+
 test('keeps log details open when the parent refreshes with unchanged data', async () => {
   const other = { model_price: 0.25 }
   const wrapper = ({ children }: { children: React.ReactNode }) => (

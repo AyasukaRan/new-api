@@ -22,18 +22,18 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	filter := model.LogFilter{
-		Source:            model.LogSourceUsage,
-		AdminSelfView:     c.GetInt("role") >= common.RoleAdminUser,
-		Type:              logType,
-		StartTimestamp:    startTimestamp,
-		EndTimestamp:      endTimestamp,
-		ModelName:         c.Query("model_name"),
-		TokenName:         c.Query("token_name"),
-		Group:             c.Query("group"),
-		RequestId:         c.Query("request_id"),
-		UpstreamRequestId: c.Query("upstream_request_id"),
+		Source:         model.LogSourceUsage,
+		AdminSelfView:  c.GetInt("role") >= common.RoleAdminUser,
+		Type:           logType,
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+		ModelName:      c.Query("model_name"),
+		TokenName:      c.Query("token_name"),
+		Group:          c.Query("group"),
+		RequestId:      c.Query("request_id"),
 	}
 	if admin {
+		filter.UpstreamRequestId = c.Query("upstream_request_id")
 		filter.Source = model.LogSource(c.DefaultQuery("source", string(model.LogSourceUsage)))
 		filter.Username = c.Query("username")
 		filter.Channel, _ = strconv.Atoi(c.Query("channel"))

@@ -168,6 +168,23 @@ it('loads all groups in the administrator view', async () => {
   expect(paths).not.toContain('/api/user/self/groups')
 })
 
+it.each([1, 10])(
+  'only exposes upstream ID filtering to administrators (role %s)',
+  async (role) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'viewer', role })
+    await renderFilter()
+    await userEvent.click(screen.getByRole('button', { name: 'Expand' }))
+    expect(screen.getByPlaceholderText('Request ID')).toBeVisible()
+    if (role >= 10) {
+      expect(screen.getByPlaceholderText('Upstream Request ID')).toBeVisible()
+    } else {
+      expect(
+        screen.queryByPlaceholderText('Upstream Request ID')
+      ).not.toBeInTheDocument()
+    }
+  }
+)
+
 it('confirms a keyboard choice before Enter submits the selected group', async () => {
   const router = await renderFilter()
   const input = screen.getByRole('combobox', { name: 'Group' })

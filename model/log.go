@@ -189,6 +189,7 @@ func assignDisplayLogIds(logs []*Log, startIdx int) {
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
 		logs[i].ChannelName = ""
+		logs[i].UpstreamRequestId = ""
 		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityUser)
 	}
 	assignDisplayLogIds(logs, startIdx)
@@ -216,6 +217,9 @@ func FormatLogList(logs []*Log, role int, deferBody bool) {
 		visibility = logOtherVisibilityAdmin
 	}
 	for _, log := range logs {
+		if visibility == logOtherVisibilityUser {
+			log.UpstreamRequestId = ""
+		}
 		log.Other = projectLogOtherJSON(log.Other, visibility, deferBody && log.CreatedAt > 0)
 	}
 }
@@ -917,6 +921,7 @@ func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*
 		log.Id = count
 		log.useCurrentUsername(names)
 		log.ChannelName = ""
+		log.UpstreamRequestId = ""
 		log.Other = formatLogOtherJSON(log.Other, logOtherVisibilityUser)
 		return fn(log)
 	})
