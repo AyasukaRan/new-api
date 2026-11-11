@@ -180,6 +180,11 @@ var RetryTimes = 0
 
 var IsMasterNode bool
 
+// AuthCacheLegacyFenceKeys keeps standalone Redis deployments compatible with
+// nodes predating hash-tagged authentication fences. All overlapping nodes must
+// share one namespace; changing it requires a coordinated rollout.
+var AuthCacheLegacyFenceKeys bool
+
 const (
 	NodeNameSourceManual   = "manual"
 	NodeNameSourceHostname = "hostname"

@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -9,12 +10,120 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestAuthCacheFenceCompatibility(t *testing.T) {
+	if address := os.Getenv("TEST_REDIS_ADDR"); address != "" {
+		previousClient, previousEnabled, previousFrequency := common.RDB, common.RedisEnabled, common.SyncFrequency
+		client := redis.NewClient(&redis.Options{Addr: address})
+		require.NoError(t, client.Ping(t.Context()).Err())
+		common.RDB, common.RedisEnabled, common.SyncFrequency = client, true, 60
+		t.Cleanup(func() {
+			assert.NoError(t, client.Close())
+			common.RDB, common.RedisEnabled, common.SyncFrequency = previousClient, previousEnabled, previousFrequency
+		})
+	} else {
+		useUserCacheMiniRedis(t)
+	}
+	for index, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy_%t", legacy), func(t *testing.T) {
+			previous := common.AuthCacheLegacyFenceKeys
+			common.AuthCacheLegacyFenceKeys = legacy
+			t.Cleanup(func() { common.AuthCacheLegacyFenceKeys = previous })
+			user := User{Id: 781234000 + index, Role: common.RoleCommonUser, Status: common.UserStatusEnabled,
+				Group: "default", AuthVersion: 1, Quota: 100}
+			token := Token{Id: user.Id, UserId: user.Id, Key: fmt.Sprintf("fence-compatibility-%d", index),
+				Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 100, ModelLimitsEnabled: true,
+				ModelLimits: "allowed-model"}
+			userKey, tokenKey := getUserCacheKey(user.Id), getTokenCacheKey(token.Key)
+			peerUserFence := fmt.Sprintf("auth:user:fence:{%s}", userKey)
+			peerUserVersion := fmt.Sprintf("auth:user:version:{%s}", userKey)
+			peerTokenFence := fmt.Sprintf("token:fence:{%s}", tokenKey)
+			if legacy {
+				peerUserFence = fmt.Sprintf("auth:user:fence:%d", user.Id)
+				peerUserVersion = fmt.Sprintf("auth:user:version:%d", user.Id)
+				peerTokenFence = "token:fence:" + common.GenerateHMAC(token.Key)
+			}
+			keys := []string{userKey, tokenKey, peerUserFence, peerUserVersion, peerTokenFence}
+			count, err := common.RDB.Exists(t.Context(), keys...).Result()
+			require.NoError(t, err)
+			require.Zero(t, count, "compatibility fixture keys must be unused")
+			t.Cleanup(func() { assert.NoError(t, common.RDB.Del(t.Context(), keys...).Err()) })
+			require.NoError(t, populateUserCache(user))
+			_, err = cacheInitToken(token)
+			require.NoError(t, err)
+
+			// A peer's pre-commit deny fence must stop both reads and stale fills.
+			require.NoError(t, common.RDB.Set(t.Context(), peerUserFence, 2, time.Minute).Err())
+			require.NoError(t, common.RDB.Set(t.Context(), peerTokenFence, 1, time.Minute).Err())
+			require.NoError(t, common.RDB.Del(t.Context(), tokenKey).Err())
+			_, err = cacheGetUserBase(user.Id)
+			assert.ErrorIs(t, err, ErrUserAuthCachePending)
+			assert.ErrorIs(t, populateUserCache(user), ErrUserAuthCachePending)
+			filled, err := cacheInitToken(token)
+			require.NoError(t, err)
+			assert.Zero(t, filled)
+			require.NoError(t, common.RDB.Del(t.Context(), peerUserFence, peerTokenFence).Err())
+
+			// These are the old writer's fence checks, with stale fills represented
+			// by an observable write. A new node's mutation must block that writer.
+			const peerUserFill = `
+local pending = tonumber(redis.call('GET', KEYS[2]) or '0')
+local committed = tonumber(redis.call('GET', KEYS[3]) or '0')
+local current = tonumber(redis.call('HGET', KEYS[1], 'AuthVersion') or '0')
+if pending > 1 or committed > 1 or current > 1 then return 0 end
+redis.call('HSET', KEYS[1], 'AuthVersion', 1, 'Status', 1)
+return 1`
+			const peerTokenFill = `
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+redis.call('HSET', KEYS[1], 'Id', ARGV[1], 'Status', 1)
+return 1`
+			require.NoError(t, SetUserAuthVersionFence(user.Id, 2))
+			require.NoError(t, invalidateTokenCacheForMutation(token.Key))
+			filled, err = common.RDB.Eval(t.Context(), peerUserFill, []string{userKey, peerUserFence, peerUserVersion}).Int()
+			require.NoError(t, err)
+			assert.Zero(t, filled)
+			filled, err = common.RDB.Eval(t.Context(), peerTokenFill, []string{tokenKey, peerTokenFence}, token.Id).Int()
+			require.NoError(t, err)
+			assert.Zero(t, filled)
+			require.NoError(t, publishCommittedUserAuthVersion(user.Id, 2))
+			filled, err = common.RDB.Eval(t.Context(), peerUserFill, []string{userKey, peerUserFence, peerUserVersion}).Int()
+			require.NoError(t, err)
+			assert.Zero(t, filled, "committed restrictions must still reject delayed peer snapshots")
+			require.NoError(t, common.RDB.Set(t.Context(), peerUserVersion, 3, 0).Err())
+			assert.ErrorIs(t, populateUserCache(user), ErrUserAuthCachePending)
+
+			// Compatibility never disables integrity checks or replaces quota counters.
+			require.NoError(t, common.RDB.Del(t.Context(), keys...).Err())
+			require.NoError(t, populateUserCache(user))
+			_, err = cacheInitToken(token)
+			require.NoError(t, err)
+			require.NoError(t, common.RDB.HSet(t.Context(), userKey, "Role", common.RoleRootUser, "Quota", 30).Err())
+			require.NoError(t, common.RDB.HSet(t.Context(), tokenKey, "ModelLimitsEnabled", "false", "RemainQuota", 30).Err())
+			_, err = cacheGetUserBase(user.Id)
+			assert.Error(t, err)
+			_, err = cacheGetTokenByKey(token.Key)
+			assert.Error(t, err)
+			require.NoError(t, populateUserCache(user))
+			_, err = cacheInitToken(token)
+			require.NoError(t, err)
+			cachedUser, err := cacheGetUserBase(user.Id)
+			require.NoError(t, err)
+			cachedToken, err := cacheGetTokenByKey(token.Key)
+			require.NoError(t, err)
+			assert.Equal(t, common.RoleCommonUser, cachedUser.Role)
+			assert.True(t, cachedToken.ModelLimitsEnabled)
+			assert.Equal(t, 30, cachedUser.Quota)
+			assert.Equal(t, 30, cachedToken.RemainQuota)
+		})
+	}
+}
 
 func TestAuthCacheIntegrityDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {

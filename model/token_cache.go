@@ -29,9 +29,12 @@ func getTokenCacheKey(key string) string {
 	return fmt.Sprintf("token:%s", common.GenerateHMAC(key))
 }
 
-// The fence uses the cache key as its hash tag so cacheInitToken's script
-// reads both keys from one slot on sharded Redis.
+// By default the fence uses the cache key as its hash tag so cacheInitToken's
+// script reads both keys from one slot on sharded Redis.
 func getTokenCacheFenceKey(key string) string {
+	if common.AuthCacheLegacyFenceKeys {
+		return fmt.Sprintf("token:fence:%s", common.GenerateHMAC(key))
+	}
 	return fmt.Sprintf("token:fence:{%s}", getTokenCacheKey(key))
 }
 
