@@ -111,14 +111,20 @@ class FakeRollout(release.Rollout):
 
 
 class RollingReleaseTests(unittest.TestCase):
-    def test_optional_inspect_accepts_missing_case_variants_but_not_daemon_errors(self):
-        for message in ('Error: No such object: fixture-bridge', 'error: no such object: fixture-bridge'):
+    def test_optional_inspect_only_accepts_exact_named_missing_object(self):
+        for message in ('Error: No such object: fixture-bridge', 'error: no such object: fixture-bridge',
+                        'Error response from daemon: No such container: fixture-bridge',
+                        'No such image: fixture-bridge', '  NO SUCH OBJECT: FIXTURE-BRIDGE\n'):
             result = release.subprocess.CompletedProcess([], 1, stdout='[]', stderr=message)
             with patch.object(release.subprocess, 'run', return_value=result):
                 self.assertIsNone(release.inspect('fixture-bridge', optional=True))
                 with self.assertRaisesRegex(RuntimeError, 'inspect_failed'):
                     release.inspect('fixture-bridge')
-        for message in ('Cannot connect to the Docker daemon', 'permission denied'):
+        for message in ('Cannot connect to the Docker daemon', 'permission denied',
+                        'Cannot connect to the Docker daemon: dial unix /var/run/docker.sock: connect: no such file or directory',
+                        'error: no such object: other-bridge',
+                        'error: no such object: fixture-bridge\npermission denied',
+                        'error:\nno such object: fixture-bridge'):
             result = release.subprocess.CompletedProcess([], 1, stdout='', stderr=message)
             with patch.object(release.subprocess, 'run', return_value=result):
                 with self.assertRaisesRegex(RuntimeError, 'inspect_failed'):

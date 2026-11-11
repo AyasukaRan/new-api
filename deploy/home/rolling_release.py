@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -50,7 +51,9 @@ def command(*args, input=None, stderr=False, timeout=180):
 def inspect(name, image=False, optional=False):
     args = ['docker', *(['image', 'inspect'] if image else ['inspect']), name]
     result = subprocess.run(args, capture_output=True, text=True, timeout=30)
-    if optional and result.returncode and 'no such' in result.stderr.lower():
+    if optional and result.returncode and re.fullmatch(
+            r'(?:error(?: response from daemon)?:[ \t]*)?no such (?:object|container|image):[ \t]*' + re.escape(name),
+            result.stderr.strip(), re.IGNORECASE):
         return None
     check(result.returncode == 0, 'inspect_failed')
     return json.loads(result.stdout)[0]
