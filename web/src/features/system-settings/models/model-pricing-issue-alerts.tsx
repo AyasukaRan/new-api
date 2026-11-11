@@ -53,9 +53,7 @@ export function ModelPricingIssueSummary(props: ModelPricingIssueSummaryProps) {
       </AlertTitle>
       <AlertDescription className='flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
         <p className='min-w-0'>
-          {t(
-            'These models have missing or outdated plugin prices. Select a model to see what needs to change.'
-          )}
+          {t('Models with missing or incompatible prices on enabled channels.')}
         </p>
         <div className='flex shrink-0 flex-wrap gap-2'>
           {props.showingAttention && (
@@ -79,6 +77,7 @@ export function ModelPricingIssueSummary(props: ModelPricingIssueSummaryProps) {
 
 export function ModelPricingIssueDetails(props: {
   issues: ModelPricingIssue[]
+  onSelectIssue?: (issue: ModelPricingIssue) => void
 }) {
   const { t } = useTranslation()
   if (props.issues.length === 0) return null
@@ -91,6 +90,12 @@ export function ModelPricingIssueDetails(props: {
       'Select this plugin below and reconfigure its price using the current billing fields, then save.'
     ),
     stale: t('Select this plugin below, remove its saved price, then save.'),
+    invalid_expression: t(
+      'Reconfigure this model using the current billing fields, then save.'
+    ),
+    invalid_task_price: t(
+      'Reconfigure this model using the current billing fields, then save.'
+    ),
   }
 
   return (
@@ -99,17 +104,43 @@ export function ModelPricingIssueDetails(props: {
       <AlertTitle>{t('Pricing changes needed')}</AlertTitle>
       <AlertDescription>
         <ul className='flex min-w-0 flex-col gap-3 [overflow-wrap:anywhere]'>
-          {props.issues.map((issue) => (
-            <li key={issue.plugin_key}>
-              <p className='text-foreground font-medium'>
-                {t('{{name}}: {{reason}}', {
-                  name: issue.plugin_name,
-                  reason: t(PRICING_ISSUE_REASONS[issue.reason]),
-                })}
-              </p>
-              <p>{instructions[issue.reason]}</p>
-            </li>
-          ))}
+          {props.issues.map((issue) => {
+            const channel = issue.channel_id
+              ? `#${issue.channel_id} ${issue.channel_name ?? ''}`.trim()
+              : issue.channel_name
+            const name = [channel, issue.plugin_name || issue.plugin_key]
+              .filter(Boolean)
+              .join(' · ')
+            const reason = t(PRICING_ISSUE_REASONS[issue.reason])
+            const label = name
+              ? t('{{name}}: {{reason}}', { name, reason })
+              : reason
+            return (
+              <li
+                key={`${issue.channel_id ?? ''}:${issue.plugin_key ?? ''}:${issue.reason}`}
+              >
+                {props.onSelectIssue ? (
+                  <Button
+                    type='button'
+                    variant='link'
+                    className='h-auto p-0 text-start whitespace-normal'
+                    onClick={() => props.onSelectIssue?.(issue)}
+                  >
+                    {label}
+                  </Button>
+                ) : (
+                  <p className='text-foreground font-medium'>{label}</p>
+                )}
+                <p>
+                  {issue.channel_id
+                    ? t(
+                        'Select the affected channel, update this model’s price, then save.'
+                      )
+                    : instructions[issue.reason]}
+                </p>
+              </li>
+            )
+          })}
         </ul>
       </AlertDescription>
     </Alert>

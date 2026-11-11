@@ -584,8 +584,16 @@ it('lists one row per affected model and opens each affected channel without tou
       '#12 Task route · Enabled'
     )
   )
+  const issueDetails = screen.getByRole('note', {
+    name: 'Pricing changes needed',
+  })
+  expect(
+    within(issueDetails).getAllByText(
+      'Select the affected channel, update this model’s price, then save.'
+    )
+  ).toHaveLength(2)
   await user.click(
-    within(rows[0]).getByRole('button', {
+    within(issueDetails).getByRole('button', {
       name: '#7 Ordinary: Invalid billing expression',
     })
   )
