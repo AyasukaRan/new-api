@@ -217,6 +217,7 @@ func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
 		{name: "complete null content", input: `[{"type":"reasoning","content":null},` + call + `]`, want: `[{"type":"reasoning","content":[{"type":"reasoning_text","text":" "}]},` + call + `]`},
 		{name: "all real reasoning remains byte identical", input: `[ ` + real + `, ` + call + ` ]`},
 		{name: "tool definitions require prior assistant reasoning", tools: `[{"type":"function","name":"lookup"}]`, input: `[{"role":"assistant","content":"Earlier answer"},` + user + `]`, want: `[` + blank + `,{"role":"assistant","content":"Earlier answer"},` + user + `]`},
+		{name: "tool history requires earlier assistant reasoning without definitions", input: `[` + assistant + `,` + user + `,` + call + `,` + output + `]`, want: `[` + blank + `,` + assistant + `,` + user + `,` + blank + `,` + call + `,` + output + `]`},
 		{name: "custom tool turns", input: `[{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"Done"},` + assistant + `]`, want: `[` + blank + `,{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"Done"},` + blank + `,` + assistant + `]`},
 		{name: "mapped model enables repair", model: "application-model", upstream: "deepseek-flash", input: `[` + call + `]`, want: `[` + blank + `,` + call + `]`},
 		{name: "explicit effort enables alias", model: "provider-alias", effort: "max", input: `[` + call + `]`, want: `[` + blank + `,` + call + `]`},
@@ -239,7 +240,7 @@ func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
 			if upstream == "" {
 				upstream = model
 			}
-			request := dto.OpenAIResponsesRequest{Model: model, Input: json.RawMessage(test.input), Tools: json.RawMessage(test.tools)}
+			request := dto.OpenAIResponsesRequest{Model: upstream, Input: json.RawMessage(test.input), Tools: json.RawMessage(test.tools)}
 			if test.effort != "" {
 				request.Reasoning = &dto.Reasoning{Effort: test.effort}
 			}
@@ -248,8 +249,15 @@ func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
 			require.NoError(t, err)
 			actual, ok := converted.(dto.OpenAIResponsesRequest)
 			require.True(t, ok)
+			assert.Equal(t, request.Input, actual.Input, "conversion must defer history repair until after parameter overrides")
+			wire, err := common.Marshal(actual)
+			require.NoError(t, err)
+			inputBeforeFinalization := ojson.GetBytes(wire, "input").Raw
+			wire, err = (&deepseek.Adaptor{}).FinalizeResponsesRequest(info, wire)
+			require.NoError(t, err)
+			require.NoError(t, common.Unmarshal(wire, &actual))
 			if test.want == "" {
-				assert.Equal(t, test.input, string(actual.Input), "history that needs no repair keeps its original bytes")
+				assert.Equal(t, inputBeforeFinalization, string(actual.Input), "history that needs no repair keeps its wire bytes")
 			} else {
 				assert.JSONEq(t, test.want, string(actual.Input))
 			}
@@ -258,9 +266,9 @@ func TestDeepSeekResponsesCompletesThinkingToolHistory(t *testing.T) {
 			if strings.Contains(test.input, `9007199254740993`) {
 				assert.Contains(t, string(actual.Input), `9007199254740993`, "unknown integer precision must survive repair")
 			}
-			again, err := (&deepseek.Adaptor{}).ConvertOpenAIResponsesRequest(nil, info, actual)
+			again, err := (&deepseek.Adaptor{}).FinalizeResponsesRequest(info, wire)
 			require.NoError(t, err)
-			assert.Equal(t, actual.Input, again.(dto.OpenAIResponsesRequest).Input, "repeated conversion must not duplicate reasoning")
+			assert.Equal(t, wire, again, "repeated finalization must not duplicate reasoning")
 		})
 	}
 }
@@ -643,12 +651,12 @@ func TestResponsesReasoningReplay(t *testing.T) {
 		{"preserve", "[" + actual + "," + note + "," + call + "," + output + "]", "[" + actual + "," + note + "," + call + "," + output + "]"},
 		{"interleaved", "[" + call + "," + output + "," + call2 + "," + output2 + "]", "[" + r + "," + call + "," + output + "," + r + "," + call2 + "," + output2 + "]"},
 		{"after tool", "[" + call + "," + output + "," + note + "]", "[" + r + "," + call + "," + output + "," + r + "," + note + "]"},
-		{"new user boundary", "[" + call + "," + output + `,{"role":"user","content":"Next"},` + note + "]", "[" + r + "," + call + "," + output + `,{"role":"user","content":"Next"},` + note + "]"},
+		{"new user boundary", "[" + call + "," + output + `,{"role":"user","content":"Next"},` + note + "]", "[" + r + "," + call + "," + output + `,{"role":"user","content":"Next"},` + r + "," + note + "]"},
 		{"parallel", "[" + note + "," + call + "," + call2 + "," + output + "," + output2 + "]", "[" + r + "," + note + "," + call + "," + call2 + "," + output + "," + output2 + "]"},
 		{"missing text", `[{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text"}]},` + call + "]", "[" + r + "," + call + "]"},
 		{"null text", `[{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":null}]},` + call + "]", "[" + r + "," + call + "]"},
 		{"preserve whitespace", "[" + r + "," + call + "]", "[" + r + "," + call + "]"},
-		{"unknown boundary", "[" + call + "," + output + `,{"type":"future_item"},` + note + "]", "[" + r + "," + call + "," + output + `,{"type":"future_item"},` + note + "]"},
+		{"unknown boundary", "[" + call + "," + output + `,{"type":"future_item"},` + note + "]", "[" + r + "," + call + "," + output + `,{"type":"future_item"},` + r + "," + note + "]"},
 		{"custom tool", "[" + note + "," + customCall + "," + customOutput + "," + note + "]", "[" + r + "," + note + "," + customCall + "," + customOutput + "," + r + "," + note + "]"},
 		{"message only", "[" + note + "]", "[" + note + "]"},
 		{"string input", `"hello"`, `"hello"`},

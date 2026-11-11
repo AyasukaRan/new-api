@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
@@ -265,118 +264,7 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(_ *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
 	applyDeepSeekV4ResponsesThinkingSuffix(info, &request)
-	if err := completeDeepSeekResponsesThinkingHistory(info, &request); err != nil {
-		return nil, err
-	}
 	return request, nil
-}
-
-func completeDeepSeekResponsesThinkingHistory(info *relaycommon.RelayInfo, request *dto.OpenAIResponsesRequest) error {
-	modelName := request.Model
-	if info != nil && info.ChannelMeta != nil && info.UpstreamModelName != "" {
-		modelName = info.UpstreamModelName
-	}
-	modelName = strings.ToLower(modelName)
-	thinkingEnabled := strings.HasPrefix(modelName, "deepseek-v4-") || modelName == "deepseek-flash" || modelName == "deepseek-pro" || modelName == "deepseek-reasoner"
-	if request.Reasoning != nil && request.Reasoning.Effort != "" {
-		thinkingEnabled = request.Reasoning.Effort != "none"
-	}
-	if !thinkingEnabled || common.GetJsonType(request.Input) != "array" {
-		return nil
-	}
-	var items []common.RawMessage
-	if err := common.Unmarshal(request.Input, &items); err != nil {
-		return nil
-	}
-	var tools []common.RawMessage
-	if len(request.Tools) > 0 && common.Unmarshal(request.Tools, &tools) != nil {
-		return nil
-	}
-	hasTools := len(tools) > 0
-	type historyItem struct {
-		Type string `json:"type"`
-		Role string `json:"role"`
-	}
-	history := make([]historyItem, len(items))
-	for i := range items {
-		if err := common.Unmarshal(items[i], &history[i]); err != nil {
-			return nil
-		}
-		if history[i].Type == "function_call" || history[i].Type == "custom_tool_call" {
-			hasTools = true
-		}
-	}
-	if !hasTools {
-		return nil
-	}
-
-	// DeepSeek rejects an empty reasoning_text even when present. A single
-	// space satisfies the required field without inventing missing thoughts.
-	emptyText := []byte(`{"type":"reasoning_text","text":" "}`)
-	emptyReasoning := common.RawMessage(`{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":" "}]}`)
-	completed := make([]common.RawMessage, 0, len(items))
-	hasReasoning := false
-	changed := false
-	for i, item := range history {
-		raw := items[i]
-		switch {
-		case item.Type == "reasoning":
-			content := ojson.GetBytes(raw, "content")
-			parts := make([]common.RawMessage, 0)
-			contentChanged := false
-			hasText := false
-			for _, part := range content.Array() {
-				rawPart := common.RawMessage(part.Raw)
-				if part.Get("type").String() == "reasoning_text" {
-					hasText = true
-					if part.Get("text").String() == "" {
-						var err error
-						rawPart, err = ojson.SetBytes(rawPart, "text", " ")
-						if err != nil {
-							return err
-						}
-						contentChanged = true
-					}
-				}
-				parts = append(parts, rawPart)
-			}
-			if !hasText && (!content.Exists() || content.Raw == "null" || content.IsArray()) {
-				parts = append(parts, emptyText)
-				contentChanged = true
-			}
-			if contentChanged {
-				encoded, err := common.Marshal(parts)
-				if err != nil {
-					return err
-				}
-				raw, err = ojson.SetRawBytes(raw, "content", encoded)
-				if err != nil {
-					return err
-				}
-				changed = true
-			}
-			hasReasoning = true
-		case (item.Type == "message" || item.Type == "") && item.Role == "assistant",
-			item.Type == "function_call", item.Type == "custom_tool_call":
-			if !hasReasoning {
-				completed = append(completed, emptyReasoning)
-				hasReasoning = true
-				changed = true
-			}
-		default:
-			hasReasoning = false
-		}
-		completed = append(completed, raw)
-	}
-	if !changed {
-		return nil
-	}
-	input, err := common.Marshal(completed)
-	if err != nil {
-		return fmt.Errorf("error completing DeepSeek responses thinking history: %w", err)
-	}
-	request.Input = input
-	return nil
 }
 
 func applyDeepSeekV4ResponsesThinkingSuffix(info *relaycommon.RelayInfo, request *dto.OpenAIResponsesRequest) {

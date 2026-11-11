@@ -24,11 +24,19 @@ func (a *Adaptor) FinalizeResponsesRequest(info *relaycommon.RelayInfo, body []b
 	official := parseErr == nil && upstream.Scheme == "https" &&
 		strings.EqualFold(upstream.Hostname(), "api.deepseek.com") &&
 		(upstream.Port() == "" || upstream.Port() == "443")
-	if !official || gjson.GetBytes(body, "reasoning.effort").String() == "none" {
+	// Channel overrides may replace both model and effort, so inspect only the
+	// final wire body rather than the earlier request or routing metadata.
+	modelName := strings.ToLower(gjson.GetBytes(body, "model").String())
+	thinkingEnabled := strings.HasPrefix(modelName, "deepseek-v4-") || modelName == "deepseek-flash" || modelName == "deepseek-pro" || modelName == "deepseek-reasoner"
+	if effort := gjson.GetBytes(body, "reasoning.effort").String(); effort != "" {
+		thinkingEnabled = effort != "none"
+	}
+	if !official || !thinkingEnabled {
 		return body, nil
 	}
 	input := []byte(gjson.GetBytes(body, "input").Raw)
-	normalized, err := normalizeResponsesReasoningReplay(input)
+	tools := gjson.GetBytes(body, "tools")
+	normalized, err := normalizeResponsesReasoningReplay(input, tools.IsArray() && len(tools.Array()) > 0)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +51,7 @@ func (a *Adaptor) FinalizeResponsesRequest(info *relaycommon.RelayInfo, body []b
 // Reproduced against the official endpoint on 2026-10-28:
 // https://github.com/yetone/magpie/commit/f4cc7459ea0d5e39409e481d5d31db6d2bace64b
 // A space is a protocol placeholder, never reconstructed model reasoning.
-func normalizeResponsesReasoningReplay(input json.RawMessage) (json.RawMessage, error) {
+func normalizeResponsesReasoningReplay(input json.RawMessage, hasTools bool) (json.RawMessage, error) {
 	root := gjson.ParseBytes(input)
 	if !root.IsArray() {
 		return input, nil
@@ -57,6 +65,13 @@ func normalizeResponsesReasoningReplay(input json.RawMessage) (json.RawMessage, 
 	values := root.Array()
 	items := make([]string, len(values))
 	for i, value := range values {
+		if !value.IsObject() {
+			return input, nil
+		}
+		kind := value.Get("type").String()
+		if kind == "function_call" || kind == "custom_tool_call" {
+			hasTools = true
+		}
 		items[i] = value.Raw
 	}
 	placeholder := `{"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":" "}]}`
@@ -125,7 +140,7 @@ func normalizeResponsesReasoningReplay(input json.RawMessage) (json.RawMessage, 
 			i++
 			continue
 		}
-		if hasCall || (afterTool && hasMessage) {
+		if hasCall || ((hasTools || afterTool) && hasMessage) {
 			if firstReasoning < 0 {
 				out = append(out, placeholder)
 				changed = true

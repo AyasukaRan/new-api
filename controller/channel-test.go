@@ -24,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -760,6 +761,18 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 		}
 	}
 
+	if info.RelayMode == relayconstant.RelayModeResponses || info.RelayMode == relayconstant.RelayModeResponsesCompact {
+		if finalizer, ok := adaptor.(relaychannel.ResponsesRequestFinalizer); ok {
+			jsonData, err = finalizer.FinalizeResponsesRequest(info, jsonData)
+			if err != nil {
+				return testResult{
+					context:     c,
+					localErr:    err,
+					newAPIError: types.NewError(err, types.ErrorCodeConvertRequestFailed),
+				}
+			}
+		}
+	}
 	requestBody := bytes.NewBuffer(jsonData)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 	// Return an observation only for an attempted upstream request. The caller
