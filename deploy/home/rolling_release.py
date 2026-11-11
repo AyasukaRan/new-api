@@ -359,11 +359,29 @@ class Rollout:
         private_write(EDGE_TEMPLATE, current, self.state['template_metadata'])
         self.save(phase, finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
 
+    def cleanup_bridge(self):
+        phase = self.state['phase']
+        check(phase in ('complete', 'rolled_back'), 'release_not_complete')
+        key = 'to-main' if phase == 'complete' else 'restore-route'
+        self.require_route(key, APP, old=phase == 'rolled_back')
+        item = inspect(BRIDGE, optional=True)
+        if item is not None:
+            receipt = read_json(self.private / self.state['edges'][key][-1] / 'state.json')
+            check(item['Id'] == receipt['current_id'] and item['Image'] == self.release['image_id']
+                  and item['Config'].get('Labels', {}).get('io.new-api.rollout') == str(self.args.state), 'unowned_bridge')
+            check(not item['State']['Running'] and item['State']['ExitCode'] == 0
+                  and not item['State']['OOMKilled'], 'bridge_not_cleanly_stopped')
+            command('docker', 'rm', item['Id'])
+            check(inspect(BRIDGE, optional=True) is None, 'bridge_cleanup_incomplete')
+        self.save(bridge_removed=True)
+
     def run(self):
         self.guard()
         while True:
             phase = self.state['phase']
             if phase in ('complete', 'rolled_back'):
+                # Completion is durable before removal; resume also finishes interrupted cleanup.
+                self.cleanup_bridge()
                 return phase
             if phase == 'prepared':
                 item = inspect(BRIDGE, optional=True)

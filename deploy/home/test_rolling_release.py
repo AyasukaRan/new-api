@@ -101,6 +101,14 @@ class FakeRollout(release.Rollout):
         self.guard()
         self.save(phase)
 
+    def cleanup_bridge(self):
+        assert self.state['phase'] in ('complete', 'rolled_back')
+        item = self.containers.get(release.BRIDGE)
+        if item:
+            assert not item['State']['Running']
+            del self.containers[release.BRIDGE]
+            self.events.append('remove:' + release.BRIDGE)
+
 
 class RollingReleaseTests(unittest.TestCase):
     def run_fake(self, flow):
@@ -115,6 +123,7 @@ class RollingReleaseTests(unittest.TestCase):
                                  'stop:' + release.APP, 'start:' + release.APP + ':new', 'switch:to-main',
                                  'drain:to-main', 'stop:' + release.BRIDGE])
         self.assertEqual(flow.compose, flow.final)
+        self.assertNotIn(release.BRIDGE, flow.containers)
 
     def test_first_long_drain_resumes_without_restarting_apps(self):
         flow = FakeRollout()
@@ -153,7 +162,8 @@ class RollingReleaseTests(unittest.TestCase):
         self.assertEqual(flow.containers[release.APP]['Image'], 'old')
         self.assertEqual(flow.compose, flow.original)
         self.assertLess(flow.events.index('start:' + release.APP + ':old'), flow.events.index('switch:restore-route'))
-        self.assertEqual(flow.events[-2:], ['stop:' + release.BRIDGE, 'guard'])
+        self.assertEqual(flow.events[-3:], ['stop:' + release.BRIDGE, 'guard', 'remove:' + release.BRIDGE])
+        self.assertNotIn(release.BRIDGE, flow.containers)
 
     def test_failed_restore_keeps_bridge_and_can_resume(self):
         flow = FakeRollout()
@@ -174,6 +184,66 @@ class RollingReleaseTests(unittest.TestCase):
         self.assertEqual(flow.route, release.BRIDGE)
         self.assertEqual(flow.state['phase'], 'stop_old')
         self.assertNotIn('start:' + release.APP + ':new', flow.events)
+
+    def test_bridge_cleanup_is_owned_stopped_and_resumable_after_completion(self):
+        for phase in ('complete', 'rolled_back'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                flow = object.__new__(release.Rollout)
+                flow.args = argparse.Namespace(state=root / 'release.json')
+                key = 'to-main' if phase == 'complete' else 'restore-route'
+                flow.state = {'phase': phase, 'edges': {key: ['edge']}}
+                flow.args.state.write_bytes(release.json_bytes(flow.state))
+                flow.private = root
+                (root / 'edge').mkdir()
+                (root / 'edge/state.json').write_bytes(release.json_bytes({'current_id': 'bridge-id'}))
+                flow.release = {'image_id': 'new'}
+                bridge = app('new', 'bridge-id', running=False)
+                bridge['Config']['Labels']['io.new-api.rollout'] = str(flow.args.state)
+                containers = {release.BRIDGE: bridge}
+                flow.require_route = lambda *_args, **_kwargs: None
+                flow.guard = lambda: None
+                flow.save = lambda **values: flow.state.update(values)
+
+                def remove(*args):
+                    self.assertEqual(args, ('docker', 'rm', 'bridge-id'), 'remove the verified ID without forcing or removing volumes')
+                    self.assertEqual(release.read_json(flow.args.state)['phase'], phase)
+                    del containers[release.BRIDGE]
+
+                with patch.object(release, 'inspect', side_effect=lambda name, **_kwargs: containers.get(name)), \
+                        patch.object(release, 'command', side_effect=remove) as command:
+                    for field, value in (('Running', True), ('ExitCode', 137), ('OOMKilled', True)):
+                        old_value = bridge['State'][field]
+                        bridge['State'][field] = value
+                        with self.assertRaisesRegex(RuntimeError, 'bridge_not_cleanly_stopped'):
+                            flow.run()
+                        bridge['State'][field] = old_value
+                    bridge['Config']['Labels']['io.new-api.rollout'] = '/another-release.json'
+                    with self.assertRaisesRegex(RuntimeError, 'unowned_bridge'):
+                        flow.run()
+                    bridge['Config']['Labels']['io.new-api.rollout'] = str(flow.args.state)
+                    command.assert_not_called()
+                    with patch.object(flow, 'save', side_effect=OSError('interrupted journal write')):
+                        with self.assertRaises(OSError):
+                            flow.run()
+                    self.assertNotIn(release.BRIDGE, containers)
+                    self.assertEqual(release.read_json(flow.args.state)['phase'], phase)
+                    flow.save = lambda **values: flow.state.update(values)
+                    self.assertEqual(flow.run(), phase)
+                    self.assertTrue(flow.state['bridge_removed'])
+                    command.assert_called_once_with('docker', 'rm', 'bridge-id')
+
+    def test_bridge_cleanup_refuses_unfinished_or_undrained_release(self):
+        flow = object.__new__(release.Rollout)
+        flow.state = {'phase': 'stop_bridge'}
+        with patch.object(release, 'command') as command:
+            with self.assertRaisesRegex(RuntimeError, 'release_not_complete'):
+                flow.cleanup_bridge()
+            flow.state['phase'] = 'complete'
+            flow.require_route = lambda *_args, **_kwargs: release.check(False, 'serving_route_changed')
+            with self.assertRaisesRegex(RuntimeError, 'serving_route_changed'):
+                flow.cleanup_bridge()
+            command.assert_not_called()
 
     def test_resuming_after_external_edge_rollback_never_stops_serving_app(self):
         flow = FakeRollout()
