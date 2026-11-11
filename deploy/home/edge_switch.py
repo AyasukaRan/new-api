@@ -183,8 +183,10 @@ def switch(args):
         state['new_workers'] = sorted(wait_for(lambda: workers(args.edge) - old_workers, args.timeout))
         wait_for(lambda: status(args.host, args.port, args.version), args.timeout)
     except BaseException:
+        rollback_workers = workers(args.edge)
         write_bound_file(args.config, rollback_config)
         command('docker', 'kill', '--signal', 'HUP', args.edge)
+        wait_for(lambda: workers(args.edge) - rollback_workers, args.timeout)
         wait_for(lambda: status(args.host, args.port, current_version), args.timeout)
         state['phase'] = 'rolled_back'
         persist_json(args.receipt / 'state.json', state)
@@ -198,6 +200,8 @@ def switch(args):
 def follow_up(args):
     state = json.loads((args.receipt / 'state.json').read_text())
     config = Path(state['config'])
+    if args.config.resolve() != config.resolve():
+        raise RuntimeError('receipt_config_mismatch')
     config_hash = digest(config.read_bytes())
     if args.action == 'rollback' and state['phase'] == 'rolled_back':
         if config_hash != state['before_sha256']:
@@ -228,8 +232,10 @@ def follow_up(args):
     if digest(original) != state['before_sha256']:
         raise RuntimeError('rollback_configuration_changed')
     validate(state['edge'], args.receipt / 'before.conf')
+    rollback_workers = workers(state['edge'])
     write_bound_file(config, original)
     command('docker', 'kill', '--signal', 'HUP', state['edge'])
+    wait_for(lambda: workers(state['edge']) - rollback_workers, args.timeout)
     wait_for(lambda: status(state['host'], state['port'], state['current_version']), args.timeout)
     state['phase'] = 'rolled_back'
     persist_json(args.receipt / 'state.json', state)

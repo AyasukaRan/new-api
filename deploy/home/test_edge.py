@@ -144,7 +144,13 @@ http {{
         # Rollback while a candidate stream is active: retain candidate and finish that stream.
         second_c, second_r, second = stream('127.0.0.1',port)
         assert second == 'data: new:start'
+        other_directory = temporary / 'wrong-config-directory'
+        other_directory.mkdir()
+        current_config, current_workers = config.read_bytes(), edge.workers(proxy)
+        run('rollback',receipt1,'--config',str(other_directory / 'nginx.conf'),expected=1)
+        assert config.read_bytes() == current_config and edge.workers(proxy) == current_workers
         assert run('rollback',receipt1)['phase'] == 'rolled_back'
+        assert edge.workers(proxy) - current_workers
         assert run('rollback',receipt1)['phase'] == 'rolled_back'
         assert b'error_log /dev/null crit;' in config.read_bytes()
         assert edge.status('127.0.0.1',port,'old') == 'old'
@@ -170,7 +176,10 @@ http {{
         assert 'data: new:end' in third_r.read().decode(); third_c.close()
         assert run('drain',receipt3)['phase'] == 'drained'
         assert edge.status('127.0.0.1',port,'new') == 'new'
-        results.append({'check':'second_switch_accepts_standard_alias_preserves_bridge_SSE','passed':True,
+        current_workers = edge.workers(proxy)
+        assert run('rollback',receipt3)['phase'] == 'rolled_back'
+        assert edge.workers(proxy) - current_workers
+        results.append({'check':'second_switch_and_same_version_rollback_confirm_fresh_workers','passed':True,
                         'old_workers':switched2['old_worker_count'],'new_workers':switched2['new_worker_count'],
                         'retained_during_stream':pending2['remaining_old_workers']})
     finally:
