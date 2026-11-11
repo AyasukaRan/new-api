@@ -210,7 +210,12 @@ def follow_up(args):
             raise RuntimeError('rollback_container_changed')
         status(state['host'], state['port'], state['current_version'])
         return {'phase': 'rolled_back', 'both_applications_retained': True}
-    if config_hash != state['after_sha256']:
+    known_hashes = {state['after_sha256']}
+    if args.action == 'rollback' and state['phase'] in ('prepared', 'switching'):
+        # A crash can leave the file restored before HUP; always reload below
+        # because a known disk hash does not identify the serving generation.
+        known_hashes.update((state['original_sha256'], state['before_sha256']))
+    if config_hash not in known_hashes:
         raise RuntimeError('active_configuration_changed')
     if args.action == 'drain':
         if state['phase'] == 'drained':

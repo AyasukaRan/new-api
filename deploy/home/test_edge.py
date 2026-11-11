@@ -157,6 +157,30 @@ http {{
         request(bridge_ip,3000,'/release')
         assert 'data: new:end' in second_r.read().decode(); second_c.close()
         results.append({'check':'rollback_restores_old_without_cutting_candidate_SSE','passed':True})
+        # Reproduce crashes around writing or reloading rollback config. The disk
+        # hash alone does not prove which upstream the active workers still use.
+        for phase, snapshot in [('prepared', 'original'), ('switching', 'before'), ('switching', 'after')]:
+            if snapshot == 'original':
+                edge.write_bound_file(config, original)
+            crash_receipt = temporary / ('crash-' + snapshot)
+            run('switch',crash_receipt,'--current',old,'--candidate',bridge,'--version','new')
+            crash_c, crash_r, crash_first = stream('127.0.0.1',port)
+            assert crash_first == 'data: new:start'
+            state_path = crash_receipt / 'state.json'
+            interrupted = json.loads(state_path.read_text())
+            interrupted['phase'] = phase
+            edge.persist_json(state_path, interrupted)
+            edge.write_bound_file(config, (crash_receipt / (snapshot + '.conf')).read_bytes())
+            assert edge.status('127.0.0.1',port,'new') == 'new'
+            interrupted_workers = edge.workers(proxy)
+            assert run('rollback',crash_receipt)['phase'] == 'rolled_back'
+            assert edge.workers(proxy) - interrupted_workers
+            assert edge.status('127.0.0.1',port,'old') == 'old'
+            assert edge.workers(proxy) & interrupted_workers
+            request(bridge_ip,3000,'/release')
+            assert 'data: new:end' in crash_r.read().decode(); crash_c.close()
+            results.append({'check':'crash_rollback_reloads_' + phase + '_' + snapshot,
+                            'passed':True,'candidate_stream_completed':True})
         # The actual bridge deployment performs two complete switches to the same app version.
         receipt2 = temporary / 'bridge-again'
         run('switch',receipt2,'--current',old,'--candidate',bridge,'--version','new')
