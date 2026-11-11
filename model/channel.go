@@ -598,10 +598,12 @@ func BatchInsertChannels(channels []Channel) error {
 	defer func() {
 		if r := recover(); r != nil {
 			tx.Rollback()
+			panic(r)
 		}
 	}()
 
-	for _, chunk := range lo.Chunk(channels, 50) {
+	// Keep each chunk backed by channels so generated IDs reach the caller.
+	for chunk := range slices.Chunk(channels, 50) {
 		if err := tx.Create(&chunk).Error; err != nil {
 			tx.Rollback()
 			return err
@@ -951,6 +953,10 @@ func UpdateChannelStatusWithError(channelId int, usingKey string, status int, re
 	channel, err := GetChannelById(channelId, true)
 	if err != nil {
 		return false, err
+	}
+	// A request failure must not replace an admin's manual disable.
+	if status == common.ChannelStatusAutoDisabled && channel.Status == common.ChannelStatusManuallyDisabled {
+		return false, nil
 	}
 	// A manual channel operation must replace the exhaustion reason even
 	// when the status value is already manually disabled.

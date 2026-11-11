@@ -146,6 +146,7 @@ type ModelPricingSheetProps = {
   onReloadGlobalEffectiveData?: () => void | Promise<unknown>
   initialIssue?: ModelPricingIssue
   onScopeChange?: (channelId: string | null) => void
+  scrollHeader?: ReactNode
 }
 
 type ModelPricingEditorPanelProps = Omit<
@@ -154,7 +155,6 @@ type ModelPricingEditorPanelProps = Omit<
 > & {
   className?: string
   embedded?: boolean
-  scrollHeader?: ReactNode
 }
 
 type ModelPricingFieldsHandle = {
@@ -182,6 +182,7 @@ export const ModelPricingSheet = forwardRef<
     usageSchema,
     pluginVariants,
     onDirtyChange,
+    scrollHeader,
     ...scopeProps
   },
   ref
@@ -207,6 +208,7 @@ export const ModelPricingSheet = forwardRef<
           usageSchema={usageSchema}
           pluginVariants={pluginVariants}
           onDirtyChange={onDirtyChange}
+          scrollHeader={scrollHeader}
           onSave={onSave}
           isSaving={isSaving}
           className='h-full rounded-none border-0 [&>[data-slot=model-pricing-header]]:pr-12'
@@ -278,7 +280,9 @@ const ModelPricingScopeEditor = forwardRef<
     : props.pluginVariants
   const providerVariant = issue?.plugin_key
     ? variants?.find(
-        (variant) => variant.plugin_key === issue.plugin_key && !variant.stale
+        (variant) =>
+          variant.plugin_key === issue.plugin_key &&
+          (!variant.stale || (isGlobal && issue.reason === 'stale'))
       )
     : undefined
   const issueChannelUnavailable = Boolean(

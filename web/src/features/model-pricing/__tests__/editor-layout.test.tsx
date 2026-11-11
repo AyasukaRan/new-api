@@ -425,7 +425,10 @@ it.each(['default', 'unset'] as const)(
     await user.clear(price)
     await user.type(price, '0.25')
     const region = screen.getByRole('region', { name: 'Edit model pricing' })
-    const button = screen.getByRole('button', {
+    const editor = region.closest('form')
+    if (!editor) throw new Error('Pricing editor form not found')
+    // The page top bar has its own Save; this one is the editor's action bar.
+    const button = within(editor).getByRole('button', {
       name: variant === 'unset' ? 'Save channel pricing' : 'Save model prices',
     })
     expect(region).not.toContainElement(button)
@@ -442,6 +445,13 @@ it.each(['default', 'unset'] as const)(
       })
       expect(save).not.toHaveBeenCalled()
     } else {
+      const dialog = await screen.findByRole('alertdialog', {
+        name: 'Confirm price changes',
+      })
+      expect(save).not.toHaveBeenCalled()
+      await user.click(
+        within(dialog).getByRole('button', { name: 'Confirm and save' })
+      )
       await waitFor(() => expect(save).toHaveBeenCalledOnce())
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({ ExposeRatioEnabled: true }),
