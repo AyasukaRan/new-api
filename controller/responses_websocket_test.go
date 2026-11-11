@@ -357,7 +357,7 @@ func newResponsesWSBillingTest(t *testing.T, expression string, handle func(*web
 		"group_ratio_setting.group_ratio": `{"default":1}`,
 		"perf_metrics_setting.enabled":    "true",
 	}))
-	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.ChannelModelActivity{}, &model.ChannelKeyObservation{}, &model.ChannelBalanceSample{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.ChannelModelActivity{}, &model.ChannelKeyObservation{}, &model.ChannelBalanceSample{}, &model.UserSubscription{}))
 	require.NoError(t, model.LOG_DB.AutoMigrate(&model.Log{}))
 	require.NoError(t, model.DB.Model(user).Updates(map[string]any{"quota": 100000, "setting": `{"billing_preference":"wallet_only"}`}).Error)
 	require.NoError(t, model.DB.Model(token).Update("remain_quota", 3000).Error)
@@ -704,7 +704,7 @@ func TestResponsesWebSocketDialsNativeResponsesChannelTypes(t *testing.T) {
 			require.NoError(t, model.DB.Model(fixture.channel).Updates(map[string]any{"type": tc.channelType, "settings": fixture.channel.OtherSettings}).Error)
 
 			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"hi"}`)))
-			assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+			require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
 			assert.Equal(t, tc.want("upstream-first"), <-targets)
 
 			request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":"hi","stream":true}`))
