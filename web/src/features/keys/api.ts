@@ -16,7 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { z } from 'zod'
+
 import { api } from '@/lib/api'
+import { currentBaseUrl } from '@/lib/base-path'
 
 import type {
   ApiKey,
@@ -117,6 +120,26 @@ export async function fetchTokenKey(
 ): Promise<{ success: boolean; message?: string; data?: { key: string } }> {
   const res = await api.post(`/api/token/${id}/key`)
   return res.data
+}
+
+const codexCatalogSchema = z.object({
+  models: z.array(z.object({ slug: z.string().min(1) })),
+})
+
+export async function getCodexModels(
+  tokenKey: string,
+  signal: AbortSignal
+): Promise<Array<{ slug: string }>> {
+  // The console client replaces Authorization with the browser session token.
+  const response = await fetch(`${currentBaseUrl()}/v1/codex/models`, {
+    headers: { Authorization: `Bearer ${tokenKey}` },
+    credentials: 'omit',
+    redirect: 'error',
+    cache: 'no-store',
+    signal,
+  })
+  if (!response.ok) throw new Error('Failed to load Codex models')
+  return codexCatalogSchema.parse(await response.json()).models
 }
 
 // Batch fetch real (unmasked) keys for multiple tokens

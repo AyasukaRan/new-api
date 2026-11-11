@@ -16,21 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Fragment } from 'react'
-
-import { useModelAccessScope } from '@/hooks/use-model-access-scope'
+import { lazy, Suspense } from 'react'
 
 import { ApiKeysDeleteDialog } from './api-keys-delete-dialog'
 import { ApiKeysMutateDrawer } from './api-keys-mutate-drawer'
 import { useApiKeys } from './api-keys-provider'
 import { CCSwitchDialog } from './dialogs/cc-switch-dialog'
 
+const CodexConfigDialog = lazy(() => import('./dialogs/codex-config-dialog'))
+
 export function ApiKeysDialogs() {
-  const scope = useModelAccessScope()
-  const { open, setOpen, currentRow, resolvedKey } = useApiKeys()
+  const { open, setOpen, currentRow, resolvedKey, setResolvedKey } =
+    useApiKeys()
 
   return (
-    <Fragment key={JSON.stringify(scope)}>
+    <>
       <ApiKeysMutateDrawer
         open={open === 'create' || open === 'update'}
         onOpenChange={(isOpen) => !isOpen && setOpen(null)}
@@ -42,6 +42,21 @@ export function ApiKeysDialogs() {
         onOpenChange={(isOpen) => !isOpen && setOpen(null)}
         tokenKey={resolvedKey}
       />
-    </Fragment>
+      {open === 'codex' && currentRow && (
+        <Suspense fallback={null}>
+          <CodexConfigDialog
+            key={currentRow.id}
+            tokenId={currentRow.id}
+            tokenKey={resolvedKey}
+            onOpenChange={(isOpen) => {
+              if (!isOpen) {
+                setOpen(null)
+                setResolvedKey('')
+              }
+            }}
+          />
+        </Suspense>
+      )}
+    </>
   )
 }

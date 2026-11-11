@@ -410,6 +410,110 @@ func TestListModelsUsesAdvancedCustomEndpointTypesFromPricingCache(t *testing.T)
 	}, payload.Data[0].SupportedEndpointTypes)
 }
 
+func TestBuildCodexModelsPreservesCatalogContract(t *testing.T) {
+	models := []dto.OpenAIModels{
+		{Id: "zz-custom-chat"},
+		{Id: "gpt-6.1-sol", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAIResponse}},
+		{Id: "gpt-5.4", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAI}},
+		{Id: "gpt-5.4-custom"},
+		{Id: "gpt-image-1", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAI}},
+		{Id: "image-only", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeImageGeneration}},
+		{Id: "embedding-only", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeEmbeddings}},
+		{Id: "rerank-only", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeJinaRerank}},
+		{Id: "video-only", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeOpenAIVideo}},
+		{Id: "search-only", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeDeepSeekToolsSearch}},
+		{Id: "claude-custom", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeAnthropic}},
+		{Id: "gemini-custom", SupportedEndpointTypes: []constant.EndpointType{constant.EndpointTypeGemini}},
+	}
+	catalog := buildCodexModels(models)
+	require.Len(t, catalog, 6)
+	assert.Equal(t, "zz-custom-chat", models[0].Id, "catalog sorting must not mutate the OpenAI list")
+	slugs := make([]string, 0, len(catalog))
+	for index, entry := range catalog {
+		slugs = append(slugs, entry.Slug)
+		assert.Equal(t, entry.Slug, entry.DisplayName)
+		assert.Equal(t, index, entry.Priority)
+		assert.Equal(t, "list", entry.Visibility)
+		assert.True(t, entry.SupportedInAPI)
+		assert.NotEmpty(t, entry.BaseInstructions)
+	}
+	assert.Equal(t, []string{"claude-custom", "gemini-custom", "gpt-5.4", "gpt-5.4-custom", "gpt-6.1-sol", "zz-custom-chat"}, slugs)
+	assert.Equal(t, "medium", catalog[2].DefaultReasoningLevel)
+	assert.Len(t, catalog[2].SupportedReasoningLevels, 4)
+	assert.True(t, catalog[2].SupportVerbosity)
+	assert.True(t, catalog[2].SupportsReasoningSummaryParameter)
+	assert.Equal(t, []string{"text", "image"}, catalog[2].InputModalities)
+	assert.Equal(t, 272000, catalog[2].ContextWindow)
+	assert.Equal(t, 1000000, catalog[2].MaxContextWindow)
+	assert.Equal(t, "freeform", catalog[2].ApplyPatchToolType)
+	assert.Equal(t, "low", catalog[4].DefaultReasoningLevel)
+	assert.Len(t, catalog[4].SupportedReasoningLevels, 5)
+	assert.Equal(t, "max", catalog[4].SupportedReasoningLevels[4].Effort)
+	assert.Equal(t, 272000, catalog[4].ContextWindow)
+	assert.Equal(t, 872000, catalog[4].MaxContextWindow)
+
+	for _, index := range []int{3, 5} {
+		encoded, err := common.Marshal(catalog[index])
+		require.NoError(t, err)
+		var payload map[string]any
+		require.NoError(t, common.Unmarshal(encoded, &payload))
+		assert.Equal(t, []any{}, payload["supported_reasoning_levels"])
+		assert.Equal(t, []any{}, payload["experimental_supported_tools"])
+		assert.Equal(t, []any{"text"}, payload["input_modalities"])
+		assert.Equal(t, false, payload["support_verbosity"])
+		assert.Equal(t, false, payload["supports_reasoning_summary_parameter"])
+		assert.Equal(t, "default", payload["shell_type"])
+		assert.Equal(t, map[string]any{"mode": "bytes", "limit": float64(10000)}, payload["truncation_policy"])
+		assert.NotContains(t, payload, "default_reasoning_level")
+		assert.NotContains(t, payload, "context_window")
+		assert.NotContains(t, payload, "max_context_window")
+		assert.NotContains(t, payload, "apply_patch_tool_type")
+	}
+}
+
+func TestListCodexModelsUsesAuthorizedModelList(t *testing.T) {
+	withSelfUseModeEnabled(t)
+	db := setupModelListControllerTestDB(t)
+	originalMemoryCacheEnabled := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = originalMemoryCacheEnabled })
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "default-private", ChannelId: 1, Enabled: true},
+		{Group: "vip", Model: "gpt-6.1-sol", ChannelId: 1, Enabled: true},
+		{Group: "vip", Model: "vip-not-allowed", ChannelId: 1, Enabled: true},
+		{Group: "vip", Model: "disabled-model", ChannelId: 1, Enabled: false},
+	}).Error)
+
+	for _, tokenModels := range []map[string]bool{
+		{"gpt-6.1-sol": true, "default-private": true, "disabled-model": true, "not-configured": true},
+		{},
+	} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/codex/models", nil)
+		common.SetContextKey(ctx, constant.ContextKeyUserGroup, "default")
+		common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "vip")
+		common.SetContextKey(ctx, constant.ContextKeyTokenModelLimitEnabled, true)
+		common.SetContextKey(ctx, constant.ContextKeyTokenModelLimit, tokenModels)
+
+		ListModels(ctx, constant.ChannelTypeCodex)
+
+		require.Equal(t, http.StatusOK, recorder.Code)
+		assert.Equal(t, "private, no-store", recorder.Header().Get("Cache-Control"))
+		var payload map[string][]codexModel
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+		require.Len(t, payload, 1)
+		require.Contains(t, payload, "models")
+		require.NotNil(t, payload["models"], "empty catalogs must encode as []")
+		if len(tokenModels) == 0 {
+			assert.Empty(t, payload["models"])
+			continue
+		}
+		require.Len(t, payload["models"], 1)
+		assert.Equal(t, "gpt-6.1-sol", payload["models"][0].Slug)
+	}
+}
+
 func TestListModelsTokenLimitIncludesTieredBillingModel(t *testing.T) {
 	withSelfUseModeDisabled(t)
 	withTieredBillingConfig(t, map[string]string{

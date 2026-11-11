@@ -272,6 +272,9 @@ func ListModels(c *gin.Context, modelType int) {
 	}
 
 	switch modelType {
+	case constant.ChannelTypeCodex:
+		c.Header("Cache-Control", "private, no-store")
+		c.JSON(http.StatusOK, gin.H{"models": buildCodexModels(userOpenAiModels)})
 	case constant.ChannelTypeAnthropic:
 		useranthropicModels := make([]dto.AnthropicModel, len(userOpenAiModels))
 		for i, model := range userOpenAiModels {

@@ -54,6 +54,12 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 			expectedField:  "data",
 		},
 		{
+			name:          "Codex catalog bearer token",
+			path:          "/v1/codex/models",
+			headerName:    "Authorization",
+			expectedField: "models",
+		},
+		{
 			name:          "Gemini API key header",
 			path:          "/v1/models",
 			headerName:    "x-goog-api-key",
@@ -87,6 +93,42 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 			assert.NotContains(t, payload, "error")
 			if test.expectedObject != "" {
 				assert.Equal(t, test.expectedObject, payload["object"])
+				assert.NotContains(t, payload, "models", "OpenAI response must stay unchanged")
+			}
+			if test.path == "/v1/codex/models" {
+				assert.Len(t, payload, 1)
+				assert.Equal(t, []any{}, payload["models"])
+			}
+		})
+	}
+}
+
+func TestCodexModelCatalogRejectsInvalidCredentials(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	require.NoError(t, i18n.Init())
+	user := model.User{Username: "codex-models-user", Status: common.UserStatusEnabled, Group: "default", Quota: 100}
+	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Create(&[]model.Token{
+		{UserId: user.Id, Key: "expiredcatalogkey", Status: common.TokenStatusEnabled, ExpiredTime: 1, UnlimitedQuota: true},
+		{UserId: user.Id, Key: "disabledcatalogkey", Status: common.TokenStatusDisabled, ExpiredTime: -1, UnlimitedQuota: true},
+	}).Error)
+	engine := gin.New()
+	SetRelayRouter(engine)
+	for _, key := range []string{"", "unknowncatalogkey", "expiredcatalogkey", "disabledcatalogkey"} {
+		t.Run(key, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/v1/codex/models", nil)
+			if key != "" {
+				request.Header.Set("Authorization", "Bearer "+key)
+			}
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusUnauthorized, recorder.Code)
+			var payload map[string]any
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+			assert.Contains(t, payload, "error")
+			assert.NotContains(t, payload, "models")
+			if key != "" {
+				assert.NotContains(t, recorder.Body.String(), key)
 			}
 		})
 	}
