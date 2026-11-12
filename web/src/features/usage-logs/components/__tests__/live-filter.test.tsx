@@ -186,6 +186,9 @@ it('preserves unsubmitted model and username drafts across live URL updates whil
   vi.setSystemTime(next)
   await act(() =>
     router.navigate({
+      from: '/usage-logs/$section',
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
       search: (previous) => ({ ...previous, endTime: next.getTime() }),
       replace: true,
       resetScroll: false,

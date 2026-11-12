@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
-import { useNavigate, getRouteApi } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff, RefreshCw } from 'lucide-react'
 import {
@@ -180,7 +180,7 @@ export function CommonLogsFilterBar<TData>(
   const { t } = useTranslation()
   const scope = useModelAccessScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
-  const navigate = useNavigate()
+  const navigate = route.useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
   const livePreset = getLogTimePreset(searchParams)

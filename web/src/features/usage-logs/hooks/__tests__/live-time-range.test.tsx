@@ -226,7 +226,12 @@ it('preserves a later page and refreshes immediately when returning to the first
   await act(() => vi.advanceTimersByTimeAsync(30_000))
   expect(router.state.location.search).toMatchObject({ page: 3, endTime: 2000 })
   await act(() =>
-    router.navigate({ search: (previous) => ({ ...previous, page: 1 }) })
+    router.navigate({
+      from: '/usage-logs/$section',
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
+      search: (previous) => ({ ...previous, page: 1 }),
+    })
   )
   await waitFor(() => expect(client.isFetching()).toBe(0))
   expect(router.state.location.search).toMatchObject({
@@ -267,6 +272,9 @@ it('stops an active timer when paused and resumes with the latest saved filters'
   )
   await act(() =>
     router.navigate({
+      from: '/usage-logs/$section',
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
       search: (previous) => ({
         ...previous,
         autoRefresh: false,
@@ -282,6 +290,9 @@ it('stops an active timer when paused and resumes with the latest saved filters'
   expect(api.get).toHaveBeenCalledTimes(requestCount)
   await act(() =>
     router.navigate({
+      from: '/usage-logs/$section',
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
       search: (previous) => ({ ...previous, autoRefresh: true }),
     })
   )
