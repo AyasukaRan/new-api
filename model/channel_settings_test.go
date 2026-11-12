@@ -50,6 +50,48 @@ func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestChannelEndpointSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting string
+		valid         bool
+	}{
+		{"legacy single address", `{}`, true},
+		{"shared mirror pool", `{"endpoint_mode":"failover","additional_base_urls":["https://backup.example/v1"]}`, true},
+		{"unknown mode", `{"endpoint_mode":"other","additional_base_urls":["https://backup.example/v1"]}`, false},
+		{"pool requires mirrors", `{"endpoint_mode":"failover"}`, false},
+		{"mirror requires a mode", `{"additional_base_urls":["https://backup.example/v1"]}`, false},
+		{"duplicate primary", `{"endpoint_mode":"load_balance","additional_base_urls":["https://primary.example/v1/"]}`, false},
+		{"credential in URL", `{"endpoint_mode":"failover","additional_base_urls":["https://user:secret@backup.example/v1"]}`, false},
+		{"query in URL", `{"endpoint_mode":"failover","additional_base_urls":["https://backup.example/v1?api_key=secret"]}`, false},
+		{"fragment in URL", `{"endpoint_mode":"failover","additional_base_urls":["https://backup.example/v1#fragment"]}`, false},
+		{"empty mirror", `{"endpoint_mode":"failover","additional_base_urls":["  "]}`, false},
+		{"non HTTP URL", `{"endpoint_mode":"failover","additional_base_urls":["file:///etc/passwd"]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseURL := "https://primary.example/v1"
+			channel := &Channel{Type: constant.ChannelTypeOpenAI, BaseURL: &baseURL, Setting: &tc.setting}
+			err := channel.ValidateSettings()
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+	t.Run("bounded address pool", func(t *testing.T) {
+		settings := dto.ChannelSettings{EndpointMode: "load_balance"}
+		for index := range 15 {
+			settings.AdditionalBaseURLs = append(settings.AdditionalBaseURLs, fmt.Sprintf("https://mirror%d.example/v1", index))
+		}
+		urls, err := settings.EndpointURLs("https://primary.example/v1")
+		require.NoError(t, err)
+		assert.Len(t, urls, 16)
+		settings.AdditionalBaseURLs = append(settings.AdditionalBaseURLs, "https://overflow.example/v1")
+		_, err = settings.EndpointURLs("https://primary.example/v1")
+		require.Error(t, err)
+	})
+}
+
 func TestAdvancedCustomChannelRequiresModelListRouteOnlyWhenUpdateChecksEnabled(t *testing.T) {
 	inferenceRoute := dto.AdvancedCustomRoute{
 		IncomingPath: "/v1/chat/completions",

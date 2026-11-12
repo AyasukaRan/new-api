@@ -286,6 +286,52 @@ func TestRestoreConnectionContextRejectsChangedAdvancedCustomRoute(t *testing.T)
 	assert.ErrorContains(t, apiErr, "upstream route changed")
 }
 
+func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.Ability{}))
+	channel := &model.Channel{Name: t.Name(), Key: "ws-key-one\nws-key-two", Group: "default,vip", Models: "ws-model", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
+	}
+	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	require.NoError(t, channel.Insert())
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
+	t.Cleanup(func() {
+		common.MemoryCacheEnabled = false
+		model.InitChannelCache()
+	})
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	service.GetChannelConstraints(c).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken, Rank: appdto.PinRankToken, RetryMode: appdto.PinRetrySingleAttempt})
+	session := &responsesWSSession{lockedChannelID: channel.Id, lockedModel: "ws-model", lockedGroup: "default", lockedKey: "ws-key-one", lockedKeyIndex: 0,
+		lockedContext: map[constant.ContextKey]any{constant.ContextKeyChannelBaseUrl: channel.GetBaseURL(), constant.ContextKeyChannelHeaderOverride: channel.GetHeaderOverride()},
+	}
+	require.Nil(t, session.restoreConnectionContext(c, "ws-model"))
+
+	// Simulate another instance's edit without refreshing this process's cache.
+	channel.ChannelInfo.KeyGroups = map[string][]string{channel.KeyIdentity("ws-key-one"): {"vip"}}
+	require.NoError(t, database.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+	for _, test := range []struct{ language, message string }{
+		{"en", "The connection credential is no longer allowed for this group"},
+		{"zh-CN", "连接使用的密钥已不允许用于当前分组"},
+		{"zh-TW", "連線使用的金鑰已不允許用於目前分組"},
+	} {
+		c.Request.Header.Set("Accept-Language", test.language)
+		apiErr := session.restoreConnectionContext(c, "ws-model")
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+		assert.Equal(t, types.ErrorCodeAccessDenied, apiErr.GetErrorCode())
+		assert.EqualError(t, apiErr, test.message)
+	}
+	channel.ChannelInfo.KeyGroups = nil
+	require.NoError(t, database.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+	require.Nil(t, session.restoreConnectionContext(c, "ws-model"), "clearing restores inheritance on the existing connection")
+	require.NoError(t, database.Model(channel).Update("group", "vip").Error)
+	require.NotNil(t, session.restoreConnectionContext(c, "ws-model"), "a pin cannot retain a removed group")
+}
+
 func TestResponsesWSChannelRoutingRequiresExplicitOptIn(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)

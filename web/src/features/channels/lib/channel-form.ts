@@ -223,6 +223,8 @@ export const channelFormSchema = z
     name: z.string().min(1, ERROR_MESSAGES.REQUIRED_NAME),
     type: z.number().min(0, ERROR_MESSAGES.REQUIRED_TYPE),
     base_url: z.string().optional(),
+    endpoint_mode: z.enum(['', 'load_balance', 'failover']).optional(),
+    additional_base_urls: z.string().optional(),
     task_plugin_key: z.string().optional(),
     task_extend_plugin_keys: z.array(z.string()).optional(),
     key: z.string(),
@@ -337,6 +339,51 @@ export const channelFormSchema = z
     upstream_model_update_ignored_models: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.endpoint_mode) {
+      const mirrors = (data.additional_base_urls || '')
+        .split(/\r?\n/)
+        .map(normalizeBaseUrl)
+        .filter(Boolean)
+      if (mirrors.length === 0 || mirrors.length > 15) {
+        addRequiredIssue(
+          ctx,
+          'additional_base_urls',
+          'Enter between 1 and 15 additional addresses.'
+        )
+      }
+      const mainAddress = normalizeBaseUrl(data.base_url)
+      const addresses = mainAddress ? [mainAddress, ...mirrors] : mirrors
+      if (new Set(addresses).size !== addresses.length) {
+        addRequiredIssue(
+          ctx,
+          'additional_base_urls',
+          'Endpoint addresses must be unique.'
+        )
+      }
+      for (const address of addresses) {
+        try {
+          const url = new URL(address)
+          if (
+            (url.protocol === 'http:' || url.protocol === 'https:') &&
+            url.hostname &&
+            !url.username &&
+            !url.password &&
+            !address.includes('?') &&
+            !address.includes('#')
+          ) {
+            continue
+          }
+        } catch {
+          // Report the invalid address through the form field below.
+        }
+        addRequiredIssue(
+          ctx,
+          'additional_base_urls',
+          'Enter one HTTP or HTTPS address per line, without credentials, query parameters, or fragments.'
+        )
+        break
+      }
+    }
     if (
       data.balance_email_enabled &&
       !data.balance_query_disabled &&
@@ -484,6 +531,8 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   name: '',
   type: 1,
   base_url: '',
+  endpoint_mode: '',
+  additional_base_urls: '',
   task_plugin_key: '',
   task_extend_plugin_keys: [],
   key: '',
@@ -565,6 +614,8 @@ export function transformChannelToFormDefaults(
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
   let extraSettings = {
+    endpoint_mode: '' as '' | 'load_balance' | 'failover',
+    additional_base_urls: '',
     group_models: {} as Record<string, string[]>,
     upstream_cost_ratio: null as number | null,
     task_plugin_key: '',
@@ -597,6 +648,16 @@ export function transformChannelToFormDefaults(
         parsed.http2_connection_shards
       )
       extraSettings = {
+        endpoint_mode:
+          parsed.endpoint_mode === 'load_balance' ||
+          parsed.endpoint_mode === 'failover'
+            ? parsed.endpoint_mode
+            : '',
+        additional_base_urls: Array.isArray(parsed.additional_base_urls)
+          ? parsed.additional_base_urls
+              .filter((url: unknown) => typeof url === 'string')
+              .join('\n')
+          : '',
         group_models: parsed.group_models || {},
         upstream_cost_ratio: parsed.upstream_cost_ratio ?? null,
         task_plugin_key: parsed.task_plugin_key || '',
@@ -762,6 +823,14 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
       formData.responses_websocket_enabled === true,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
+  }
+
+  if (formData.endpoint_mode) {
+    settingObj.endpoint_mode = formData.endpoint_mode
+    settingObj.additional_base_urls = (formData.additional_base_urls || '')
+      .split(/\r?\n/)
+      .map(normalizeBaseUrl)
+      .filter(Boolean)
   }
 
   if (formData.upstream_cost_ratio != null) {

@@ -353,6 +353,17 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		probe.Key, probe.Keys = key.value, nil
 		probe.ChannelInfo.IsMultiKey = false
 		result = testChannelModelAttempt(ctx, &probe, testUserID, testModel, endpointType, isStream, key.index)
+		for result.context != nil {
+			// The attempt's deadline is already closed; cancellation of the
+			// parent probe, rather than that completed attempt, stops failover.
+			result.context.Request = result.context.Request.WithContext(ctx)
+			if _, retry := service.FailChannelEndpoint(result.context, &probe, result.newAPIError); !retry {
+				break
+			}
+			// Publish only the final mirror outcome. A primary outage must not
+			// quarantine every credential while a configured backup works.
+			result = testChannelModelAttempt(ctx, &probe, testUserID, testModel, endpointType, isStream, key.index, result.context)
+		}
 		if err := ctx.Err(); err != nil {
 			return testResult{localErr: err}
 		}
@@ -426,7 +437,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	return result
 }
 
-func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, keyIndex int) (result testResult) {
+func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, keyIndex int, previous ...*gin.Context) (result testResult) {
 	tik := time.Now()
 	var unsupportedTestChannelTypes = []int{
 		constant.ChannelTypeMidjourney,
@@ -446,6 +457,9 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 	}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	if len(previous) > 0 {
+		service.ContinueChannelEndpointSelection(c, previous[0])
+	}
 	requestCtx := ctx
 	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); scheduled {
 		var cancel context.CancelFunc

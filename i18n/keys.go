@@ -49,6 +49,9 @@ const (
 	MsgRelayRetryNoAvailableChannel      = "relay.retry_no_available_channel"
 	MsgRelayAccessTokenUnsupported       = "relay.access_token_unsupported"
 	MsgRelayInvalidUpstreamResponse      = "relay.invalid_upstream_response"
+	MsgRelayChannelNoGroupKey            = "relay.channel_no_group_key"
+	MsgRelayConnectionKeyGroupDenied     = "relay.connection_key_group_denied"
+	MsgRelayChannelEndpointsExhausted    = "relay.channel_endpoints_exhausted"
 )
 
 // Emails and the name of the token created at registration, in the

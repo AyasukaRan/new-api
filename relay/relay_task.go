@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -100,8 +101,13 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
-		key, index, newAPIError := ch.GetNextRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable))
+		key, index, newAPIError := ch.GetNextRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
 		if newAPIError != nil {
+			if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {
+				newAPIError.SetMessage(i18n.T(c, i18n.MsgRelayChannelNoGroupKey))
+			} else if errors.Is(newAPIError, model.ErrChannelDisabled) {
+				newAPIError.SetMessage(i18n.T(c, i18n.MsgDistributorChannelDisabled))
+			}
 			if newAPIError.GetErrorCode() == model.ErrorCodeChannelProbeUnavailable {
 				return service.TaskErrorWrapperLocal(newAPIError, string(newAPIError.GetErrorCode()), newAPIError.StatusCode)
 			}

@@ -51,6 +51,7 @@ import {
   buildSettingJSON,
   channelFormSchema,
   transformChannelToFormDefaults,
+  transformFormDataToCreatePayload,
 } from '../../lib/channel-form'
 import { channelSchema, type Channel } from '../../types'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
@@ -274,6 +275,160 @@ test('changing built-in providers updates server-provided URL placeholders witho
     'placeholder',
     'Leave empty to use default'
   )
+})
+
+test.each(['Load balance', 'Failover'])(
+  '%s saves additional endpoint addresses without changing the main or batch address',
+  async (strategy) => {
+    editingChannel.setting = JSON.stringify({
+      batch_base_url: 'https://batch.example',
+    })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(
+      screen.getByRole('combobox', { name: 'Endpoint strategy' })
+    )
+    await user.click(screen.getByRole('option', { name: strategy }))
+    expect(
+      screen.getByText('Main address: https://saved.example')
+    ).toBeVisible()
+    const addresses = screen.getByRole('textbox', {
+      name: 'Additional addresses',
+    })
+    await user.type(
+      addresses,
+      'https://mirror-a.example/\nhttps://mirror-b.example/api/'
+    )
+    expect(addresses).toHaveAttribute('wrap', 'off')
+    expect(addresses).toHaveClass('min-w-0', 'max-w-full')
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    const payload = put.mock.calls[0]?.[1] as {
+      base_url: string
+      setting: string
+    }
+    expect(payload.base_url).toBe('https://saved.example')
+    expect(JSON.parse(payload.setting)).toMatchObject({
+      endpoint_mode: strategy === 'Load balance' ? 'load_balance' : 'failover',
+      additional_base_urls: [
+        'https://mirror-a.example',
+        'https://mirror-b.example/api',
+      ],
+      batch_base_url: 'https://batch.example',
+    })
+  }
+)
+
+test('endpoint settings round trip while single address clears only mirror settings', async () => {
+  editingChannel.type = 43
+  editingChannel.base_url = ''
+  editingChannel.setting = JSON.stringify({
+    endpoint_mode: 'failover',
+    additional_base_urls: ['https://mirror.example'],
+    batch_base_url: 'https://batch.example',
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  expect(
+    await screen.findByText('Main address: https://deepseek.server.example')
+  ).toBeVisible()
+  expect(
+    screen.getByRole('textbox', { name: 'Additional addresses' })
+  ).toHaveValue('https://mirror.example')
+  await user.click(screen.getByRole('combobox', { name: 'Endpoint strategy' }))
+  await user.click(screen.getByRole('option', { name: 'Single address' }))
+  expect(
+    screen.queryByRole('textbox', { name: 'Additional addresses' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as {
+    base_url: string
+    setting: string
+  }
+  expect(payload.base_url).toBe('')
+  expect(JSON.parse(payload.setting)).not.toHaveProperty('endpoint_mode')
+  expect(JSON.parse(payload.setting)).not.toHaveProperty('additional_base_urls')
+  expect(JSON.parse(payload.setting)).toMatchObject({
+    batch_base_url: 'https://batch.example',
+  })
+})
+
+test('legacy single-address settings stay compatible and invalid mirrors block saving', async () => {
+  const defaults = transformChannelToFormDefaults(editingChannel)
+  expect(JSON.parse(buildSettingJSON(defaults))).not.toHaveProperty(
+    'endpoint_mode'
+  )
+  expect(JSON.parse(buildSettingJSON(defaults))).not.toHaveProperty(
+    'additional_base_urls'
+  )
+  const put = vi.spyOn(api, 'put')
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('combobox', { name: 'Endpoint strategy' }))
+  await user.click(screen.getByRole('option', { name: 'Failover' }))
+  await user.type(
+    screen.getByRole('textbox', { name: 'Additional addresses' }),
+    'not-an-address'
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  expect(
+    await screen.findByText(
+      'Enter one HTTP or HTTPS address per line, without credentials, query parameters, or fragments.'
+    )
+  ).toBeVisible()
+  expect(put).not.toHaveBeenCalled()
+})
+
+test('new endpoint pools preserve address order and reject unsafe or excessive mirror lists', () => {
+  const defaults = transformChannelToFormDefaults(editingChannel)
+  const values = {
+    ...defaults,
+    endpoint_mode: 'failover' as const,
+    additional_base_urls:
+      ' https://first.example/\n\nhttps://second.example/api/ ',
+  }
+  expect(channelFormSchema.safeParse(values).success).toBe(true)
+  const payload = transformFormDataToCreatePayload(values)
+  expect(JSON.parse(payload.channel.setting || '{}')).toMatchObject({
+    endpoint_mode: 'failover',
+    additional_base_urls: [
+      'https://first.example',
+      'https://second.example/api',
+    ],
+  })
+  for (const invalid of [
+    '',
+    Array.from(
+      { length: 16 },
+      (_, index) => `https://mirror-${index}.example`
+    ).join('\n'),
+    'https://saved.example/',
+    'https://duplicate.example\nhttps://duplicate.example/',
+    'https://user:password@mirror.example',
+    'https://mirror.example?key=private',
+    'https://mirror.example#fragment',
+    'file:///private',
+  ]) {
+    expect(
+      channelFormSchema.safeParse({ ...values, additional_base_urls: invalid })
+        .success,
+      invalid
+    ).toBe(false)
+  }
+  expect(
+    channelFormSchema.safeParse({ ...values, base_url: 'invalid-primary' })
+      .success
+  ).toBe(false)
 })
 
 test.each([

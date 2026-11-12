@@ -53,13 +53,16 @@ export function parseTaskResult() { return {}; }
 	require.NoError(t, err)
 	t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister("channel-default-url") })
 	bound := `{"task_plugin_key":"channel-default-url"}`
+	withMirrors := `{"task_plugin_key":"channel-default-url","endpoint_mode":"failover","additional_base_urls":["https://backup.example.com"]}`
 
 	empty := "  "
-	for _, baseURL := range []*string{nil, &empty} {
-		channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, Key: "sk", Setting: &bound, BaseURL: baseURL}
-		require.NoError(t, validateChannel(channel, true))
-		require.NotNil(t, channel.BaseURL)
-		assert.Equal(t, "http://127.0.0.1:8000", *channel.BaseURL, "normalized plugin default is persisted onto the channel")
+	for _, setting := range []string{bound, withMirrors} {
+		for _, baseURL := range []*string{nil, &empty} {
+			channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, Key: "sk", Setting: &setting, BaseURL: baseURL}
+			require.NoError(t, validateChannel(channel, true))
+			require.NotNil(t, channel.BaseURL)
+			assert.Equal(t, "http://127.0.0.1:8000", *channel.BaseURL, "normalized plugin default is persisted onto the channel")
+		}
 	}
 
 	explicit := "https://override.example.com"

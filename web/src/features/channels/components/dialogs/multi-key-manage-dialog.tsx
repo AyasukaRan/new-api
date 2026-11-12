@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, Trash2, Power, PowerOff } from 'lucide-react'
 import { useState, useEffect, useId, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -28,9 +28,11 @@ import { Dialog } from '@/components/dialog'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
+import { MultiSelect } from '@/components/multi-select'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -62,6 +64,7 @@ import {
   disableAllMultiKeys,
   deleteDisabledMultiKeys,
   updateChannelBalance,
+  setMultiKeyGroups,
 } from '../../api'
 import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
 import {
@@ -74,6 +77,7 @@ import {
 } from '../../lib'
 import type {
   Channel,
+  KeyStatus,
   MultiKeyConfirmAction,
   MultiKeyStatusResponse,
 } from '../../types'
@@ -128,6 +132,9 @@ function MultiKeyManageContent({
   >(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
   const [isUpdatingBalance, setIsUpdatingBalance] = useState(false)
+  const [groupDrafts, setGroupDrafts] = useState<
+    Record<string, string[] | undefined>
+  >({})
   const instanceId = useId()
   const mounted = useRef(true)
   useEffect(() => {
@@ -287,7 +294,7 @@ function MultiKeyManageContent({
         description={t(
           'Manage multi-key status and configuration for this channel'
         )}
-        contentClassName='flex max-h-[min(90dvh,var(--dialog-available-height))] max-w-5xl flex-col'
+        contentClassName='flex max-h-[min(90dvh,var(--dialog-available-height))] flex-col sm:max-w-5xl'
         titleClassName='flex flex-wrap items-center gap-2'
         contentHeight='min(72vh, 720px)'
         bodyClassName='space-y-4'
@@ -430,7 +437,7 @@ function MultiKeyManageContent({
             {statusQuery.isSuccess && keys.length > 0 && (
               <StaticDataTable
                 className='rounded-none border-0'
-                tableClassName='table-fixed'
+                tableClassName='min-w-[52rem] table-fixed'
                 data={keys}
                 getRowKey={(key) => key.index}
                 columns={[
@@ -465,7 +472,7 @@ function MultiKeyManageContent({
                           />
                           {key.reason && (
                             <p className='text-muted-foreground text-xs wrap-anywhere'>
-                              {key.reason}
+                              {t(key.reason)}
                             </p>
                           )}
                           {!!key.disabled_time && (
@@ -512,6 +519,28 @@ function MultiKeyManageContent({
                         </div>
                       )
                     },
+                  },
+                  {
+                    id: 'groups',
+                    header: t('Groups'),
+                    className: 'w-64',
+                    cellClassName: 'whitespace-normal align-top',
+                    cell: (key) => (
+                      <KeyGroupsEditor
+                        key={`${key.index}:${key.key_identity}`}
+                        channelId={channel.id}
+                        keyStatus={key}
+                        channelGroups={data?.channel_groups ?? []}
+                        draft={groupDrafts[`${key.index}:${key.key_identity}`]}
+                        onDraftChange={(groups) =>
+                          setGroupDrafts((previous) => ({
+                            ...previous,
+                            [`${key.index}:${key.key_identity}`]: groups,
+                          }))
+                        }
+                        disabled={actionsUnavailable || !canEditSensitive}
+                      />
+                    ),
                   },
                   {
                     id: 'actions',
@@ -575,5 +604,83 @@ function MultiKeyManageContent({
         handleConfirm={performAction}
       />
     </>
+  )
+}
+
+function KeyGroupsEditor(props: {
+  channelId: number
+  keyStatus: KeyStatus
+  channelGroups: string[]
+  draft?: string[]
+  onDraftChange: (groups: string[] | undefined) => void
+  disabled: boolean
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const id = useId()
+  const groups = props.draft ?? props.keyStatus.groups ?? []
+  const savedGroups = props.keyStatus.groups ?? []
+  const changed =
+    groups.length !== savedGroups.length ||
+    groups.some((group) => !savedGroups.includes(group))
+  const save = useMutation({
+    mutationFn: async () =>
+      requireServerSuccess(
+        await setMultiKeyGroups(
+          props.channelId,
+          props.keyStatus.index,
+          props.keyStatus.key_identity,
+          groups
+        )
+      ),
+    onSuccess: async () => {
+      await refreshChannelStatusQueries(queryClient)
+      props.onDraftChange(undefined)
+      toast.success(t('Operation successful'))
+    },
+    onError: async (error) => {
+      handleServerError(error, t('Operation failed'))
+      // A failed identity check must refresh the row before another write.
+      await refreshChannelStatusQueries(queryClient)
+    },
+  })
+  const unavailable =
+    props.disabled || save.isPending || !props.keyStatus.key_identity
+  return (
+    <div className='min-w-0 space-y-2'>
+      <Label className='sr-only' htmlFor={id}>
+        {t('Groups for key #{{index}}', { index: props.keyStatus.index + 1 })}
+      </Label>
+      <MultiSelect
+        id={id}
+        options={props.channelGroups.map((group) => ({
+          value: group,
+          label: group,
+        }))}
+        selected={groups}
+        onChange={props.onDraftChange}
+        disabled={unavailable}
+        maxVisibleChips={2}
+        placeholder={t('Groups for key #{{index}}', {
+          index: props.keyStatus.index + 1,
+        })}
+      />
+      {groups.length === 0 && (
+        <p className='text-muted-foreground text-xs'>
+          {t('All channel groups')}
+        </p>
+      )}
+      <Button
+        type='button'
+        size='sm'
+        variant='outline'
+        disabled={unavailable || !changed}
+        onClick={() => {
+          if (!unavailable && changed) save.mutate()
+        }}
+      >
+        {t('Save groups')}
+      </Button>
+    </div>
   )
 }

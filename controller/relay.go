@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -185,17 +186,39 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 	var observation *bool
+	var sameChannelRetry *model.Channel
+	initialChannelKeys := make(map[int]map[string]bool)
+	rejectedChannelKeys := make(map[int]map[string]bool)
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	for retryParam.GetRetry() <= common.RetryTimes {
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
-		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
+		relayInfo.RetryIndex = service.RequestPolicy(c).Attempts
+		retryingSameChannel := sameChannelRetry != nil
+		channel, channelErr := getChannel(c, relayInfo, retryParam, sameChannelRetry)
+		sameChannelRetry = nil
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
 			break
+		}
+		usingKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		if channel.ChannelInfo.IsMultiKey {
+			if initialChannelKeys[channel.Id] == nil {
+				initialChannelKeys[channel.Id] = make(map[string]bool)
+				rejectedChannelKeys[channel.Id] = make(map[string]bool)
+				for _, key := range channel.GetKeys() {
+					initialChannelKeys[channel.Id][key] = true
+				}
+				// The selector has already checked current persisted group
+				// permission, even if this cached channel predates a key edit.
+				initialChannelKeys[channel.Id][usingKey] = true
+			}
+			if retryingSameChannel && (!initialChannelKeys[channel.Id][usingKey] || rejectedChannelKeys[channel.Id][usingKey]) {
+				newAPIError = types.NewErrorWithStatusCode(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+				break
+			}
 		}
 		service.AppendUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareBillingForSelectedChannel(c, relayInfo); billingErr != nil {
@@ -251,12 +274,54 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.LastError = newAPIError
 
 		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
+		invalidCredential := isInvalidDeepSeekCredential(c, channel, newAPIError)
+		endpointFailed := false
+		if invalidCredential {
+			rejectedChannelKeys[channel.Id][usingKey] = true
+			updated, quarantineErr := model.DisableInvalidChannelKey(channel, relayInfo.OriginModelName, usingKey)
+			if quarantineErr != nil {
+				logger.LogError(c, common.LogText("failed to quarantine invalid channel credential: channel_id=%d", channel.Id))
+			}
+			if updated != nil && updated.Status == common.ChannelStatusEnabled && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
+				for index, key := range updated.GetKeys() {
+					status, configured := updated.ChannelInfo.MultiKeyStatusList[index]
+					if initialChannelKeys[channel.Id][key] && !rejectedChannelKeys[channel.Id][key] && (!configured || status == common.ChannelStatusEnabled) && updated.KeyAllowedForGroup(key, common.GetContextKeyString(c, constant.ContextKeyUsingGroup)) {
+						sameChannelRetry = updated
+						break
+					}
+				}
+			}
+			if sameChannelRetry != nil {
+				decision = service.PolicyDecision{Action: "retry", Reason: "invalid_channel_credential", Source: "channel"}
+			} else if decision.Action != "retry" {
+				decision = service.PolicyDecision{Action: "stop", Reason: "channel_credentials_exhausted", Source: "channel"}
+			}
+		} else if relayInfo.TaskRelayInfo == nil && !service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
+			var retryEndpoint bool
+			endpointFailed, retryEndpoint = service.FailChannelEndpoint(c, channel, newAPIError)
+			if retryEndpoint {
+				sameChannelRetry = channel
+				decision = service.PolicyDecision{Action: "retry", Reason: "channel_endpoint_unavailable", Source: "channel"}
+			}
+		}
+		if c.Writer.Written() || c.Request.Context().Err() != nil {
+			sameChannelRetry = nil
+			decision = service.PolicyDecision{Action: "stop", Reason: "request_no_longer_replayable", Source: "system"}
+		}
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, usingKey, channel.GetAutoBan() && !invalidCredential && !endpointFailed), newAPIError, relayInfo)
+		if sameChannelRetry != nil {
+			continue
+		}
+		if invalidCredential {
+			newAPIError = types.NewErrorWithStatusCode(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+			relayInfo.LastError = newAPIError
+		}
 
 		if decision.Action != "retry" {
 			break
 		}
+		retryParam.IncreaseRetry()
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -322,8 +387,25 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
+func isInvalidDeepSeekCredential(c *gin.Context, channel *model.Channel, apiErr *types.NewAPIError) bool {
+	if channel == nil || channel.Type != constant.ChannelTypeDeepSeek || !channel.ChannelInfo.IsMultiKey || apiErr == nil || apiErr.StatusCode != http.StatusUnauthorized || apiErr.GetErrorType() != types.ErrorTypeOpenAIError {
+		return false
+	}
+	for header := range channel.GetHeaderOverride() {
+		if strings.EqualFold(header, "Authorization") {
+			return false
+		}
+	}
+	upstream, err := url.Parse(common.GetContextKeyString(c, constant.ContextKeyUpstreamRequestOrigin))
+	return err == nil && upstream.Scheme == "https" && strings.EqualFold(upstream.Hostname(), "api.deepseek.com") && (upstream.Port() == "" || upstream.Port() == "443")
+}
+
+func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam, sameChannel ...*model.Channel) (*model.Channel, *types.NewAPIError) {
+	var preferred *model.Channel
+	if len(sameChannel) > 0 {
+		preferred = sameChannel[0]
+	}
+	if preferred == nil && info.ChannelMeta == nil {
 		// Capture the selected channel configuration before the request starts,
 		// so a later admin edit cannot relabel its key observation.
 		if channel, err := model.CacheGetChannel(c.GetInt("channel_id")); err == nil && channel != nil {
@@ -353,7 +435,11 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	for selection := 0; ; selection++ {
 		var selectGroup string
 		var err error
-		channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(retryParam)
+		if preferred != nil {
+			channel = preferred
+		} else {
+			channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(retryParam)
+		}
 		if err != nil {
 			var probeErr *model.ChannelProbeError
 			if errors.As(err, &probeErr) {
@@ -369,7 +455,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			break
 		}
 		_, pinned, _ := service.GetChannelConstraints(c).ResolvedPin()
-		if (newAPIError.GetErrorCode() != model.ErrorCodeChannelBalanceUnavailable && newAPIError.GetErrorCode() != model.ErrorCodeChannelProbeUnavailable) || pinned || selection > 0 {
+		if preferred != nil || (newAPIError.GetErrorCode() != model.ErrorCodeChannelBalanceUnavailable && newAPIError.GetErrorCode() != model.ErrorCodeChannelProbeUnavailable) || pinned || selection > 0 {
 			return nil, newAPIError
 		}
 	}

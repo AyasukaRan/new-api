@@ -542,16 +542,16 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		return fmt.Errorf("channel cannot be empty")
 	}
 
-	// 校验 channel settings
-	if err := channel.ValidateSettings(); err != nil {
-		var message *common.Message
-		if errors.As(err, &message) {
-			return message
-		}
-		return common.NewMessage("Invalid channel settings format: {{error}}", map[string]any{"error": err.Error()})
-	}
 	if channel.Type == constant.ChannelTypeTaskPlugin {
-		pluginKey := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
+		// Resolve the persisted default before validating the complete mirror
+		// pool. Parse without GetSetting's repair/write behavior on bad JSON.
+		var pluginSetting dto.ChannelSettings
+		if channel.Setting != nil && *channel.Setting != "" {
+			if err := common.UnmarshalJsonStr(*channel.Setting, &pluginSetting); err != nil {
+				return common.NewMessage("Invalid channel settings format: {{error}}", map[string]any{"error": err.Error()})
+			}
+		}
+		pluginKey := strings.TrimSpace(pluginSetting.TaskPluginKey)
 		if pluginKey == "" {
 			return fmt.Errorf("task plugin key is required")
 		}
@@ -572,6 +572,13 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 			defaultBaseURL := plugin.Meta.BaseURL
 			channel.BaseURL = &defaultBaseURL
 		}
+	}
+	if err := channel.ValidateSettings(); err != nil {
+		var message *common.Message
+		if errors.As(err, &message) {
+			return message
+		}
+		return common.NewMessage("Invalid channel settings format: {{error}}", map[string]any{"error": err.Error()})
 	}
 
 	setting := channel.GetSetting()
@@ -1737,8 +1744,23 @@ func CopyChannel(c *gin.Context) {
 		return
 	}
 
-	// insert
-	if err := clone.Insert(); err != nil {
+	// Rebind credential scopes to the new channel ID inside the same commit.
+	clone.ChannelInfo.KeyGroups = nil
+	if err := model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&clone).Error; err != nil {
+			return err
+		}
+		clone.ChannelInfo.KeyGroups = make(map[string][]string)
+		for _, key := range origin.GetKeys() {
+			if groups := origin.ChannelInfo.KeyGroups[origin.KeyIdentity(key)]; len(groups) > 0 {
+				clone.ChannelInfo.KeyGroups[clone.KeyIdentity(key)] = slices.Clone(groups)
+			}
+		}
+		if err := tx.Model(&clone).Update("channel_info", clone.ChannelInfo).Error; err != nil {
+			return err
+		}
+		return clone.AddAbilities(tx)
+	}); err != nil {
 		common.SysError(common.LogText("failed to clone channel: %s", err.Error()))
 		common.ApiErrorT(c, "Failed to copy channel. Please try again later")
 		return
@@ -1755,21 +1777,24 @@ func CopyChannel(c *gin.Context) {
 
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
-	ChannelId int    `json:"channel_id"`
-	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
-	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
-	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
-	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
-	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	ChannelId   int       `json:"channel_id"`
+	Action      string    `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
+	KeyIndex    *int      `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
+	Page        int       `json:"page,omitempty"`      // for get_key_status pagination
+	PageSize    int       `json:"page_size,omitempty"` // for get_key_status pagination
+	Status      *int      `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	KeyIdentity string    `json:"key_identity,omitempty"`
+	Groups      *[]string `json:"groups,omitempty"`
 }
 
 // MultiKeyStatusResponse represents the response for key status query
 type MultiKeyStatusResponse struct {
-	Keys       []KeyStatus `json:"keys"`
-	Total      int         `json:"total"`
-	Page       int         `json:"page"`
-	PageSize   int         `json:"page_size"`
-	TotalPages int         `json:"total_pages"`
+	ChannelGroups []string    `json:"channel_groups"`
+	Keys          []KeyStatus `json:"keys"`
+	Total         int         `json:"total"`
+	Page          int         `json:"page"`
+	PageSize      int         `json:"page_size"`
+	TotalPages    int         `json:"total_pages"`
 	// Statistics
 	EnabledCount         int                          `json:"enabled_count"`
 	ManualDisabledCount  int                          `json:"manual_disabled_count"`
@@ -1779,11 +1804,13 @@ type MultiKeyStatusResponse struct {
 }
 
 type KeyStatus struct {
-	Index        int    `json:"index"`
-	Status       int    `json:"status"` // 1: enabled, 2: disabled
-	DisabledTime int64  `json:"disabled_time,omitempty"`
-	Reason       string `json:"reason,omitempty"`
-	KeyPreview   string `json:"key_preview"` // masked credential for identification
+	KeyIdentity  string   `json:"key_identity"`
+	Groups       []string `json:"groups"`
+	Index        int      `json:"index"`
+	Status       int      `json:"status"` // 1: enabled, 2: disabled
+	DisabledTime int64    `json:"disabled_time,omitempty"`
+	Reason       string   `json:"reason,omitempty"`
+	KeyPreview   string   `json:"key_preview"` // masked credential for identification
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1901,6 +1928,8 @@ func ManageMultiKeys(c *gin.Context) {
 			}
 
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
+				KeyIdentity:  channel.KeyIdentity(key),
+				Groups:       append([]string{}, channel.ChannelInfo.KeyGroups[channel.KeyIdentity(key)]...),
 				Index:        i,
 				Status:       status,
 				DisabledTime: disabledTime,
@@ -1945,6 +1974,7 @@ func ManageMultiKeys(c *gin.Context) {
 			"success": true,
 			"message": "",
 			"data": MultiKeyStatusResponse{
+				ChannelGroups:        channel.GetGroups(),
 				Keys:                 pageKeyStatusList,
 				Total:                filteredTotal, // Total of filtered results
 				Page:                 page,
@@ -1957,6 +1987,19 @@ func ManageMultiKeys(c *gin.Context) {
 				BalanceQueryDisabled: errors.Is(balanceQueryErr, model.ErrChannelBalanceQueryDisabled),
 			},
 		})
+		return
+
+	case "set_key_groups":
+		if request.KeyIndex == nil || request.KeyIdentity == "" || request.Groups == nil {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		if err := model.SetChannelKeyGroups(channel.Id, *request.KeyIndex, request.KeyIdentity, *request.Groups); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		common.ApiSuccess(c, nil)
 		return
 
 	case "disable_key":
@@ -2239,7 +2282,7 @@ func ManageMultiKeys(c *gin.Context) {
 }
 
 func multiKeyActionRequiresSensitiveWrite(action string) bool {
-	return action == "delete_key" || action == "delete_disabled_keys"
+	return action == "delete_key" || action == "delete_disabled_keys" || action == "set_key_groups"
 }
 
 // OllamaPullModel 拉取 Ollama 模型

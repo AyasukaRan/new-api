@@ -24,10 +24,15 @@ import {
 } from '@tanstack/react-table'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import i18next, { createInstance, type i18n } from 'i18next'
+import { I18nextProvider } from 'react-i18next'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { Button } from '@/components/ui/button'
+import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import type { Channel, MultiKeyManageParams } from '../../types'
 import { useChannelsColumns } from '../channels-columns'
@@ -35,7 +40,11 @@ import { ChannelsProvider, useChannels } from '../channels-provider'
 import { MultiKeyManageDialog } from '../dialogs/multi-key-manage-dialog'
 
 const clients: QueryClient[] = []
-afterEach(() => clients.splice(0).forEach((client) => client.clear()))
+const originalAuth = useAuthStore.getState().auth
+afterEach(() => {
+  clients.splice(0).forEach((client) => client.clear())
+  useAuthStore.setState({ auth: originalAuth })
+})
 
 function statusResponse(overrides: Record<string, unknown> = {}) {
   return {
@@ -43,16 +52,31 @@ function statusResponse(overrides: Record<string, unknown> = {}) {
       success: true,
       data: {
         keys: [
-          { index: 0, status: 1, key_preview: 'sk-a**********0001' },
+          {
+            index: 0,
+            status: 1,
+            key_preview: 'sk-a**********0001',
+            key_identity: 'identity-a',
+            groups: [] as string[],
+          },
           {
             index: 1,
+            key_identity: 'identity-b',
+            groups: ['default'],
             status: 2,
             key_preview: 'sk-b**********0002',
             reason: 'manual',
             disabled_time: 1789300000,
           },
-          { index: 2, status: 1, key_preview: 'sk-c**********0003' },
+          {
+            index: 2,
+            status: 1,
+            key_preview: 'sk-c**********0003',
+            key_identity: 'identity-c',
+            groups: [] as string[],
+          },
         ],
+        channel_groups: ['default', 'premium'],
         total: 3,
         page: 1,
         page_size: 10,
@@ -136,17 +160,19 @@ function Fixture() {
   )
 }
 
-function setup() {
+function setup(language?: i18n) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
   clients.push(client)
   render(
-    <QueryClientProvider client={client}>
-      <ChannelsProvider>
-        <Fixture />
-      </ChannelsProvider>
-    </QueryClientProvider>
+    <I18nextProvider i18n={language ?? i18next}>
+      <QueryClientProvider client={client}>
+        <ChannelsProvider>
+          <Fixture />
+        </ChannelsProvider>
+      </QueryClientProvider>
+    </I18nextProvider>
   )
   return { client, user: userEvent.setup() }
 }
@@ -167,6 +193,27 @@ test('shows masked keys and distinguishes zero, negative and last known balances
   expect(keyRow(3).getByText('Query failed')).toBeVisible()
   expect(keyRow(3).getByText('Last known balance: $5')).toBeVisible()
   expect(keyRow(1).getByText(/Last queried:/)).toBeVisible()
+})
+
+test('a fixed invalid credential reason follows the interface language', async () => {
+  const response = statusResponse()
+  response.data.data.keys[1].reason = 'Upstream API credential is invalid.'
+  vi.spyOn(api, 'post').mockResolvedValue(response)
+  const language = createInstance()
+  await language.init({
+    lng: 'en',
+    fallbackLng: 'en',
+    resources: { zh },
+    keySeparator: false,
+    interpolation: { escapeValue: false },
+  })
+  const { user } = setup(language)
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  expect(
+    await screen.findByText('Upstream API credential is invalid.')
+  ).toBeVisible()
+  await act(() => language.changeLanguage('zh'))
+  expect(screen.getByText('上游 API 凭据无效。')).toBeVisible()
 })
 
 test('disabling balance queries retains cached readings and never sends an upstream balance query', async () => {
@@ -411,4 +458,182 @@ test('a refreshed key snapshot dismisses an unsubmitted confirmation', async () 
       (call) => (call[1] as MultiKeyManageParams).action === 'get_key_status'
     )
   ).toBe(true)
+})
+
+test('key groups save the masked key identity and empty selection inherits channel groups', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'root', role: ROLE.SUPER_ADMIN },
+    },
+  })
+  let groups: string[] = []
+  const post = vi
+    .spyOn(api, 'post')
+    .mockImplementation(async (_url, params) => {
+      const request = params as MultiKeyManageParams
+      if (request.action === 'set_key_groups') {
+        groups = request.groups ?? []
+        return { data: { success: true } }
+      }
+      const response = statusResponse()
+      response.data.data.keys[0].groups = groups
+      return response
+    })
+  const get = vi.spyOn(api, 'get')
+  const { user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  expect(keyRow(1).getByText('All channel groups')).toBeVisible()
+  await user.click(
+    keyRow(1).getByRole('combobox', { name: 'Groups for key #1' })
+  )
+  await user.click(screen.getByRole('option', { name: 'premium' }))
+  await user.keyboard('{Escape}')
+  await user.click(keyRow(1).getByRole('button', { name: 'Save groups' }))
+  await waitFor(() =>
+    expect(
+      keyRow(1).getByRole('button', { name: 'Save groups' })
+    ).toBeDisabled()
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/channel/multi_key/manage',
+    {
+      action: 'set_key_groups',
+      channel_id: 1,
+      key_index: 0,
+      key_identity: 'identity-a',
+      groups: ['premium'],
+    },
+    expect.anything()
+  )
+  await user.click(
+    keyRow(1).getByRole('combobox', { name: 'Groups for key #1' })
+  )
+  await user.click(screen.getByRole('option', { name: 'premium' }))
+  await user.keyboard('{Escape}')
+  await user.click(keyRow(1).getByRole('button', { name: 'Save groups' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel/multi_key/manage',
+      {
+        action: 'set_key_groups',
+        channel_id: 1,
+        key_index: 0,
+        key_identity: 'identity-a',
+        groups: [],
+      },
+      expect.anything()
+    )
+  )
+  expect(get).not.toHaveBeenCalled()
+  expect(
+    post.mock.calls.every(([url]) => url === '/api/channel/multi_key/manage')
+  ).toBe(true)
+})
+
+test('failed key group saving preserves the draft but a replacement identity cannot inherit it', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'root', role: ROLE.SUPER_ADMIN },
+    },
+  })
+  let replaced = false
+  const post = vi
+    .spyOn(api, 'post')
+    .mockImplementation(async (_url, params) => {
+      if ((params as MultiKeyManageParams).action === 'set_key_groups') {
+        return {
+          data: {
+            success: false,
+            message: 'The key list changed. Refresh and try again.',
+          },
+        }
+      }
+      const response = statusResponse()
+      if (replaced) {
+        response.data.data.keys[0].key_identity = 'replacement-identity'
+        response.data.data.keys[0].key_preview = 'replacement-**********hint'
+      }
+      return response
+    })
+  const { client, user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  await user.click(
+    keyRow(1).getByRole('combobox', { name: 'Groups for key #1' })
+  )
+  await user.click(screen.getByRole('option', { name: 'premium' }))
+  await user.keyboard('{Escape}')
+  await user.click(keyRow(1).getByRole('button', { name: 'Save groups' }))
+  await waitFor(() =>
+    expect(keyRow(1).getByRole('button', { name: 'Save groups' })).toBeEnabled()
+  )
+  expect(keyRow(1).getByText('premium')).toBeVisible()
+  expect(
+    post.mock.calls.filter(
+      ([, params]) =>
+        (params as MultiKeyManageParams).action === 'get_key_status'
+    ).length
+  ).toBeGreaterThan(1)
+  replaced = true
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['channels'] })
+  })
+  expect(await screen.findByText('replacement-**********hint')).toBeVisible()
+  expect(keyRow(1).getByText('All channel groups')).toBeVisible()
+  expect(keyRow(1).getByRole('button', { name: 'Save groups' })).toBeDisabled()
+  expect(keyRow(1).queryByText('premium')).not.toBeInTheDocument()
+})
+
+test('key groups require sensitive write permission and fit the desktop dialog with narrow-screen scrolling', async () => {
+  vi.spyOn(api, 'post').mockResolvedValue(statusResponse())
+  const { user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  expect(
+    keyRow(1).getByRole('combobox', { name: 'Groups for key #1' })
+  ).toBeDisabled()
+  expect(keyRow(1).getByRole('button', { name: 'Save groups' })).toBeDisabled()
+  expect(screen.getByRole('dialog')).toHaveClass(
+    'sm:max-w-5xl',
+    'max-w-[calc(100%-2rem)]'
+  )
+  expect(screen.getByRole('table')).toHaveClass('min-w-[52rem]')
+  expect(screen.getByRole('table').parentElement).toHaveClass('overflow-x-auto')
+})
+
+test('a failed group save retains its draft through a failed status refresh', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'root', role: ROLE.SUPER_ADMIN },
+    },
+  })
+  let statusUnavailable = false
+  vi.spyOn(api, 'post').mockImplementation(async (_url, params) => {
+    if ((params as MultiKeyManageParams).action === 'set_key_groups') {
+      statusUnavailable = true
+      return { data: { success: false, message: 'Operation failed' } }
+    }
+    return statusUnavailable
+      ? { data: { success: false, message: 'Operation failed' } }
+      : statusResponse()
+  })
+  const { user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  await user.click(
+    keyRow(1).getByRole('combobox', { name: 'Groups for key #1' })
+  )
+  await user.click(screen.getByRole('option', { name: 'premium' }))
+  await user.keyboard('{Escape}')
+  await user.click(keyRow(1).getByRole('button', { name: 'Save groups' }))
+  expect(await screen.findByText('Failed to load key status')).toBeVisible()
+  statusUnavailable = false
+  await user.click(screen.getByRole('button', { name: 'Retry' }))
+  await screen.findByText('sk-a**********0001')
+  expect(keyRow(1).getByText('premium')).toBeVisible()
+  expect(keyRow(1).getByRole('button', { name: 'Save groups' })).toBeEnabled()
 })

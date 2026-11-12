@@ -65,7 +65,12 @@ type Channel struct {
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
 
+const ErrorCodeChannelGroupUnavailable types.ErrorCode = "channel_no_group_key"
+
+var ErrChannelDisabled = errors.New("channel is disabled")
+
 type ChannelInfo struct {
+	KeyGroups              map[string][]string   `json:"key_groups,omitempty"`
 	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
 	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
 	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
@@ -226,8 +231,45 @@ func (channel *Channel) GetNextRelayKey(batchRequest ...bool) (string, int, *typ
 
 // GetNextRelayKeyForModel excludes failed probes as well as known debt without
 // changing the key status or preventing administrative tests from recovering it.
-func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest bool) (string, int, *types.NewAPIError) {
+func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest bool, groups ...string) (string, int, *types.NewAPIError) {
+	if len(groups) > 0 && channel.ChannelInfo.IsMultiKey {
+		// Permission changes must not wait for another instance's routing cache.
+		var current Channel
+		if err := DB.Select("id", commonKeyCol, commonGroupCol, "channel_info", "status").First(&current, channel.Id).Error; err != nil {
+			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		if current.Status != common.ChannelStatusEnabled {
+			return "", 0, types.NewError(ErrChannelDisabled, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		if !slices.Contains(current.GetGroups(), groups[0]) {
+			return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+		}
+		snapshot := *channel
+		snapshot.Key, snapshot.Keys = current.Key, nil
+		snapshot.ChannelInfo, snapshot.Group = current.ChannelInfo, current.Group
+		channel = &snapshot
+	}
 	negativeKeys := channelNegativeBalanceKeysForRelay(channel, batchRequest)
+	if len(groups) > 0 && len(channel.ChannelInfo.KeyGroups) > 0 {
+		if !channel.HasEnabledKeyForGroup(groups[0]) {
+			return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+		}
+		if batchRequest {
+			_, batchKey := channel.GetBatchEndpoint("")
+			if batchKey != "" && !channel.KeyAllowedForGroup(batchKey, groups[0]) {
+				return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+			}
+		}
+		negativeKeys = maps.Clone(negativeKeys)
+		if negativeKeys == nil {
+			negativeKeys = make(map[int]bool)
+		}
+		for index, key := range channel.GetKeys() {
+			if !channel.KeyAllowedForGroup(key, groups[0]) {
+				negativeKeys[index] = true
+			}
+		}
+	}
 	if batchRequest {
 		return channel.nextEnabledKey(negativeKeys)
 	}
@@ -309,7 +351,7 @@ func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, 
 				logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, channel.ChannelInfo.MultiKeyPollingIndex)
 			}
 			if !common.MemoryCacheEnabled {
-				_ = channel.SaveChannelInfo()
+				_ = channel.savePollingIndex()
 			} else {
 				// CacheUpdateChannel(channel)
 			}
@@ -324,6 +366,13 @@ func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, 
 			if getStatus(idx) == common.ChannelStatusEnabled && !negativeKeys[idx] {
 				// update polling index for next call (point to the next position)
 				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+				if common.MemoryCacheEnabled {
+					channelSyncLock.Lock()
+					if cached := channelsIDM[channel.Id]; cached != nil && cached.Key == channel.Key {
+						cached.ChannelInfo.MultiKeyPollingIndex = channel.ChannelInfo.MultiKeyPollingIndex
+					}
+					channelSyncLock.Unlock()
+				}
 				return keys[idx], idx, nil
 			}
 		}
@@ -336,7 +385,25 @@ func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, 
 }
 
 func (channel *Channel) SaveChannelInfo() error {
-	return DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).Select("id", "channel_info").First(&current, channel.Id).Error; err != nil {
+			return err
+		}
+		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
+		return tx.Model(channel).Update("channel_info", channel.ChannelInfo).Error
+	})
+}
+
+func (channel *Channel) savePollingIndex() error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).Select("id", "channel_info").First(&current, channel.Id).Error; err != nil {
+			return err
+		}
+		current.ChannelInfo.MultiKeyPollingIndex = channel.ChannelInfo.MultiKeyPollingIndex
+		return tx.Model(&current).Update("channel_info", current.ChannelInfo).Error
+	})
 }
 
 func (channel *Channel) GetModels() []string {
@@ -360,7 +427,7 @@ func (channel *Channel) GetGroups() []string {
 // GetModelsForGroup is the shared route and catalog view. Intersecting with
 // Models keeps stale saved scopes from resurrecting a removed model.
 func (channel *Channel) GetModelsForGroup(group string) []string {
-	if !slices.Contains(channel.GetGroups(), group) {
+	if !channel.HasKeyForGroup(group) {
 		return nil
 	}
 	setting := dto.ChannelSettings{}
@@ -386,6 +453,9 @@ func (channel *Channel) GetModelsForGroup(group string) []string {
 // HasGroupModelLimits also fails closed for malformed settings on pinned
 // requests; reading routing settings must never clear them in the database.
 func (channel *Channel) HasGroupModelLimits() bool {
+	if len(channel.ChannelInfo.KeyGroups) > 0 {
+		return true
+	}
 	if channel.Setting == nil || *channel.Setting == "" {
 		return false
 	}
@@ -498,14 +568,21 @@ func (channel *Channel) saveStatusStateWithDB(tx *gorm.DB) error {
 	if channel.Id == 0 {
 		return errors.New("channel ID is 0")
 	}
-	updates := map[string]any{
-		"status":     channel.Status,
-		"other_info": channel.OtherInfo,
-	}
-	if channel.ChannelInfo.IsMultiKey {
-		updates["channel_info"] = channel.ChannelInfo
-	}
-	return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+	return tx.Transaction(func(tx *gorm.DB) error {
+		updates := map[string]any{
+			"status":     channel.Status,
+			"other_info": channel.OtherInfo,
+		}
+		if channel.ChannelInfo.IsMultiKey {
+			var current Channel
+			if err := lockForUpdate(tx).Select("channel_info").First(&current, channel.Id).Error; err != nil {
+				return err
+			}
+			channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
+			updates["channel_info"] = channel.ChannelInfo
+		}
+		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+	})
 }
 
 func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
@@ -752,6 +829,26 @@ func (channel *Channel) Update() error {
 		}
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).First(&current, channel.Id).Error; err != nil {
+			return err
+		}
+		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
+		keySnapshot := *channel
+		keySnapshot.Keys = nil
+		if keySnapshot.Key == "" {
+			keySnapshot.Key = current.Key
+		}
+		channel.retainKeyGroups(keySnapshot.GetKeys())
+		if channel.Group != "" && channel.Group != current.Group {
+			for _, groups := range channel.ChannelInfo.KeyGroups {
+				for _, group := range groups {
+					if !slices.Contains(channel.GetGroups(), group) {
+						return common.NewMessage("Key groups must be a subset of the channel groups.")
+					}
+				}
+			}
+		}
 		resetEmail := false
 		if channel.Setting != nil {
 			var stored Channel
@@ -781,16 +878,21 @@ func (channel *Channel) Update() error {
 				return err
 			}
 			if len(last) > 0 {
-				return tx.Model(&last[0]).UpdateColumn("email_state", nil).Error
+				if err := tx.Model(&last[0]).UpdateColumn("email_state", nil).Error; err != nil {
+					return err
+				}
 			}
 		}
-		return nil
+		channel.Keys = nil
+		if err := tx.First(channel, channel.Id).Error; err != nil {
+			return err
+		}
+		return channel.UpdateAbilities(tx)
 	})
 	if err != nil {
 		return err
 	}
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
-	return channel.UpdateAbilities(nil)
+	return nil
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -1007,6 +1109,89 @@ func UpdateChannelStatusWithError(channelId int, usingKey string, status int, re
 	return true, nil
 }
 
+// DisableInvalidChannelKey quarantines a rejected physical credential only
+// while its account and relay configuration still match the failed request.
+// It preserves the latest key permissions under the database row lock and
+// publishes the new state only after committing it.
+func DisableInvalidChannelKey(snapshot *Channel, modelName, usingKey string) (*Channel, error) {
+	if snapshot == nil || !snapshot.ChannelInfo.IsMultiKey || usingKey == "" {
+		return nil, nil
+	}
+	expectedID, err := ChannelKeyObservationID(snapshot, modelName, usingKey)
+	if err != nil {
+		return nil, err
+	}
+	if common.MemoryCacheEnabled {
+		channelStatusLock.Lock()
+		defer channelStatusLock.Unlock()
+	}
+	pollingLock := GetChannelPollingLock(snapshot.Id)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+	var updated *Channel
+	statusChanged := false
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).First(&current, snapshot.Id).Error; err != nil {
+			return err
+		}
+		if !current.ChannelInfo.IsMultiKey || current.Status == common.ChannelStatusManuallyDisabled || !slices.Contains(current.GetKeys(), usingKey) {
+			return nil
+		}
+		currentID, err := ChannelKeyObservationID(&current, modelName, usingKey)
+		if err != nil || currentID != expectedID {
+			return err
+		}
+		if current.ChannelInfo.MultiKeyStatusList == nil {
+			current.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		}
+		if current.ChannelInfo.MultiKeyDisabledReason == nil {
+			current.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+		}
+		if current.ChannelInfo.MultiKeyDisabledTime == nil {
+			current.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
+		}
+		for index, key := range current.GetKeys() {
+			if key != usingKey || current.ChannelInfo.MultiKeyStatusList[index] == common.ChannelStatusManuallyDisabled {
+				continue
+			}
+			current.ChannelInfo.MultiKeyStatusList[index] = common.ChannelStatusAutoDisabled
+			current.ChannelInfo.MultiKeyDisabledReason[index] = "Upstream API credential is invalid."
+			current.ChannelInfo.MultiKeyDisabledTime[index] = common.GetTimestamp()
+		}
+		if !hasEnabledMultiKey(current.GetKeys(), current.ChannelInfo.MultiKeyStatusList) {
+			statusChanged = current.Status != common.ChannelStatusAutoDisabled
+			current.Status = common.ChannelStatusAutoDisabled
+			info := current.GetOtherInfo()
+			info["status_reason"], info["status_time"] = ChannelStatusReasonAllKeysDisabled, common.GetTimestamp()
+			current.SetOtherInfo(info)
+		}
+		if err := current.saveStatusStateWithDB(tx); err != nil {
+			return err
+		}
+		if statusChanged {
+			if err := tx.Model(&Ability{}).Where("channel_id = ?", current.Id).Select("enabled").Update("enabled", false).Error; err != nil {
+				return err
+			}
+		}
+		updated = &current
+		return nil
+	})
+	if err != nil || updated == nil {
+		return nil, err
+	}
+	if common.MemoryCacheEnabled {
+		if cached, _ := CacheGetChannel(updated.Id); cached != nil {
+			cached.ChannelInfo = updated.ChannelInfo
+			CacheUpdateChannelStatus(updated.Id, updated.Status)
+		}
+	}
+	if statusChanged {
+		InvalidatePricingCache()
+	}
+	return updated, nil
+}
+
 func EnableChannelByTag(tag string) error {
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
@@ -1213,6 +1398,9 @@ func (channel *Channel) ValidateSettings() error {
 	}
 	if err := channelParams.ValidateHTTPTransport(); err != nil {
 		return err
+	}
+	if _, err := channelParams.EndpointURLs(channel.GetBaseURL()); err != nil {
+		return common.NewMessage(err.Error())
 	}
 	if err := channelParams.ValidateBalanceQuery(); err != nil {
 		return err

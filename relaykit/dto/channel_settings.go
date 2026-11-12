@@ -24,6 +24,8 @@ type ChannelSettings struct {
 	ForceFormat               bool                `json:"force_format,omitempty"`
 	ThinkingToContent         bool                `json:"thinking_to_content,omitempty"`
 	Proxy                     string              `json:"proxy"`
+	EndpointMode              string              `json:"endpoint_mode,omitempty"`
+	AdditionalBaseURLs        []string            `json:"additional_base_urls,omitempty"`
 	PassThroughBodyEnabled    bool                `json:"pass_through_body_enabled,omitempty"`
 	ResponsesWebSocketEnabled bool                `json:"responses_websocket_enabled,omitempty"`
 	SystemPrompt              string              `json:"system_prompt,omitempty"`
@@ -71,6 +73,39 @@ type ChannelSettings struct {
 	// TLSInsecureSkipVerify accepts upstream certificates that fail
 	// verification, such as self-signed ones, for this channel only.
 	TLSInsecureSkipVerify bool `json:"tls_insecure_skip_verify,omitempty"`
+}
+
+// EndpointURLs resolves equivalent upstream mirrors sharing the same credentials.
+// The legacy single-address path retains each provider's existing URL semantics.
+func (s *ChannelSettings) EndpointURLs(primary string) ([]string, error) {
+	if s == nil || s.EndpointMode == "" {
+		if s != nil && len(s.AdditionalBaseURLs) > 0 {
+			return nil, fmt.Errorf("Choose an endpoint routing mode before adding addresses.")
+		}
+		return []string{primary}, nil
+	}
+	if s.EndpointMode != "load_balance" && s.EndpointMode != "failover" {
+		return nil, fmt.Errorf("Unknown endpoint routing mode.")
+	}
+	if len(s.AdditionalBaseURLs) < 1 || len(s.AdditionalBaseURLs) > 15 {
+		return nil, fmt.Errorf("Enter between 1 and 15 additional addresses.")
+	}
+	addresses := make([]string, 0, len(s.AdditionalBaseURLs)+1)
+	for _, address := range append([]string{primary}, s.AdditionalBaseURLs...) {
+		parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(address), "/"))
+		if err != nil || parsed.Hostname() == "" ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+			return nil, fmt.Errorf("Enter one HTTP or HTTPS address per line, without credentials, query parameters, or fragments.")
+		}
+		parsed.Host = strings.ToLower(parsed.Host)
+		normalized := parsed.String()
+		if slices.Contains(addresses, normalized) {
+			return nil, fmt.Errorf("Endpoint addresses must be unique.")
+		}
+		addresses = append(addresses, normalized)
+	}
+	return addresses, nil
 }
 
 // ValidateUpstreamCostRatio accepts an explicit zero but not invalid or unbounded costs.

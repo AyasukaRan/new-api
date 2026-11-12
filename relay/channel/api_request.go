@@ -390,6 +390,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	fullRequestURL = toWebSocketURL(fullRequestURL)
 	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
 		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
+		service.RecordChannelEndpointRequest(c, targetURL)
 	}
 	targetHeader := http.Header{}
 	err = a.SetupRequestHeader(c, &targetHeader, info)
@@ -506,6 +507,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	service.CaptureUpstreamRequest(c, info, req)
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
+	service.RecordChannelEndpointRequest(c, req.URL)
 	resp, err := relayClient.Do(req)
 	if err != nil {
 		logger.LogError(c, common2.LogText("do request failed: %s", err.Error()))

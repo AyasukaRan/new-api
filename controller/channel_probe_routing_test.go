@@ -1,9 +1,13 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -18,9 +22,11 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
@@ -53,6 +59,318 @@ func requireProbeRoutingError(t *testing.T, apiErr *types.NewAPIError, message s
 	info := &relaycommon.RelayInfo{}
 	assert.Equal(t, perfmetrics.OutcomeIgnored, perfmetrics.ClassifyRelayOutcome(nil, info, apiErr))
 	assert.Nil(t, perfmetrics.RelayObservation(nil, info, apiErr))
+}
+
+func TestDeepSeekInvalidKeyFailoverDatabaseMatrix(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousRetries, previousDisable := common.RetryTimes, common.AutomaticDisableChannelEnabled
+	previousCount, previousLogs, previousTrace := constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled
+	previousErrorLogs := constant.ErrorLogEnabled
+	common.RetryTimes, common.AutomaticDisableChannelEnabled = 0, false
+	constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = false, false, false, false
+	t.Cleanup(func() {
+		common.RetryTimes, common.AutomaticDisableChannelEnabled = previousRetries, previousDisable
+		constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = previousCount, previousLogs, previousTrace, previousErrorLogs
+	})
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	previousTransport := client.Transport
+	t.Cleanup(func() { client.Transport = previousTransport })
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}, &model.ChannelBalanceSample{}, &model.Log{}))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false", "quota_setting.enable_free_model_pre_consume": "false"}))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"fallback":1}`))
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"deepseek-flash":0}`))
+			user := &model.User{Username: "invalid-key-user", Password: "unused", Group: "default", Status: common.UserStatusEnabled, Quota: 1000, AffCode: "badkey"}
+			require.NoError(t, db.Create(user).Error)
+			for _, cached := range []bool{false, true} {
+				for _, test := range []struct {
+					name                                            string
+					chat, duplicate, allBad, single, strict         bool
+					cancel, written, changed, custom, otherProvider bool
+					groupRestricted                                 bool
+					wantCalls, wantStatus, wantDisabled, retries    int
+				}{
+					{name: "responses_zero_global_retries", wantCalls: 2, wantStatus: 200, wantDisabled: 1},
+					{name: "chat_zero_global_retries", chat: true, wantCalls: 2, wantStatus: 200, wantDisabled: 1},
+					{name: "duplicate_physical_key", duplicate: true, wantCalls: 2, wantStatus: 200, wantDisabled: 2},
+					{name: "all_keys_rejected", allBad: true, wantCalls: 2, wantStatus: 503, wantDisabled: 2},
+					{name: "exhausted_keys_use_cross_channel_budget", allBad: true, retries: 3, wantCalls: 3, wantStatus: 200, wantDisabled: 2},
+					{name: "single_attempt_pin", single: true, wantCalls: 1, wantStatus: 503, wantDisabled: 1},
+					{name: "strict_same_channel", strict: true, wantCalls: 2, wantStatus: 200, wantDisabled: 1},
+					{name: "remaining_key_not_allowed_for_group", groupRestricted: true, wantCalls: 1, wantStatus: 503, wantDisabled: 1},
+					{name: "client_cancelled", cancel: true, wantCalls: 1, wantStatus: 503, wantDisabled: 1},
+					{name: "response_already_written", written: true, wantCalls: 1, wantStatus: 200, wantDisabled: 1},
+					{name: "account_changed_during_request", changed: true, wantCalls: 1, wantStatus: 503},
+					{name: "custom_endpoint_unchanged", custom: true, wantCalls: 1, wantStatus: 401},
+					{name: "other_provider_unchanged", otherProvider: true, wantCalls: 1, wantStatus: 401},
+				} {
+					t.Run(fmt.Sprintf("cache=%t/%s", cached, test.name), func(t *testing.T) {
+						common.MemoryCacheEnabled = cached
+						common.RetryTimes = test.retries
+						keys := "fixture-invalid-key\nfixture-healthy-key"
+						if test.duplicate {
+							keys = "fixture-invalid-key\nfixture-invalid-key\nfixture-healthy-key"
+						}
+						channel := &model.Channel{Type: constant.ChannelTypeDeepSeek, Key: keys, Models: "deepseek-flash", Group: "default", Status: common.ChannelStatusEnabled, AutoBan: common.GetPointer(1), BaseURL: common.GetPointer("https://api.deepseek.com"), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: len(strings.Split(keys, "\n")), MultiKeyMode: constant.MultiKeyModePolling}}
+						if test.custom {
+							channel.BaseURL = common.GetPointer("https://custom.invalid")
+						}
+						if test.otherProvider {
+							channel.Type = constant.ChannelTypeOpenAI
+						}
+						if test.groupRestricted {
+							channel.Group = "default,vip"
+						}
+						if test.retries > 0 {
+							channel.Group = "fallback"
+						}
+						require.NoError(t, channel.Insert())
+						if test.groupRestricted {
+							require.NoError(t, model.SetChannelKeyGroups(channel.Id, 1, channel.KeyIdentity("fixture-healthy-key"), []string{"vip"}))
+						}
+						if test.retries > 0 {
+							fallback := &model.Channel{Type: constant.ChannelTypeDeepSeek, Key: "fixture-fallback-key", Models: "deepseek-flash", Group: channel.Group, Status: common.ChannelStatusEnabled, BaseURL: channel.BaseURL}
+							require.NoError(t, fallback.Insert())
+							t.Cleanup(func() {
+								require.NoError(t, db.Delete(fallback).Error)
+								require.NoError(t, db.Where("channel_id = ?", fallback.Id).Delete(&model.Ability{}).Error)
+							})
+						}
+						model.InitChannelCache()
+						t.Cleanup(func() { model.InvalidateChannelProbeRouting(channel.Id) })
+						usingGroup := channel.GetGroups()[0]
+						c, recorder := probeRoutingContext("deepseek-flash", usingGroup)
+						format := types.RelayFormatOpenAI
+						if !test.chat {
+							format = types.RelayFormatOpenAIResponses
+							c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"deepseek-flash","input":"hello"}`))
+							c.Request.Header.Set("Content-Type", "application/json")
+						}
+						ctx, cancel := context.WithCancel(c.Request.Context())
+						defer cancel()
+						c.Request = c.Request.WithContext(ctx)
+						common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+						common.SetContextKey(c, constant.ContextKeyTokenGroup, usingGroup)
+						if test.single {
+							service.GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: channel.Id, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+						}
+						if test.strict {
+							service.RequestPolicy(c).SessionMode = "strict"
+							c.Set("channel_affinity_skip_retry_on_failure", true)
+							require.True(t, service.ShouldSkipRetryAfterChannelAffinityFailure(c))
+						}
+						var used []string
+						client.Transport = channelProbeTestTransport(func(request *http.Request) (*http.Response, error) {
+							key := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+							used = append(used, key)
+							if len(used) == 1 {
+								if test.changed {
+									require.NoError(t, db.Model(channel).Update("base_url", "https://replacement.invalid").Error)
+								}
+								if test.cancel {
+									cancel()
+								}
+								if test.written {
+									c.Writer.WriteHeaderNow()
+								}
+							}
+							status := http.StatusOK
+							body := `{"id":"resp_fixture","object":"response","status":"completed","model":"deepseek-flash","output":[{"id":"msg_fixture","type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}`
+							if test.chat {
+								body = `{"id":"chat_fixture","model":"deepseek-flash","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
+							}
+							if key == "fixture-invalid-key" || (test.allBad && key != "fixture-fallback-key") {
+								status = http.StatusUnauthorized
+								body = `{"error":{"message":"Authentication Fails, Your api key: ****test is invalid","type":"authentication_error","code":"invalid_request_error"}}`
+							}
+							return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+						})
+						require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "deepseek-flash"))
+						Relay(c, format)
+						assert.Equal(t, test.wantStatus, recorder.Code, recorder.Body.String())
+						require.Len(t, used, test.wantCalls)
+						assert.Equal(t, "fixture-invalid-key", used[0])
+						if len(used) > 1 {
+							assert.Equal(t, "fixture-healthy-key", used[1])
+						}
+						if test.retries > 0 {
+							assert.Equal(t, "fixture-fallback-key", used[2])
+						}
+						stored, err := model.GetChannelById(channel.Id, true)
+						require.NoError(t, err)
+						assert.Len(t, stored.ChannelInfo.MultiKeyStatusList, test.wantDisabled)
+						if test.allBad {
+							assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+						} else {
+							assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+						}
+						if test.wantStatus == 200 && !test.written && !test.allBad {
+							assert.Contains(t, recorder.Body.String(), "OK")
+							assert.Equal(t, []string{fmt.Sprint(channel.Id), fmt.Sprint(channel.Id)}, c.GetStringSlice("use_channel"))
+							for range 2 {
+								key, _, apiErr := stored.GetNextRelayKeyForModel("deepseek-flash", false, "default")
+								require.Nil(t, apiErr)
+								assert.Equal(t, "fixture-healthy-key", key, "later requests must not revive the invalid credential")
+							}
+						}
+						assert.NotContains(t, recorder.Body.String(), "fixture-invalid-key")
+					})
+				}
+			}
+		})
+	}
+}
+
+func TestChannelEndpointExhaustionLanguage(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, test := range []struct{ language, message string }{
+		{"en", "No channel request address is available"},
+		{"zh-CN", "没有可用的渠道请求地址"},
+		{"zh-TW", "沒有可用的渠道請求位址"},
+	} {
+		t.Run(test.language, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Request.Header.Set("Accept-Language", test.language)
+			channel := &model.Channel{Id: -1, BaseURL: common.GetPointer("https://exhaustion-primary.invalid")}
+			channel.SetSetting(kitdto.ChannelSettings{EndpointMode: "failover", AdditionalBaseURLs: []string{"https://exhaustion-backup.invalid"}})
+			common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
+			for attempt := range 2 {
+				endpoint, err := service.SelectChannelEndpoint(c, channel)
+				require.NoError(t, err)
+				target, err := url.Parse(endpoint + "/v1/chat/completions")
+				require.NoError(t, err)
+				service.RecordChannelEndpointRequest(c, target)
+				failed, retry := service.FailChannelEndpoint(c, channel, types.NewErrorWithStatusCode(errors.New("fixture mirror unavailable"), types.ErrorCodeDoRequestFailed, http.StatusBadGateway))
+				assert.True(t, failed)
+				assert.Equal(t, attempt == 0, retry)
+			}
+			_, err := service.SelectChannelEndpoint(c, channel)
+			assert.EqualError(t, err, test.message)
+		})
+	}
+}
+
+func TestChannelEndpointFailover(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := modelManagementDB(t, "sqlite", "")
+	require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}, &model.ChannelBalanceSample{}, &model.Log{}))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false", "quota_setting.enable_free_model_pre_consume": "false"}))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"deepseek-flash":0}`))
+	previousRetries, previousDisable := common.RetryTimes, common.AutomaticDisableChannelEnabled
+	previousCount, previousLogs, previousTrace, previousErrors := constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled
+	common.RetryTimes, common.AutomaticDisableChannelEnabled = 0, false
+	constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = false, false, false, false
+	t.Cleanup(func() {
+		common.RetryTimes, common.AutomaticDisableChannelEnabled = previousRetries, previousDisable
+		constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = previousCount, previousLogs, previousTrace, previousErrors
+	})
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	previousTransport := client.Transport
+	t.Cleanup(func() { client.Transport = previousTransport })
+	user := &model.User{Username: "mirror-user", Password: "unused", Group: "default", Status: common.UserStatusEnabled, Quota: 1000, AffCode: "mirror"}
+	require.NoError(t, db.Create(user).Error)
+	for _, test := range []struct {
+		name                                                                    string
+		status                                                                  int
+		network, allFailed, single, cancel, written, absolute, probe, scheduled bool
+		wantCalls, wantStatus                                                   int
+	}{
+		{name: "primary_503", status: 503, wantCalls: 2, wantStatus: 200},
+		{name: "network_error", network: true, wantCalls: 2, wantStatus: 200},
+		{name: "all_mirrors_failed", status: 502, allFailed: true, wantCalls: 2, wantStatus: 502},
+		{name: "rate_limit_not_mirror_failure", status: 429, wantCalls: 1, wantStatus: 429},
+		{name: "business_error_not_mirror_failure", status: 400, wantCalls: 1, wantStatus: 400},
+		{name: "explicit_single_attempt", status: 503, single: true, wantCalls: 1, wantStatus: 503},
+		{name: "cancelled", status: 503, cancel: true, wantCalls: 1, wantStatus: 503},
+		{name: "already_written", status: 503, written: true, wantCalls: 1, wantStatus: 200},
+		{name: "absolute_route_not_attributed", status: 503, absolute: true, wantCalls: 1, wantStatus: 503},
+		{name: "manual_probe_uses_backup", status: 503, probe: true, wantCalls: 2, wantStatus: 200},
+		{name: "scheduled_probe_uses_backup", status: 503, probe: true, scheduled: true, wantCalls: 2, wantStatus: 200},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			primary, backup := "https://"+test.name+".primary.invalid", "https://"+test.name+".backup.invalid"
+			settings := kitdto.ChannelSettings{EndpointMode: "failover", AdditionalBaseURLs: []string{backup}}
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "mirror-key\nmirror-key", Models: "deepseek-flash", Group: "default", Status: common.ChannelStatusEnabled, BaseURL: &primary, ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}}
+			if test.probe {
+				channel.Key, channel.ChannelInfo = "mirror-key", model.ChannelInfo{}
+			}
+			if test.absolute {
+				channel.Type = constant.ChannelTypeAdvancedCustom
+				channel.SetOtherSettings(kitdto.ChannelOtherSettings{AdvancedCustom: &kitdto.AdvancedCustomConfig{Routes: []kitdto.AdvancedCustomRoute{{IncomingPath: "/v1/chat/completions", UpstreamPath: primary + "/v1/chat/completions", Converter: "none"}}}})
+			}
+			encoded, err := common.Marshal(settings)
+			require.NoError(t, err)
+			channel.Setting = common.GetPointer(string(encoded))
+			require.NoError(t, channel.Insert())
+			model.InitChannelCache()
+			c, recorder := probeRoutingContext("deepseek-flash", "default")
+			common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+			common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+			ctx, cancel := context.WithCancel(c.Request.Context())
+			defer cancel()
+			c.Request = c.Request.WithContext(ctx)
+			if test.single {
+				service.GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: channel.Id, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+			}
+			var targets, keys []string
+			client.Transport = channelProbeTestTransport(func(request *http.Request) (*http.Response, error) {
+				targets = append(targets, request.URL.Scheme+"://"+request.URL.Host)
+				keys = append(keys, request.Header.Get("Authorization"))
+				if test.cancel {
+					cancel()
+				}
+				if test.written {
+					c.Writer.WriteHeaderNow()
+				}
+				status := http.StatusOK
+				body := `{"id":"chat_fixture","model":"deepseek-flash","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
+				if request.URL.Host == strings.TrimPrefix(primary, "https://") || test.allFailed {
+					if test.network {
+						return nil, errors.New("fixture connection failure")
+					}
+					status, body = test.status, `{"error":{"type":"server_error","message":"fixture upstream unavailable"}}`
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+			})
+			if test.probe {
+				probeCtx := context.Background()
+				if test.scheduled {
+					probeCtx = context.WithValue(probeCtx, channelIdleProbeIntervalKey{}, time.Minute)
+				}
+				result := testChannelModel(probeCtx, channel, user.Id, "deepseek-flash", "", false)
+				require.NoError(t, result.localErr)
+				require.Nil(t, result.newAPIError)
+				require.NotNil(t, result.sample)
+				assert.True(t, result.sample.Success, "only the final successful mirror outcome may be published")
+				assert.Nil(t, channel.RelayCredentialProbeError("deepseek-flash", "mirror-key"), "the failed primary must not gate the healthy credential")
+			} else {
+				require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "deepseek-flash"))
+				Relay(c, types.RelayFormatOpenAI)
+				assert.Equal(t, test.wantStatus, recorder.Code, recorder.Body.String())
+			}
+			require.Len(t, targets, test.wantCalls)
+			assert.Equal(t, primary, targets[0])
+			if test.wantCalls == 2 {
+				assert.Equal(t, backup, targets[1])
+				assert.Equal(t, keys[0], keys[1], "the same key may be used at a different mirror")
+			}
+			if test.wantStatus == 200 && !test.written {
+				next, _ := probeRoutingContext("deepseek-flash", "default")
+				selected, err := service.SelectChannelEndpoint(next, channel)
+				require.NoError(t, err)
+				assert.Equal(t, backup, selected, "new requests temporarily avoid the failed primary")
+			}
+		})
+	}
 }
 
 func TestConcurrentKeySuccessRespectsProbe(t *testing.T) {

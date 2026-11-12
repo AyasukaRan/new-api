@@ -218,7 +218,7 @@ func filterRelayAbilities(abilities []Ability, modelName string, filters []dto.C
 	var probeError *ChannelProbeError
 	for _, ability := range abilities {
 		channel := channelsByID[ability.ChannelId]
-		if channel == nil || channel.Status != common.ChannelStatusEnabled {
+		if channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.HasKeyForGroup(ability.Group) {
 			continue
 		}
 		matches, rejectedBy := ChannelSatisfiesFilters(channel, modelName, filters)

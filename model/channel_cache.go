@@ -148,6 +148,9 @@ func GetRandomSatisfiedChannel(
 		kept := make([]int, 0, len(ids))
 		for _, id := range ids {
 			channel := candidates[id]
+			if channel != nil && !channel.HasKeyForGroup(group) {
+				continue
+			}
 			if channel != nil {
 				if failure := channel.RelayProbeError(model, filters); failure != nil {
 					if probeError == nil || failure.ObservedAt > probeError.ObservedAt {

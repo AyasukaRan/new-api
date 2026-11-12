@@ -285,6 +285,8 @@ const UPSTREAM_DETECTED_MODEL_PREVIEW_LIMIT = 8
 const SENSITIVE_FORM_FIELDS = [
   'type',
   'base_url',
+  'endpoint_mode',
+  'additional_base_urls',
   'key',
   'openai_organization',
   'other',
@@ -4324,6 +4326,88 @@ export function ChannelMutateDrawer({
                         </AlertDescription>
                       </Alert>
                     )}
+                  </FormItem>
+                )}
+              />
+            )}
+
+            <FormField
+              control={form.control}
+              name='endpoint_mode'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Endpoint strategy')}</FormLabel>
+                  <Select
+                    disabled={sensitiveLocked}
+                    items={[
+                      { value: 'single', label: t('Single address') },
+                      { value: 'load_balance', label: t('Load balance') },
+                      { value: 'failover', label: t('Failover') },
+                    ]}
+                    value={field.value || 'single'}
+                    onValueChange={(value) =>
+                      field.onChange(value === 'single' ? '' : value)
+                    }
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        <SelectItem value='single'>
+                          {t('Single address')}
+                        </SelectItem>
+                        <SelectItem value='load_balance'>
+                          {t('Load balance')}
+                        </SelectItem>
+                        <SelectItem value='failover'>
+                          {t('Failover')}
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            {formValues.endpoint_mode && (
+              <FormField
+                control={form.control}
+                name='additional_base_urls'
+                render={({ field }) => (
+                  <FormItem className='min-w-0'>
+                    <FormLabel>{t('Additional addresses')}</FormLabel>
+                    <FormDescription className='break-all'>
+                      {t('Main address')}:{' '}
+                      {currentBaseUrl?.trim() ||
+                        boundTaskPlugin?.baseUrl ||
+                        defaultBaseURLs?.[currentType] ||
+                        t('Provider default')}
+                    </FormDescription>
+                    <FormControl>
+                      <Textarea
+                        {...field}
+                        disabled={sensitiveLocked}
+                        rows={3}
+                        wrap='off'
+                        className='field-sizing-fixed max-w-full min-w-0 font-mono'
+                        placeholder='https://mirror.example.com'
+                        autoComplete='off'
+                        spellCheck={false}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {formValues.endpoint_mode === 'failover'
+                        ? t(
+                            'Try the main address first, then these addresses in order. All addresses use the same channel keys.'
+                          )
+                        : t(
+                            'Distribute requests equally across the main address and these addresses. All addresses use the same channel keys.'
+                          )}
+                    </FormDescription>
+                    <FormMessage />
                   </FormItem>
                 )}
               />

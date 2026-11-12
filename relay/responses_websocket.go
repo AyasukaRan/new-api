@@ -631,6 +631,10 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	// The channel type is not rechecked: a locked channel keeps its type, and
 	// the FilterResponsesWebSocket rules were applied when it was selected.
 	channel, err := appmodel.CacheGetChannel(s.lockedChannelID)
+	if err == nil && channel != nil && channel.ChannelInfo.IsMultiKey {
+		// A new frame must not retain key permissions from another instance's cache.
+		channel, err = appmodel.GetChannelById(s.lockedChannelID, true)
+	}
 	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
@@ -648,7 +652,10 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	}
 	// Changes that alter the physical upstream connection require a new
 	// handshake. Request-level settings can be refreshed without rotating keys.
-	if channel.GetBaseURL() != s.lockedContext[appconstant.ContextKeyChannelBaseUrl] ||
+	settings := channel.GetSetting()
+	endpoints, endpointErr := settings.EndpointURLs(channel.GetBaseURL())
+	lockedURL, _ := s.lockedContext[appconstant.ContextKeyChannelBaseUrl].(string)
+	if endpointErr != nil || !slices.Contains(endpoints, lockedURL) ||
 		!reflect.DeepEqual(channel.GetHeaderOverride(), s.lockedContext[appconstant.ContextKeyChannelHeaderOverride]) {
 		return types.NewErrorWithStatusCode(errors.New("upstream connection settings changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
@@ -665,19 +672,22 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 		!reflect.DeepEqual(route.Auth, s.lockedRoute.Auth) {
 		return types.NewErrorWithStatusCode(errors.New("upstream route changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
+	group := common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup)
+	if group == "auto" {
+		if !slices.Contains(service.GetRequestAutoGroups(c, common.GetContextKeyString(c, appconstant.ContextKeyUserGroup)), s.lockedGroup) {
+			return types.NewErrorWithStatusCode(errors.New("the connection group is no longer allowed"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		group = s.lockedGroup
+		common.SetContextKey(c, appconstant.ContextKeyAutoGroup, group)
+	}
+	if channel.ChannelInfo.IsMultiKey && !channel.KeyAllowedForGroup(s.lockedKey, group) {
+		return types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgRelayConnectionKeyGroupDenied)), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
 	if pin, found, _ := service.GetChannelConstraints(c).ResolvedPin(); found {
 		if pin.ChannelId != s.lockedChannelID {
 			return types.NewErrorWithStatusCode(errors.New("channel pin changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
 	} else {
-		group := common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup)
-		if group == "auto" {
-			if !slices.Contains(service.GetRequestAutoGroups(c, common.GetContextKeyString(c, appconstant.ContextKeyUserGroup)), s.lockedGroup) {
-				return types.NewErrorWithStatusCode(errors.New("the connection group is no longer allowed"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
-			}
-			group = s.lockedGroup
-			common.SetContextKey(c, appconstant.ContextKeyAutoGroup, group)
-		}
 		if !appmodel.IsChannelEnabledForGroupModel(group, model, s.lockedChannelID) {
 			return types.NewErrorWithStatusCode(errors.New("the connection channel is no longer allowed for this group and model"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}

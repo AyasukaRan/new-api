@@ -707,9 +707,14 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if len(channelTest) > 0 && channelTest[0] {
 		key, index, newAPIError = channel.GetNextEnabledKey()
 	} else {
-		key, index, newAPIError = channel.GetNextRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable))
+		key, index, newAPIError = channel.GetNextRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
 	}
 	if newAPIError != nil {
+		if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {
+			newAPIError.SetMessage(i18n.T(c, i18n.MsgRelayChannelNoGroupKey))
+		} else if errors.Is(newAPIError, model.ErrChannelDisabled) {
+			newAPIError.SetMessage(i18n.T(c, i18n.MsgDistributorChannelDisabled))
+		}
 		return newAPIError
 	}
 	if channel.ChannelInfo.IsMultiKey {
@@ -727,6 +732,12 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	// endpoint from the same two context keys as everything else.
 	if service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
 		baseURL, key = channel.GetBatchEndpoint(key)
+	} else {
+		var endpointErr error
+		baseURL, endpointErr = service.SelectChannelEndpoint(c, channel)
+		if endpointErr != nil {
+			return types.NewErrorWithStatusCode(endpointErr, types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+		}
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, baseURL)

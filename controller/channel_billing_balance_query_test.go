@@ -150,6 +150,7 @@ func TestNegativeBalancesAreExcludedFromRelay(t *testing.T) {
 					assert.Equal(t, !test.blocked, allowed, "candidate filtering must evaluate the credential actually sent by batch")
 					ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 					ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/batches", nil)
+					common.SetContextKey(ctx, constant.ContextKeyUsingGroup, "default")
 					service.GetChannelConstraints(ctx).AddFilter(filters[0])
 					setupErr := middleware.SetupContextForSelectedChannel(ctx, &batchChannel, "balance-model")
 					if test.blocked {

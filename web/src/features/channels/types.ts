@@ -101,6 +101,8 @@ export type Channel = z.infer<typeof channelSchema>
 // ============================================================================
 
 export interface ChannelSettings {
+  endpoint_mode?: '' | 'load_balance' | 'failover'
+  additional_base_urls?: string[]
   /** Upstream estimate before the sales group multiplier; absent means unknown. */
   upstream_cost_ratio?: number | null
   /** Missing groups include all models; an empty array explicitly excludes all. */
@@ -319,6 +321,8 @@ export interface CopyChannelResponse {
 
 export interface KeyStatus {
   index: number
+  key_identity: string
+  groups: string[]
   status: number // 1: enabled, 2: manual disabled, 3: auto disabled
   disabled_time?: number
   reason?: string
@@ -341,6 +345,7 @@ export interface MultiKeyStatusResponse {
   message?: string
   data?: {
     keys: KeyStatus[]
+    channel_groups: string[]
     total: number
     page: number
     page_size: number
@@ -412,7 +417,10 @@ export interface MultiKeyManageParams {
     | 'disable_all_keys'
     | 'delete_key'
     | 'delete_disabled_keys'
+    | 'set_key_groups'
   key_index?: number
+  key_identity?: string
+  groups?: string[]
   page?: number
   page_size?: number
   status?: number // 1=enabled, 2=manual_disabled, 3=auto_disabled

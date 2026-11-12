@@ -469,6 +469,21 @@ export async function getMultiKeyStatus(
   ) as Promise<MultiKeyStatusResponse>
 }
 
+export async function setMultiKeyGroups(
+  channelId: number,
+  keyIndex: number,
+  keyIdentity: string,
+  groups: string[]
+): Promise<{ success: boolean; message?: string }> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'set_key_groups',
+    key_index: keyIndex,
+    key_identity: keyIdentity,
+    groups,
+  })
+}
+
 /**
  * Enable a specific key in multi-key channel
  */

@@ -12,6 +12,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -177,6 +180,228 @@ func TestMultiKeyStatusReturnsMatchingBalancesAndMaskedCredentials(t *testing.T)
 	assert.False(t, updated.BalanceMonitor.ConfigurationChanged)
 	assert.Equal(t, model.MaskTokenKey(keys[0]), updated.Keys[0].KeyPreview)
 	assert.Equal(t, common.GetPointer(float64(9)), updated.BalanceMonitor.KeyBalances[0].Balance)
+}
+
+func TestMultiKeyGroupPermissions(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	rootID := setupChannelManagementTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Model{}, &model.Vendor{}, &model.ChannelBalanceSample{}))
+	const keyA, keyB = "sk-group-a-private-key", "sk-group-b-private-key"
+	channel := &model.Channel{Name: t.Name(), Type: 1, Key: keyA + "\n" + keyB, Models: "group-scoped-model", Group: "public,private,blocked", Status: common.ChannelStatusEnabled,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
+	}
+	require.NoError(t, channel.Insert())
+	require.NoError(t, model.RecordChannelBalanceSample(channel, &model.ChannelBalanceSample{
+		Success: true, KnownBalance: 2, Balance: common.GetPointer(float64(2)),
+		KeyBalances: []model.ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(float64(1))}, {Index: 1, Balance: common.GetPointer(float64(1))}},
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.ChannelBalanceSample{}).Error)
+		require.NoError(t, channel.Delete())
+		model.InitChannelCache()
+	})
+	manageRole := common.RoleRootUser
+	manage := func(request MultiKeyManageRequest, wantSuccess bool) MultiKeyStatusResponse {
+		t.Helper()
+		request.ChannelId = channel.Id
+		payload, err := common.Marshal(request)
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("id", rootID)
+		c.Set("role", manageRole)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/multi_key/manage", bytes.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		ManageMultiKeys(c)
+		var result struct {
+			Success bool                   `json:"success"`
+			Data    MultiKeyStatusResponse `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &result))
+		require.Equal(t, wantSuccess, result.Success, recorder.Body.String())
+		assert.NotContains(t, recorder.Body.String(), keyA)
+		assert.NotContains(t, recorder.Body.String(), keyB)
+		return result.Data
+	}
+	setGroups := func(index int, identity string, groups []string, success bool) {
+		t.Helper()
+		manage(MultiKeyManageRequest{Action: "set_key_groups", KeyIndex: &index, KeyIdentity: identity, Groups: &groups}, success)
+	}
+	status := manage(MultiKeyManageRequest{Action: "get_key_status"}, true)
+	require.Len(t, status.Keys, 2)
+	assert.ElementsMatch(t, []string{"public", "private", "blocked"}, status.ChannelGroups)
+	assert.Empty(t, status.Keys[0].Groups, "an unconfigured key inherits all channel groups")
+	identityA, identityB := status.Keys[0].KeyIdentity, status.Keys[1].KeyIdentity
+	require.NotEmpty(t, identityA)
+	assert.NotEqual(t, identityA, identityB)
+	require.NoError(t, model.DB.Model(channel).Update("group", "private,blocked").Error)
+	_, _, removedGroupErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "public")
+	require.NotNil(t, removedGroupErr, "stale cache cannot retain a deleted group when all keys inherit")
+	require.NoError(t, model.DB.Model(channel).Update("group", "public,private,blocked").Error)
+	channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModePolling
+	require.NoError(t, channel.SaveChannelInfo())
+	common.MemoryCacheEnabled = true
+	model.InitChannelCache()
+	first, _, firstErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "public")
+	require.Nil(t, firstErr)
+	second, _, secondErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "public")
+	require.Nil(t, secondErr)
+	assert.Equal(t, keyA, first)
+	assert.Equal(t, keyB, second, "the authoritative permission snapshot must preserve round-robin progress")
+	common.MemoryCacheEnabled = false
+	_, err := model.UpdateChannelStatusWithError(channel.Id, keyB, common.ChannelStatusAutoDisabled, "fixture invalid credential")
+	require.NoError(t, err)
+	_, _, pollingErr := channel.GetNextEnabledKey()
+	require.Nil(t, pollingErr)
+	afterPolling, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, afterPolling.ChannelInfo.MultiKeyStatusList[1], "a stale polling snapshot must preserve newly quarantined keys")
+	_, err = model.UpdateChannelStatusWithError(channel.Id, keyB, common.ChannelStatusEnabled, "")
+	require.NoError(t, err)
+	setGroups(0, identityA, []string{"public"}, true)
+	setGroups(1, identityB, []string{"private"}, true)
+	manageRole = common.RoleCommonUser
+	setGroups(1, identityB, []string{"blocked"}, false)
+	manageRole = common.RoleRootUser
+	setGroups(0, identityA, []string{"outside"}, false)
+	setGroups(0, identityA, []string{""}, false)
+	manage(MultiKeyManageRequest{Action: "set_key_groups", KeyIndex: common.GetPointer(0), KeyIdentity: identityA}, false)
+	batchSnapshot := *channel
+	batchSettings := batchSnapshot.GetSetting()
+	batchSettings.BatchKey = keyB
+	batchSnapshot.SetSetting(batchSettings)
+	_, _, batchErr := batchSnapshot.GetNextRelayKeyForModel("group-scoped-model", true, "public")
+	require.NotNil(t, batchErr, "batch override cannot use another group's restricted key")
+	_, _, batchErr = batchSnapshot.GetNextRelayKeyForModel("group-scoped-model", true, "private")
+	require.Nil(t, batchErr)
+	for _, test := range []struct{ language, noGroupKey, disabled string }{
+		{"en", "No channel key is available for this group", "This channel has been disabled"},
+		{"zh-CN", "当前分组没有可用的渠道密钥", "该渠道已被禁用"},
+		{"zh-TW", "目前分組沒有可用的渠道金鑰", "該管道已被禁用"},
+	} {
+		t.Run(test.language, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Request.Header.Set("Accept-Language", test.language)
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "blocked")
+			apiErr := middleware.SetupContextForSelectedChannel(c, channel, "group-scoped-model")
+			require.NotNil(t, apiErr)
+			assert.EqualError(t, apiErr, test.noGroupKey)
+			assert.Equal(t, model.ErrorCodeChannelGroupUnavailable, apiErr.GetErrorCode())
+			assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+			require.NoError(t, model.DB.Model(channel).Update("status", common.ChannelStatusManuallyDisabled).Error)
+			t.Cleanup(func() {
+				require.NoError(t, model.DB.Model(channel).Update("status", common.ChannelStatusEnabled).Error)
+			})
+			apiErr = middleware.SetupContextForSelectedChannel(c, channel, "group-scoped-model")
+			require.NotNil(t, apiErr)
+			assert.EqualError(t, apiErr, test.disabled)
+			assert.Equal(t, "get_channel_failed", string(apiErr.GetErrorCode()))
+			missing := *channel
+			missing.Id = -1
+			apiErr = middleware.SetupContextForSelectedChannel(c, &missing, "group-scoped-model")
+			require.NotNil(t, apiErr)
+			assert.ErrorIs(t, apiErr, gorm.ErrRecordNotFound, "database errors must not be mislabeled as a disabled channel")
+		})
+	}
+
+	// Keep the original pre-edit snapshot to exercise a stale instance cache.
+	for _, mode := range []constant.MultiKeyMode{constant.MultiKeyModeRandom, constant.MultiKeyModePolling} {
+		current, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		current.ChannelInfo.MultiKeyMode = mode
+		require.NoError(t, current.SaveChannelInfo())
+		for group, expected := range map[string]string{"public": keyA, "private": keyB} {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
+			require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "group-scoped-model"))
+			assert.Equal(t, expected, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+		}
+		_, _, apiErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "blocked")
+		require.NotNil(t, apiErr)
+		assert.Equal(t, "channel_no_group_key", string(apiErr.GetErrorCode()))
+	}
+	loaded, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Empty(t, loaded.GetModelsForGroup("blocked"))
+	for _, cache := range []bool{false, true} {
+		common.MemoryCacheEnabled = cache
+		model.InitChannelCache()
+		selected, err := model.GetRandomSatisfiedChannel("blocked", "group-scoped-model", 0, nil)
+		require.NoError(t, err)
+		assert.Nil(t, selected)
+		assert.False(t, model.IsChannelEnabledForGroupModel("blocked", "group-scoped-model", channel.Id))
+	}
+	pricing := model.GetPricing()
+	require.Len(t, pricing, 1)
+	assert.ElementsMatch(t, []string{"public", "private"}, pricing[0].EnableGroup)
+	common.MemoryCacheEnabled = false
+
+	// A disabled authorized key cannot fall through to another group's key.
+	loaded.ChannelInfo.MultiKeyStatusList = map[int]int{0: common.ChannelStatusManuallyDisabled}
+	require.NoError(t, loaded.SaveChannelInfo())
+	_, _, apiErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "public")
+	require.NotNil(t, apiErr)
+	assert.ElementsMatch(t, []string{"group-scoped-model"}, loaded.GetModelsForGroup("public"), "temporary health does not erase catalog permissions")
+	loaded.ChannelInfo.MultiKeyStatusList = nil
+	require.NoError(t, loaded.SaveChannelInfo())
+	setGroups(0, identityA, []string{}, true)
+	key, _, apiErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "blocked")
+	require.Nil(t, apiErr)
+	assert.Equal(t, keyA, key, "explicit clearing restores inheritance")
+	setGroups(0, identityA, []string{"public"}, true)
+
+	// Group deletion cannot convert a saved explicit restriction to inheritance.
+	loaded, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	loaded.Group = "private,blocked"
+	require.Error(t, loaded.Update())
+	require.NoError(t, model.DB.Model(loaded).Update("group", "private,blocked").Error)
+	_, _, apiErr = channel.GetNextRelayKeyForModel("group-scoped-model", false, "blocked")
+	require.NotNil(t, apiErr, "legacy inconsistent scopes fail closed")
+	require.NoError(t, model.DB.Model(loaded).Update("group", "public,private,blocked").Error)
+
+	// Reordering follows the physical credential, and stale index writes fail.
+	loaded, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	loaded.Key = keyB + "\n" + keyA
+	require.NoError(t, loaded.Update())
+	status = manage(MultiKeyManageRequest{Action: "get_key_status"}, true)
+	assert.Equal(t, identityB, status.Keys[0].KeyIdentity)
+	assert.Equal(t, []string{"private"}, status.Keys[0].Groups)
+	assert.Equal(t, identityA, status.Keys[1].KeyIdentity)
+	assert.Equal(t, []string{"public"}, status.Keys[1].Groups)
+	setGroups(0, identityA, []string{"blocked"}, false)
+
+	// Copying must rebind identities without widening the copied permissions.
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set("id", rootID)
+	c.Set("role", common.RoleRootUser)
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy", nil)
+	CopyChannel(c)
+	var copied struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ID int `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &copied))
+	require.True(t, copied.Success, recorder.Body.String())
+	clone, err := model.GetChannelById(copied.Data.ID, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, clone.Delete()) })
+	assert.NotEqual(t, identityA, clone.KeyIdentity(keyA))
+	assert.Equal(t, []string{"public"}, clone.ChannelInfo.KeyGroups[clone.KeyIdentity(keyA)])
+	assert.Empty(t, clone.GetModelsForGroup("blocked"))
+
+	manage(MultiKeyManageRequest{Action: "delete_key", KeyIndex: common.GetPointer(0)}, true)
+	loaded, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.NotContains(t, loaded.ChannelInfo.KeyGroups, identityB)
+	assert.Equal(t, []string{"public"}, loaded.ChannelInfo.KeyGroups[identityA])
+	assert.Empty(t, loaded.GetModelsForGroup("private"))
 }
 
 func TestModelSquareHidesModelsWithoutEnabledChannels(t *testing.T) {
