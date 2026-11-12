@@ -189,7 +189,7 @@ it('preserves unsubmitted model and username drafts across live URL updates whil
       from: '/usage-logs/$section',
       to: '/usage-logs/$section',
       params: { section: 'common' },
-      search: (previous) => ({ ...previous, endTime: next.getTime() }),
+      search: { ...router.state.location.search, endTime: next.getTime() },
       replace: true,
       resetScroll: false,
     })

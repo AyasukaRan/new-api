@@ -230,7 +230,7 @@ it('preserves a later page and refreshes immediately when returning to the first
       from: '/usage-logs/$section',
       to: '/usage-logs/$section',
       params: { section: 'common' },
-      search: (previous) => ({ ...previous, page: 1 }),
+      search: { ...router.state.location.search, page: 1 },
     })
   )
   await waitFor(() => expect(client.isFetching()).toBe(0))
@@ -275,11 +275,11 @@ it('stops an active timer when paused and resumes with the latest saved filters'
       from: '/usage-logs/$section',
       to: '/usage-logs/$section',
       params: { section: 'common' },
-      search: (previous) => ({
-        ...previous,
+      search: {
+        ...router.state.location.search,
         autoRefresh: false,
         model: 'model-b',
-      }),
+      },
     })
   )
   await waitFor(() => expect(client.isFetching()).toBe(0))
@@ -293,7 +293,7 @@ it('stops an active timer when paused and resumes with the latest saved filters'
       from: '/usage-logs/$section',
       to: '/usage-logs/$section',
       params: { section: 'common' },
-      search: (previous) => ({ ...previous, autoRefresh: true }),
+      search: { ...router.state.location.search, autoRefresh: true },
     })
   )
   await waitFor(() => expect(client.isFetching()).toBe(0))
