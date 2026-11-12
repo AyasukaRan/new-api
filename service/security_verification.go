@@ -319,7 +319,12 @@ func securityVerificationPolicy(scope string, state model.UserVerificationState)
 		methods = append(methods, VerificationMethodPasskey)
 	}
 	switch scope {
-	case VerificationScopeChannelKeyRead, VerificationScopePasskeyDelete, VerificationScopeLogin:
+	case VerificationScopeChannelKeyRead:
+		// Only accounts without an enrolled factor may use their password.
+		if len(methods) == 0 && state.HasPassword {
+			methods = []string{VerificationMethodPassword}
+		}
+	case VerificationScopePasskeyDelete, VerificationScopeLogin:
 	case VerificationScopeTwoFADisable, VerificationScopeTwoFABackupCodes:
 		if !state.HasTwoFA {
 			return nil, model.ErrTwoFANotEnabled
@@ -392,7 +397,8 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	for i := range methods {
 		if methods[i].Method == VerificationMethodPassword && !common.PasswordLoginEnabled {
 			switch scope {
-			case VerificationScopeAccountBind, VerificationScopeAccountUnbind, VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete,
+			case VerificationScopeChannelKeyRead,
+				VerificationScopeAccountBind, VerificationScopeAccountUnbind, VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete,
 				VerificationScopeAdminUserCreate, VerificationScopeAdminUserUpdate, VerificationScopeAdminUserDelete,
 				VerificationScopeAdminUserManage, VerificationScopeAdminUserPasskeyReset,
 				VerificationScopeAdminUserTwoFADisable, VerificationScopeAdminUserBindingClear:

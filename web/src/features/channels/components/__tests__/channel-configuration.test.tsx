@@ -192,6 +192,19 @@ beforeEach(() => {
     if (url === '/api/prefill_group') {
       return { data: { success: true, data: [] } }
     }
+    if (url === '/api/verify/methods') {
+      return {
+        data: {
+          success: true,
+          data: {
+            scope: 'channel.key.read',
+            methods: [{ method: '2fa', available: true }],
+            oauth_providers: [],
+            password_encryption_enabled: false,
+          },
+        },
+      }
+    }
     throw new Error(`Unexpected GET ${url}`)
   })
 })
@@ -2199,6 +2212,96 @@ test('single-key editing omits the multi-key strategy control and update field',
   await userEvent.click(screen.getByRole('button', { name: 'Update Channel' }))
   await waitFor(() => expect(put).toHaveBeenCalled())
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('multi_key_mode')
+})
+
+test.each([
+  {
+    name: 'newline-separated multiple keys',
+    multi: true,
+    key: 'test-key-first\ntest-key-second\ntest-key-third\n',
+    multiline: true,
+  },
+  {
+    name: 'a single formatted JSON credential',
+    multi: false,
+    key: '{\n  "access_token": "test-access",\n  "refresh_token": "test-refresh",\n  "private_key": "line-one\\nline-two"\n}\n',
+    multiline: true,
+  },
+  {
+    name: 'a single plain key',
+    multi: false,
+    key: 'test-single-key',
+    multiline: false,
+  },
+])(
+  'reveals and copies $name without changing its contents',
+  async ({ multi, key, multiline }) => {
+    editingChannel.channel_info = {
+      ...editingChannel.channel_info,
+      is_multi_key: multi,
+      multi_key_size: multi ? 3 : 0,
+    }
+    const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+      if (url === '/api/verify') {
+        return {
+          data: {
+            success: true,
+            data: {
+              proof_token: 'test-channel-proof',
+              method: '2fa',
+              scope: 'channel.key.read',
+              expires_at: Math.floor(Date.now() / 1000) + 60,
+            },
+          },
+        }
+      }
+      if (url === '/api/channel/42/key') {
+        return { data: { success: true, data: { key } } }
+      }
+      throw new Error(`Unexpected POST ${url}`)
+    })
+    const user = userEvent.setup()
+    const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled()
+    expect(post).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'Reveal key' }))
+    await user.type(
+      await screen.findByLabelText('Authenticator code or backup code'),
+      '123456'
+    )
+    await user.click(screen.getByRole('button', { name: 'Verify' }))
+    const displayedKey = screen.getByPlaceholderText(
+      'Hidden — verify to reveal'
+    )
+    await waitFor(() => expect(displayedKey).toHaveValue(key))
+    expect(displayedKey.tagName).toBe(multiline ? 'TEXTAREA' : 'INPUT')
+    expect(displayedKey).toHaveAttribute('readonly')
+    if (multiline) expect(displayedKey).toHaveAttribute('wrap', 'off')
+    if (multi) {
+      expect(screen.getByLabelText('Count')).toHaveTextContent('3')
+    } else {
+      expect(screen.queryByLabelText('Count')).not.toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('button', { name: 'Copy' }))
+    expect(copy).toHaveBeenCalledWith(key)
+  }
+)
+
+test('shows fixed-length masked rows and the saved count before revealing multiple keys', async () => {
+  editingChannel.channel_info = {
+    ...editingChannel.channel_info,
+    is_multi_key: true,
+    multi_key_size: 3,
+  }
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  const masked = screen.getByPlaceholderText('Hidden — verify to reveal')
+  expect(masked.tagName).toBe('TEXTAREA')
+  expect(masked).toHaveValue('••••••••\n••••••••\n••••••••')
+  expect(screen.getByLabelText('Count')).toHaveTextContent('3')
+  expect(screen.getByRole('button', { name: 'Copy' })).toBeDisabled()
 })
 
 test.each(['append', 'replace'])(

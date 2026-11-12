@@ -117,6 +117,7 @@ import {
   parseChannelConnectionInfo,
   type ChannelConnectionInfo,
 } from '@/lib/channel-connection-info'
+import { formatNumber } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { ROLE } from '@/lib/roles'
 import {
@@ -583,6 +584,8 @@ export function ChannelMutateDrawer({
   // Check if this is a multi-key channel
   const isMultiKeyChannel =
     isEditing && channelData?.data?.channel_info?.is_multi_key === true
+  const savedKeyCount = channelData?.data?.channel_info?.multi_key_size ?? 0
+  const savedKeyRows = Math.min(8, Math.max(2, savedKeyCount))
 
   // Form setup
   const form = useForm<ChannelFormValues>({
@@ -4517,6 +4520,15 @@ export function ChannelMutateDrawer({
                             <div>
                               <p className='text-sm font-medium'>
                                 {t('Current key')}
+                                {isMultiKeyChannel && (
+                                  <Badge
+                                    variant='secondary'
+                                    className='ml-2 font-normal'
+                                    aria-label={t('Count')}
+                                  >
+                                    {formatNumber(savedKeyCount)}
+                                  </Badge>
+                                )}
                               </p>
                               <p className='text-muted-foreground text-xs'>
                                 {t(
@@ -4558,12 +4570,33 @@ export function ChannelMutateDrawer({
                               </Button>
                             </div>
                           </div>
-                          <Input
-                            readOnly
-                            value={channelKey ?? ''}
-                            placeholder={t('Hidden — verify to reveal')}
-                            className='font-mono'
-                          />
+                          {isMultiKeyChannel ||
+                          /[\r\n]/.test(channelKey ?? '') ? (
+                            <Textarea
+                              readOnly
+                              aria-label={t('Current key')}
+                              value={
+                                channelKey ??
+                                Array(Math.min(8, savedKeyCount))
+                                  .fill('••••••••')
+                                  .join('\n')
+                              }
+                              placeholder={t('Hidden — verify to reveal')}
+                              rows={isMultiKeyChannel ? savedKeyRows : 4}
+                              wrap='off'
+                              autoComplete='off'
+                              spellCheck={false}
+                              className='field-sizing-fixed max-h-64 font-mono'
+                            />
+                          ) : (
+                            <Input
+                              readOnly
+                              aria-label={t('Current key')}
+                              value={channelKey ?? ''}
+                              placeholder={t('Hidden — verify to reveal')}
+                              className='font-mono'
+                            />
+                          )}
                         </div>
                       )}
                       <FormMessage />

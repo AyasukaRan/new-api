@@ -25,6 +25,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { withBasePath } from '@/lib/base-path'
 
 import type { PasskeyDomains } from '../../passkey/assertion'
 import { PasskeyDomainSelector } from '../../passkey/components/passkey-domain-selector'
@@ -166,6 +167,29 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
                       {t(option.reason)}
                     </p>
                   )
+              )}
+              {state.request.scope === 'channel.key.read' && (
+                <>
+                  <p className='text-muted-foreground'>
+                    {t(
+                      'Enable Two-factor Authentication or Passkey in Security & Access to continue.'
+                    )}
+                  </p>
+                  <Button
+                    role='link'
+                    variant='outline'
+                    size='sm'
+                    render={
+                      <a
+                        href={withBasePath('/security')}
+                        target='_blank'
+                        rel='noopener noreferrer'
+                      />
+                    }
+                  >
+                    {t('Security & Access')}
+                  </Button>
+                </>
               )}
             </div>
           ) : (

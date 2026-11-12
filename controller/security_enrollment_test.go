@@ -735,6 +735,142 @@ func TestSecurityEnrollmentPasswordProofIsBoundToSessionAndAction(t *testing.T) 
 	assert.ErrorIs(t, err, service.ErrLoginSessionRevoked)
 }
 
+func TestSecurityEnrollmentChannelKeyMethodPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name                              string
+		password, passkey, twoFA, locked  bool
+		disabledPassword, disabledPasskey bool
+		role                              int
+		methods                           []service.VerificationMethodOption
+	}{
+		{name: "password only root", password: true, methods: []service.VerificationMethodOption{{Method: "password", Available: true}}},
+		{name: "disabled password login", password: true, disabledPassword: true, methods: []service.VerificationMethodOption{{Method: "password", Reason: "Password authentication is disabled."}}},
+		{name: "passwordless root has no session or OAuth fallback", methods: []service.VerificationMethodOption{}},
+		{name: "enrolled passkey prevents password fallback", password: true, passkey: true, methods: []service.VerificationMethodOption{{Method: "passkey", Available: true}}},
+		{name: "disabled passkey prevents password fallback", password: true, passkey: true, disabledPasskey: true, methods: []service.VerificationMethodOption{{Method: "passkey", Reason: "Passkey authentication is disabled."}}},
+		{name: "enrolled twofa prevents password fallback", password: true, twoFA: true, methods: []service.VerificationMethodOption{{Method: "2fa", Available: true}}},
+		{name: "locked twofa prevents password fallback", password: true, twoFA: true, locked: true, methods: []service.VerificationMethodOption{{Method: "2fa", Reason: service.ErrVerificationLocked.Error()}}},
+		{name: "both enrolled factors remain alternatives", password: true, passkey: true, twoFA: true, methods: []service.VerificationMethodOption{{Method: "2fa", Available: true}, {Method: "passkey", Available: true}}},
+		{name: "administrator cannot reveal channel keys", password: true, role: common.RoleAdminUser},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			user, identity := setupSecurityEnrollmentTest(t)
+			previousPasswordLogin := common.PasswordLoginEnabled
+			common.PasswordLoginEnabled = !test.disabledPassword
+			t.Cleanup(func() { common.PasswordLoginEnabled = previousPasswordLogin })
+			role := test.role
+			if role == 0 {
+				role = common.RoleRootUser
+			}
+			require.NoError(t, model.DB.Model(user).Update("role", role).Error)
+			if !test.password {
+				require.NoError(t, model.DB.Model(user).Update("password", "").Error)
+			}
+			if test.passkey {
+				require.NoError(t, model.DB.Create(&model.PasskeyCredential{UserID: user.Id, CredentialID: "channel-key-passkey", PublicKey: "public-key"}).Error)
+			}
+			if test.twoFA {
+				twoFA := &model.TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}
+				if test.locked {
+					until := time.Now().Add(time.Minute)
+					twoFA.LockedUntil = &until
+				}
+				require.NoError(t, model.DB.Create(twoFA).Error)
+			}
+			system_setting.GetPasskeySettings().Enabled = !test.disabledPasskey
+			requirements, err := service.GetVerificationRequirements(identity, service.VerificationScopeChannelKeyRead)
+			if role != common.RoleRootUser {
+				assert.ErrorIs(t, err, service.ErrVerificationForbidden)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.methods, requirements.Methods)
+			input := service.VerificationInput{Method: "password", Scope: service.VerificationScopeChannelKeyRead, Context: []byte(`{"channel_id":123}`), Password: "enrollment-password"}
+			proof, err := service.VerifySecurityInput(identity, input)
+			if test.name == "password only root" {
+				require.NoError(t, err)
+				assert.NotEmpty(t, proof.ProofToken)
+			} else {
+				assert.Error(t, err)
+				assert.Nil(t, proof)
+			}
+			for _, method := range []string{"session", "oauth"} {
+				input.Method = method
+				proof, err := service.VerifySecurityInput(identity, input)
+				assert.ErrorIs(t, err, service.ErrProofMethod)
+				assert.Nil(t, proof)
+			}
+		})
+	}
+}
+
+func TestSecurityEnrollmentChannelKeyPasswordProof(t *testing.T) {
+	user, identity := setupSecurityEnrollmentTest(t)
+	previousPasswordLogin := common.PasswordLoginEnabled
+	common.PasswordLoginEnabled = true
+	t.Cleanup(func() { common.PasswordLoginEnabled = previousPasswordLogin })
+	require.NoError(t, model.DB.Model(user).Update("role", common.RoleRootUser).Error)
+	require.NoError(t, model.PublishUserAuthCache(user.Id))
+	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}))
+	channel := &model.Channel{Name: "protected channel", Key: "private-channel-key"}
+	require.NoError(t, model.DB.Create(channel).Error)
+	context, err := common.Marshal(service.ChannelKeyReadContext{ChannelID: channel.Id})
+	require.NoError(t, err)
+	operation := service.VerificationOperation{Scope: service.VerificationScopeChannelKeyRead, Context: context}
+	input := service.VerificationInput{Method: "password", Scope: operation.Scope, Context: context, Password: "wrong"}
+	payload, err := common.Marshal(input)
+	require.NoError(t, err)
+	response := securityEnrollmentRequest(http.MethodPost, "/api/verify", string(payload), "", identity, UniversalVerify)
+	assert.NotContains(t, response.Body.String(), "proof_token")
+	assert.Contains(t, response.Body.String(), "SECURITY_VERIFICATION_FAILED")
+	input.Password = "enrollment-password"
+	payload, err = common.Marshal(input)
+	require.NoError(t, err)
+	response = securityEnrollmentRequest(http.MethodPost, "/api/verify", string(payload), "", identity, UniversalVerify)
+	var body securityEnrollmentResponse
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+	require.True(t, body.Success, body.Message)
+	var proof service.SecurityProof
+	require.NoError(t, common.Unmarshal(body.Data, &proof))
+	assert.Equal(t, "password", proof.Method)
+	assert.Equal(t, operation.Scope, proof.Scope)
+	otherContext, err := common.Marshal(service.ChannelKeyReadContext{ChannelID: channel.Id + 1})
+	require.NoError(t, err)
+	_, err = service.ConsumeOperationProof(proof.ProofToken, identity, service.VerificationOperation{Scope: operation.Scope, Context: otherContext})
+	assert.ErrorIs(t, err, service.ErrProofContext)
+	otherSession := identity
+	otherSession.SessionID = "another-session"
+	_, err = service.ConsumeOperationProof(proof.ProofToken, otherSession, operation)
+	assert.ErrorIs(t, err, service.ErrAuthTokenInvalid)
+	_, err = service.ConsumeOperationProof(proof.ProofToken, identity, service.VerificationOperation{Scope: "passkey.register"})
+	assert.ErrorIs(t, err, service.ErrProofScope)
+	readKey := func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: strconv.Itoa(channel.Id)}}
+		middleware.SecureVerificationRequired()(c)
+		if !c.IsAborted() {
+			GetChannelKey(c)
+		}
+	}
+	response = securityEnrollmentRequest(http.MethodPost, "/api/channel/key", "", proof.ProofToken, identity, readKey)
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+	require.True(t, body.Success, body.Message)
+	assert.JSONEq(t, `{"key":"private-channel-key"}`, string(body.Data))
+	response = securityEnrollmentRequest(http.MethodPost, "/api/channel/key", "", proof.ProofToken, identity, readKey)
+	assert.Equal(t, http.StatusForbidden, response.Code)
+	assert.Contains(t, response.Body.String(), "SECURITY_PROOF_CONSUMED")
+	assert.NotContains(t, response.Body.String(), channel.Key)
+	proofForExpiry, err := service.VerifySecurityInput(identity, input)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.AuthFlow{}).Where("purpose = ?", model.AuthFlowPurposeSecurityProof).Update("expires_at", time.Now().Add(-time.Minute)).Error)
+	_, err = service.ConsumeOperationProof(proofForExpiry.ProofToken, identity, operation)
+	assert.ErrorIs(t, err, service.ErrAuthTokenExpired)
+	proofBeforeEnrollment, err := service.VerifySecurityInput(identity, input)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Create(&model.PasskeyCredential{UserID: user.Id, CredentialID: "new-channel-key-passkey", PublicKey: "public-key"}).Error)
+	_, err = service.ConsumeOperationProof(proofBeforeEnrollment.ProofToken, identity, operation)
+	assert.ErrorIs(t, err, service.ErrProofMethod, "an enrolled factor must invalidate the password fallback before disclosure")
+}
+
 func TestSecurityEnrollmentProofStartsOnlyOneSetup(t *testing.T) {
 	_, identity := setupSecurityEnrollmentTest(t)
 	proof := issueSecurityEnrollmentProof(t, identity, service.VerificationOperation{Scope: "2fa.setup"}, "password")

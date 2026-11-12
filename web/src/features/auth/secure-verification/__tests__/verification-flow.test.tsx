@@ -297,6 +297,37 @@ it('keeps the requested channel context fixed while verification is open', async
   )
 })
 
+it('guides channel owners without verification methods to security setup without unlocking keys', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: { ...passwordRequirements, scope: 'channel.key.read', methods: [] },
+    },
+  })
+  const post = vi.spyOn(api, 'post')
+  const result = vi.fn()
+  const user = userEvent.setup()
+  render(
+    <Harness
+      operation={{ scope: 'channel.key.read', context: { channel_id: 123 } }}
+      onResult={result}
+    />
+  )
+  await user.click(screen.getByText('Protected action'))
+  expect(
+    await screen.findByRole('link', { name: 'Security & Access' })
+  ).toHaveAttribute('href', '/security')
+  expect(
+    screen.getByText(
+      'Enable Two-factor Authentication or Passkey in Security & Access to continue.'
+    )
+  ).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled()
+  expect(post).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: 'Cancel' }))
+  await waitFor(() => expect(result).toHaveBeenCalledWith(null))
+})
+
 it('shows query errors and reloads requirements only when the user retries', async () => {
   const requests = vi
     .spyOn(api, 'get')
