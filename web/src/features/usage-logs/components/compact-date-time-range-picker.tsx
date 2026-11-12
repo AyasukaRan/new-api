@@ -30,11 +30,23 @@ import {
 import dayjs from '@/lib/dayjs'
 import { cn } from '@/lib/utils'
 
+import type { LogTimePreset } from '../lib/time-range'
+
+const presetLabels: Record<LogTimePreset, string> = {
+  today: 'Today',
+  '7d': '7 Days',
+  week: 'This week',
+  '30d': '30 Days',
+  month: 'Current month',
+}
+
 interface CompactDateTimeRangePickerProps {
   start?: Date
   end?: Date
   onChange: (range: { start?: Date; end?: Date }) => void
   className?: string
+  preset?: LogTimePreset
+  onPresetSelect?: (preset: LogTimePreset) => void
 }
 
 function toInputValue(date?: Date): string {
@@ -52,6 +64,8 @@ export function CompactDateTimeRangePicker({
   end,
   onChange,
   className,
+  preset,
+  onPresetSelect,
 }: CompactDateTimeRangePickerProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -89,7 +103,12 @@ export function CompactDateTimeRangePicker({
     setOpen(false)
   }
 
-  const applyPreset = (kind: 'today' | '7d' | 'week' | '30d' | 'month') => {
+  const applyPreset = (kind: LogTimePreset) => {
+    if (onPresetSelect) {
+      onPresetSelect(kind)
+      setOpen(false)
+      return
+    }
     const now = dayjs()
     const presets = {
       today: {
@@ -137,6 +156,11 @@ export function CompactDateTimeRangePicker({
         }
       >
         <CalendarDays className='text-muted-foreground size-4 shrink-0' />
+        {preset && (
+          <span className='text-primary shrink-0 text-xs font-medium'>
+            {t(presetLabels[preset])}
+          </span>
+        )}
         <span className='hidden truncate sm:block'>{label}</span>
         <span className='min-w-0 [overflow-wrap:anywhere] whitespace-normal sm:hidden'>
           {mobileLabel}
@@ -186,6 +210,7 @@ export function CompactDateTimeRangePicker({
               size='sm'
               className='h-7 flex-1 px-2 text-xs'
               onClick={() => applyPreset('today')}
+              aria-pressed={preset === 'today'}
             >
               {t('Today')}
             </Button>
@@ -195,6 +220,7 @@ export function CompactDateTimeRangePicker({
               size='sm'
               className='h-7 flex-1 px-2 text-xs'
               onClick={() => applyPreset('7d')}
+              aria-pressed={preset === '7d'}
             >
               {t('7 Days')}
             </Button>
@@ -204,6 +230,7 @@ export function CompactDateTimeRangePicker({
               size='sm'
               className='h-7 flex-1 px-2 text-xs'
               onClick={() => applyPreset('week')}
+              aria-pressed={preset === 'week'}
             >
               {t('This week')}
             </Button>
@@ -213,6 +240,7 @@ export function CompactDateTimeRangePicker({
               size='sm'
               className='h-7 flex-1 px-2 text-xs'
               onClick={() => applyPreset('30d')}
+              aria-pressed={preset === '30d'}
             >
               {t('30 Days')}
             </Button>
@@ -222,6 +250,7 @@ export function CompactDateTimeRangePicker({
               size='sm'
               className='h-7 flex-1 px-2 text-xs'
               onClick={() => applyPreset('month')}
+              aria-pressed={preset === 'month'}
             >
               {t('Current month')}
             </Button>

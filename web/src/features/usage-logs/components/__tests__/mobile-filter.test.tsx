@@ -345,3 +345,26 @@ it('shows the seconds of the selected range on the trigger', () => {
     })
   ).toBeVisible()
 })
+
+it('selects a live preset without converting it into a fixed date range', async () => {
+  const onChange = vi.fn()
+  const onPresetSelect = vi.fn()
+  const user = userEvent.setup()
+  render(
+    <CompactDateTimeRangePicker
+      start={new Date(2026, 10, 12)}
+      end={new Date(2026, 10, 12, 17, 42)}
+      preset='today'
+      onPresetSelect={onPresetSelect}
+      onChange={onChange}
+    />
+  )
+  await user.click(screen.getByRole('button', { name: /^2026/ }))
+  expect(screen.getByRole('button', { name: 'Today' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  await user.click(screen.getByRole('button', { name: '7 Days' }))
+  expect(onPresetSelect).toHaveBeenCalledWith('7d')
+  expect(onChange).not.toHaveBeenCalled()
+})

@@ -25,6 +25,7 @@ import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
 import type { PolicyEvent } from '@/features/system-settings/request-policies/api'
 
 import type { UsageLog } from './data/schema'
+import type { LogTimePreset } from './lib/time-range'
 // ============================================================================
 // Log Category Types
 // ============================================================================
@@ -52,6 +53,7 @@ export interface CommonFilters {
  * Common logs specific filters
  */
 export interface CommonLogFilters extends CommonFilters {
+  timeRange?: LogTimePreset
   model?: string
   token?: string
   group?: string
