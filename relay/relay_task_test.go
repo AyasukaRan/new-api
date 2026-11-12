@@ -26,7 +26,6 @@ import (
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -35,23 +34,26 @@ import (
 func setupRelayChannelDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	previousDB := model.DB
-	previousType := common.MainDatabaseType()
-	previousCache := common.MemoryCacheEnabled
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	previousPath, previousMaster := common.SQLitePath, common.IsMasterNode
+	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	t.Cleanup(func() {
+		model.DB = previousDB
+		common.SetDatabaseTypes(previousMain, previousLog)
+		common.SQLitePath, common.IsMasterNode = previousPath, previousMaster
+		common.MemoryCacheEnabled, common.RedisEnabled = previousCache, previousRedis
+	})
+	t.Setenv("SQL_DSN", "local")
+	t.Setenv("LOG_SQL_DSN", "")
+	common.SQLitePath, common.IsMasterNode = t.TempDir()+"/relay.db", false
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	require.NoError(t, model.InitDB())
+	database := model.DB
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&model.Channel{}))
-	model.DB = database
-	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
-	common.MemoryCacheEnabled = false
-	t.Cleanup(func() {
-		model.DB = previousDB
-		common.SetMainDatabaseType(previousType)
-		common.MemoryCacheEnabled = previousCache
-		require.NoError(t, sqlDB.Close())
-	})
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.ChannelBalanceSample{}, &model.ChannelKeyObservation{}))
 	return database
 }
 

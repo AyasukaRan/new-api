@@ -232,7 +232,7 @@ func (channel *Channel) GetNextRelayKey(batchRequest ...bool) (string, int, *typ
 // GetNextRelayKeyForModel excludes failed probes as well as known debt without
 // changing the key status or preventing administrative tests from recovering it.
 func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest bool, groups ...string) (string, int, *types.NewAPIError) {
-	if len(groups) > 0 && channel.ChannelInfo.IsMultiKey {
+	if len(groups) > 0 {
 		// Permission changes must not wait for another instance's routing cache.
 		var current Channel
 		if err := DB.Select("id", commonKeyCol, commonGroupCol, "channel_info", "status").First(&current, channel.Id).Error; err != nil {
@@ -241,7 +241,7 @@ func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest b
 		if current.Status != common.ChannelStatusEnabled {
 			return "", 0, types.NewError(ErrChannelDisabled, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
-		if !slices.Contains(current.GetGroups(), groups[0]) {
+		if current.ChannelInfo.IsMultiKey && !slices.Contains(current.GetGroups(), groups[0]) {
 			return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
 		}
 		snapshot := *channel

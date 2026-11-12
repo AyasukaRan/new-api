@@ -225,13 +225,13 @@ func filterRelayAbilities(abilities []Ability, modelName string, filters []dto.C
 		if !matches && rejectedBy != dto.FilterChannelBalance {
 			continue
 		}
-		if failure := channel.RelayProbeError(modelName, filters); failure != nil {
+		available, failure := channel.RelayKeyAvailabilityForGroup(ability.Group, modelName, filters)
+		if failure != nil {
 			if probeError == nil || failure.ObservedAt > probeError.ObservedAt {
 				probeError = failure
 			}
-			continue
 		}
-		if !matches {
+		if !matches || !available {
 			continue
 		}
 		filtered = append(filtered, ability)

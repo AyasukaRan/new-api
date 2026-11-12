@@ -707,7 +707,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if len(channelTest) > 0 && channelTest[0] {
 		key, index, newAPIError = channel.GetNextEnabledKey()
 	} else {
-		key, index, newAPIError = channel.GetNextRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+		key, index, newAPIError = channel.GetNextRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
 	}
 	if newAPIError != nil {
 		if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {

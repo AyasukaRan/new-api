@@ -148,20 +148,18 @@ func GetRandomSatisfiedChannel(
 		kept := make([]int, 0, len(ids))
 		for _, id := range ids {
 			channel := candidates[id]
-			if channel != nil && !channel.HasKeyForGroup(group) {
-				continue
-			}
 			if channel != nil {
-				if failure := channel.RelayProbeError(model, filters); failure != nil {
+				available, failure := channel.RelayKeyAvailabilityForGroup(group, model, filters)
+				if failure != nil {
 					if probeError == nil || failure.ObservedAt > probeError.ObservedAt {
 						probeError = failure
 					}
+				}
+				if !available {
 					continue
 				}
 			}
-			if channel == nil || channel.HasRelayBalanceForRequest(filters) {
-				kept = append(kept, id)
-			}
+			kept = append(kept, id)
 		}
 		return kept
 	}

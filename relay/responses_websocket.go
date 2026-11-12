@@ -630,11 +630,8 @@ func responsesWSErrorEndsRequest(event responsesWSErrorEvent, streamID, response
 func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model string) *types.NewAPIError {
 	// The channel type is not rechecked: a locked channel keeps its type, and
 	// the FilterResponsesWebSocket rules were applied when it was selected.
-	channel, err := appmodel.CacheGetChannel(s.lockedChannelID)
-	if err == nil && channel != nil && channel.ChannelInfo.IsMultiKey {
-		// A new frame must not retain key permissions from another instance's cache.
-		channel, err = appmodel.GetChannelById(s.lockedChannelID, true)
-	}
+	// The cached key mode can predate a switch from one key to scoped keys.
+	channel, err := appmodel.GetChannelById(s.lockedChannelID, true)
 	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}

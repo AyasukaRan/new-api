@@ -11,6 +11,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// GetSelectedRequestGroup returns the concrete routing group without replacing
+// the token's auto selector. An unresolved auto selection stays empty.
+func GetSelectedRequestGroup(c *gin.Context) string {
+	group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if group == "auto" {
+		return common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+	}
+	return group
+}
+
 func GetUserUsableGroups(userGroup string) map[string]string {
 	groupsCopy := setting.GetUserUsableGroupsCopy()
 	if userGroup != "" {

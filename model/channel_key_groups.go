@@ -2,11 +2,13 @@ package model
 
 import (
 	"crypto/hmac"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	"gorm.io/gorm"
 )
 
@@ -46,6 +48,44 @@ func (channel *Channel) HasEnabledKeyForGroup(group string) bool {
 		}
 	}
 	return false
+}
+
+// RelayKeyAvailabilityForGroup applies health only to credentials this group
+// may use. Catalogs keep using HasKeyForGroup, independently of transient health.
+func (channel *Channel) RelayKeyAvailabilityForGroup(group, modelName string, filters []dto.ChannelFilter) (bool, *ChannelProbeError) {
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	snapshot := *channel
+	snapshot.ChannelInfo.MultiKeyStatusList = maps.Clone(channel.ChannelInfo.MultiKeyStatusList)
+	lock.Unlock()
+	if !snapshot.HasKeyForGroup(group) {
+		return false, nil
+	}
+	if snapshot.ChannelInfo.IsMultiKey {
+		if snapshot.ChannelInfo.MultiKeyStatusList == nil {
+			snapshot.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		}
+		for index, key := range snapshot.GetKeys() {
+			if !snapshot.KeyAllowedForGroup(key, group) {
+				snapshot.ChannelInfo.MultiKeyStatusList[index] = common.ChannelStatusManuallyDisabled
+			}
+		}
+		if !hasEnabledMultiKey(snapshot.GetKeys(), snapshot.ChannelInfo.MultiKeyStatusList) {
+			return false, nil
+		}
+		for _, filter := range filters {
+			if filter.Kind == dto.FilterBatchCapable {
+				_, batchKey := snapshot.GetBatchEndpoint("")
+				if batchKey != "" && !snapshot.KeyAllowedForGroup(batchKey, group) {
+					return false, nil
+				}
+			}
+		}
+	}
+	if failure := snapshot.RelayProbeError(modelName, filters); failure != nil {
+		return false, failure
+	}
+	return snapshot.HasRelayBalanceForRequest(filters), nil
 }
 
 // retainKeyGroups removes only deleted credentials. Removing a channel group

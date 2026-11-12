@@ -326,26 +326,45 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			return nil, "", pinnedChannelUnavailable(pin, http.StatusForbidden, i18n.MsgDistributorChannelDisabled)
 		}
 		selectGroup := ""
+		usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+		if retry != nil && retry.TokenGroup != "" {
+			usingGroup = retry.TokenGroup
+		}
 		// Existing unscoped pins and model-less lifecycle operations retain their
-		// behavior. A model request cannot use a pin to bypass an explicit scope.
-		if modelName != "" && channel.HasGroupModelLimits() {
-			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
-			if retry != nil && retry.TokenGroup != "" {
-				usingGroup = retry.TokenGroup
-			}
+		// model behavior. Multi-key auto pins still need a concrete allowed group.
+		checkModelScope := modelName != "" && channel.HasGroupModelLimits()
+		if checkModelScope || channel.ChannelInfo.IsMultiKey && usingGroup == "auto" {
+			hasAllowedGroup := false
+			var groupProbeError *model.ChannelProbeError
 			groups := []string{usingGroup}
 			if usingGroup == "auto" {
 				groups = GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
 			}
 			for _, group := range groups {
-				if model.IsChannelEnabledForGroupModel(group, modelName, channel.Id) {
+				if checkModelScope && model.IsChannelEnabledForGroupModel(group, modelName, channel.Id) ||
+					!checkModelScope && channel.HasKeyForGroup(group) {
+					hasAllowedGroup = true
+					available, failure := channel.RelayKeyAvailabilityForGroup(group, modelName, constraints.Filters)
+					if failure != nil && (groupProbeError == nil || failure.ObservedAt > groupProbeError.ObservedAt) {
+						groupProbeError = failure
+					}
+					if !available {
+						continue
+					}
 					selectGroup = group
 					break
 				}
 			}
 			if selectGroup == "" {
+				if groupProbeError != nil {
+					return nil, "", channelProbeSelectionError(groupProbeError)
+				}
+				status := http.StatusForbidden
+				if hasAllowedGroup {
+					status = http.StatusServiceUnavailable
+				}
 				return nil, "", &ChannelSelectError{
-					StatusCode: http.StatusForbidden, Code: types.ErrorCodeModelNotFound,
+					StatusCode: status, Code: types.ErrorCodeModelNotFound,
 					MessageID: i18n.MsgDistributorNoAvailableChannel,
 					Params:    map[string]any{"Group": usingGroup, "Model": modelName},
 				}
@@ -389,6 +408,13 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 					userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 					for _, g := range GetRequestAutoGroups(c, userGroup) {
 						if model.IsChannelEnabledForGroupModel(g, modelName, preferred.Id) {
+							available, failure := preferred.RelayKeyAvailabilityForGroup(g, modelName, constraints.Filters)
+							if failure != nil && (probeErr == nil || failure.ObservedAt > probeErr.ObservedAt) {
+								probeErr = failure
+							}
+							if !available {
+								continue
+							}
 							selectGroup = g
 							affinityUsable = true
 							break
@@ -396,7 +422,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 					}
 				} else if model.IsChannelEnabledForGroupModel(usingGroup, modelName, preferred.Id) {
 					selectGroup = usingGroup
-					affinityUsable = true
+					affinityUsable, probeErr = preferred.RelayKeyAvailabilityForGroup(usingGroup, modelName, constraints.Filters)
 				}
 			}
 			if affinityUsable {

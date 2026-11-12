@@ -285,7 +285,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if updated != nil && updated.Status == common.ChannelStatusEnabled && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
 				for index, key := range updated.GetKeys() {
 					status, configured := updated.ChannelInfo.MultiKeyStatusList[index]
-					if initialChannelKeys[channel.Id][key] && !rejectedChannelKeys[channel.Id][key] && (!configured || status == common.ChannelStatusEnabled) && updated.KeyAllowedForGroup(key, common.GetContextKeyString(c, constant.ContextKeyUsingGroup)) {
+					if initialChannelKeys[channel.Id][key] && !rejectedChannelKeys[channel.Id][key] && (!configured || status == common.ChannelStatusEnabled) && updated.KeyAllowedForGroup(key, service.GetSelectedRequestGroup(c)) {
 						sameChannelRetry = updated
 						break
 					}

@@ -13,9 +13,15 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relay"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,6 +191,13 @@ func TestMultiKeyStatusReturnsMatchingBalancesAndMaskedCredentials(t *testing.T)
 func TestMultiKeyGroupPermissions(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	rootID := setupChannelManagementTest(t)
+	previousGroups, previousRatios := setting.UserUsableGroups2JSONString(), ratio_setting.GroupRatio2JSONString()
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"public":"Public","private":"Private","blocked":"Blocked"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"public":1,"private":1,"blocked":1}`))
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousRatios))
+	})
 	require.NoError(t, model.DB.AutoMigrate(&model.Model{}, &model.Vendor{}, &model.ChannelBalanceSample{}))
 	const keyA, keyB = "sk-group-a-private-key", "sk-group-b-private-key"
 	channel := &model.Channel{Name: t.Name(), Type: 1, Key: keyA + "\n" + keyB, Models: "group-scoped-model", Group: "public,private,blocked", Status: common.ChannelStatusEnabled,
@@ -234,6 +247,23 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 	identityA, identityB := status.Keys[0].KeyIdentity, status.Keys[1].KeyIdentity
 	require.NotEmpty(t, identityA)
 	assert.NotEqual(t, identityA, identityB)
+	for _, groups := range [][]string{{"outside", "private"}, {"outside"}} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "auto")
+		common.SetContextKey(c, constant.ContextKeyUserGroup, "public")
+		common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, groups)
+		service.GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: channel.Id, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+		selected, selectedGroup, selectErr := service.SelectChannelForRequest(c, "unlisted-pinned-model", &service.RetryParam{Ctx: c, TokenGroup: "auto"})
+		if len(groups) == 1 {
+			require.NotNil(t, selectErr, "an auto pin cannot invent permission to the channel's first group")
+			continue
+		}
+		require.Nil(t, selectErr)
+		assert.Equal(t, "private", selectedGroup)
+		require.Nil(t, middleware.SetupContextForSelectedChannel(c, selected, "unlisted-pinned-model"), "an unscoped auto pin keeps its existing model behavior")
+		assert.Equal(t, "auto", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+	}
 	require.NoError(t, model.DB.Model(channel).Update("group", "private,blocked").Error)
 	_, _, removedGroupErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "public")
 	require.NotNil(t, removedGroupErr, "stale cache cannot retain a deleted group when all keys inherit")
@@ -274,6 +304,89 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 	require.NotNil(t, batchErr, "batch override cannot use another group's restricted key")
 	_, _, batchErr = batchSnapshot.GetNextRelayKeyForModel("group-scoped-model", true, "private")
 	require.Nil(t, batchErr)
+	autoContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	autoContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(autoContext, constant.ContextKeyUsingGroup, "auto")
+	common.SetContextKey(autoContext, constant.ContextKeyUserGroup, "public")
+	common.SetContextKey(autoContext, constant.ContextKeyTokenAutoGroups, []string{"private"})
+	autoChannel, autoGroup, selectErr := service.SelectChannelForRequest(autoContext, "group-scoped-model", &service.RetryParam{Ctx: autoContext, ModelName: "group-scoped-model", TokenGroup: "auto"})
+	require.Nil(t, selectErr)
+	assert.Equal(t, "private", autoGroup)
+	require.Nil(t, middleware.SetupContextForSelectedChannel(autoContext, autoChannel, "group-scoped-model"))
+	assert.Equal(t, keyB, common.GetContextKeyString(autoContext, constant.ContextKeyChannelKey))
+	assert.Equal(t, "auto", common.GetContextKeyString(autoContext, constant.ContextKeyUsingGroup))
+	for _, test := range []struct{ tokenGroup, selectedGroup, key string }{
+		{"public", "private", keyA},
+		{"auto", "public", keyA},
+		{"auto", "private", keyB},
+		{"auto", "blocked", ""},
+		{"auto", "", ""},
+	} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, test.tokenGroup)
+		common.SetContextKey(c, constant.ContextKeyAutoGroup, test.selectedGroup)
+		apiErr := middleware.SetupContextForSelectedChannel(c, channel, "group-scoped-model")
+		if test.key == "" {
+			require.NotNil(t, apiErr)
+			assert.Equal(t, model.ErrorCodeChannelGroupUnavailable, apiErr.GetErrorCode())
+		} else {
+			require.Nil(t, apiErr)
+			assert.Equal(t, test.key, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+		}
+		assert.Equal(t, test.tokenGroup, common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+	}
+	staleSingle := *channel
+	staleSingle.Key, staleSingle.Keys, staleSingle.ChannelInfo = keyB, nil, model.ChannelInfo{}
+	key, _, staleModeErr := staleSingle.GetNextRelayKeyForModel("group-scoped-model", false, "public")
+	require.Nil(t, staleModeErr)
+	assert.Equal(t, keyA, key, "an old single-key cache must honor newly configured multi-key permissions")
+	require.NoError(t, model.DB.AutoMigrate(&model.Task{}, &model.ChannelKeyObservation{}))
+	originTask := &model.Task{TaskID: "key-groups-origin", UserId: rootID, ChannelId: channel.Id}
+	require.NoError(t, model.DB.Create(originTask).Error)
+	t.Cleanup(func() { require.NoError(t, model.DB.Delete(originTask).Error) })
+	originChannel, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	originSettings := originChannel.GetSetting()
+	originSettings.GroupModels = map[string][]string{"public": {}, "private": {"group-scoped-model"}}
+	originChannel.SetSetting(originSettings)
+	require.NoError(t, model.DB.Model(originChannel).Update("setting", originChannel.Setting).Error)
+	require.NoError(t, originChannel.UpdateAbilities(model.DB))
+	for _, groups := range [][]string{{"private"}, {"public", "private"}, {"blocked"}} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/continue", nil)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "auto")
+		common.SetContextKey(c, constant.ContextKeyAutoGroup, "public")
+		common.SetContextKey(c, constant.ContextKeyUserGroup, "public")
+		common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, groups)
+		info := &relaycommon.RelayInfo{UserId: rootID, OriginModelName: "group-scoped-model", ChannelMeta: &relaycommon.ChannelMeta{}, TaskRelayInfo: &relaycommon.TaskRelayInfo{OriginTaskID: originTask.TaskID}}
+		taskErr := relay.ResolveOriginTask(c, info)
+		if groups[0] == "blocked" {
+			require.NotNil(t, taskErr, "the previous channel's auto group must not authorize an unavailable origin group")
+		} else {
+			require.Nil(t, taskErr)
+			assert.Equal(t, keyB, info.ApiKey)
+			assert.Equal(t, "private", common.GetContextKeyString(c, constant.ContextKeyAutoGroup))
+		}
+		assert.Equal(t, "auto", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+	}
+	require.NoError(t, model.RecordChannelKeyObservation(originChannel, "group-scoped-model", keyB, 1, common.GetPointer(false), 502, "origin probe unavailable", "probe"))
+	originContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	originContext.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/continue", nil)
+	common.SetContextKey(originContext, constant.ContextKeyUsingGroup, "auto")
+	common.SetContextKey(originContext, constant.ContextKeyUserGroup, "public")
+	common.SetContextKey(originContext, constant.ContextKeyTokenAutoGroups, []string{"private"})
+	originInfo := &relaycommon.RelayInfo{UserId: rootID, OriginModelName: "group-scoped-model", ChannelMeta: &relaycommon.ChannelMeta{}, TaskRelayInfo: &relaycommon.TaskRelayInfo{OriginTaskID: originTask.TaskID}}
+	originError := relay.ResolveOriginTask(originContext, originInfo)
+	require.NotNil(t, originError)
+	assert.Equal(t, http.StatusServiceUnavailable, originError.StatusCode)
+	assert.Equal(t, string(model.ErrorCodeChannelProbeUnavailable), originError.Code)
+	assert.Contains(t, originError.Message, "origin probe unavailable")
+	require.NoError(t, model.RecordChannelKeyObservation(originChannel, "group-scoped-model", keyB, 2, common.GetPointer(true), 200, "", "probe"))
+	require.NoError(t, model.DB.Model(channel).Update("setting", channel.Setting).Error)
+	currentChannel, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	require.NoError(t, currentChannel.UpdateAbilities(model.DB))
 	for _, test := range []struct{ language, noGroupKey, disabled string }{
 		{"en", "No channel key is available for this group", "This channel has been disabled"},
 		{"zh-CN", "当前分组没有可用的渠道密钥", "该渠道已被禁用"},
@@ -346,7 +459,7 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 	loaded.ChannelInfo.MultiKeyStatusList = nil
 	require.NoError(t, loaded.SaveChannelInfo())
 	setGroups(0, identityA, []string{}, true)
-	key, _, apiErr := channel.GetNextRelayKeyForModel("group-scoped-model", false, "blocked")
+	key, _, apiErr = channel.GetNextRelayKeyForModel("group-scoped-model", false, "blocked")
 	require.Nil(t, apiErr)
 	assert.Equal(t, keyA, key, "explicit clearing restores inheritance")
 	setGroups(0, identityA, []string{"public"}, true)

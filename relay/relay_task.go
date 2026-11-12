@@ -101,7 +101,31 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
-		key, index, newAPIError := ch.GetNextRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+		if ch.ChannelInfo.IsMultiKey && common.GetContextKeyString(c, constant.ContextKeyUsingGroup) == "auto" {
+			// This is an explicit channel change, so the previous channel's
+			// selected group must not authorize the origin channel's credential.
+			selectedGroup := ""
+			var groupProbeError *model.ChannelProbeError
+			checkModelScope := info.OriginModelName != "" && ch.HasGroupModelLimits()
+			for _, group := range service.GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup)) {
+				if ch.HasKeyForGroup(group) && (!checkModelScope || model.IsChannelEnabledForGroupModel(group, info.OriginModelName, ch.Id)) {
+					available, failure := ch.RelayKeyAvailabilityForGroup(group, info.OriginModelName, service.GetChannelConstraints(c).Filters)
+					if failure != nil && (groupProbeError == nil || failure.ObservedAt > groupProbeError.ObservedAt) {
+						groupProbeError = failure
+					}
+					if !available {
+						continue
+					}
+					selectedGroup = group
+					break
+				}
+			}
+			if selectedGroup == "" && groupProbeError != nil {
+				return service.TaskErrorWrapperLocal(groupProbeError, string(model.ErrorCodeChannelProbeUnavailable), http.StatusServiceUnavailable)
+			}
+			common.SetContextKey(c, constant.ContextKeyAutoGroup, selectedGroup)
+		}
+		key, index, newAPIError := ch.GetNextRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
 		if newAPIError != nil {
 			if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {
 				newAPIError.SetMessage(i18n.T(c, i18n.MsgRelayChannelNoGroupKey))

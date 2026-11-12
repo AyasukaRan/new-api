@@ -98,6 +98,7 @@ func TestSelectResponsesWSChannelHonorsPinsAndFilters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 			constraints := service.GetChannelConstraints(c)
 			constraints.AddPin(appdto.ChannelPin{ChannelId: disabled.Id, Source: appdto.PinSourceOriginTask, Rank: appdto.PinRankOriginTask, RetryMode: appdto.PinRetrySameChannel})
 			constraints.AddPin(appdto.ChannelPin{ChannelId: tc.channelID, Source: appdto.PinSourceToken, Rank: appdto.PinRankToken, RetryMode: appdto.PinRetrySingleAttempt})
@@ -177,6 +178,7 @@ func TestSelectResponsesWSChannelAcceptsNativeResponsesChannelTypes(t *testing.T
 			require.NoError(t, database.Create(channel).Error)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 			constraints := service.GetChannelConstraints(c)
 			constraints.AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken, Rank: appdto.PinRankToken, RetryMode: appdto.PinRetrySingleAttempt})
 			constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
@@ -290,9 +292,7 @@ func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	require.NoError(t, database.AutoMigrate(&model.Ability{}))
-	channel := &model.Channel{Name: t.Name(), Key: "ws-key-one\nws-key-two", Group: "default,vip", Models: "ws-model", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI,
-		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
-	}
+	channel := &model.Channel{Name: t.Name(), Key: "ws-key-one", Group: "default,vip", Models: "ws-model", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
 	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
 	require.NoError(t, channel.Insert())
 	common.MemoryCacheEnabled = true
@@ -311,8 +311,9 @@ func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
 	require.Nil(t, session.restoreConnectionContext(c, "ws-model"))
 
 	// Simulate another instance's edit without refreshing this process's cache.
-	channel.ChannelInfo.KeyGroups = map[string][]string{channel.KeyIdentity("ws-key-one"): {"vip"}}
-	require.NoError(t, database.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+	channel.Key = "ws-key-one\nws-key-two"
+	channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, KeyGroups: map[string][]string{channel.KeyIdentity("ws-key-one"): {"vip"}}}
+	require.NoError(t, database.Model(channel).Updates(map[string]any{"key": channel.Key, "channel_info": channel.ChannelInfo}).Error)
 	for _, test := range []struct{ language, message string }{
 		{"en", "The connection credential is no longer allowed for this group"},
 		{"zh-CN", "连接使用的密钥已不允许用于当前分组"},
@@ -357,6 +358,7 @@ func TestResponsesWSChannelRoutingRequiresExplicitOptIn(t *testing.T) {
 	model.InitChannelCache()
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 	params := &service.RetryParam{Ctx: c, ModelName: "ws-model", TokenGroup: "default"}
 	channel, apiErr := selectResponsesWSChannel(c, "ws-model", params)
 	require.Nil(t, apiErr)
@@ -418,6 +420,7 @@ func TestSelectResponsesWSChannelHonorsStrictSessionBinding(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
 		c.Request.Header.Set("X-Session", t.Name())
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 		return c
 	}
 	seed := newSessionContext()

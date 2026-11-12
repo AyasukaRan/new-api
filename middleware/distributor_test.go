@@ -18,7 +18,33 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func setupDistributorChannelDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	previousDB := model.DB
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	previousPath, previousMaster := common.SQLitePath, common.IsMasterNode
+	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	t.Cleanup(func() {
+		model.DB = previousDB
+		common.SetDatabaseTypes(previousMain, previousLog)
+		common.SQLitePath, common.IsMasterNode = previousPath, previousMaster
+		common.MemoryCacheEnabled, common.RedisEnabled = previousCache, previousRedis
+	})
+	t.Setenv("SQL_DSN", "local")
+	t.Setenv("LOG_SQL_DSN", "")
+	common.SQLitePath, common.IsMasterNode = t.TempDir()+"/distributor.db", false
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	require.NoError(t, model.InitDB())
+	database := model.DB
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.ChannelBalanceSample{}, &model.ChannelKeyObservation{}))
+	return database
+}
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
 	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin}
@@ -74,6 +100,7 @@ func TestChannelMatchesExpectedTaskPluginRejectsUnindexedLegacyChannel(t *testin
 }
 
 func TestSharedEndpointRebindsToSelectedLegacyProvider(t *testing.T) {
+	database := setupDistributorChannelDB(t)
 	registry := jsplugin.NewRegistry()
 	_, err := registry.Register(distributorEndpointPluginSource("gemini-shared", constant.ChannelTypeGemini), jsplugin.Options{})
 	require.NoError(t, err)
@@ -83,6 +110,8 @@ func TestSharedEndpointRebindsToSelectedLegacyProvider(t *testing.T) {
 	require.Len(t, candidates, 2)
 
 	c, _ := gin.CreateTestContext(nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 	c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Generation: registry.Generation(), Plugin: candidates[0].Plugin})
 	c.Set(jsplugin.ContextKeyPinnedEndpoint, jsplugin.PinnedEndpoint{
 		Generation: registry.Generation(),
@@ -94,8 +123,10 @@ func TestSharedEndpointRebindsToSelectedLegacyProvider(t *testing.T) {
 	})
 	c.Set("expected_task_plugin_key", candidates[0].Plugin.Meta.Key)
 
-	geminiChannel := &model.Channel{Id: 1, Type: constant.ChannelTypeGemini}
-	vertexChannel := &model.Channel{Id: 2, Type: constant.ChannelTypeVertexAi}
+	geminiChannel := &model.Channel{Type: constant.ChannelTypeGemini, Key: "gemini-fixture-key", Group: "default", Status: common.ChannelStatusEnabled}
+	vertexChannel := &model.Channel{Type: constant.ChannelTypeVertexAi, Key: "vertex-fixture-key", Group: "default", Status: common.ChannelStatusEnabled}
+	require.NoError(t, database.Create(geminiChannel).Error)
+	require.NoError(t, database.Create(vertexChannel).Error)
 	assert.True(t, channelMatchesExpectedTaskPlugin(c, geminiChannel, candidates[0].Plugin.Meta.Key))
 	assert.True(t, channelMatchesExpectedTaskPlugin(c, vertexChannel, candidates[0].Plugin.Meta.Key))
 	assert.False(t, channelMatchesExpectedTaskPlugin(c, &model.Channel{Type: constant.ChannelTypeKling}, candidates[0].Plugin.Meta.Key))
@@ -289,6 +320,7 @@ func TestNoAvailableChannelMessageWithoutPlugin(t *testing.T) {
 }
 
 func TestSharedEndpointRebindsToSelectedType61Plugin(t *testing.T) {
+	database := setupDistributorChannelDB(t)
 	registry := jsplugin.NewRegistry()
 	for _, key := range []string{"alpha", "beta"} {
 		source := strings.Replace(distributorEndpointPluginSource(key, 0), "channelTypes: [0],", "", 1)
@@ -299,13 +331,16 @@ func TestSharedEndpointRebindsToSelectedType61Plugin(t *testing.T) {
 	candidates := generation.LookupEndpointCandidates("POST", "/v1/responses", "task-model")
 	require.Len(t, candidates, 2)
 	c, _ := gin.CreateTestContext(nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 	c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Generation: generation, Plugin: candidates[0].Plugin})
 	c.Set(jsplugin.ContextKeyPinnedEndpoint, jsplugin.PinnedEndpoint{Generation: generation, Plugin: candidates[0].Plugin, Protocol: candidates[0].Protocol, Operation: candidates[0].Operation, Model: "task-model", Candidates: candidates})
 	c.Set("expected_task_plugin_key", "alpha")
-	channel := &model.Channel{Id: 2, Type: constant.ChannelTypeTaskPlugin}
+	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, Key: "plugin-fixture-key", Group: "default", Status: common.ChannelStatusEnabled}
 	channel.SetSetting(dto.ChannelSettings{TaskPluginKey: "unrelated"})
 	assert.False(t, channelMatchesExpectedTaskPlugin(c, channel, "alpha"))
 	channel.SetSetting(dto.ChannelSettings{TaskPluginKey: "beta"})
+	require.NoError(t, database.Create(channel).Error)
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	assert.Equal(t, "beta", c.GetString("task_plugin_key"))
 	assert.Equal(t, "beta", c.GetString("expected_task_plugin_key"))
@@ -315,6 +350,7 @@ func TestSharedEndpointRebindsToSelectedType61Plugin(t *testing.T) {
 // On a native path two plugins declare, the selected channel names the
 // executing plugin, which takes over the route and the task identity.
 func TestSharedNativeRouteRebindsToSelectedPlugin(t *testing.T) {
+	database := setupDistributorChannelDB(t)
 	registry := jsplugin.NewRegistry()
 	for _, key := range []string{"route-alpha", "route-beta"} {
 		_, err := registry.Register(fmt.Sprintf(`
@@ -332,13 +368,16 @@ export function parseTaskResult() { return {}; }
 	candidates := generation.LookupDeclaredRoutes("POST", "/probe/v1/jobs")
 	require.Len(t, candidates, 2)
 	c, _ := gin.CreateTestContext(nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/probe/v1/jobs", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 	c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Generation: generation, Plugin: candidates[0].Plugin})
 	c.Set(jsplugin.ContextKeyPinnedRoute, jsplugin.PinnedRoute{Generation: generation, Plugin: candidates[0].Plugin, Route: candidates[0].Route, Candidates: candidates})
 	c.Set("expected_task_plugin_key", "route-alpha")
-	channel := &model.Channel{Id: 3, Type: constant.ChannelTypeTaskPlugin}
+	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, Key: "plugin-fixture-key", Group: "default", Status: common.ChannelStatusEnabled}
 	channel.SetSetting(dto.ChannelSettings{TaskPluginKey: "unrelated"})
 	assert.False(t, channelMatchesExpectedTaskPlugin(c, channel, "route-alpha"))
 	channel.SetSetting(dto.ChannelSettings{TaskPluginKey: "route-beta"})
+	require.NoError(t, database.Create(channel).Error)
 
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	pinned := c.MustGet(jsplugin.ContextKeyPinnedRoute).(jsplugin.PinnedRoute)
@@ -362,6 +401,7 @@ func TestChannelMatchesExpectedTaskPluginUsesNewAPIExtensions(t *testing.T) {
 }
 
 func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
+	database := setupDistributorChannelDB(t)
 	registry := jsplugin.NewRegistry()
 	for _, key := range []string{"alpha", "beta"} {
 		source := strings.Replace(distributorEndpointPluginSource(key, 0), "channelTypes: [0],", "", 1)
@@ -377,17 +417,20 @@ func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
 			pinned = candidates[1]
 		}
 		c, _ := gin.CreateTestContext(nil)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
 		c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Generation: generation, Plugin: pinned.Plugin})
 		c.Set(jsplugin.ContextKeyPinnedEndpoint, jsplugin.PinnedEndpoint{Generation: generation, Plugin: pinned.Plugin, Protocol: pinned.Protocol, Operation: pinned.Operation, Model: "task-model", Candidates: candidates})
 		c.Set("expected_task_plugin_key", expected)
 		return c
 	}
 
-	channel := &model.Channel{Id: 3, Type: constant.ChannelTypeNewAPI}
+	channel := &model.Channel{Type: constant.ChannelTypeNewAPI, Key: "gateway-fixture-key", Group: "default", Status: common.ChannelStatusEnabled}
 	channel.SetSetting(dto.ChannelSettings{TaskExtendPluginKeys: []string{"unrelated"}})
 	assert.False(t, channelMatchesExpectedTaskPlugin(pin("alpha"), channel, "alpha"))
 
 	channel.SetSetting(dto.ChannelSettings{TaskExtendPluginKeys: []string{"beta"}})
+	require.NoError(t, database.Create(channel).Error)
 	c := pin("alpha")
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	assert.Equal(t, "beta", c.GetString("task_plugin_key"), "the only bound candidate executes")
@@ -395,6 +438,7 @@ func TestSharedEndpointRebindsToBoundNewAPIExtension(t *testing.T) {
 	assert.Equal(t, "beta", c.MustGet(jsplugin.ContextKeyPinnedEndpoint).(jsplugin.PinnedEndpoint).Plugin.Meta.Key)
 
 	channel.SetSetting(dto.ChannelSettings{TaskExtendPluginKeys: []string{"alpha", "beta"}})
+	require.NoError(t, database.Model(channel).Update("setting", channel.Setting).Error)
 	c = pin("beta")
 	require.Nil(t, SetupContextForSelectedChannel(c, channel, "task-model"))
 	assert.Equal(t, "alpha", c.GetString("task_plugin_key"), "the first bound candidate executes regardless of the earlier pin")
