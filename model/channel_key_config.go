@@ -113,6 +113,12 @@ func (channel *Channel) KeyConfiguration() ([]ChannelKeyConfigView, string, erro
 // ApplyKeyConfigs replaces the editor snapshot while retaining surviving keys'
 // physical order. New credentials append; drag order lives only in KeyOrder.
 func (channel *Channel) ApplyKeyConfigs(configs []ChannelKeyConfig, creating bool) error {
+	if channel.Setting != nil && *channel.Setting != "" {
+		var setting dto.ChannelSettings
+		if err := common.UnmarshalJsonStr(*channel.Setting, &setting); err != nil {
+			return common.NewMessage("Invalid parameters")
+		}
+	}
 	var otherSettings dto.ChannelOtherSettings
 	if channel.OtherSettings != "" {
 		if err := common.UnmarshalJsonStr(channel.OtherSettings, &otherSettings); err != nil {

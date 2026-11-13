@@ -99,13 +99,19 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 		return result
 	}
 	channel := &model.Channel{Name: t.Name(), Type: constant.ChannelTypeOpenAI, Models: "config-model", Group: "default,vip", Status: common.ChannelStatusEnabled}
-	invalid := *channel
-	invalid.Name += " invalid"
-	invalid.Type, invalid.OtherSettings = constant.ChannelTypeVertexAi, "{malformed"
-	assert.False(t, request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeFailover, Channel: &invalid, KeyConfigs: []model.ChannelKeyConfig{{Key: keyA}}}).Success)
-	var invalidCount int64
-	require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", invalid.Name).Count(&invalidCount).Error)
-	assert.Zero(t, invalidCount, "invalid settings must not create a partial channel")
+	for _, other := range []bool{false, true} {
+		invalid := *channel
+		invalid.Name += fmt.Sprintf(" invalid other=%t", other)
+		if other {
+			invalid.Type, invalid.OtherSettings = constant.ChannelTypeVertexAi, "{malformed"
+		} else {
+			invalid.Setting = common.GetPointer("{malformed")
+		}
+		assert.False(t, request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeFailover, Channel: &invalid, KeyConfigs: []model.ChannelKeyConfig{{Key: keyA}}}).Success)
+		var invalidCount int64
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", invalid.Name).Count(&invalidCount).Error)
+		assert.Zero(t, invalidCount, "invalid settings must not create a partial channel")
+	}
 	for _, channelType := range []int{constant.ChannelTypeCodex, constant.ChannelTypeVertexAi, constant.ChannelTypeTaskPlugin} {
 		structured := &model.Channel{Type: channelType, Key: "{\n  \"private_key\": \"fixture-only\"\n}", Group: "default"}
 		original := structured.Key
