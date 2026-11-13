@@ -293,7 +293,7 @@ func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
 	database := setupRelayChannelDB(t)
 	require.NoError(t, database.AutoMigrate(&model.Ability{}))
 	channel := &model.Channel{Name: t.Name(), Key: "ws-key-one", Group: "default,vip", Models: "ws-model", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
-	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true, UpstreamCostRatio: common.GetPointer(1.5)})
 	require.NoError(t, channel.Insert())
 	common.MemoryCacheEnabled = true
 	model.InitChannelCache()
@@ -309,6 +309,10 @@ func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
 		lockedContext: map[constant.ContextKey]any{constant.ContextKeyChannelBaseUrl: channel.GetBaseURL(), constant.ContextKeyChannelHeaderOverride: channel.GetHeaderOverride()},
 	}
 	require.Nil(t, session.restoreConnectionContext(c, "ws-model"))
+	previousCost, exists := common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.True(t, exists)
+	require.NotNil(t, previousCost)
+	assert.Equal(t, 1.5, *previousCost)
 
 	// Simulate another instance's edit without refreshing this process's cache.
 	channel.Key = "ws-key-one\nws-key-two"
@@ -329,6 +333,25 @@ func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
 	channel.ChannelInfo.KeyGroups = nil
 	require.NoError(t, database.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
 	require.Nil(t, session.restoreConnectionContext(c, "ws-model"), "clearing restores inheritance on the existing connection")
+	for _, cost := range []*float64{common.GetPointer(0.0), common.GetPointer(0.5), nil} {
+		require.NoError(t, model.SetChannelKeyCostRatio(channel.Id, 0, channel.KeyIdentity(session.lockedKey), cost))
+		require.Nil(t, session.restoreConnectionContext(c, "ws-model"))
+		current, ok := common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+		require.True(t, ok)
+		require.NotNil(t, current)
+		if cost == nil {
+			assert.Equal(t, 1.5, *current)
+		} else {
+			assert.Equal(t, *cost, *current)
+		}
+		assert.Equal(t, 1.5, *previousCost, "completed frames retain their own cost snapshot")
+	}
+	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	require.NoError(t, database.Model(channel).Update("setting", channel.Setting).Error)
+	require.Nil(t, session.restoreConnectionContext(c, "ws-model"))
+	currentCost, exists := common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.True(t, exists)
+	assert.Nil(t, currentCost, "an unset cost must not reuse the previous frame's estimate")
 	require.NoError(t, database.Model(channel).Update("group", "vip").Error)
 	require.NotNil(t, session.restoreConnectionContext(c, "ws-model"), "a pin cannot retain a removed group")
 }

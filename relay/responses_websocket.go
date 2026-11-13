@@ -364,6 +364,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			attemptChannel = channel
 			info.ChannelAttemptStartTime = time.Now()
 			finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), info, channel.Id)
+			service.MarkGroupKeyAttempt(c, channel, common.GetContextKeyString(c, appconstant.ContextKeyChannelKey))
 			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
@@ -696,6 +697,7 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 		c.Set(string(key), value)
 	}
 	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, channel.GetSetting())
+	common.SetContextKey(c, appconstant.ContextKeyChannelUpstreamCostRatio, channel.UpstreamCostRatioForKey(s.lockedKey))
 	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
 	common.SetContextKey(c, appconstant.ContextKeyChannelParamOverride, channel.GetParamOverride())
 	common.SetContextKey(c, appconstant.ContextKeyChannelModelMapping, channel.GetModelMapping())

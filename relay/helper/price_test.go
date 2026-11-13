@@ -1127,6 +1127,35 @@ func TestChannelPricingRetryRebuildsModesAndReservesBeforeSending(t *testing.T) 
 	assert.NotNil(t, service.PrepareBillingForSelectedChannel(nil, info), "an unfunded retry must stop before upstream execution")
 }
 
+func TestSelectedKeyCostSnapshotAndRetry(t *testing.T) {
+	withChannelModelPricing(t, `{"key-cost-model":{"1":{"billing_mode":"per_token","model_ratio":2}}}`)
+	ctx := channelPricingContext(t, 1)
+	common.SetContextKey(ctx, constant.ContextKeyChannelSetting, dto.ChannelSettings{UpstreamCostRatio: common.GetPointer(1.5)})
+	info := &relaycommon.RelayInfo{OriginModelName: "key-cost-model", UserGroup: "default", UsingGroup: "default"}
+	for _, test := range []struct {
+		name     string
+		selected *float64
+		want     *float64
+	}{
+		{name: "key override", selected: common.GetPointer(0.25), want: common.GetPointer(0.25)},
+		{name: "explicit free key", selected: common.GetPointer(0.0), want: common.GetPointer(0.0)},
+		{name: "inherited channel", selected: common.GetPointer(1.5), want: common.GetPointer(1.5)},
+		{name: "unset selected channel clears previous cost"},
+		{name: "invalid stored cost stays unknown", selected: common.GetPointer(math.NaN())},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			common.SetContextKey(ctx, constant.ContextKeyChannelUpstreamCostRatio, test.selected)
+			require.NoError(t, RefreshPricingForSelectedChannel(ctx, info))
+			assert.Equal(t, test.want, info.UpstreamCostRatio)
+			assert.Equal(t, 2.0, info.PriceData.ModelRatio, "cost never changes the user's selling price")
+			if test.selected != nil && test.want != nil {
+				*test.selected = 9
+				assert.Equal(t, *test.want, *info.UpstreamCostRatio, "pricing freezes the selected attempt's cost")
+			}
+		})
+	}
+}
+
 func TestChannelPricingMissingFixedPriceAndBadRuntimeExpressionFail(t *testing.T) {
 	withChannelModelPricing(t, `{"unpriced-channel-model":{
 		"1":{"billing_mode":"per_request"},

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -1746,12 +1747,26 @@ func CopyChannel(c *gin.Context) {
 
 	// Rebind credential scopes to the new channel ID inside the same commit.
 	clone.ChannelInfo.KeyGroups = nil
+	clone.ChannelInfo.KeyCostRatios = nil
+	clone.ChannelInfo.KeyGroupPriorities = nil
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&clone).Error; err != nil {
 			return err
 		}
 		clone.ChannelInfo.KeyGroups = make(map[string][]string)
-		for _, key := range origin.GetKeys() {
+		clone.ChannelInfo.KeyCostRatios = make(map[string]float64)
+		clone.ChannelInfo.KeyGroupPriorities = make(map[string]map[string]int64)
+		keys := []string{origin.Key}
+		if origin.ChannelInfo.IsMultiKey {
+			keys = origin.GetKeys()
+		}
+		for _, key := range keys {
+			if ratio, exists := origin.ChannelInfo.KeyCostRatios[origin.KeyIdentity(key)]; exists {
+				clone.ChannelInfo.KeyCostRatios[clone.KeyIdentity(key)] = ratio
+			}
+			if priorities := origin.ChannelInfo.KeyGroupPriorities[origin.KeyIdentity(key)]; len(priorities) > 0 {
+				clone.ChannelInfo.KeyGroupPriorities[clone.KeyIdentity(key)] = maps.Clone(priorities)
+			}
 			if groups := origin.ChannelInfo.KeyGroups[origin.KeyIdentity(key)]; len(groups) > 0 {
 				clone.ChannelInfo.KeyGroups[clone.KeyIdentity(key)] = slices.Clone(groups)
 			}
@@ -1777,24 +1792,27 @@ func CopyChannel(c *gin.Context) {
 
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
-	ChannelId   int       `json:"channel_id"`
-	Action      string    `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
-	KeyIndex    *int      `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
-	Page        int       `json:"page,omitempty"`      // for get_key_status pagination
-	PageSize    int       `json:"page_size,omitempty"` // for get_key_status pagination
-	Status      *int      `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
-	KeyIdentity string    `json:"key_identity,omitempty"`
-	Groups      *[]string `json:"groups,omitempty"`
+	ChannelId         int       `json:"channel_id"`
+	Action            string    `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
+	KeyIndex          *int      `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
+	Page              int       `json:"page,omitempty"`      // for get_key_status pagination
+	PageSize          int       `json:"page_size,omitempty"` // for get_key_status pagination
+	Status            *int      `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	KeyIdentity       string    `json:"key_identity,omitempty"`
+	Groups            *[]string `json:"groups,omitempty"`
+	UpstreamCostRatio *float64  `json:"upstream_cost_ratio"`
+	ClearCostRatio    bool      `json:"clear_cost_ratio"`
 }
 
 // MultiKeyStatusResponse represents the response for key status query
 type MultiKeyStatusResponse struct {
-	ChannelGroups []string    `json:"channel_groups"`
-	Keys          []KeyStatus `json:"keys"`
-	Total         int         `json:"total"`
-	Page          int         `json:"page"`
-	PageSize      int         `json:"page_size"`
-	TotalPages    int         `json:"total_pages"`
+	ChannelUpstreamCostRatio *float64    `json:"channel_upstream_cost_ratio"`
+	ChannelGroups            []string    `json:"channel_groups"`
+	Keys                     []KeyStatus `json:"keys"`
+	Total                    int         `json:"total"`
+	Page                     int         `json:"page"`
+	PageSize                 int         `json:"page_size"`
+	TotalPages               int         `json:"total_pages"`
 	// Statistics
 	EnabledCount         int                          `json:"enabled_count"`
 	ManualDisabledCount  int                          `json:"manual_disabled_count"`
@@ -1804,13 +1822,14 @@ type MultiKeyStatusResponse struct {
 }
 
 type KeyStatus struct {
-	KeyIdentity  string   `json:"key_identity"`
-	Groups       []string `json:"groups"`
-	Index        int      `json:"index"`
-	Status       int      `json:"status"` // 1: enabled, 2: disabled
-	DisabledTime int64    `json:"disabled_time,omitempty"`
-	Reason       string   `json:"reason,omitempty"`
-	KeyPreview   string   `json:"key_preview"` // masked credential for identification
+	UpstreamCostRatio *float64 `json:"upstream_cost_ratio"`
+	KeyIdentity       string   `json:"key_identity"`
+	Groups            []string `json:"groups"`
+	Index             int      `json:"index"`
+	Status            int      `json:"status"` // 1: enabled, 2: disabled
+	DisabledTime      int64    `json:"disabled_time,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	KeyPreview        string   `json:"key_preview"` // masked credential for identification
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1832,10 +1851,13 @@ func ManageMultiKeys(c *gin.Context) {
 		common.ApiErrorT(c, "This channel is not in multi-key mode")
 		return
 	}
-	if multiKeyActionRequiresSensitiveWrite(request.Action) &&
-		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
-		common.ApiErrorT(c, "Unauthorized, insufficient privileges")
-		return
+	if multiKeyActionRequiresSensitiveWrite(request.Action) {
+		roleAllowed := authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite)
+		tokenAllowed := c.GetInt("access_token_id") == 0 || service.AccessTokenScopeGranted(c.GetStringSlice("access_token_scopes"), service.AccessTokenScopeOf(authz.ChannelSensitiveWrite))
+		if !roleAllowed || !tokenAllowed {
+			common.ApiErrorT(c, "Unauthorized, insufficient privileges")
+			return
+		}
 	}
 
 	// get_key_status 为只读查询，不记录审计；其余为修改操作，记录审计并跳过中间件兜底。
@@ -1927,14 +1949,19 @@ func ManageMultiKeys(c *gin.Context) {
 				keyPreview = "********"
 			}
 
+			var costRatio *float64
+			if ratio, exists := channel.ChannelInfo.KeyCostRatios[channel.KeyIdentity(key)]; exists {
+				costRatio = &ratio
+			}
 			allKeyStatusList = append(allKeyStatusList, KeyStatus{
-				KeyIdentity:  channel.KeyIdentity(key),
-				Groups:       append([]string{}, channel.ChannelInfo.KeyGroups[channel.KeyIdentity(key)]...),
-				Index:        i,
-				Status:       status,
-				DisabledTime: disabledTime,
-				Reason:       model.SanitizeChannelObservationError(channel, key, reason),
-				KeyPreview:   keyPreview,
+				UpstreamCostRatio: costRatio,
+				KeyIdentity:       channel.KeyIdentity(key),
+				Groups:            append([]string{}, channel.ChannelInfo.KeyGroups[channel.KeyIdentity(key)]...),
+				Index:             i,
+				Status:            status,
+				DisabledTime:      disabledTime,
+				Reason:            model.SanitizeChannelObservationError(channel, key, reason),
+				KeyPreview:        keyPreview,
 			})
 		}
 
@@ -1974,19 +2001,33 @@ func ManageMultiKeys(c *gin.Context) {
 			"success": true,
 			"message": "",
 			"data": MultiKeyStatusResponse{
-				ChannelGroups:        channel.GetGroups(),
-				Keys:                 pageKeyStatusList,
-				Total:                filteredTotal, // Total of filtered results
-				Page:                 page,
-				PageSize:             pageSize,
-				TotalPages:           totalPages,
-				EnabledCount:         enabledCount,        // Overall statistics
-				ManualDisabledCount:  manualDisabledCount, // Overall statistics
-				AutoDisabledCount:    autoDisabledCount,   // Overall statistics
-				BalanceMonitor:       channel.BalanceMonitor,
-				BalanceQueryDisabled: errors.Is(balanceQueryErr, model.ErrChannelBalanceQueryDisabled),
+				ChannelGroups:            channel.GetGroups(),
+				ChannelUpstreamCostRatio: channel.GetSetting().UpstreamCostRatio,
+				Keys:                     pageKeyStatusList,
+				Total:                    filteredTotal, // Total of filtered results
+				Page:                     page,
+				PageSize:                 pageSize,
+				TotalPages:               totalPages,
+				EnabledCount:             enabledCount,        // Overall statistics
+				ManualDisabledCount:      manualDisabledCount, // Overall statistics
+				AutoDisabledCount:        autoDisabledCount,   // Overall statistics
+				BalanceMonitor:           channel.BalanceMonitor,
+				BalanceQueryDisabled:     errors.Is(balanceQueryErr, model.ErrChannelBalanceQueryDisabled),
 			},
 		})
+		return
+
+	case "set_key_cost_ratio":
+		if request.KeyIndex == nil || request.KeyIdentity == "" || (request.UpstreamCostRatio == nil) == !request.ClearCostRatio {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		if err := model.SetChannelKeyCostRatio(channel.Id, *request.KeyIndex, request.KeyIdentity, request.UpstreamCostRatio); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		common.ApiSuccess(c, nil)
 		return
 
 	case "set_key_groups":
@@ -2282,7 +2323,7 @@ func ManageMultiKeys(c *gin.Context) {
 }
 
 func multiKeyActionRequiresSensitiveWrite(action string) bool {
-	return action == "delete_key" || action == "delete_disabled_keys" || action == "set_key_groups"
+	return action == "delete_key" || action == "delete_disabled_keys" || action == "set_key_groups" || action == "set_key_cost_ratio"
 }
 
 // OllamaPullModel 拉取 Ollama 模型

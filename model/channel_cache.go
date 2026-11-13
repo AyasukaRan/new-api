@@ -17,6 +17,7 @@ import (
 )
 
 var group2model2channels map[string]map[string][]int // enabled channel
+var groupKeyRoutingEnabled map[string]bool           // refreshed with the same channel snapshot
 var channelsIDM map[int]*Channel                     // all channels include disabled
 // channel2advancedCustomConfig caches parsed Advanced Custom (type 58) configs so
 // path-aware selection avoids re-parsing JSON per request. Refreshed on full sync.
@@ -30,11 +31,20 @@ func InitChannelCache() {
 		return
 	}
 	newChannelId2channel := make(map[int]*Channel)
+	newGroupKeyRoutingEnabled := make(map[string]bool)
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
 	var channels []*Channel
 	DB.Find(&channels)
 	for _, channel := range channels {
 		newChannelId2channel[channel.Id] = channel
+		for _, group := range channel.GetGroups() {
+			for _, priorities := range channel.ChannelInfo.KeyGroupPriorities {
+				if _, exists := priorities[group]; exists {
+					newGroupKeyRoutingEnabled[group] = true
+					break
+				}
+			}
+		}
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
 				newChannel2advancedCustomConfig[channel.Id] = config
@@ -81,6 +91,7 @@ func InitChannelCache() {
 
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
+	groupKeyRoutingEnabled = newGroupKeyRoutingEnabled
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {

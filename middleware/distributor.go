@@ -703,11 +703,16 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 
 	var key string
 	var index int
+	var upstreamCostRatio *float64
+	var batchBaseURL string
 	var newAPIError *types.NewAPIError
 	if len(channelTest) > 0 && channelTest[0] {
 		key, index, newAPIError = channel.GetNextEnabledKey()
 	} else {
-		key, index, newAPIError = channel.GetNextRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
+		var selected model.RelayKeySelection
+		selected, newAPIError = channel.SelectRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
+		key, index, upstreamCostRatio = selected.Key, selected.Index, selected.UpstreamCostRatio
+		batchBaseURL = selected.BatchBaseURL
 	}
 	if newAPIError != nil {
 		if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {
@@ -731,7 +736,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	// later stage — the file relay, the plugin's submit hook — reads the batch
 	// endpoint from the same two context keys as everything else.
 	if service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
-		baseURL, key = channel.GetBatchEndpoint(key)
+		baseURL = batchBaseURL
+		if len(channelTest) > 0 && channelTest[0] {
+			baseURL, key = channel.GetBatchEndpoint(key)
+		}
 	} else {
 		var endpointErr error
 		baseURL, endpointErr = service.SelectChannelEndpoint(c, channel)
@@ -740,6 +748,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		}
 	}
 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+	common.SetContextKey(c, constant.ContextKeyChannelUpstreamCostRatio, upstreamCostRatio)
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, baseURL)
 
 	common.SetContextKey(c, constant.ContextKeySystemPromptOverride, false)

@@ -29,6 +29,7 @@ import {
   ListChecks,
   RefreshCw,
   ArrowUpFromLine,
+  Layers,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -156,6 +157,15 @@ export function ChannelsPrimaryButtons() {
             })
           }}
         />
+
+        <Button
+          type='button'
+          variant='outline'
+          onClick={() => setOpen('group-key-routing')}
+        >
+          <Layers className='size-4' aria-hidden />
+          {t('Group failover routing')}
+        </Button>
 
         {/* Create Channel */}
         <Tooltip>

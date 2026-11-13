@@ -390,12 +390,12 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 	operation_setting.SetToolPriceForTest("cost_test_tool", 4)
 	t.Cleanup(func() { operation_setting.DeleteToolPriceForTest("cost_test_tool") })
 	for index, tc := range []struct {
-		name, expression                                 string
-		group, ratio, base                               float64
-		quota                                            int
-		claude, audio, realtime, stream, tool, small     bool
-		unset, missing, local, probe, unknown, zeroUsage bool
-		estimated, settlementFailed, interrupted         bool
+		name, expression                                  string
+		group, ratio, base                                float64
+		quota                                             int
+		claude, audio, realtime, stream, tool, small      bool
+		unset, missing, local, probe, unknown, zeroUsage  bool
+		estimated, settlementFailed, interrupted, keyCost bool
 	}{
 		{name: "legacy cache base", group: 2, ratio: 1.3, base: 2865, quota: 5730},
 		{name: "expression cache stream", expression: expression, stream: true, group: 2, ratio: 1.3, base: 2865, quota: 5730},
@@ -411,6 +411,10 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		{name: "realtime actual usage", group: 2, ratio: 1.3, realtime: true, base: 3000, quota: 6000},
 		{name: "audio expression", expression: expression, group: 2, ratio: 1.3, audio: true, base: 2865, quota: 5730},
 		{name: "realtime expression", expression: expression, group: 2, ratio: 1.3, realtime: true, base: 2865, quota: 5730},
+		{name: "key override text", group: 2, ratio: 0.25, base: 2865, quota: 5730, keyCost: true},
+		{name: "free key expression", expression: expression, group: 2, ratio: 0, base: 2865, quota: 5730, keyCost: true},
+		{name: "key override audio", group: 2, ratio: 0.25, audio: true, base: 3000, quota: 6000, keyCost: true},
+		{name: "key override realtime", group: 2, ratio: 0.25, realtime: true, base: 3000, quota: 6000, keyCost: true},
 		{name: "missing upstream usage", group: 2, ratio: 1.3, missing: true, unknown: true},
 		{name: "local estimate records estimated cost", group: 2, ratio: 1.3, local: true, base: 2865, quota: 5730},
 		{name: "billing usage estimate records estimated cost", group: 2, ratio: 1.3, estimated: true, base: 2865, quota: 5730},
@@ -425,9 +429,17 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			token := model.Token{UserId: user.Id, Key: fmt.Sprintf("upstream-cost-%d", index), RemainQuota: startingQuota, Status: common.TokenStatusEnabled}
 			require.NoError(t, db.Create(&token).Error)
 			channel := model.Channel{Name: "upstream-cost", Key: "unused", Status: common.ChannelStatusEnabled}
-			channel.SetSetting(dto.ChannelSettings{UpstreamCostRatio: &tc.ratio})
+			channelRatio := tc.ratio
+			if tc.keyCost {
+				channelRatio = 9
+			}
+			channel.SetSetting(dto.ChannelSettings{UpstreamCostRatio: &channelRatio})
 			require.NoError(t, channel.ValidateSettings())
 			require.NoError(t, db.Create(&channel).Error)
+			if tc.keyCost {
+				channel.ChannelInfo.KeyCostRatios = map[string]float64{channel.KeyIdentity(channel.Key): tc.ratio}
+				require.NoError(t, db.Model(&channel).Update("channel_info", channel.ChannelInfo).Error)
+			}
 			t.Cleanup(func() {
 				require.NoError(t, logDB.Where("user_id = ?", user.Id).Delete(&model.Log{}).Error)
 				require.NoError(t, db.Unscoped().Delete(&token).Error)
@@ -436,13 +448,13 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			})
 			var persisted model.Channel
 			require.NoError(t, db.First(&persisted, channel.Id).Error)
-			frozenRatio := *persisted.GetSetting().UpstreamCostRatio
+			frozenRatio := persisted.UpstreamCostRatioForKey(persisted.Key)
 			info := &relaycommon.RelayInfo{
 				UserId: user.Id, TokenId: token.Id, TokenKey: token.Key, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id},
 				OriginModelName: "upstream-cost-test", UsingGroup: "default", UserGroup: "default", UserSetting: dto.UserSetting{BillingPreference: "wallet_only"},
 				ForcePreConsume: true, StartTime: time.Now(), IsStream: tc.stream, IsChannelTest: tc.probe, RelayFormat: types.RelayFormatOpenAI,
 				PriceData:         hosttypes.PriceData{ModelRatio: 1.5, CompletionRatio: 5, CacheRatio: 0.1, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: tc.group}},
-				UpstreamCostRatio: &frozenRatio,
+				UpstreamCostRatio: frozenRatio,
 			}
 			if tc.unset {
 				info.UpstreamCostRatio = nil

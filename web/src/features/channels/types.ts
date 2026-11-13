@@ -323,6 +323,7 @@ export interface KeyStatus {
   index: number
   key_identity: string
   groups: string[]
+  upstream_cost_ratio: number | null
   status: number // 1: enabled, 2: manual disabled, 3: auto disabled
   disabled_time?: number
   reason?: string
@@ -346,6 +347,7 @@ export interface MultiKeyStatusResponse {
   data?: {
     keys: KeyStatus[]
     channel_groups: string[]
+    channel_upstream_cost_ratio: number | null
     total: number
     page: number
     page_size: number
@@ -418,12 +420,39 @@ export interface MultiKeyManageParams {
     | 'delete_key'
     | 'delete_disabled_keys'
     | 'set_key_groups'
+    | 'set_key_cost_ratio'
   key_index?: number
   key_identity?: string
   groups?: string[]
+  upstream_cost_ratio?: number
+  clear_cost_ratio?: boolean
   page?: number
   page_size?: number
   status?: number // 1=enabled, 2=manual_disabled, 3=auto_disabled
+}
+
+export type GroupKeyRoutingItem = {
+  channel_id: number
+  channel_name: string
+  key_index: number
+  key_identity: string
+  key_preview: string
+  channel_priority: number
+  priority: number | null
+  effective_priority: number
+  status: number
+}
+
+export type GroupKeyRouting = {
+  group: string
+  revision: string
+  items: GroupKeyRoutingItem[]
+}
+
+export type GroupKeyRoutingUpdate = {
+  group: string
+  revision: string
+  items: Pick<GroupKeyRoutingItem, 'channel_id' | 'key_identity' | 'priority'>[]
 }
 
 export interface BatchDeleteParams {

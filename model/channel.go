@@ -59,8 +59,13 @@ type Channel struct {
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
 
 	// cache info
-	Keys           []string               `json:"-" gorm:"-"`
-	BalanceMonitor *ChannelBalanceMonitor `json:"balance_monitor,omitempty" gorm:"-"`
+	Keys                    []string               `json:"-" gorm:"-"`
+	BalanceMonitor          *ChannelBalanceMonitor `json:"balance_monitor,omitempty" gorm:"-"`
+	RelayKeyIdentity        string                 `json:"-" gorm:"-"`
+	RelayKeyPriority        int64                  `json:"-" gorm:"-"`
+	RelayKeyIndex           int                    `json:"-" gorm:"-"`
+	RelayModelExact         bool                   `json:"-" gorm:"-"`
+	RelayCredentialIdentity string                 `json:"-" gorm:"-"`
 }
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
@@ -70,14 +75,16 @@ const ErrorCodeChannelGroupUnavailable types.ErrorCode = "channel_no_group_key"
 var ErrChannelDisabled = errors.New("channel is disabled")
 
 type ChannelInfo struct {
-	KeyGroups              map[string][]string   `json:"key_groups,omitempty"`
-	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
-	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
-	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
-	MultiKeyDisabledReason map[int]string        `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
-	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
-	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
-	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	KeyGroupPriorities     map[string]map[string]int64 `json:"key_group_priorities,omitempty"`
+	KeyCostRatios          map[string]float64          `json:"key_cost_ratios,omitempty"`
+	KeyGroups              map[string][]string         `json:"key_groups,omitempty"`
+	IsMultiKey             bool                        `json:"is_multi_key"`                        // 是否多Key模式
+	MultiKeySize           int                         `json:"multi_key_size"`                      // 多Key模式下的Key数量
+	MultiKeyStatusList     map[int]int                 `json:"multi_key_status_list"`               // key状态列表，key index -> status
+	MultiKeyDisabledReason map[int]string              `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
+	MultiKeyDisabledTime   map[int]int64               `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
+	MultiKeyPollingIndex   int                         `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
+	MultiKeyMode           constant.MultiKeyMode       `json:"multi_key_mode"`
 }
 
 type ChannelSortOptions struct {
@@ -231,33 +238,46 @@ func (channel *Channel) GetNextRelayKey(batchRequest ...bool) (string, int, *typ
 
 // GetNextRelayKeyForModel excludes failed probes as well as known debt without
 // changing the key status or preventing administrative tests from recovering it.
+type RelayKeySelection struct {
+	Key               string
+	Index             int
+	UpstreamCostRatio *float64
+	BatchBaseURL      string
+}
+
 func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest bool, groups ...string) (string, int, *types.NewAPIError) {
+	selected, err := channel.SelectRelayKeyForModel(modelName, batchRequest, groups...)
+	return selected.Key, selected.Index, err
+}
+
+func (channel *Channel) SelectRelayKeyForModel(modelName string, batchRequest bool, groups ...string) (RelayKeySelection, *types.NewAPIError) {
 	if len(groups) > 0 {
 		// Permission changes must not wait for another instance's routing cache.
 		var current Channel
-		if err := DB.Select("id", commonKeyCol, commonGroupCol, "channel_info", "status").First(&current, channel.Id).Error; err != nil {
-			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		if err := DB.Select("id", commonKeyCol, commonGroupCol, "channel_info", "status", "setting", "base_url").First(&current, channel.Id).Error; err != nil {
+			return RelayKeySelection{}, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
 		if current.Status != common.ChannelStatusEnabled {
-			return "", 0, types.NewError(ErrChannelDisabled, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			return RelayKeySelection{}, types.NewError(ErrChannelDisabled, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
-		if current.ChannelInfo.IsMultiKey && !slices.Contains(current.GetGroups(), groups[0]) {
-			return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+		if (current.ChannelInfo.IsMultiKey || channel.RelayKeyIdentity != "") && !slices.Contains(current.GetGroups(), groups[0]) {
+			return RelayKeySelection{}, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
 		}
 		snapshot := *channel
 		snapshot.Key, snapshot.Keys = current.Key, nil
-		snapshot.ChannelInfo, snapshot.Group = current.ChannelInfo, current.Group
+		snapshot.ChannelInfo, snapshot.Group, snapshot.Setting = current.ChannelInfo, current.Group, current.Setting
+		snapshot.BaseURL = current.BaseURL
 		channel = &snapshot
 	}
 	negativeKeys := channelNegativeBalanceKeysForRelay(channel, batchRequest)
 	if len(groups) > 0 && len(channel.ChannelInfo.KeyGroups) > 0 {
 		if !channel.HasEnabledKeyForGroup(groups[0]) {
-			return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+			return RelayKeySelection{}, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
 		}
 		if batchRequest {
 			_, batchKey := channel.GetBatchEndpoint("")
 			if batchKey != "" && !channel.KeyAllowedForGroup(batchKey, groups[0]) {
-				return "", 0, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
+				return RelayKeySelection{}, types.NewError(errors.New("channel has no available key for this group"), ErrorCodeChannelGroupUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithStatusCode(http.StatusServiceUnavailable))
 			}
 		}
 		negativeKeys = maps.Clone(negativeKeys)
@@ -270,19 +290,35 @@ func (channel *Channel) GetNextRelayKeyForModel(modelName string, batchRequest b
 			}
 		}
 	}
-	if batchRequest {
-		return channel.nextEnabledKey(negativeKeys)
+
+	failures := make(map[int]*ChannelProbeError)
+	if !batchRequest {
+		failures = channel.probeKeyFailures(modelName)
 	}
-	failures := channel.probeKeyFailures(modelName)
 	if failure := channel.relayProbeError(failures, negativeKeys); failure != nil {
-		return "", 0, failure.NewAPIError()
+		return RelayKeySelection{}, failure.NewAPIError()
 	}
 	excluded := make(map[int]bool, len(negativeKeys)+len(failures))
 	maps.Copy(excluded, negativeKeys)
 	for index := range failures {
 		excluded[index] = true
 	}
-	return channel.nextEnabledKey(excluded)
+	if channel.RelayKeyIdentity != "" {
+		for index, key := range channel.relayKeys() {
+			if channel.KeyIdentity(key) != channel.RelayKeyIdentity {
+				excluded[index] = true
+			}
+		}
+	}
+	key, index, apiErr := channel.nextEnabledKey(excluded)
+	if apiErr != nil {
+		return RelayKeySelection{}, apiErr
+	}
+	batchBaseURL := ""
+	if batchRequest {
+		batchBaseURL, key = channel.GetBatchEndpoint(key)
+	}
+	return RelayKeySelection{Key: key, Index: index, UpstreamCostRatio: channel.UpstreamCostRatioForKey(key), BatchBaseURL: batchBaseURL}, nil
 }
 
 func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, *types.NewAPIError) {
@@ -391,6 +427,8 @@ func (channel *Channel) SaveChannelInfo() error {
 			return err
 		}
 		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
+		channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
+		channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
 		return tx.Model(channel).Update("channel_info", channel.ChannelInfo).Error
 	})
 }
@@ -579,6 +617,8 @@ func (channel *Channel) saveStatusStateWithDB(tx *gorm.DB) error {
 				return err
 			}
 			channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
+			channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
+			channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
 			updates["channel_info"] = channel.ChannelInfo
 		}
 		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
@@ -834,12 +874,16 @@ func (channel *Channel) Update() error {
 			return err
 		}
 		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
+		channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
+		channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
 		keySnapshot := *channel
 		keySnapshot.Keys = nil
 		if keySnapshot.Key == "" {
 			keySnapshot.Key = current.Key
 		}
 		channel.retainKeyGroups(keySnapshot.GetKeys())
+		channel.retainKeyCostRatios(keySnapshot.relayKeys())
+		channel.retainKeyGroupPriorities(keySnapshot.relayKeys())
 		if channel.Group != "" && channel.Group != current.Group {
 			for _, groups := range channel.ChannelInfo.KeyGroups {
 				for _, group := range groups {
@@ -1114,7 +1158,7 @@ func UpdateChannelStatusWithError(channelId int, usingKey string, status int, re
 // It preserves the latest key permissions under the database row lock and
 // publishes the new state only after committing it.
 func DisableInvalidChannelKey(snapshot *Channel, modelName, usingKey string) (*Channel, error) {
-	if snapshot == nil || !snapshot.ChannelInfo.IsMultiKey || usingKey == "" {
+	if snapshot == nil || usingKey == "" {
 		return nil, nil
 	}
 	expectedID, err := ChannelKeyObservationID(snapshot, modelName, usingKey)
@@ -1135,12 +1179,27 @@ func DisableInvalidChannelKey(snapshot *Channel, modelName, usingKey string) (*C
 		if err := lockForUpdate(tx).First(&current, snapshot.Id).Error; err != nil {
 			return err
 		}
-		if !current.ChannelInfo.IsMultiKey || current.Status == common.ChannelStatusManuallyDisabled || !slices.Contains(current.GetKeys(), usingKey) {
+		if current.ChannelInfo.IsMultiKey != snapshot.ChannelInfo.IsMultiKey || current.Status == common.ChannelStatusManuallyDisabled || !slices.Contains(current.relayKeys(), usingKey) {
 			return nil
 		}
 		currentID, err := ChannelKeyObservationID(&current, modelName, usingKey)
 		if err != nil || currentID != expectedID {
 			return err
+		}
+		if !current.ChannelInfo.IsMultiKey {
+			statusChanged = current.Status != common.ChannelStatusAutoDisabled
+			current.Status = common.ChannelStatusAutoDisabled
+			info := current.GetOtherInfo()
+			info["status_reason"], info["status_time"] = "Upstream API credential is invalid.", common.GetTimestamp()
+			current.SetOtherInfo(info)
+			if err := current.saveStatusStateWithDB(tx); err != nil {
+				return err
+			}
+			if err := tx.Model(&Ability{}).Where("channel_id = ?", current.Id).Update("enabled", false).Error; err != nil {
+				return err
+			}
+			updated = &current
+			return nil
 		}
 		if current.ChannelInfo.MultiKeyStatusList == nil {
 			current.ChannelInfo.MultiKeyStatusList = make(map[int]int)

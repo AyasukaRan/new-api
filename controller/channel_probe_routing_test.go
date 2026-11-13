@@ -61,6 +61,304 @@ func requireProbeRoutingError(t *testing.T, apiErr *types.NewAPIError, message s
 	assert.Nil(t, perfmetrics.RelayObservation(nil, info, apiErr))
 }
 
+func TestGroupKeyRoutingDatabaseMatrix(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			channel := &model.Channel{Name: "routing configuration", Type: constant.ChannelTypeOpenAI, Key: "routing-first-secret\nrouting-second-secret\nrouting-first-secret", Group: "default,vip", Models: "routing-model", Status: common.ChannelStatusEnabled, Priority: common.GetPointer(int64(10)), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3}}
+			require.NoError(t, channel.Insert())
+			require.NoError(t, model.SetChannelKeyGroups(channel.Id, 1, channel.KeyIdentity("routing-second-secret"), []string{"vip"}))
+			order, err := model.GetGroupKeyRouting("default")
+			require.NoError(t, err)
+			require.Len(t, order.Items, 1, "duplicate credentials collapse; keys for another group stay out")
+			assert.Nil(t, order.Items[0].Priority)
+			assert.EqualValues(t, 10, order.Items[0].EffectivePriority)
+			encoded, err := common.Marshal(order)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), "routing-first-secret")
+			assert.NotContains(t, string(encoded), "routing-second-secret")
+
+			// A concurrent cost edit must survive a routing-only write.
+			require.NoError(t, model.SetChannelKeyCostRatio(channel.Id, 0, channel.KeyIdentity("routing-first-secret"), common.GetPointer(0.3)))
+			change := model.GroupKeyRoutingChange{ChannelID: channel.Id, KeyIdentity: order.Items[0].KeyIdentity, Priority: common.GetPointer(int64(-2))}
+			updated, err := model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: order.Revision, Items: []model.GroupKeyRoutingChange{change}})
+			require.NoError(t, err)
+			assert.EqualValues(t, -2, updated.Items[0].EffectivePriority)
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, 0.3, *stored.UpstreamCostRatioForKey("routing-first-secret"))
+			_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: order.Revision, Items: []model.GroupKeyRoutingChange{change}})
+			require.Error(t, err, "a stale editor cannot overwrite a newer routing policy")
+
+			invalid := model.GroupKeyRoutingChange{ChannelID: channel.Id, KeyIdentity: channel.KeyIdentity("routing-second-secret"), Priority: common.GetPointer(int64(-1))}
+			change.Priority = common.GetPointer(int64(0))
+			_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: updated.Revision, Items: []model.GroupKeyRoutingChange{change, invalid}})
+			require.Error(t, err, "group membership is validated before any row is changed")
+			unchanged, err := model.GetGroupKeyRouting("default")
+			require.NoError(t, err)
+			assert.Equal(t, updated.Revision, unchanged.Revision)
+			_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: unchanged.Revision, Items: []model.GroupKeyRoutingChange{change, change}})
+			require.Error(t, err, "duplicate changes must not bypass atomic validation")
+			change.Priority = common.GetPointer(int64(2147483648))
+			_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: unchanged.Revision, Items: []model.GroupKeyRoutingChange{change}})
+			require.Error(t, err, "reject priorities outside the supported range")
+
+			// Reordering the list changes positions, never physical-key ownership.
+			stored.Key = "routing-second-secret\nrouting-first-secret"
+			require.NoError(t, stored.Update())
+			reordered, err := model.GetGroupKeyRouting("default")
+			require.NoError(t, err)
+			require.Len(t, reordered.Items, 1)
+			assert.Equal(t, order.Items[0].KeyIdentity, reordered.Items[0].KeyIdentity)
+			assert.EqualValues(t, -2, reordered.Items[0].EffectivePriority)
+			change.Priority = nil
+			reset, err := model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: reordered.Revision, Items: []model.GroupKeyRoutingChange{change}})
+			require.NoError(t, err)
+			assert.Nil(t, reset.Items[0].Priority)
+			assert.EqualValues(t, 10, reset.Items[0].EffectivePriority)
+
+			for _, cached := range []bool{false, true} {
+				common.MemoryCacheEnabled = cached
+				single := &model.Channel{Name: "single fresh permission", Type: constant.ChannelTypeOpenAI, Key: "single-scoped-key", Models: "routing-model", Group: "default", Status: common.ChannelStatusEnabled}
+				single.ChannelInfo.KeyGroupPriorities = map[string]map[string]int64{}
+				require.NoError(t, single.Insert())
+				current, err := model.GetGroupKeyRouting("default")
+				require.NoError(t, err)
+				_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: current.Revision, Items: []model.GroupKeyRoutingChange{{ChannelID: single.Id, KeyIdentity: single.KeyIdentity(single.Key), Priority: common.GetPointer(int64(50))}}})
+				require.NoError(t, err)
+				model.InitChannelCache()
+				candidates, enabled, err := model.GetGroupKeyCandidates("default", "routing-model", nil, single.Id)
+				require.NoError(t, err)
+				require.True(t, enabled)
+				require.Len(t, candidates, 1)
+				require.NoError(t, model.DB.Model(single).Update("group", "vip").Error)
+				c, _ := probeRoutingContext("routing-model", "default")
+				apiErr := middleware.SetupContextForSelectedChannel(c, candidates[0], "routing-model")
+				require.NotNil(t, apiErr)
+				assert.Equal(t, model.ErrorCodeChannelGroupUnavailable, apiErr.GetErrorCode(), "a cached single-key candidate cannot retain revoked group permission")
+				require.NoError(t, single.Delete())
+			}
+		})
+	}
+}
+
+func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousRetries, previousDisable := common.RetryTimes, common.AutomaticDisableChannelEnabled
+	previousCount, previousLogs, previousTrace, previousErrors := constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled
+	previousGroups := ratio_setting.GroupRatio2JSONString()
+	previousUsableGroups, previousAutoLimit := setting.UserUsableGroups2JSONString(), setting.GetMaxTokenAutoGroups()
+	affinity := operation_setting.GetChannelAffinitySetting()
+	previousAffinity := *affinity
+	affinity.Enabled = false
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP"}`))
+	require.NoError(t, setting.UpdateMaxTokenAutoGroups("2"))
+	common.AutomaticDisableChannelEnabled = false
+	constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = false, false, false, false
+	t.Cleanup(func() {
+		common.RetryTimes, common.AutomaticDisableChannelEnabled = previousRetries, previousDisable
+		constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = previousCount, previousLogs, previousTrace, previousErrors
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsableGroups))
+		require.NoError(t, setting.UpdateMaxTokenAutoGroups(fmt.Sprint(previousAutoLimit)))
+		*affinity = previousAffinity
+	})
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	previousTransport := client.Transport
+	t.Cleanup(func() { client.Transport = previousTransport })
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}, &model.ChannelBalanceSample{}, &model.Log{}))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false", "quota_setting.enable_free_model_pre_consume": "false"}))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"vip":2}`))
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"deepseek-flash":0}`))
+			user := &model.User{Username: "tier-routing-user", Password: "unused", Group: "default", Status: common.UserStatusEnabled, Quota: 1000, AffCode: "tierrouting"}
+			require.NoError(t, db.Create(user).Error)
+			for _, cached := range []bool{false, true} {
+				for _, test := range []struct {
+					name, unavailable, affinityMode                         string
+					singleChannel, invalid, auto, pinned, written, canceled bool
+					allFail, normalized                                     bool
+					retries, calls, status                                  int
+				}{
+					{name: "cross_channel_tiers", retries: 3, calls: 4, status: 200},
+					{name: "normalized_backup_follows_all_exact_tiers", normalized: true, retries: 3, calls: 4, status: 200},
+					{name: "lower_preferred_affinity_does_not_override_tier", affinityMode: "prefer", retries: 3, calls: 4, status: 200},
+					{name: "strict_affinity_stays_on_bound_channel", affinityMode: "strict", retries: 3, calls: 1, status: 503},
+					{name: "single_channel_tiers", singleChannel: true, retries: 3, calls: 3, status: 200},
+					{name: "disabled_first_key_is_skipped", unavailable: "disabled", retries: 3, calls: 3, status: 200},
+					{name: "negative_balance_key_is_skipped", unavailable: "balance", retries: 3, calls: 3, status: 200},
+					{name: "failed_probe_key_is_skipped", unavailable: "probe", retries: 3, calls: 3, status: 200},
+					{name: "invalid_cross_channel_respects_zero_budget", invalid: true, retries: 0, calls: 1, status: 503},
+					{name: "global_retry_limit", retries: 1, calls: 2, status: 503},
+					{name: "invalid_key_cannot_skip_same_tier_channel", invalid: true, retries: 3, calls: 4, status: 200},
+					{name: "auto_group_stays_bound", auto: true, allFail: true, retries: 3, calls: 4, status: 503},
+					{name: "single_attempt_pin", pinned: true, retries: 3, calls: 1, status: 503},
+					{name: "started_response_is_not_replayed", written: true, retries: 3, calls: 1, status: 200},
+					{name: "cancelled_request_is_not_replayed", canceled: true, retries: 3, calls: 1, status: 503},
+				} {
+					t.Run(fmt.Sprintf("cache=%t/%s", cached, test.name), func(t *testing.T) {
+						common.MemoryCacheEnabled, common.RetryTimes = cached, test.retries
+						requestModel := "deepseek-flash"
+						if test.normalized {
+							requestModel += "@thinking:on"
+						}
+						caseAffinity := *affinity
+						t.Cleanup(func() { *affinity = caseAffinity })
+						channelA := &model.Channel{Name: "tier-A", Type: constant.ChannelTypeDeepSeek, Key: "tier-key-a1\ntier-key-a2\ntier-key-a3", Models: requestModel, Group: "default", Status: common.ChannelStatusEnabled, BaseURL: common.GetPointer("https://api.deepseek.com"), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling}}
+						channelB := &model.Channel{Name: "tier-B", Type: constant.ChannelTypeDeepSeek, Key: "tier-key-b1", Models: "deepseek-flash", Group: "default", Status: common.ChannelStatusEnabled, BaseURL: channelA.BaseURL}
+						if test.invalid {
+							channelA.Weight = common.GetPointer(uint(100))
+							channelB.Weight = common.GetPointer(uint(0))
+						}
+						channels := []*model.Channel{channelA}
+						if !test.singleChannel {
+							channels = append(channels, channelB)
+						}
+						if test.auto {
+							channels = append(channels, &model.Channel{Name: "other-group", Type: constant.ChannelTypeDeepSeek, Key: "other-group-key", Models: "deepseek-flash", Group: "vip", Status: common.ChannelStatusEnabled, BaseURL: channelA.BaseURL})
+						}
+						for _, channel := range channels {
+							require.NoError(t, channel.Insert())
+							t.Cleanup(func() {
+								require.NoError(t, channel.Delete())
+								model.InvalidateChannelProbeRouting(channel.Id)
+							})
+						}
+						order, err := model.GetGroupKeyRouting("default")
+						require.NoError(t, err)
+						changes := []model.GroupKeyRoutingChange{
+							{ChannelID: channelA.Id, KeyIdentity: channelA.KeyIdentity("tier-key-a1"), Priority: common.GetPointer(int64(0))},
+							{ChannelID: channelA.Id, KeyIdentity: channelA.KeyIdentity("tier-key-a2"), Priority: common.GetPointer(int64(0))},
+							{ChannelID: channelA.Id, KeyIdentity: channelA.KeyIdentity("tier-key-a3"), Priority: common.GetPointer(int64(-2))},
+						}
+						if !test.singleChannel {
+							priority := int64(-1)
+							if test.normalized {
+								priority = 100
+							}
+							if test.invalid {
+								priority = 0
+								changes[1].Priority = common.GetPointer(int64(-1))
+							}
+							changes = append(changes, model.GroupKeyRoutingChange{ChannelID: channelB.Id, KeyIdentity: channelB.KeyIdentity("tier-key-b1"), Priority: &priority})
+						}
+						_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: order.Revision, Items: changes})
+						require.NoError(t, err)
+						switch test.unavailable {
+						case "disabled":
+							_, err = model.UpdateChannelStatusWithError(channelA.Id, "tier-key-a1", common.ChannelStatusManuallyDisabled, "fixture disabled")
+							require.NoError(t, err)
+						case "balance":
+							require.NoError(t, model.RecordChannelBalanceSample(channelA, &model.ChannelBalanceSample{Success: true, KnownBalance: 2, KeyBalances: []model.ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(float64(-1))}, {Index: 1, Balance: common.GetPointer(float64(1))}, {Index: 2, Balance: common.GetPointer(float64(1))}}}))
+						case "probe":
+							require.NoError(t, model.RecordChannelKeyObservation(channelA, "deepseek-flash", "tier-key-a1", time.Now().UnixMilli(), common.GetPointer(false), 503, "fixture probe failure", "probe"))
+						}
+						model.InitChannelCache()
+						group := "default"
+						if test.auto {
+							group = "auto"
+						}
+						c, recorder := probeRoutingContext(requestModel, group)
+						common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+						common.SetContextKey(c, constant.ContextKeyTokenGroup, group)
+						common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, test.auto)
+						ctx, cancel := context.WithCancel(c.Request.Context())
+						defer cancel()
+						c.Request = c.Request.WithContext(ctx)
+						if test.pinned {
+							service.GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: channelA.Id, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+						}
+						if test.affinityMode != "" {
+							policy, err := model.BuildRequestPolicy(map[string]string{"channel_affinity_setting.enabled": "true", "channel_affinity_setting.session_mode": test.affinityMode, "channel_affinity_setting.rules": `[{"name":"session","model_regex":[".*"],"key_sources":[{"type":"request_header","key":"X-Session"}],"session_mode":"inherit"}]`})
+							require.NoError(t, err)
+							*affinity = policy.Affinity
+							seed, _ := probeRoutingContext(requestModel, group)
+							seed.Request.Header.Set("X-Session", t.Name())
+							_, _ = service.GetPreferredChannelByAffinity(seed, requestModel, group)
+							service.RecordChannelAffinity(seed, channelB.Id)
+							t.Cleanup(func() { service.ClearCurrentChannelAffinityCache(seed) })
+							c.Request.Header.Set("X-Session", t.Name())
+						}
+						var used []string
+						client.Transport = channelProbeTestTransport(func(request *http.Request) (*http.Response, error) {
+							key := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+							used = append(used, key)
+							if test.written {
+								c.Writer.WriteHeaderNow()
+							}
+							if test.canceled {
+								cancel()
+							}
+							status := http.StatusServiceUnavailable
+							body := `{"error":{"type":"server_error","message":"fixture tier unavailable"}}`
+							if test.invalid {
+								status = http.StatusUnauthorized
+								body = `{"error":{"message":"Authentication Fails, Your api key: ****test is invalid","type":"authentication_error","code":"invalid_request_error"}}`
+							}
+							if (key == "tier-key-a3" && !test.allFail && !test.normalized) || key == "other-group-key" || (test.normalized && key == "tier-key-b1") {
+								status = http.StatusOK
+								body = `{"id":"chat_fixture","model":"deepseek-flash","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
+							}
+							return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+						})
+						selected, _, selectErr := service.SelectChannelForRequest(c, requestModel, &service.RetryParam{Ctx: c, TokenGroup: group, ModelName: requestModel, Retry: common.GetPointer(0)})
+						require.Nil(t, selectErr)
+						require.NotNil(t, selected)
+						if test.affinityMode == "prefer" {
+							assert.Equal(t, channelA.Id, selected.Id)
+							assert.False(t, service.ShouldSkipRetryAfterChannelAffinityFailure(c))
+							_, logged := c.Get("channel_affinity_log_info")
+							assert.False(t, logged, "the unused affinity channel must not be recorded as selected")
+						}
+						require.Nil(t, middleware.SetupContextForSelectedChannel(c, selected, requestModel))
+						Relay(c, types.RelayFormatOpenAI)
+						assert.Equal(t, test.status, recorder.Code, recorder.Body.String())
+						require.Len(t, used, test.calls)
+						assert.NotContains(t, used, "other-group-key", "fallback must never switch to a different billing group")
+						if test.normalized {
+							assert.Equal(t, []string{"tier-key-a1", "tier-key-a2", "tier-key-a3", "tier-key-b1"}, used)
+							return
+						}
+						if test.affinityMode == "strict" {
+							assert.Equal(t, []string{"tier-key-b1"}, used)
+							return
+						}
+						if test.unavailable != "" {
+							assert.Equal(t, []string{"tier-key-a2", "tier-key-b1", "tier-key-a3"}, used)
+							return
+						}
+						if len(used) >= 2 {
+							firstTier := []string{"tier-key-a1", "tier-key-a2"}
+							if test.invalid {
+								firstTier[1] = "tier-key-b1"
+							}
+							assert.ElementsMatch(t, firstTier, used[:2], "all first-tier keys must precede any backup")
+						}
+						if len(used) == 4 {
+							middle := "tier-key-b1"
+							if test.invalid {
+								middle = "tier-key-a2"
+							}
+							assert.Equal(t, middle, used[2])
+							assert.Equal(t, "tier-key-a3", used[3])
+						}
+					})
+				}
+			}
+		})
+	}
+}
+
 func TestDeepSeekInvalidKeyFailoverDatabaseMatrix(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	previousRetries, previousDisable := common.RetryTimes, common.AutomaticDisableChannelEnabled

@@ -58,11 +58,13 @@ function statusResponse(overrides: Record<string, unknown> = {}) {
             key_preview: 'sk-a**********0001',
             key_identity: 'identity-a',
             groups: [] as string[],
+            upstream_cost_ratio: null as number | null,
           },
           {
             index: 1,
             key_identity: 'identity-b',
             groups: ['default'],
+            upstream_cost_ratio: null as number | null,
             status: 2,
             key_preview: 'sk-b**********0002',
             reason: 'manual',
@@ -74,9 +76,11 @@ function statusResponse(overrides: Record<string, unknown> = {}) {
             key_preview: 'sk-c**********0003',
             key_identity: 'identity-c',
             groups: [] as string[],
+            upstream_cost_ratio: null as number | null,
           },
         ],
         channel_groups: ['default', 'premium'],
+        channel_upstream_cost_ratio: 1.25,
         total: 3,
         page: 1,
         page_size: 10,
@@ -587,7 +591,7 @@ test('failed key group saving preserves the draft but a replacement identity can
   expect(keyRow(1).queryByText('premium')).not.toBeInTheDocument()
 })
 
-test('key groups require sensitive write permission and fit the desktop dialog with narrow-screen scrolling', async () => {
+test('key settings require sensitive write permission and fit the desktop dialog with narrow-screen scrolling', async () => {
   vi.spyOn(api, 'post').mockResolvedValue(statusResponse())
   const { user } = setup()
   await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
@@ -596,12 +600,166 @@ test('key groups require sensitive write permission and fit the desktop dialog w
     keyRow(1).getByRole('combobox', { name: 'Groups for key #1' })
   ).toBeDisabled()
   expect(keyRow(1).getByRole('button', { name: 'Save groups' })).toBeDisabled()
+  expect(
+    keyRow(1).getByRole('textbox', {
+      name: 'Upstream cost multiplier for key #1',
+    })
+  ).toBeDisabled()
+  expect(keyRow(1).getByRole('button', { name: 'Save cost' })).toBeDisabled()
   expect(screen.getByRole('dialog')).toHaveClass(
-    'sm:max-w-5xl',
+    'sm:max-w-6xl',
     'max-w-[calc(100%-2rem)]'
   )
-  expect(screen.getByRole('table')).toHaveClass('min-w-[52rem]')
+  expect(screen.getByRole('table')).toHaveClass('min-w-[64rem]')
   expect(screen.getByRole('table').parentElement).toHaveClass('overflow-x-auto')
+})
+
+test('key cost saves explicit zero and clearing it restores channel inheritance with an explicit flag', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'root', role: ROLE.SUPER_ADMIN },
+    },
+  })
+  let ratio: number | null = null
+  const post = vi
+    .spyOn(api, 'post')
+    .mockImplementation(async (_url, params) => {
+      const request = params as {
+        action: string
+        upstream_cost_ratio?: number
+        clear_cost_ratio?: boolean
+      }
+      if (request.action === 'set_key_cost_ratio') {
+        ratio = request.clear_cost_ratio
+          ? null
+          : (request.upstream_cost_ratio ?? null)
+        return { data: { success: true } }
+      }
+      const response = statusResponse()
+      response.data.data.keys[0].upstream_cost_ratio = ratio
+      return response
+    })
+  const get = vi.spyOn(api, 'get')
+  const { user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  const input = keyRow(1).getByRole('textbox', {
+    name: 'Upstream cost multiplier for key #1',
+  })
+  expect(input).toHaveValue('')
+  expect(keyRow(1).getByText('Channel cost: 1.25×')).toBeVisible()
+  await user.type(input, '0')
+  await user.click(keyRow(1).getByRole('button', { name: 'Save cost' }))
+  await waitFor(() =>
+    expect(keyRow(1).getByRole('button', { name: 'Save cost' })).toBeDisabled()
+  )
+  expect(input).toHaveValue('0')
+  expect(keyRow(1).getByText('Free upstream cost')).toBeVisible()
+  expect(post).toHaveBeenCalledWith(
+    '/api/channel/multi_key/manage',
+    {
+      action: 'set_key_cost_ratio',
+      channel_id: 1,
+      key_index: 0,
+      key_identity: 'identity-a',
+      upstream_cost_ratio: 0,
+    },
+    expect.anything()
+  )
+  await user.clear(input)
+  await user.click(keyRow(1).getByRole('button', { name: 'Save cost' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel/multi_key/manage',
+      {
+        action: 'set_key_cost_ratio',
+        channel_id: 1,
+        key_index: 0,
+        key_identity: 'identity-a',
+        clear_cost_ratio: true,
+      },
+      expect.anything()
+    )
+  )
+  expect(get).not.toHaveBeenCalled()
+})
+
+test('invalid key cost drafts cannot be saved', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'root', role: ROLE.SUPER_ADMIN },
+    },
+  })
+  const post = vi.spyOn(api, 'post').mockResolvedValue(statusResponse())
+  const { user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  const input = keyRow(1).getByRole('textbox', {
+    name: 'Upstream cost multiplier for key #1',
+  })
+  for (const value of ['-1', '10001', 'invalid']) {
+    await user.clear(input)
+    await user.type(input, value)
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(keyRow(1).getByRole('button', { name: 'Save cost' })).toBeDisabled()
+  }
+  expect(
+    post.mock.calls.every(
+      ([, params]) => (params as { action: string }).action === 'get_key_status'
+    )
+  ).toBe(true)
+})
+
+test('failed key cost saving retains the draft but a replacement key cannot inherit it', async () => {
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: { id: 1, username: 'root', role: ROLE.SUPER_ADMIN },
+    },
+  })
+  let replaced = false
+  vi.spyOn(api, 'post').mockImplementation(async (_url, params) => {
+    if ((params as { action: string }).action === 'set_key_cost_ratio') {
+      return { data: { success: false, message: 'Operation failed' } }
+    }
+    const response = statusResponse()
+    if (replaced) {
+      response.data.data.keys[0].key_identity = 'replacement-identity'
+    }
+    return response
+  })
+  const { client, user } = setup()
+  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+  await screen.findByText('sk-a**********0001')
+  await user.type(
+    keyRow(1).getByRole('textbox', {
+      name: 'Upstream cost multiplier for key #1',
+    }),
+    '0.5'
+  )
+  await user.click(keyRow(1).getByRole('button', { name: 'Save cost' }))
+  await waitFor(() =>
+    expect(keyRow(1).getByRole('button', { name: 'Save cost' })).toBeEnabled()
+  )
+  expect(
+    keyRow(1).getByRole('textbox', {
+      name: 'Upstream cost multiplier for key #1',
+    })
+  ).toHaveValue('0.5')
+  replaced = true
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: ['channels'] })
+  })
+  await waitFor(() =>
+    expect(
+      keyRow(1).getByRole('textbox', {
+        name: 'Upstream cost multiplier for key #1',
+      })
+    ).toHaveValue('')
+  )
+  expect(keyRow(1).getByRole('button', { name: 'Save cost' })).toBeDisabled()
 })
 
 test('a failed group save retains its draft through a failed status refresh', async () => {

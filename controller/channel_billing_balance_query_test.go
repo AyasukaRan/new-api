@@ -145,6 +145,8 @@ func TestNegativeBalancesAreExcludedFromRelay(t *testing.T) {
 					batchChannel := *test.channel
 					test.setting.BatchEnabled = true
 					batchChannel.SetSetting(test.setting)
+					require.NoError(t, db.Model(test.channel).Update("setting", batchChannel.Setting).Error)
+					t.Cleanup(func() { require.NoError(t, db.Model(test.channel).Update("setting", test.channel.Setting).Error) })
 					filters := []taskdto.ChannelFilter{{Kind: taskdto.FilterBatchCapable}}
 					allowed, _ := model.ChannelSatisfiesFilters(&batchChannel, "balance-model", filters)
 					assert.Equal(t, !test.blocked, allowed, "candidate filtering must evaluate the credential actually sent by batch")

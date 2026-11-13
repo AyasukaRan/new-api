@@ -38,3 +38,31 @@ func ReorderChannelPriority(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": order})
 }
+
+func GetGroupKeyRouting(c *gin.Context) {
+	order, err := model.GetGroupKeyRouting(c.Query("group"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, order)
+}
+
+func SetGroupKeyRouting(c *gin.Context) {
+	var update model.GroupKeyRoutingUpdate
+	if err := common.DecodeJson(c.Request.Body, &update); err != nil {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	order, err := model.SetGroupKeyRouting(update)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	recordManageAudit(c, "channel.group_key_routing", map[string]any{
+		"group": update.Group,
+		"count": len(update.Items),
+	})
+	model.InitChannelCache()
+	common.ApiSuccess(c, order)
+}

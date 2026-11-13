@@ -112,6 +112,11 @@ func (p *RetryParam) ResetRetryNextTry() {
 //	Retry=3: GroupB, priority1 (startRetryIndex=2, priorityRetry=1)
 //	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
+	if value, exists := param.Ctx.Get(groupKeyRouteContext); exists && value != nil {
+		state := value.(*groupKeyRoute)
+		channel, err := SelectGroupKeyRetry(param.Ctx, param.ModelName)
+		return channel, state.Group, err
+	}
 	var channel *model.Channel
 	var err error
 	selectGroup := param.TokenGroup
@@ -149,12 +154,11 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
 			var groupErr error
-			channel, groupErr = model.GetRandomSatisfiedChannel(
-				autoGroup,
-				param.ModelName,
-				priorityRetry,
-				filters,
-			)
+			var tiered bool
+			channel, tiered, groupErr = selectGroupKeyTier(param.Ctx, autoGroup, param.ModelName, 0, 0)
+			if !tiered && groupErr == nil {
+				channel, groupErr = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, filters)
+			}
 			var probeErr *model.ChannelProbeError
 			if errors.As(groupErr, &probeErr) {
 				var previous *model.ChannelProbeError
@@ -183,7 +187,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 
 			// Prepare state for next retry
 			// 为下一次重试准备状态
-			if crossGroupRetry && groupRetry >= common.RetryTimes {
+			if crossGroupRetry && groupRetry >= common.RetryTimes && !HasGroupKeyRouting(param.Ctx) {
 				// Current group has exhausted all retries, prepare to switch to next group
 				// This request still uses current group, but next retry will use next group
 				// 当前分组已用完所有重试次数，准备切换到下一个分组
@@ -203,12 +207,11 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(
-			param.TokenGroup,
-			param.ModelName,
-			max(param.GetRetry()-affinityRetryOffset, 0),
-			filters,
-		)
+		var tiered bool
+		channel, tiered, err = selectGroupKeyTier(param.Ctx, param.TokenGroup, param.ModelName, 0, 0)
+		if !tiered && err == nil {
+			channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, max(param.GetRetry()-affinityRetryOffset, 0), filters)
+		}
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}
@@ -388,12 +391,26 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		if probeErr := channel.RelayProbeError(modelName, constraints.Filters); probeErr != nil {
 			return nil, "", channelProbeSelectionError(probeErr)
 		}
+		group := selectGroup
+		if group == "" {
+			group = GetSelectedRequestGroup(c)
+		}
+		if candidate, enabled, err := selectGroupKeyTier(c, group, modelName, channel.Id, channel.Id); enabled || err != nil {
+			if err != nil {
+				return nil, group, groupKeySelectionError(err)
+			}
+			if candidate == nil {
+				return nil, group, groupKeySelectionError(nil)
+			}
+			channel = candidate
+		}
 		return channel, selectGroup, nil
 	}
 
 	usingGroup := retry.TokenGroup
 	var channel *model.Channel
 	var selectGroup string
+	affinityChannelID := 0
 	if retry.GetRetry() == 0 {
 		if preferredChannelID, found := GetPreferredChannelByAffinity(c, modelName, usingGroup); found {
 			affinityUsable := false
@@ -433,7 +450,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 					if usingGroup == "auto" {
 						common.SetContextKey(c, constant.ContextKeyAutoGroup, selectGroup)
 					}
-					MarkChannelAffinityUsed(c, selectGroup, preferred.Id)
+					affinityChannelID = preferred.Id
 				}
 			}
 			if !affinityUsable && !ShouldKeepChannelAffinityOnChannelDisabled() {
@@ -448,6 +465,29 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		}
 	}
 
+	if channel != nil {
+		fixedID := 0
+		if RequestPolicy(c).SessionMode == "strict" {
+			fixedID = channel.Id
+		}
+		if candidate, enabled, err := selectGroupKeyTier(c, selectGroup, modelName, fixedID, channel.Id); enabled || err != nil {
+			if err != nil {
+				return nil, selectGroup, groupKeySelectionError(err)
+			}
+			if candidate == nil {
+				return nil, selectGroup, groupKeySelectionError(nil)
+			}
+			channel = candidate
+		}
+	}
+	if affinityChannelID != 0 {
+		if channel != nil && channel.Id == affinityChannelID {
+			MarkChannelAffinityUsed(c, selectGroup, affinityChannelID)
+		} else {
+			c.Set(ginKeyChannelAffinitySkipRetry, false)
+			c.Set(ginKeyChannelAffinityRetryOffset, 0)
+		}
+	}
 	if channel == nil {
 		var err error
 		channel, selectGroup, err = CacheGetRandomSatisfiedChannel(retry)

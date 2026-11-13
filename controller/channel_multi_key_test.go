@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -300,10 +302,12 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 	batchSettings := batchSnapshot.GetSetting()
 	batchSettings.BatchKey = keyB
 	batchSnapshot.SetSetting(batchSettings)
+	require.NoError(t, model.DB.Model(channel).Update("setting", batchSnapshot.Setting).Error)
 	_, _, batchErr := batchSnapshot.GetNextRelayKeyForModel("group-scoped-model", true, "public")
 	require.NotNil(t, batchErr, "batch override cannot use another group's restricted key")
 	_, _, batchErr = batchSnapshot.GetNextRelayKeyForModel("group-scoped-model", true, "private")
 	require.Nil(t, batchErr)
+	require.NoError(t, model.DB.Model(channel).Update("setting", channel.Setting).Error)
 	autoContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 	autoContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	common.SetContextKey(autoContext, constant.ContextKeyUsingGroup, "auto")
@@ -370,6 +374,44 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 		}
 		assert.Equal(t, "auto", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
 	}
+	t.Run("single_origin_tier_resolves_actual_auto_group", func(t *testing.T) {
+		previousCache := common.MemoryCacheEnabled
+		t.Cleanup(func() { common.MemoryCacheEnabled = previousCache; model.InitChannelCache() })
+		single := &model.Channel{Name: "single origin tier", Type: constant.ChannelTypeOpenAI, Key: "single-origin-private-key", Models: "group-scoped-model", Group: "private", Status: common.ChannelStatusEnabled}
+		require.NoError(t, single.Insert())
+		t.Cleanup(func() { require.NoError(t, single.Delete()) })
+		order, err := model.GetGroupKeyRouting("private")
+		require.NoError(t, err)
+		_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "private", Revision: order.Revision, Items: []model.GroupKeyRoutingChange{{ChannelID: single.Id, KeyIdentity: single.KeyIdentity(single.Key), Priority: common.GetPointer(int64(20))}}})
+		require.NoError(t, err)
+		task := &model.Task{TaskID: "single-key-tier-origin", UserId: rootID, ChannelId: single.Id}
+		require.NoError(t, model.DB.Create(task).Error)
+		t.Cleanup(func() { require.NoError(t, model.DB.Delete(task).Error) })
+		for _, cached := range []bool{false, true} {
+			common.MemoryCacheEnabled = cached
+			model.InitChannelCache()
+			for _, groups := range [][]string{{"private"}, {"public", "private"}, {"blocked"}} {
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/continue", nil)
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, "auto")
+				common.SetContextKey(c, constant.ContextKeyAutoGroup, "public")
+				common.SetContextKey(c, constant.ContextKeyUserGroup, "public")
+				common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, groups)
+				info := &relaycommon.RelayInfo{UserId: rootID, OriginModelName: "group-scoped-model", ChannelMeta: &relaycommon.ChannelMeta{}, TaskRelayInfo: &relaycommon.TaskRelayInfo{OriginTaskID: task.TaskID}}
+				taskErr := relay.ResolveOriginTask(c, info)
+				if groups[0] == "blocked" {
+					require.NotNil(t, taskErr)
+					assert.Empty(t, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+				} else {
+					require.Nil(t, taskErr)
+					assert.Equal(t, single.Key, info.ApiKey)
+					assert.Equal(t, "private", common.GetContextKeyString(c, constant.ContextKeyAutoGroup))
+					assert.True(t, service.HasGroupKeyRouting(c))
+				}
+				assert.Equal(t, "auto", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+			}
+		}
+	})
 	require.NoError(t, model.RecordChannelKeyObservation(originChannel, "group-scoped-model", keyB, 1, common.GetPointer(false), 502, "origin probe unavailable", "probe"))
 	originContext, _ := gin.CreateTestContext(httptest.NewRecorder())
 	originContext.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/continue", nil)
@@ -515,6 +557,186 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 	assert.NotContains(t, loaded.ChannelInfo.KeyGroups, identityB)
 	assert.Equal(t, []string{"public"}, loaded.ChannelInfo.KeyGroups[identityA])
 	assert.Empty(t, loaded.GetModelsForGroup("private"))
+}
+
+func TestMultiKeyCostRatios(t *testing.T) {
+	rootID := setupChannelManagementTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.ChannelBalanceSample{}, &model.ChannelKeyObservation{}))
+	const keyA, keyB = "cost-fixture-key-a", "cost-fixture-key-b"
+	channel := &model.Channel{Name: t.Name(), Type: constant.ChannelTypeOpenAI, Key: keyA + "\n" + keyB, Models: "cost-model", Group: "default", Status: common.ChannelStatusEnabled,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}}
+	channel.SetSetting(kitdto.ChannelSettings{UpstreamCostRatio: common.GetPointer(1.5)})
+	require.NoError(t, channel.Insert())
+	t.Cleanup(func() {
+		require.NoError(t, channel.Delete())
+		model.InitChannelCache()
+	})
+	identityA, identityB := channel.KeyIdentity(keyA), channel.KeyIdentity(keyB)
+	manageRole := common.RoleRootUser
+	var accessTokenScopes []string
+	manage := func(body map[string]any, wantSuccess bool) MultiKeyStatusResponse {
+		t.Helper()
+		body["channel_id"] = channel.Id
+		payload, err := common.Marshal(body)
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("id", rootID)
+		c.Set("role", manageRole)
+		if accessTokenScopes != nil {
+			c.Set("access_token_id", 1)
+			c.Set("access_token_scopes", accessTokenScopes)
+		}
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/multi_key/manage", bytes.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		ManageMultiKeys(c)
+		var response struct {
+			Success bool                   `json:"success"`
+			Data    MultiKeyStatusResponse `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.Equal(t, wantSuccess, response.Success, recorder.Body.String())
+		assert.NotContains(t, recorder.Body.String(), keyA)
+		assert.NotContains(t, recorder.Body.String(), keyB)
+		if body["action"] == "get_key_status" && wantSuccess {
+			assert.Contains(t, recorder.Body.String(), `"channel_upstream_cost_ratio":`)
+			assert.Contains(t, recorder.Body.String(), `"upstream_cost_ratio":`)
+		}
+		return response.Data
+	}
+	status := manage(map[string]any{"action": "get_key_status"}, true)
+	require.Len(t, status.Keys, 2)
+	assert.Nil(t, status.Keys[0].UpstreamCostRatio)
+	require.NotNil(t, status.ChannelUpstreamCostRatio)
+	assert.Equal(t, 1.5, *status.ChannelUpstreamCostRatio)
+	manageRole = common.RoleAdminUser
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0}, false)
+	manageRole = common.RoleRootUser
+	accessTokenScopes = []string{"channel:operate"}
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0}, false)
+	accessTokenScopes = []string{"channel:operate", "channel:sensitive_write"}
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0}, true)
+	accessTokenScopes = nil
+	for _, fields := range []map[string]any{
+		{}, {"upstream_cost_ratio": nil}, {"clear_cost_ratio": false},
+		{"upstream_cost_ratio": 1, "clear_cost_ratio": true},
+		{"upstream_cost_ratio": -1}, {"upstream_cost_ratio": 10001}, {"upstream_cost_ratio": "0"},
+	} {
+		fields["action"], fields["key_index"], fields["key_identity"] = "set_key_cost_ratio", 0, identityA
+		manage(fields, false)
+	}
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		require.Error(t, model.SetChannelKeyCostRatio(channel.Id, 0, identityA, &value))
+	}
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0}, true)
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 1, "key_identity": identityB, "upstream_cost_ratio": 2}, true)
+	// Stale status and ordinary edits must preserve another node's cost writes.
+	require.NoError(t, channel.SaveChannelInfo())
+	require.NoError(t, channel.Update())
+	_, err := model.UpdateChannelStatusWithError(channel.Id, keyB, common.ChannelStatusAutoDisabled, "fixture unavailable")
+	require.NoError(t, err)
+	require.NoError(t, model.SetChannelKeyGroups(channel.Id, 0, identityA, []string{"default"}))
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]float64{identityA: 0, identityB: 2}, stored.ChannelInfo.KeyCostRatios)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1])
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0.25}, true)
+	stored, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"default"}, stored.ChannelInfo.KeyGroups[identityA])
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusList[1])
+	// Request selection uses the current physical key's cost, not stale cache metadata.
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "cost-model"))
+	frozen, exists := common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.True(t, exists)
+	require.NotNil(t, frozen)
+	assert.Equal(t, 0.25, *frozen)
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0}, true)
+	assert.Equal(t, 0.25, *frozen, "an in-flight request retains its selected cost")
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "cost-model"))
+	frozen, _ = common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.NotNil(t, frozen)
+	assert.Zero(t, *frozen, "retrying the same channel captures the replacement attempt's cost")
+	_, err = model.UpdateChannelStatusWithError(channel.Id, keyB, common.ChannelStatusEnabled, "")
+	require.NoError(t, err)
+	_, err = model.UpdateChannelStatusWithError(channel.Id, keyA, common.ChannelStatusAutoDisabled, "fixture unavailable")
+	require.NoError(t, err)
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "cost-model"))
+	assert.Equal(t, keyB, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+	frozen, _ = common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.NotNil(t, frozen)
+	assert.Equal(t, 2.0, *frozen, "a replacement credential must not inherit the failed key's free estimate")
+	_, err = model.UpdateChannelStatusWithError(channel.Id, keyA, common.ChannelStatusEnabled, "")
+	require.NoError(t, err)
+	_, err = model.UpdateChannelStatusWithError(channel.Id, keyB, common.ChannelStatusAutoDisabled, "fixture unavailable")
+	require.NoError(t, err)
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "clear_cost_ratio": true}, true)
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "cost-model"))
+	frozen, _ = common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.NotNil(t, frozen)
+	assert.Equal(t, 1.5, *frozen)
+	require.NoError(t, model.DB.Model(channel).Update("setting", "{}").Error)
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "cost-model"))
+	frozen, exists = common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio)
+	require.True(t, exists)
+	assert.Nil(t, frozen, "a stale channel setting must not resurrect cleared costs")
+	require.NoError(t, model.DB.Model(channel).Update("setting", channel.Setting).Error)
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 0}, true)
+	// Destination and credential changes must be taken from the same saved batch settings.
+	staleBatch := *channel
+	staleBatch.SetSetting(kitdto.ChannelSettings{BatchEnabled: true, BatchKey: "cost-old-batch-key", BatchBaseURL: "https://old-batch.invalid"})
+	updatedBatch := *channel
+	updatedBatch.SetSetting(kitdto.ChannelSettings{BatchEnabled: true, BatchKey: keyA, BatchBaseURL: "https://new-batch.invalid", UpstreamCostRatio: common.GetPointer(1.5)})
+	require.NoError(t, model.DB.Model(channel).Update("setting", updatedBatch.Setting).Error)
+	batchContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	batchContext.Request = httptest.NewRequest(http.MethodPost, "/v1/batches", nil)
+	common.SetContextKey(batchContext, constant.ContextKeyUsingGroup, "default")
+	service.GetChannelConstraints(batchContext).AddFilter(dto.ChannelFilter{Kind: dto.FilterBatchCapable})
+	require.Nil(t, middleware.SetupContextForSelectedChannel(batchContext, &staleBatch, "cost-model"))
+	assert.Equal(t, keyA, common.GetContextKeyString(batchContext, constant.ContextKeyChannelKey))
+	assert.Equal(t, "https://new-batch.invalid", common.GetContextKeyString(batchContext, constant.ContextKeyChannelBaseUrl))
+	batchCost, _ := common.GetContextKeyType[*float64](batchContext, constant.ContextKeyChannelUpstreamCostRatio)
+	require.NotNil(t, batchCost)
+	assert.Zero(t, *batchCost)
+	require.NoError(t, model.DB.Model(channel).Update("setting", channel.Setting).Error)
+	stored, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	stored.Key = keyB + "\n" + keyA
+	require.NoError(t, stored.Update())
+	status = manage(map[string]any{"action": "get_key_status"}, true)
+	assert.Equal(t, identityB, status.Keys[0].KeyIdentity)
+	require.NotNil(t, status.Keys[0].UpstreamCostRatio)
+	assert.Equal(t, 2.0, *status.Keys[0].UpstreamCostRatio)
+	require.NotNil(t, status.Keys[1].UpstreamCostRatio)
+	assert.Zero(t, *status.Keys[1].UpstreamCostRatio)
+	manage(map[string]any{"action": "set_key_cost_ratio", "key_index": 0, "key_identity": identityA, "upstream_cost_ratio": 3}, false)
+	// Copies use the new channel's identities and preserve an explicit free key.
+	recorder := httptest.NewRecorder()
+	copyContext, _ := gin.CreateTestContext(recorder)
+	copyContext.Set("id", rootID)
+	copyContext.Set("role", common.RoleRootUser)
+	copyContext.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+	copyContext.Request = httptest.NewRequest(http.MethodPost, "/api/channel/copy", nil)
+	CopyChannel(copyContext)
+	var copied struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ID int `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &copied))
+	require.True(t, copied.Success, recorder.Body.String())
+	clone, err := model.GetChannelById(copied.Data.ID, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, clone.Delete()) })
+	assert.Equal(t, map[string]float64{clone.KeyIdentity(keyA): 0, clone.KeyIdentity(keyB): 2}, clone.ChannelInfo.KeyCostRatios)
+	manage(map[string]any{"action": "delete_key", "key_index": 0}, true)
+	stored, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]float64{identityA: 0}, stored.ChannelInfo.KeyCostRatios)
 }
 
 func TestModelSquareHidesModelsWithoutEnabledChannels(t *testing.T) {

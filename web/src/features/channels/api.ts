@@ -37,6 +37,8 @@ import type {
   GetChannelResponse,
   GetChannelsParams,
   GetChannelsResponse,
+  GroupKeyRouting,
+  GroupKeyRoutingUpdate,
   MultiKeyManageParams,
   MultiKeyStatusResponse,
   SearchChannelsParams,
@@ -482,6 +484,45 @@ export async function setMultiKeyGroups(
     key_identity: keyIdentity,
     groups,
   })
+}
+
+export async function setMultiKeyCostRatio(
+  channelId: number,
+  keyIndex: number,
+  keyIdentity: string,
+  ratio: number | null
+): Promise<{ success: boolean; message?: string }> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'set_key_cost_ratio',
+    key_index: keyIndex,
+    key_identity: keyIdentity,
+    ...(ratio === null
+      ? { clear_cost_ratio: true }
+      : { upstream_cost_ratio: ratio }),
+  })
+}
+
+export async function getGroupKeyRouting(
+  group: string,
+  signal?: AbortSignal
+): Promise<GroupKeyRouting> {
+  const response = await api.get<{ success: boolean; data: GroupKeyRouting }>(
+    '/api/channel/group_key_routing',
+    channelActionConfig({ params: { group }, signal, disableDuplicate: true })
+  )
+  return requireServerSuccess(response.data).data
+}
+
+export async function updateGroupKeyRouting(
+  update: GroupKeyRoutingUpdate
+): Promise<GroupKeyRouting> {
+  const response = await api.put<{ success: boolean; data: GroupKeyRouting }>(
+    '/api/channel/group_key_routing',
+    update,
+    channelActionConfig()
+  )
+  return requireServerSuccess(response.data).data
 }
 
 /**

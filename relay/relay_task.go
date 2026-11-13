@@ -101,7 +101,21 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	info.LockedChannel = ch
 
 	if originTask.ChannelId != info.ChannelId {
-		if ch.ChannelInfo.IsMultiKey && common.GetContextKeyString(c, constant.ContextKeyUsingGroup) == "auto" {
+		autoGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup) == "auto"
+		resolveGroup := ch.ChannelInfo.IsMultiKey || service.HasGroupKeyRouting(c)
+		if autoGroup && !resolveGroup {
+			for _, group := range ch.GetGroups() {
+				_, configured, candidateErr := model.GetGroupKeyCandidates(group, info.OriginModelName, service.GetChannelConstraints(c).Filters, ch.Id)
+				if configured {
+					resolveGroup = true
+					break
+				}
+				if candidateErr != nil {
+					return service.TaskErrorWrapperLocal(candidateErr, "channel_not_found", http.StatusServiceUnavailable)
+				}
+			}
+		}
+		if autoGroup && resolveGroup {
 			// This is an explicit channel change, so the previous channel's
 			// selected group must not authorize the origin channel's credential.
 			selectedGroup := ""
@@ -120,12 +134,21 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 					break
 				}
 			}
-			if selectedGroup == "" && groupProbeError != nil {
-				return service.TaskErrorWrapperLocal(groupProbeError, string(model.ErrorCodeChannelProbeUnavailable), http.StatusServiceUnavailable)
+			if selectedGroup == "" {
+				if groupProbeError != nil {
+					return service.TaskErrorWrapperLocal(groupProbeError, string(model.ErrorCodeChannelProbeUnavailable), http.StatusServiceUnavailable)
+				}
+				return service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelayChannelNoGroupKey)), string(model.ErrorCodeChannelGroupUnavailable), http.StatusServiceUnavailable)
 			}
 			common.SetContextKey(c, constant.ContextKeyAutoGroup, selectedGroup)
 		}
-		key, index, newAPIError := ch.GetNextRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
+		ch, err = service.BindGroupKeyChannel(c, ch, info.OriginModelName)
+		if err != nil {
+			return service.TaskErrorWrapperLocal(err, "channel_no_available_key", http.StatusServiceUnavailable)
+		}
+		info.LockedChannel = ch
+		selected, newAPIError := ch.SelectRelayKeyForModel(info.OriginModelName, service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
+		key, index := selected.Key, selected.Index
 		if newAPIError != nil {
 			if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {
 				newAPIError.SetMessage(i18n.T(c, i18n.MsgRelayChannelNoGroupKey))
@@ -138,12 +161,17 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 			return service.TaskErrorWrapper(newAPIError, "channel_no_available_key", newAPIError.StatusCode, common.UpstreamAddresses(c)...)
 		}
 		common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+		common.SetContextKey(c, constant.ContextKeyChannelUpstreamCostRatio, selected.UpstreamCostRatio)
 		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
 		common.SetContextKey(c, constant.ContextKeyChannelType, ch.Type)
-		common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, ch.GetBaseURL())
+		baseURL := ch.GetBaseURL()
+		if service.GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable) {
+			baseURL = selected.BatchBaseURL
+		}
+		common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, baseURL)
 		common.SetContextKey(c, constant.ContextKeyChannelId, originTask.ChannelId)
 
-		info.ChannelBaseUrl = ch.GetBaseURL()
+		info.ChannelBaseUrl = baseURL
 		info.ChannelId = originTask.ChannelId
 		info.ChannelType = ch.Type
 		info.ApiKey = key

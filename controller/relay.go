@@ -238,6 +238,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
+		service.MarkGroupKeyAttempt(c, channel, usingKey)
 		relayInfo.ChannelAttemptStartTime = time.Now()
 		finishActivity := perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, channel.Id)
 		service.ResetRequestToolObservation(c)
@@ -276,18 +277,32 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
 		invalidCredential := isInvalidDeepSeekCredential(c, channel, newAPIError)
 		endpointFailed := false
+		crossChannelCredentialRetry := false
 		if invalidCredential {
+			if rejectedChannelKeys[channel.Id] == nil {
+				rejectedChannelKeys[channel.Id] = make(map[string]bool)
+			}
 			rejectedChannelKeys[channel.Id][usingKey] = true
 			updated, quarantineErr := model.DisableInvalidChannelKey(channel, relayInfo.OriginModelName, usingKey)
 			if quarantineErr != nil {
 				logger.LogError(c, common.LogText("failed to quarantine invalid channel credential: channel_id=%d", channel.Id))
 			}
-			if updated != nil && updated.Status == common.ChannelStatusEnabled && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
+			if !service.HasGroupKeyRouting(c) && updated != nil && updated.Status == common.ChannelStatusEnabled && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
 				for index, key := range updated.GetKeys() {
 					status, configured := updated.ChannelInfo.MultiKeyStatusList[index]
 					if initialChannelKeys[channel.Id][key] && !rejectedChannelKeys[channel.Id][key] && (!configured || status == common.ChannelStatusEnabled) && updated.KeyAllowedForGroup(key, service.GetSelectedRequestGroup(c)) {
 						sameChannelRetry = updated
 						break
+					}
+				}
+			}
+			if service.HasGroupKeyRouting(c) && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
+				sameChannelRetry, _ = service.SelectGroupKeyRetry(c, relayInfo.OriginModelName)
+				if sameChannelRetry != nil && sameChannelRetry.Id != channel.Id {
+					if decision.Action == "retry" && retryParam.GetRetry() < common.RetryTimes {
+						crossChannelCredentialRetry = true
+					} else {
+						sameChannelRetry = nil
 					}
 				}
 			}
@@ -301,6 +316,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			endpointFailed, retryEndpoint = service.FailChannelEndpoint(c, channel, newAPIError)
 			if retryEndpoint {
 				sameChannelRetry = channel
+				if service.HasGroupKeyRouting(c) {
+					// Mirrors share credentials; retry this exact key without
+					// advancing the tier or resurrecting an invalid credential.
+					snapshot := *channel
+					snapshot.RelayKeyIdentity = channel.KeyIdentity(usingKey)
+					sameChannelRetry = &snapshot
+				}
 				decision = service.PolicyDecision{Action: "retry", Reason: "channel_endpoint_unavailable", Source: "channel"}
 			}
 		}
@@ -311,6 +333,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, usingKey, channel.GetAutoBan() && !invalidCredential && !endpointFailed), newAPIError, relayInfo)
 		if sameChannelRetry != nil {
+			if crossChannelCredentialRetry {
+				retryParam.IncreaseRetry()
+			}
 			continue
 		}
 		if invalidCredential {
@@ -388,7 +413,7 @@ var upgrader = websocket.Upgrader{
 }
 
 func isInvalidDeepSeekCredential(c *gin.Context, channel *model.Channel, apiErr *types.NewAPIError) bool {
-	if channel == nil || channel.Type != constant.ChannelTypeDeepSeek || !channel.ChannelInfo.IsMultiKey || apiErr == nil || apiErr.StatusCode != http.StatusUnauthorized || apiErr.GetErrorType() != types.ErrorTypeOpenAIError {
+	if channel == nil || channel.Type != constant.ChannelTypeDeepSeek || !channel.ChannelInfo.IsMultiKey && !service.HasGroupKeyRouting(c) || apiErr == nil || apiErr.StatusCode != http.StatusUnauthorized || apiErr.GetErrorType() != types.ErrorTypeOpenAIError {
 		return false
 	}
 	for header := range channel.GetHeaderOverride() {
@@ -448,6 +473,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryGetChannelFailed, map[string]any{"Group": selectGroup, "Model": info.OriginModelName, "Error": err.Error()})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
 		if channel == nil {
+			if service.HasGroupKeyRouting(c) {
+				return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgRelayChannelNoGroupKey)), types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+			}
 			return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryNoAvailableChannel, map[string]any{"Group": selectGroup, "Model": info.OriginModelName})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
 		newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
@@ -712,6 +740,7 @@ func executeTaskSubmissionWith(
 		var channel *model.Channel
 
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
+			service.LockGroupKeyRouting(c, lockedCh.Id)
 			channel = lockedCh
 			if retryParam.GetRetry() == 0 && !service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
 				if probeErr := channel.RelayCredentialProbeError(relayInfo.OriginModelName, common.GetContextKeyString(c, constant.ContextKeyChannelKey)); probeErr != nil {
@@ -721,6 +750,14 @@ func executeTaskSubmissionWith(
 			}
 			policy.BeginAttempt(channel, relayInfo.UsingGroup)
 			if retryParam.GetRetry() > 0 {
+				if service.HasGroupKeyRouting(c) {
+					var selectErr error
+					channel, selectErr = service.SelectGroupKeyRetry(c, relayInfo.OriginModelName)
+					if selectErr != nil || channel == nil || channel.Id != lockedCh.Id {
+						taskErr = service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelayChannelNoGroupKey)), "channel_no_available_key", http.StatusServiceUnavailable)
+						break
+					}
+				}
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
 					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)
 					if setupErr.GetErrorCode() == model.ErrorCodeChannelProbeUnavailable {
@@ -757,6 +794,7 @@ func executeTaskSubmissionWith(
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		stage = "submit"
+		service.MarkGroupKeyAttempt(c, channel, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
 		relayInfo.ChannelAttemptStartTime = time.Now()
 		finishActivity := perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, channel.Id)
 		result, taskErr = submit(c, relayInfo)

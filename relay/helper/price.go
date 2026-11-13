@@ -165,8 +165,11 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	if info != nil {
 		info.UpstreamCostRatio = nil
 		if c != nil {
-			settings, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
-			if ok && settings.UpstreamCostRatio != nil && settings.ValidateUpstreamCostRatio() == nil {
+			settings, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+			if selected, exists := common.GetContextKeyType[*float64](c, constant.ContextKeyChannelUpstreamCostRatio); exists {
+				settings.UpstreamCostRatio = selected
+			}
+			if settings.UpstreamCostRatio != nil && settings.ValidateUpstreamCostRatio() == nil {
 				ratio := *settings.UpstreamCostRatio
 				info.UpstreamCostRatio = &ratio
 			}

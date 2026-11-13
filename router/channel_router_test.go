@@ -25,6 +25,8 @@ func TestChannelDefaultBaseURLsRequireReadPermission(t *testing.T) {
 }
 
 func TestChannelStatusRoutesUseExpectedPermissions(t *testing.T) {
+	assertChannelRoutePermission(t, http.MethodGet, "/group_key_routing", authz.ChannelRead, controller.GetGroupKeyRouting)
+	assertChannelRoutePermission(t, http.MethodPut, "/group_key_routing", authz.ChannelSensitiveWrite, controller.SetGroupKeyRouting)
 	assertChannelRoutePermission(t, http.MethodGet, "/priority/order", authz.ChannelRead, controller.GetChannelPriorityOrder)
 	assertChannelRoutePermission(t, http.MethodPost, "/priority/reorder", authz.ChannelWrite, controller.ReorderChannelPriority)
 	assertChannelRoutePermission(t, http.MethodGet, "/:id/vllm/status", authz.ChannelRead, controller.GetVLLMChannelStatus)
@@ -55,6 +57,17 @@ func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
 	require.NotPanics(t, func() {
 		registerChannelRoutes(api)
 	})
+}
+
+func TestGroupKeyRoutingRejectsAnonymousAccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	registerChannelRoutes(engine.Group("/api"))
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(method, "/api/channel/group_key_routing?group=default", nil))
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code, method)
+	}
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {

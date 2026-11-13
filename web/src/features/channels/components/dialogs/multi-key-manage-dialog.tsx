@@ -32,6 +32,13 @@ import { MultiSelect } from '@/components/multi-select'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldLabel,
+} from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
   Select,
@@ -42,6 +49,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
+import { toIntlLocale } from '@/i18n/languages'
 import {
   ADMIN_PERMISSION_ACTIONS,
   ADMIN_PERMISSION_RESOURCES,
@@ -65,6 +73,7 @@ import {
   deleteDisabledMultiKeys,
   updateChannelBalance,
   setMultiKeyGroups,
+  setMultiKeyCostRatio,
 } from '../../api'
 import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
 import {
@@ -134,6 +143,9 @@ function MultiKeyManageContent({
   const [isUpdatingBalance, setIsUpdatingBalance] = useState(false)
   const [groupDrafts, setGroupDrafts] = useState<
     Record<string, string[] | undefined>
+  >({})
+  const [costDrafts, setCostDrafts] = useState<
+    Record<string, string | undefined>
   >({})
   const instanceId = useId()
   const mounted = useRef(true)
@@ -294,7 +306,7 @@ function MultiKeyManageContent({
         description={t(
           'Manage multi-key status and configuration for this channel'
         )}
-        contentClassName='flex max-h-[min(90dvh,var(--dialog-available-height))] flex-col sm:max-w-5xl'
+        contentClassName='flex max-h-[min(90dvh,var(--dialog-available-height))] flex-col sm:max-w-6xl'
         titleClassName='flex flex-wrap items-center gap-2'
         contentHeight='min(72vh, 720px)'
         bodyClassName='space-y-4'
@@ -423,6 +435,11 @@ function MultiKeyManageContent({
               </AlertDescription>
             </Alert>
           )}
+          <FieldDescription className='text-xs'>
+            {t(
+              'Leave key cost empty to inherit the channel multiplier; 0 means free. User charges are unchanged.'
+            )}
+          </FieldDescription>
           <div className='min-h-0 flex-1 overflow-auto rounded-md border'>
             {statusQuery.isPending && <LoadingState />}
             {statusQuery.isError && (
@@ -437,7 +454,7 @@ function MultiKeyManageContent({
             {statusQuery.isSuccess && keys.length > 0 && (
               <StaticDataTable
                 className='rounded-none border-0'
-                tableClassName='min-w-[52rem] table-fixed'
+                tableClassName='min-w-[64rem] table-fixed'
                 data={keys}
                 getRowKey={(key) => key.index}
                 columns={[
@@ -543,6 +560,30 @@ function MultiKeyManageContent({
                     ),
                   },
                   {
+                    id: 'cost',
+                    header: t('Upstream cost multiplier'),
+                    className: 'w-44',
+                    cellClassName: 'whitespace-normal align-top',
+                    cell: (key) => (
+                      <KeyCostEditor
+                        key={`${key.index}:${key.key_identity}`}
+                        channelId={channel.id}
+                        keyStatus={key}
+                        channelCostRatio={
+                          data?.channel_upstream_cost_ratio ?? null
+                        }
+                        draft={costDrafts[`${key.index}:${key.key_identity}`]}
+                        onDraftChange={(value) =>
+                          setCostDrafts((previous) => ({
+                            ...previous,
+                            [`${key.index}:${key.key_identity}`]: value,
+                          }))
+                        }
+                        disabled={actionsUnavailable || !canEditSensitive}
+                      />
+                    ),
+                  },
+                  {
                     id: 'actions',
                     header: t('Actions'),
                     className: 'text-right',
@@ -604,6 +645,104 @@ function MultiKeyManageContent({
         handleConfirm={performAction}
       />
     </>
+  )
+}
+
+function KeyCostEditor(props: {
+  channelId: number
+  keyStatus: KeyStatus
+  channelCostRatio: number | null
+  draft?: string
+  onDraftChange: (value: string | undefined) => void
+  disabled: boolean
+}) {
+  const { t, i18n } = useTranslation()
+  const queryClient = useQueryClient()
+  const id = useId()
+  const savedRatio = props.keyStatus.upstream_cost_ratio ?? null
+  const value = props.draft ?? (savedRatio === null ? '' : String(savedRatio))
+  const ratio = value.trim() === '' ? null : Number(value)
+  const invalid =
+    ratio !== null && (!Number.isFinite(ratio) || ratio < 0 || ratio > 10000)
+  const changed = !invalid && ratio !== savedRatio
+  const save = useMutation({
+    mutationFn: async () =>
+      requireServerSuccess(
+        await setMultiKeyCostRatio(
+          props.channelId,
+          props.keyStatus.index,
+          props.keyStatus.key_identity,
+          ratio
+        )
+      ),
+    onSuccess: async () => {
+      await refreshChannelStatusQueries(queryClient)
+      props.onDraftChange(undefined)
+      toast.success(t('Operation successful'))
+    },
+    onError: async (error) => {
+      handleServerError(error, t('Operation failed'))
+      await refreshChannelStatusQueries(queryClient)
+    },
+  })
+  const unavailable =
+    props.disabled || save.isPending || !props.keyStatus.key_identity
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  // A cost multiplier must retain sub-cent precision; ordinary formatNumber rounds to two decimals.
+  const channelCost =
+    props.channelCostRatio === null
+      ? t('Not configured')
+      : new Intl.NumberFormat(locale, { maximumSignificantDigits: 21 }).format(
+          props.channelCostRatio
+        )
+  return (
+    <Field
+      data-invalid={invalid}
+      data-disabled={unavailable}
+      className='min-w-0'
+    >
+      <FieldLabel className='sr-only' htmlFor={id}>
+        {t('Upstream cost multiplier for key #{{index}}', {
+          index: props.keyStatus.index + 1,
+        })}
+      </FieldLabel>
+      <Input
+        id={id}
+        inputMode='decimal'
+        value={value}
+        onChange={(event) => props.onDraftChange(event.target.value)}
+        disabled={unavailable}
+        aria-invalid={invalid}
+        aria-describedby={`${id}-hint`}
+        placeholder={t('Inherit channel')}
+      />
+      <FieldDescription id={`${id}-hint`} className='text-xs'>
+        {props.channelCostRatio === null
+          ? t('Channel cost is not configured')
+          : t('Channel cost: {{ratio}}×', { ratio: channelCost })}
+      </FieldDescription>
+      {ratio === 0 && (
+        <FieldDescription className='text-xs'>
+          {t('Free upstream cost')}
+        </FieldDescription>
+      )}
+      {invalid && (
+        <FieldError className='text-xs'>
+          {t('Upstream cost multiplier must be between 0 and 10000')}
+        </FieldError>
+      )}
+      <Button
+        type='button'
+        size='sm'
+        variant='outline'
+        disabled={unavailable || !changed}
+        onClick={() => {
+          if (!unavailable && changed) save.mutate()
+        }}
+      >
+        {t('Save cost')}
+      </Button>
+    </Field>
   )
 }
 
