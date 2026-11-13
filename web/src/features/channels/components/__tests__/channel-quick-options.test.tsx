@@ -254,8 +254,10 @@ describe('body passthrough quick option', () => {
           JSON.parse(payload.setting ?? '{}').pass_through_body_enabled
         ).toBe(enabled === true)
         expect(
-          transformChannelToFormDefaults({ ...channel, ...payload })
-            .pass_through_body_enabled
+          transformChannelToFormDefaults({
+            ...channel,
+            setting: payload.setting ?? '{}',
+          }).pass_through_body_enabled
         ).toBe(enabled === true)
       }
     }
