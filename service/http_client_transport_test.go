@@ -318,12 +318,9 @@ func TestHTTPClientCachePolicyAndCompatibility(t *testing.T) {
 	assert.NotSame(t, clientA, proxyInsecure)
 }
 
-func TestChannelTLSInsecureSkipVerifyAcceptsUntrustedUpstream(t *testing.T) {
-	initDefaultHTTPClientFixture(t)
-	upstream := startHTTP2TLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	connectProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func startHTTPConnectProxy(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -343,7 +340,16 @@ func TestChannelTLSInsecureSkipVerifyAcceptsUntrustedUpstream(t *testing.T) {
 		go func() { _, _ = io.Copy(target, conn) }()
 		_, _ = io.Copy(conn, target)
 	}))
-	t.Cleanup(connectProxy.Close)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestChannelTLSInsecureSkipVerifyAcceptsUntrustedUpstream(t *testing.T) {
+	initDefaultHTTPClientFixture(t)
+	upstream := startHTTP2TLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	connectProxy := startHTTPConnectProxy(t)
 
 	skip := dto.ChannelSettings{TLSInsecureSkipVerify: true}
 	testCases := []struct {
@@ -373,6 +379,172 @@ func TestChannelTLSInsecureSkipVerifyAcceptsUntrustedUpstream(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantProto, resp.ProtoMajor)
 			drainClose(t, resp)
+		})
+	}
+}
+
+func TestRelayResponseHeaderTimeoutPolicyIsolation(t *testing.T) {
+	previousHeaderTimeout, previousTimeout := common.RelayResponseHeaderTimeout, common.RelayTimeout
+	common.RelayResponseHeaderTimeout, common.RelayTimeout = 0, 0
+	t.Cleanup(func() {
+		common.RelayResponseHeaderTimeout, common.RelayTimeout = previousHeaderTimeout, previousTimeout
+	})
+	initDefaultHTTPClientFixture(t)
+
+	for _, tc := range []struct {
+		name     string
+		protocol string
+		shards   int
+		proxy    bool
+	}{
+		{name: "http1 direct", protocol: dto.HTTPProtocolHTTP1, shards: 1},
+		{name: "http1 proxy", protocol: dto.HTTPProtocolHTTP1, shards: 1, proxy: true},
+		{name: "http2 direct", protocol: dto.HTTPProtocolAuto, shards: 1},
+		{name: "http2 proxy", protocol: dto.HTTPProtocolAuto, shards: 1, proxy: true},
+		{name: "http2 shards direct", protocol: dto.HTTPProtocolAuto, shards: 2},
+		{name: "http2 shards proxy", protocol: dto.HTTPProtocolAuto, shards: 2, proxy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			ordinaryWaiting := make(chan struct{})
+			server := startHTTP2TLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Test-Peer", r.RemoteAddr)
+				switch r.URL.Path {
+				case "/timeout":
+					<-r.Context().Done()
+					return
+				case "/ordinary":
+					close(ordinaryWaiting)
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+				case "/stream":
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					if http.NewResponseController(w).Flush() != nil {
+						return
+					}
+					select {
+					case <-release:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				_, _ = io.WriteString(w, "data: complete\n\n")
+			}))
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+			proxyURL := ""
+			if tc.proxy {
+				proxyURL = startHTTPConnectProxy(t).URL
+			}
+			settings := dto.ChannelSettings{HTTPProtocol: tc.protocol, HTTP2ConnectionShards: tc.shards, TLSInsecureSkipVerify: true}
+			ordinary, err := GetHttpClientWithProxySettings(proxyURL, settings)
+			require.NoError(t, err)
+			policy := NormalizeHTTPTransportPolicy(settings)
+			policy.ResponseHeaderTimeoutSeconds = 1
+			limited, err := GetHttpClientWithProxyPolicy(proxyURL, policy)
+			require.NoError(t, err)
+			alias := proxyURL
+			if tc.proxy {
+				alias += "/"
+			}
+			cached, err := GetHttpClientWithProxyPolicy(alias, policy)
+			require.NoError(t, err)
+			assert.Same(t, limited, cached)
+			assert.NotSame(t, ordinary, limited)
+			t.Cleanup(ordinary.CloseIdleConnections)
+			t.Cleanup(limited.CloseIdleConnections)
+			wantProto := 2
+			if tc.protocol == dto.HTTPProtocolHTTP1 {
+				wantProto = 1
+			}
+			peers := []map[string]bool{{}, {}}
+			for index, client := range []*http.Client{ordinary, limited} {
+				for range 2 * tc.shards {
+					response, requestErr := client.Get(server.URL)
+					require.NoError(t, requestErr)
+					assert.Equal(t, wantProto, response.ProtoMajor)
+					peers[index][response.Header.Get("X-Test-Peer")] = true
+					drainClose(t, response)
+				}
+				assert.Len(t, peers[index], tc.shards, "each policy must reuse its own connections")
+			}
+			for peer := range peers[0] {
+				assert.NotContains(t, peers[1], peer, "different header limits must not share a connection pool")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/stream", nil)
+			require.NoError(t, err)
+			stream, err := limited.Do(request)
+			require.NoError(t, err)
+			defer stream.Body.Close()
+			ordinaryDone := make(chan error, 1)
+			ordinaryRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/ordinary", nil)
+			require.NoError(t, err)
+			go func() {
+				response, requestErr := ordinary.Do(ordinaryRequest)
+				if requestErr == nil {
+					_, requestErr = io.Copy(io.Discard, response.Body)
+					_ = response.Body.Close()
+				}
+				ordinaryDone <- requestErr
+			}()
+			select {
+			case <-ordinaryWaiting:
+			case <-ctx.Done():
+				t.Fatal("ordinary request did not reach the upstream")
+			}
+			for range tc.shards {
+				request, err = http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/timeout", nil)
+				require.NoError(t, err)
+				response, timeoutErr := limited.Do(request)
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				require.ErrorContains(t, timeoutErr, "timeout awaiting response headers")
+				require.NoError(t, ctx.Err(), "the policy must expire before the safety deadline")
+			}
+			// The real header timeout is the boundary: both other requests began
+			// earlier and must remain usable beyond it without a whole-body timer.
+			releaseOnce.Do(func() { close(release) })
+			require.NoError(t, <-ordinaryDone, "the ordinary policy must retain its unlimited header wait")
+			body, err := io.ReadAll(stream.Body)
+			require.NoError(t, err, "response headers must stop the timeout before a long stream body")
+			assert.Equal(t, "data: complete\n\n", string(body))
+		})
+	}
+}
+
+func TestRelayResponseHeaderTimeoutPreservesGlobalLimit(t *testing.T) {
+	withRelayHTTPTransportSettings(t)
+	previousHeaderTimeout, previousTimeout := common.RelayResponseHeaderTimeout, common.RelayTimeout
+	common.RelayResponseHeaderTimeout, common.RelayTimeout = 1, 0
+	t.Cleanup(func() {
+		common.RelayResponseHeaderTimeout, common.RelayTimeout = previousHeaderTimeout, previousTimeout
+	})
+	server := startHTTP2TLSServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	for _, override := range []int{0, 10} {
+		t.Run(fmt.Sprintf("override=%d", override), func(t *testing.T) {
+			policy := HTTPTransportPolicy{Protocol: dto.HTTPProtocolHTTP1, Shards: 1, ResponseHeaderTimeoutSeconds: override}
+			client := newHTTPClientWithPolicyAndTLS(policy, testTLSClientConfig(t, server))
+			t.Cleanup(client.CloseIdleConnections)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+			require.NoError(t, err)
+			response, err := client.Do(request)
+			if response != nil {
+				_ = response.Body.Close()
+			}
+			require.ErrorContains(t, err, "timeout awaiting response headers")
+			assert.NoError(t, ctx.Err(), "an override must not relax the shorter global header limit")
 		})
 	}
 }

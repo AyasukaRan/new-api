@@ -224,6 +224,9 @@ var RelayHTTP2PingTimeout int     // seconds to wait for a PING acknowledgement
 // ResponseHeaderTimeout only bounds the wait for the response headers; once the
 // headers arrive, streaming is unaffected.
 var RelayResponseHeaderTimeout int // unit is second
+// MultiKeyFailoverResponseHeaderTimeout leaves time for another credential;
+// zero inherits the ordinary transport timeout, without limiting response bodies.
+var MultiKeyFailoverResponseHeaderTimeout = 120 // unit is second
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int
 

@@ -398,7 +398,12 @@ func GetHttpClientWithProxy(rawProxyURL string) (*http.Client, error) {
 // channel transport settings. Default auto + 1 shard shares the same client pool as
 // GetHttpClientWithProxy / GetHttpClient for the empty-proxy case.
 func GetHttpClientWithProxySettings(rawProxyURL string, settings dto.ChannelSettings) (*http.Client, error) {
-	policy := NormalizeHTTPTransportPolicy(settings)
+	return GetHttpClientWithProxyPolicy(rawProxyURL, NormalizeHTTPTransportPolicy(settings))
+}
+
+// GetHttpClientWithProxyPolicy keeps request-specific header limits in separate
+// reusable pools instead of mutating a transport used by ordinary requests.
+func GetHttpClientWithProxyPolicy(rawProxyURL string, policy HTTPTransportPolicy) (*http.Client, error) {
 	trimmedProxyURL := strings.TrimSpace(rawProxyURL)
 
 	if trimmedProxyURL == "" {

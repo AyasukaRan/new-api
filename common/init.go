@@ -117,6 +117,7 @@ func InitEnv() {
 	RelayHTTP2PingIdleTimeout = GetEnvOrDefault("RELAY_HTTP2_PING_IDLE_TIMEOUT", 0)
 	RelayHTTP2PingTimeout = GetEnvOrDefault("RELAY_HTTP2_PING_TIMEOUT", 15)
 	RelayResponseHeaderTimeout = GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 1800)
+	MultiKeyFailoverResponseHeaderTimeout = max(0, GetEnvOrDefault("MULTI_KEY_FAILOVER_RESPONSE_HEADER_TIMEOUT", 120))
 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)
 	RelayMaxIdleConnsPerHost = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS_PER_HOST", 100)
 

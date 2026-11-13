@@ -456,12 +456,17 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	if info.IsChannelTest && c.Request != nil {
+	keyFailover := !info.IsChannelTest && info.ChannelMeta != nil && info.ChannelIsMultiKey && service.HasChannelKeyFailover(c)
+	if (info.IsChannelTest || keyFailover) && c.Request != nil {
 		// Adaptors may build a background-context request. Health checks must
-		// carry their own deadline and task cancellation to the actual transport.
+		// carry their deadline, and failover must stop when its client disconnects.
 		req = req.WithContext(c.Request.Context())
 	}
-	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
+	policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
+	if keyFailover && common2.MultiKeyFailoverResponseHeaderTimeout > 0 {
+		policy.ResponseHeaderTimeoutSeconds = common2.MultiKeyFailoverResponseHeaderTimeout
+	}
+	client, err := service.GetHttpClientWithProxyPolicy(info.ChannelSetting.Proxy, policy)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
@@ -472,7 +477,6 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	relayClient := *client
 	relayClient.CheckRedirect = keepUpstreamRedirectResponse
 	if common2.DebugEnabled && req != nil && req.URL != nil {
-		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
 		logger.LogDebug(c, "http transport select: host=%s protocol=%s shards=%d policy=%s",
 			req.URL.Host,
 			policy.Protocol,
@@ -517,7 +521,6 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		return nil, errors.New("resp is nil")
 	}
 	if common2.DebugEnabled {
-		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
 		logger.LogDebug(c, "http transport negotiated: host=%s protocol=%s shards=%d policy=%s negotiated=%s",
 			req.URL.Host,
 			policy.Protocol,

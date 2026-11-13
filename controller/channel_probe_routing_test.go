@@ -184,6 +184,11 @@ func TestGroupKeyRoutingDatabaseMatrix(t *testing.T) {
 
 func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 	require.NoError(t, i18n.Init())
+	previousHeaderLimit := common.MultiKeyFailoverResponseHeaderTimeout
+	// This matrix supplies a fake transport; real header deadlines have their
+	// own Relay integration coverage in relay_stream_test.go.
+	common.MultiKeyFailoverResponseHeaderTimeout = 0
+	t.Cleanup(func() { common.MultiKeyFailoverResponseHeaderTimeout = previousHeaderLimit })
 	previousRetries, previousDisable := common.RetryTimes, common.AutomaticDisableChannelEnabled
 	previousCount, previousLogs, previousTrace, previousErrors := constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled
 	previousGroups := ratio_setting.GroupRatio2JSONString()
