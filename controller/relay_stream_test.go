@@ -45,6 +45,7 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false", "quota_setting.enable_free_model_pre_consume": "false"}))
 	previousRetries, previousDisable := common.RetryTimes, common.AutomaticDisableChannelEnabled
 	previousHeader, previousFailover, previousTimeout := common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout, common.RelayTimeout
+	previousStreamingTimeout := constant.StreamingTimeout
 	previousCount, previousLogs, previousTrace, previousErrors := constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled
 	previousGroups := ratio_setting.GroupRatio2JSONString()
 	affinity := operation_setting.GetChannelAffinitySetting()
@@ -54,10 +55,12 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 	affinity.Enabled, general.PingIntervalEnabled = false, false
 	common.AutomaticDisableChannelEnabled = false
 	common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout, common.RelayTimeout = 0, 1, 0
+	constant.StreamingTimeout = 30
 	constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = false, false, false, false
 	t.Cleanup(func() {
 		common.RetryTimes, common.AutomaticDisableChannelEnabled = previousRetries, previousDisable
 		common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout, common.RelayTimeout = previousHeader, previousFailover, previousTimeout
+		constant.StreamingTimeout = previousStreamingTimeout
 		constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = previousCount, previousLogs, previousTrace, previousErrors
 		*affinity, general.PingIntervalEnabled = previousAffinity, previousPing
 		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
