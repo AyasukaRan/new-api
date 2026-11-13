@@ -29,6 +29,7 @@ func HasGroupKeyRouting(c *gin.Context) bool {
 }
 
 func MarkGroupKeyAttempt(c *gin.Context, channel *model.Channel, key string) {
+	markChannelKeyAttempt(c, channel, key)
 	if value, exists := c.Get(groupKeyRouteContext); exists && value != nil {
 		state := value.(*groupKeyRoute)
 		state.Tried[channel.KeyIdentity(key)] = true
@@ -137,7 +138,14 @@ func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, pref
 	}
 	slices.SortFunc(keys, func(a, b *model.Channel) int { return a.RelayKeyIndex - b.RelayKeyIndex })
 	selected := keys[0]
-	if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModeRandom {
+	if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+		for _, index := range selected.OrderedKeyIndices() {
+			if position := slices.IndexFunc(keys, func(candidate *model.Channel) bool { return candidate.RelayKeyIndex == index }); position >= 0 {
+				selected = keys[position]
+				break
+			}
+		}
+	} else if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModeRandom {
 		selected = keys[rand.Intn(len(keys))]
 	} else if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
 		selected, err = model.ReserveGroupKeyCandidate(keys)

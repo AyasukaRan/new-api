@@ -485,18 +485,26 @@ func GetChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	channel, err := model.GetChannelById(id, false)
+	channel, err := model.GetChannelById(id, true)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if channel != nil {
-		clearChannelInfo(channel)
+	configs, revision, err := channel.KeyConfiguration()
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
+	channel.Key = ""
+	clearChannelInfo(channel)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    channel,
+		"data": struct {
+			*model.Channel
+			KeyConfigs        []model.ChannelKeyConfigView `json:"key_configs"`
+			KeyConfigRevision string                       `json:"key_config_revision"`
+		}{channel, configs, revision},
 	})
 	return
 }
@@ -720,10 +728,11 @@ func RefreshCodexChannelCredential(c *gin.Context) {
 }
 
 type AddChannelRequest struct {
-	Mode                      string                `json:"mode"`
-	MultiKeyMode              constant.MultiKeyMode `json:"multi_key_mode"`
-	BatchAddSetKeyPrefix2Name bool                  `json:"batch_add_set_key_prefix_2_name"`
-	Channel                   *model.Channel        `json:"channel"`
+	Mode                      string                   `json:"mode"`
+	MultiKeyMode              constant.MultiKeyMode    `json:"multi_key_mode"`
+	BatchAddSetKeyPrefix2Name bool                     `json:"batch_add_set_key_prefix_2_name"`
+	Channel                   *model.Channel           `json:"channel"`
+	KeyConfigs                []model.ChannelKeyConfig `json:"key_configs,omitempty"`
 }
 
 func getVertexArrayKeys(keys string) ([]string, []int, error) {
@@ -765,6 +774,22 @@ func AddChannel(c *gin.Context) {
 	err := c.ShouldBindJSON(&addChannelRequest)
 	if err != nil {
 		common.ApiError(c, err)
+		return
+	}
+	if addChannelRequest.KeyConfigs != nil {
+		if addChannelRequest.Channel == nil || addChannelRequest.Channel.Key != "" || addChannelRequest.Mode != "single" && addChannelRequest.Mode != "multi_to_single" {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		addChannelRequest.Channel.Id = 0
+		addChannelRequest.Channel.ChannelInfo = model.ChannelInfo{IsMultiKey: addChannelRequest.Mode == "multi_to_single", MultiKeyMode: addChannelRequest.MultiKeyMode}
+		if err := addChannelRequest.Channel.ApplyKeyConfigs(addChannelRequest.KeyConfigs, true); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if addChannelRequest.MultiKeyMode != "" && addChannelRequest.MultiKeyMode != constant.MultiKeyModeRandom && addChannelRequest.MultiKeyMode != constant.MultiKeyModePolling && addChannelRequest.MultiKeyMode != constant.MultiKeyModeFailover {
+		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
 
@@ -863,7 +888,11 @@ func AddChannel(c *gin.Context) {
 			channelInputIndices = append(channelInputIndices, []int{inputIndices[i]})
 		}
 	}
-	err = model.BatchInsertChannels(channels)
+	if addChannelRequest.KeyConfigs != nil {
+		err = model.BatchInsertChannels(channels, addChannelRequest.KeyConfigs)
+	} else {
+		err = model.BatchInsertChannels(channels)
+	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1110,8 +1139,10 @@ func DeleteChannelBatch(c *gin.Context) {
 
 type PatchChannel struct {
 	model.Channel
-	MultiKeyMode *string `json:"multi_key_mode"`
-	KeyMode      *string `json:"key_mode"` // 多key模式下密钥覆盖或者追加
+	MultiKeyMode      *string                  `json:"multi_key_mode"`
+	KeyMode           *string                  `json:"key_mode"` // 多key模式下密钥覆盖或者追加
+	KeyConfigs        []model.ChannelKeyConfig `json:"key_configs,omitempty"`
+	KeyConfigRevision string                   `json:"key_config_revision,omitempty"`
 }
 
 type ChannelStatusRequest struct {
@@ -1144,6 +1175,10 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
+	if channel.KeyConfigs != nil && (channel.Key != "" || channel.KeyMode != nil) {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
 
 	if channel.Type == constant.ChannelTypeTaskPlugin &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
@@ -1236,6 +1271,10 @@ func UpdateChannel(c *gin.Context) {
 
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
 	if channel.MultiKeyMode != nil && *channel.MultiKeyMode != "" {
+		if *channel.MultiKeyMode != string(constant.MultiKeyModeRandom) && *channel.MultiKeyMode != string(constant.MultiKeyModePolling) && *channel.MultiKeyMode != string(constant.MultiKeyModeFailover) {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
 		channel.ChannelInfo.MultiKeyMode = constant.MultiKeyMode(*channel.MultiKeyMode)
 	}
 
@@ -1316,12 +1355,22 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
-	err = channel.Update()
+	if channel.KeyConfigs != nil {
+		lock := model.GetChannelPollingLock(channel.Id)
+		lock.Lock()
+		err = channel.UpdateWithKeyConfigs(&model.ChannelKeyConfigUpdate{Items: channel.KeyConfigs, Revision: channel.KeyConfigRevision})
+		lock.Unlock()
+	} else {
+		err = channel.Update()
+	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	if channel.KeyConfigs != nil && channel.Status != common.ChannelStatusEnabled {
+		closeActiveChannelWebSockets([]int{channel.Id})
+	}
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)
 	}
@@ -1352,6 +1401,8 @@ func UpdateChannel(c *gin.Context) {
 	}
 	recordManageAudit(c, "channel.update", updateAudit)
 	channel.Key = ""
+	channel.KeyConfigs = nil
+	channel.KeyConfigRevision = ""
 	clearChannelInfo(&channel.Channel)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -1749,6 +1800,7 @@ func CopyChannel(c *gin.Context) {
 	clone.ChannelInfo.KeyGroups = nil
 	clone.ChannelInfo.KeyCostRatios = nil
 	clone.ChannelInfo.KeyGroupPriorities = nil
+	clone.ChannelInfo.KeyOrder = nil
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&clone).Error; err != nil {
 			return err
@@ -1770,6 +1822,9 @@ func CopyChannel(c *gin.Context) {
 			if groups := origin.ChannelInfo.KeyGroups[origin.KeyIdentity(key)]; len(groups) > 0 {
 				clone.ChannelInfo.KeyGroups[clone.KeyIdentity(key)] = slices.Clone(groups)
 			}
+		}
+		for _, index := range origin.OrderedKeyIndices() {
+			clone.ChannelInfo.KeyOrder = append(clone.ChannelInfo.KeyOrder, clone.KeyIdentity(keys[index]))
 		}
 		if err := tx.Model(&clone).Update("channel_info", clone.ChannelInfo).Error; err != nil {
 			return err

@@ -960,10 +960,11 @@ export function useChannelsColumns(
           const multiKeyMode = channel.channel_info?.multi_key_mode ?? 'random'
           const MultiKeyModeIcon =
             multiKeyMode === 'random' ? Shuffle : ListOrdered
-          const multiKeyTooltip =
-            multiKeyMode === 'random'
-              ? t('Multi-key: Random rotation')
-              : t('Multi-key: Polling rotation')
+          const multiKeyTooltip = {
+            random: t('Multi-key: Random rotation'),
+            polling: t('Multi-key: Polling rotation'),
+            failover: t('Key failover'),
+          }[multiKeyMode]
 
           const ionetMeta = parseIonetMeta(channel.other_info)
           const isIonet = ionetMeta?.source === 'ionet'
@@ -988,7 +989,7 @@ export function useChannelsColumns(
                           onClick={(event) => {
                             event.stopPropagation()
                             setCurrentRow(channel)
-                            setOpen('multi-key-manage')
+                            setOpen('update-channel')
                           }}
                         />
                       }

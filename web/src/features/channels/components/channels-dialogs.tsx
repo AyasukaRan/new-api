@@ -24,7 +24,6 @@ import { ChannelTestDialog } from './dialogs/channel-test-dialog'
 import { CopyChannelDialog } from './dialogs/copy-channel-dialog'
 import { EditTagDialog } from './dialogs/edit-tag-dialog'
 import { FetchModelsDialog } from './dialogs/fetch-models-dialog'
-import { GroupKeyRoutingDialog } from './dialogs/group-key-routing-dialog'
 import { InferenceStatusDialog } from './dialogs/inference-status-dialog'
 import { MultiKeyManageDialog } from './dialogs/multi-key-manage-dialog'
 import { OllamaModelsDialog } from './dialogs/ollama-models-dialog'
@@ -98,11 +97,6 @@ export function ChannelsDialogs() {
       <MultiKeyManageDialog
         open={open === 'multi-key-manage'}
         onOpenChange={(v) => !v && setOpen(null)}
-      />
-
-      <GroupKeyRoutingDialog
-        open={open === 'group-key-routing'}
-        onOpenChange={(value) => !value && setOpen(null)}
       />
 
       {/* Tag Batch Edit Dialog */}

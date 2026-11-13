@@ -89,6 +89,7 @@ import {
 } from '../../lib'
 import type {
   Channel,
+  ChannelTestKey,
   GetChannelsResponse,
   SearchChannelsResponse,
 } from '../../types'
@@ -97,6 +98,8 @@ import { useChannels } from '../channels-provider'
 type ChannelTestDialogProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
+  channel?: Channel
+  selectedKey?: ChannelTestKey
 }
 
 type ChannelTestDialogContentProps = ChannelTestDialogProps & {
@@ -291,22 +294,21 @@ function getTestTableColumnClass(columnId: string) {
   }
 }
 
-export function ChannelTestDialog({
-  open,
-  onOpenChange,
-}: ChannelTestDialogProps) {
+export function ChannelTestDialog(props: ChannelTestDialogProps) {
   const { currentRow } = useChannels()
+  const channel = props.channel ?? currentRow
 
-  if (!currentRow) {
+  if (!channel) {
     return null
   }
 
   return (
     <ChannelTestDialogContent
-      key={currentRow.id}
-      open={open}
-      onOpenChange={onOpenChange}
-      currentRow={currentRow}
+      key={`${channel.id}:${props.selectedKey?.key_identity ?? ''}`}
+      open={props.open}
+      onOpenChange={props.onOpenChange}
+      currentRow={channel}
+      selectedKey={props.selectedKey}
     />
   )
 }
@@ -315,6 +317,7 @@ function ChannelTestDialogContent({
   open,
   onOpenChange,
   currentRow,
+  selectedKey,
 }: ChannelTestDialogContentProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -550,6 +553,7 @@ function ChannelTestDialogContent({
             testModel: model,
             endpointType: endpointType === 'auto' ? undefined : endpointType,
             stream: effectiveStreamTest,
+            selectedKey,
             silent,
           },
           (success, responseTime, error, errorCode, skipped) => {
@@ -589,6 +593,7 @@ function ChannelTestDialogContent({
     },
     [
       currentRow,
+      selectedKey,
       endpointType,
       effectiveStreamTest,
       markModelTesting,
@@ -983,6 +988,13 @@ function ChannelTestDialogContent({
             <span className='shrink-0'>{t('Test Channel Connection')}:</span>
             <span className='min-w-0 truncate'>{currentRow.name}</span>
           </span>
+        }
+        description={
+          selectedKey
+            ? t('Selected key: #{{index}}', {
+                index: selectedKey.key_index + 1,
+              })
+            : undefined
         }
         contentClassName='max-h-[min(90dvh,var(--dialog-available-height))] overflow-y-auto sm:max-w-4xl'
         contentHeight='auto'

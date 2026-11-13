@@ -29,7 +29,7 @@ export const channelInfoSchema = z.object({
   multi_key_disabled_reason: z.record(z.string(), z.string()).optional(),
   multi_key_disabled_time: z.record(z.string(), z.number()).optional(),
   multi_key_polling_index: z.number().default(0),
-  multi_key_mode: z.enum(['random', 'polling']).default('random'),
+  multi_key_mode: z.enum(['random', 'polling', 'failover']).default('random'),
 })
 
 export type ChannelInfo = z.infer<typeof channelInfoSchema>
@@ -53,6 +53,27 @@ export const channelBalanceMonitorSchema = z.object({
 })
 export type ChannelBalanceMonitor = z.infer<typeof channelBalanceMonitorSchema>
 export type ChannelKeyBalance = z.infer<typeof channelKeyBalanceSchema>
+
+export const channelKeyConfigSchema = z.object({
+  key_identity: z.string(),
+  key_index: z.number(),
+  key_preview: z.string(),
+  groups: z.array(z.string()),
+  upstream_cost_ratio: z.number().nullable(),
+  effective_upstream_cost_ratio: z.number().nullable(),
+  status: z.number(),
+})
+
+export type ChannelKeyConfig = z.infer<typeof channelKeyConfigSchema>
+
+export type ChannelKeyConfigInput = {
+  key_identity?: string
+  key_index?: number
+  key?: string
+  groups: string[]
+  upstream_cost_ratio: number | null
+  enabled?: boolean
+}
 
 export const channelSchema = z.object({
   id: z.number(),
@@ -92,9 +113,16 @@ export const channelSchema = z.object({
     multi_key_mode: 'random',
   }),
   settings: z.string().default('{}'), // other_settings JSON
+  key_config_revision: z.string().optional(),
+  key_configs: z.array(channelKeyConfigSchema).optional(),
 })
 
 export type Channel = z.infer<typeof channelSchema>
+
+export type UpdateChannelRequest = Omit<Partial<Channel>, 'key_configs'> & {
+  key_configs?: ChannelKeyConfigInput[]
+  multi_key_mode?: 'random' | 'polling' | 'failover'
+}
 
 // ============================================================================
 // Channel Settings Types
@@ -404,6 +432,11 @@ export interface ChannelTestParams {
   test_model?: string
 }
 
+export type ChannelTestKey = {
+  key_index: number
+  key_identity: string
+}
+
 export interface CopyChannelParams {
   suffix?: string
   reset_balance?: boolean
@@ -502,7 +535,7 @@ export interface ChannelFormData {
   other?: string
   // Multi-key specific
   multi_key_mode?: 'single' | 'batch' | 'multi_to_single'
-  multi_key_type?: 'random' | 'polling'
+  multi_key_type?: 'random' | 'polling' | 'failover'
   batch_add_set_key_prefix_2_name?: boolean
 }
 
@@ -512,7 +545,8 @@ export interface ChannelFormData {
 
 export interface AddChannelRequest {
   mode: 'single' | 'batch' | 'multi_to_single'
-  multi_key_mode?: 'random' | 'polling'
+  multi_key_mode?: 'random' | 'polling' | 'failover'
+  key_configs?: ChannelKeyConfigInput[]
   batch_add_set_key_prefix_2_name?: boolean
   channel: Partial<Channel>
 }

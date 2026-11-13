@@ -145,7 +145,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
 
   const handleManageKeys = () => {
     setCurrentRow(channel)
-    setOpen('multi-key-manage')
+    setOpen('update-channel')
   }
 
   const handleToggleStatus = async (

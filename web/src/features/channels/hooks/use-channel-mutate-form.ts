@@ -36,7 +36,7 @@ import {
   transformFormDataToUpdatePayload,
   type ChannelFormValues,
 } from '../lib'
-import type { Channel } from '../types'
+import type { Channel, UpdateChannelRequest } from '../types'
 
 type UseChannelMutateFormParams = {
   currentRow?: Channel | null
@@ -48,6 +48,9 @@ type UseChannelMutateFormParams = {
 const SENSITIVE_UPDATE_FIELDS = [
   'type',
   'key',
+  'key_configs',
+  'key_config_revision',
+  'multi_key_mode',
   'base_url',
   'openai_organization',
   'param_override',
@@ -55,7 +58,7 @@ const SENSITIVE_UPDATE_FIELDS = [
   'setting',
   'settings',
   'other',
-] satisfies (keyof Channel)[]
+] satisfies (keyof UpdateChannelRequest)[]
 
 export function useChannelMutateForm(props: UseChannelMutateFormParams) {
   const { t } = useTranslation()
@@ -84,6 +87,7 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
         const payloadWithKeyMode =
           canEditSensitive &&
           props.isMultiKeyChannel &&
+          !data.key_configs &&
           data.key?.trim() &&
           data.key_mode
             ? {

@@ -30,7 +30,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 
-import { channelSchema } from '../../types'
+import { channelSchema, type ChannelTestKey } from '../../types'
 import { ChannelsProvider, useChannels } from '../channels-provider'
 import { ChannelTestDialog } from '../dialogs/channel-test-dialog'
 
@@ -42,7 +42,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function TestDialogHarness({ model }: { model: string }) {
+function TestDialogHarness({
+  model,
+  selectedKey,
+}: {
+  model: string
+  selectedKey?: ChannelTestKey
+}) {
   const { setCurrentRow } = useChannels()
   const [open, setOpen] = useState(false)
   return (
@@ -69,12 +75,16 @@ function TestDialogHarness({ model }: { model: string }) {
       >
         Open monitor
       </button>
-      <ChannelTestDialog open={open} onOpenChange={setOpen} />
+      <ChannelTestDialog
+        open={open}
+        onOpenChange={setOpen}
+        selectedKey={selectedKey}
+      />
     </>
   )
 }
 
-function renderTestDialog(model: string) {
+function renderTestDialog(model: string, selectedKey?: ChannelTestKey) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
@@ -87,7 +97,7 @@ function renderTestDialog(model: string) {
     <RouterContextProvider router={router}>
       <QueryClientProvider client={client}>
         <ChannelsProvider>
-          <TestDialogHarness model={model} />
+          <TestDialogHarness model={model} selectedKey={selectedKey} />
         </ChannelsProvider>
       </QueryClientProvider>
     </RouterContextProvider>
@@ -110,6 +120,34 @@ test('manual tests start in stream mode and preserve switching to nonstream', as
   expect(request).toHaveBeenCalledWith(
     '/api/channel/test/42',
     expect.objectContaining({ params: { model: 'gpt-5.5', stream: false } })
+  )
+})
+
+test('testing a selected key sends its zero-based identity without falling back to another key', async () => {
+  const request = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: false, message: 'Upstream API credential is invalid.' },
+  })
+  const user = userEvent.setup()
+  renderTestDialog('gpt-5.5', { key_index: 0, key_identity: 'masked-identity' })
+  await user.click(screen.getByRole('button', { name: 'Open monitor' }))
+  expect(screen.getByText('Selected key: #1')).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Test Connection' }))
+  await waitFor(() =>
+    expect(
+      screen.getByText('Upstream API credential is invalid.')
+    ).toBeVisible()
+  )
+  expect(request).toHaveBeenCalledOnce()
+  expect(request).toHaveBeenCalledWith(
+    '/api/channel/test/42',
+    expect.objectContaining({
+      params: {
+        model: 'gpt-5.5',
+        stream: true,
+        key_index: 0,
+        key_identity: 'masked-identity',
+      },
+    })
   )
 })
 

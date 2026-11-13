@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,26 @@ type testResult struct {
 	responseTime int64
 	// A nil sample means setup failed before an upstream request was attempted.
 	sample *perfmetrics.Sample
+}
+
+type channelTestKeySelection struct {
+	index    int
+	identity string
+}
+
+func (selection channelTestKeySelection) credential(channel *model.Channel) (string, error) {
+	keys := []string{channel.Key}
+	if channel.ChannelInfo.IsMultiKey {
+		keys = channel.GetKeys()
+	}
+	if selection.index < 0 || selection.index >= len(keys) {
+		return "", common.NewMessage("Key index out of range")
+	}
+	key := keys[selection.index]
+	if !hmac.Equal([]byte(selection.identity), []byte(channel.KeyIdentity(key))) {
+		return "", common.NewMessage("The key list changed. Refresh and try again.")
+	}
+	return key, nil
 }
 
 func normalizeChannelTestEndpoint(channel *model.Channel, testModel string, endpointType string) string {
@@ -269,21 +290,33 @@ func scheduledChannelTestAllowed(ctx context.Context, channelID int) (bool, erro
 }
 
 func testChannelModel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
-	if shouldSkipChannelTest(ctx, channel, testModel, endpointType) {
+	selectedKey, specificKey := ctx.Value(channelTestKeySelection{}).(channelTestKeySelection)
+	if !specificKey && shouldSkipChannelTest(ctx, channel, testModel, endpointType) {
 		return testResult{summary: channelTestSummary{Skipped: 1}}
 	}
 	_, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration)
-	if scheduled {
-		// A job's channel snapshot can outlive credential edits between models.
+	if scheduled || specificKey {
+		// A channel snapshot can outlive credential edits between models.
 		var current model.Channel
 		if err := model.DB.WithContext(ctx).First(&current, channel.Id).Error; err != nil {
 			return testResult{localErr: err, summary: channelTestSummary{Skipped: 1}}
 		}
-		if current.Status != common.ChannelStatusEnabled || shouldSkipChannelTest(ctx, &current, testModel, endpointType) ||
-			!slices.ContainsFunc(current.GetModels(), func(name string) bool { return strings.TrimSpace(name) == testModel }) {
+		if scheduled && (current.Status != common.ChannelStatusEnabled || shouldSkipChannelTest(ctx, &current, testModel, endpointType) ||
+			!slices.ContainsFunc(current.GetModels(), func(name string) bool { return strings.TrimSpace(name) == testModel })) {
 			return testResult{summary: channelTestSummary{Skipped: 1}}
 		}
 		channel = &current
+	}
+	var selectedCredential string
+	if specificKey {
+		var err error
+		selectedCredential, err = selectedKey.credential(channel)
+		if err != nil {
+			return testResult{localErr: err}
+		}
+	}
+	if specificKey && shouldSkipChannelTest(ctx, channel, testModel, endpointType) {
+		return testResult{summary: channelTestSummary{Skipped: 1}}
 	}
 	type testKey struct {
 		value string
@@ -296,7 +329,12 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 	lock.Lock()
 	snapshot := *channel
 	keys := []testKey{{value: channel.Key, index: -1}}
-	if channel.ChannelInfo.IsMultiKey {
+	if specificKey {
+		keys[0].value = selectedCredential
+		if channel.ChannelInfo.IsMultiKey {
+			keys[0].index = selectedKey.index
+		}
+	} else if channel.ChannelInfo.IsMultiKey {
 		keys = nil
 		for index, key := range channel.GetKeys() {
 			status, configured := channel.ChannelInfo.MultiKeyStatusList[index]
@@ -341,19 +379,19 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 				continue
 			}
 		}
-		if !attempted {
+		if !attempted && !specificKey {
 			if err := model.RecordChannelModelProbe(channel.Id, testModel, time.Now().UnixMilli(), nil); err != nil {
 				common.SysError("failed to record channel check time: " + err.Error())
 			}
-			attempted = true
 		}
+		attempted = true
 		// Pin only this test attempt to a key. Calling the routing selector on
 		// the original multi-key channel would advance its persistent cursor.
 		probe := snapshot
 		probe.Key, probe.Keys = key.value, nil
 		probe.ChannelInfo.IsMultiKey = false
 		result = testChannelModelAttempt(ctx, &probe, testUserID, testModel, endpointType, isStream, key.index)
-		for result.context != nil {
+		for result.context != nil && !specificKey {
 			// The attempt's deadline is already closed; cancellation of the
 			// parent probe, rather than that completed attempt, stops failover.
 			result.context.Request = result.context.Request.WithContext(ctx)
@@ -387,6 +425,11 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		}
 		if err := model.RecordChannelKeyObservation(&snapshot, testModel, key.value, time.Now().UnixMilli(), &result.sample.Success, statusCode, errorMessage, perfmetrics.SourceProbe); err != nil {
 			common.SysError(fmt.Sprintf("channel key observation persistence failed: channel_id=%d model=%q", channel.Id, testModel))
+		}
+		// A selected credential does not represent the remaining keys or delay
+		// their next automatic probe, even when this one succeeds.
+		if specificKey {
+			return result
 		}
 		if result.sample.Success {
 			if successfulResult == nil {
@@ -1203,7 +1246,23 @@ func TestChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	channel, err := model.CacheGetChannel(channelId)
+	query := c.Request.URL.Query()
+	specificKey := query.Has("key_index") || query.Has("key_identity")
+	var selection channelTestKeySelection
+	if specificKey {
+		selection.index, err = strconv.Atoi(query.Get("key_index"))
+		selection.identity = query.Get("key_identity")
+		if err != nil || len(query["key_index"]) != 1 || len(query["key_identity"]) != 1 || selection.identity == "" {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+	}
+	var channel *model.Channel
+	if specificKey {
+		channel, err = model.GetChannelById(channelId, true)
+	} else {
+		channel, err = model.CacheGetChannel(channelId)
+	}
 	if err != nil {
 		channel, err = model.GetChannelById(channelId, true)
 		if err != nil {
@@ -1211,11 +1270,12 @@ func TestChannel(c *gin.Context) {
 			return
 		}
 	}
-	//defer func() {
-	//	if channel.ChannelInfo.IsMultiKey {
-	//		go func() { _ = channel.SaveChannelInfo() }()
-	//	}
-	//}()
+	if specificKey {
+		if _, err := selection.credential(channel); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	testModel := c.Query("model")
 	endpointType := c.Query("endpoint_type")
 	isStream, _ := strconv.ParseBool(c.DefaultQuery("stream", "true"))
@@ -1229,6 +1289,9 @@ func TestChannel(c *gin.Context) {
 	if c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
+	if specificKey {
+		requestCtx = context.WithValue(requestCtx, channelTestKeySelection{}, selection)
+	}
 	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
 	if err := perfmetrics.Flush(); err != nil {
 		common.SysError("failed to persist manual channel monitoring: " + err.Error())
@@ -1236,25 +1299,30 @@ func TestChannel(c *gin.Context) {
 	if result.localErr != nil {
 		resp := gin.H{
 			"success": false,
-			"message": result.localErr.Error(),
+			"message": model.SanitizeChannelObservationError(channel, channel.Key, result.localErr.Error()),
 			"time":    0.0,
 		}
 		if result.newAPIError != nil {
 			resp["error_code"] = result.newAPIError.GetErrorCode()
+		}
+		var message *common.Message
+		if errors.As(result.localErr, &message) && len(message.Params) == 0 &&
+			(message.Key == "Key index out of range" || message.Key == "The key list changed. Refresh and try again.") {
+			resp["message_key"] = message.Key
 		}
 		c.JSON(http.StatusOK, resp)
 		return
 	}
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
-	if result.summary.Tested > 0 {
+	if result.summary.Tested > 0 && !specificKey {
 		go channel.UpdateResponseTime(result.responseTime)
 	}
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success":    false,
-			"message":    result.newAPIError.Error(),
+			"message":    model.SanitizeChannelObservationError(channel, channel.Key, result.newAPIError.Error()),
 			"time":       consumedTime,
 			"error_code": result.newAPIError.GetErrorCode(),
 		})

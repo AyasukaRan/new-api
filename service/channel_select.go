@@ -119,10 +119,21 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	}
 	var channel *model.Channel
 	var err error
+	var keyRetry *model.Channel
+	if param.GetRetry() > 0 {
+		keyRetry, err = SelectChannelKeyRetry(param.Ctx, param.ModelName)
+		if err != nil {
+			return nil, GetSelectedRequestGroup(param.Ctx), err
+		}
+	}
+	var exhausted map[string]map[int]bool
+	if value, exists := param.Ctx.Get(channelKeyFailoverContext); exists {
+		exhausted = value.(*channelKeyFailover).Exhausted
+	}
 	selectGroup := param.TokenGroup
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 	filters := GetChannelConstraints(param.Ctx).Filters
-	affinityRetryOffset := param.Ctx.GetInt(ginKeyChannelAffinityRetryOffset)
+	affinityRetryOffset := param.Ctx.GetInt(ginKeyChannelAffinityRetryOffset) + param.Ctx.GetInt(channelKeyRetryOffset)
 
 	if param.TokenGroup == "auto" {
 		autoGroups := GetRequestAutoGroups(param.Ctx, userGroup)
@@ -155,9 +166,14 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 
 			var groupErr error
 			var tiered bool
-			channel, tiered, groupErr = selectGroupKeyTier(param.Ctx, autoGroup, param.ModelName, 0, 0)
-			if !tiered && groupErr == nil {
-				channel, groupErr = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, filters)
+			if keyRetry != nil && autoGroup == GetSelectedRequestGroup(param.Ctx) {
+				channel = keyRetry
+				param.Ctx.Set(channelKeyRetryOffset, param.Ctx.GetInt(channelKeyRetryOffset)+1)
+			} else {
+				channel, tiered, groupErr = selectGroupKeyTier(param.Ctx, autoGroup, param.ModelName, 0, 0)
+				if !tiered && groupErr == nil {
+					channel, groupErr = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, filters, exhausted[autoGroup])
+				}
 			}
 			var probeErr *model.ChannelProbeError
 			if errors.As(groupErr, &probeErr) {
@@ -178,6 +194,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				param.SetRetry(0)
 				affinityRetryOffset = 0
 				param.Ctx.Set(ginKeyChannelAffinityRetryOffset, 0)
+				param.Ctx.Set(channelKeyRetryOffset, 0)
 				continue
 			}
 			common.SetContextKey(param.Ctx, constant.ContextKeyAutoGroup, autoGroup)
@@ -199,6 +216,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				param.SetRetry(0)
 				param.ResetRetryNextTry()
 				param.Ctx.Set(ginKeyChannelAffinityRetryOffset, 0)
+				param.Ctx.Set(channelKeyRetryOffset, 0)
 			} else {
 				// Stay in current group, save current state
 				// 保持在当前分组，保存当前状态
@@ -207,10 +225,15 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		var tiered bool
-		channel, tiered, err = selectGroupKeyTier(param.Ctx, param.TokenGroup, param.ModelName, 0, 0)
-		if !tiered && err == nil {
-			channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, max(param.GetRetry()-affinityRetryOffset, 0), filters)
+		if keyRetry != nil {
+			channel = keyRetry
+			param.Ctx.Set(channelKeyRetryOffset, param.Ctx.GetInt(channelKeyRetryOffset)+1)
+		} else {
+			var tiered bool
+			channel, tiered, err = selectGroupKeyTier(param.Ctx, param.TokenGroup, param.ModelName, 0, 0)
+			if !tiered && err == nil {
+				channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, max(param.GetRetry()-affinityRetryOffset, 0), filters, exhausted[param.TokenGroup])
+			}
 		}
 		if err != nil {
 			return nil, param.TokenGroup, err

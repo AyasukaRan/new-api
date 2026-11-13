@@ -210,6 +210,7 @@ import {
 import type { Channel } from '../../types'
 import { ChannelBalanceSettings } from '../channel-balance-settings'
 import { ChannelGroupModelsSettings } from '../channel-group-models-settings'
+import { ChannelKeyEditor } from '../channel-key-editor'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
 import { ChannelTypeLogo } from '../channel-type-badge'
@@ -288,6 +289,9 @@ const SENSITIVE_FORM_FIELDS = [
   'endpoint_mode',
   'additional_base_urls',
   'key',
+  'key_configs',
+  'key_config_revision',
+  'multi_key_type',
   'openai_organization',
   'other',
   'key_mode',
@@ -426,7 +430,7 @@ export function ChannelMutateDrawer({
 }: ChannelMutateDrawerProps) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const { setOpen } = useChannels()
+  const { setOpen, sensitiveVisible } = useChannels()
   const currentUser = useAuthStore((s) => s.auth.user)
   const canEditSensitive = hasPermission(
     currentUser,
@@ -615,6 +619,9 @@ export function ChannelMutateDrawer({
   const currentTaskPluginKey = formValues.task_plugin_key
   const currentTaskExtendPluginKeys = formValues.task_extend_plugin_keys
   const currentKey = formValues.key
+  const currentKeyConfigs = Array.isArray(formValues.key_configs)
+    ? formValues.key_configs
+    : undefined
   const currentModels = formValues.models
   const currentModelMapping = formValues.model_mapping
   const awsKeyType = formValues.aws_key_type
@@ -711,6 +718,12 @@ export function ChannelMutateDrawer({
   const isChannelDetailLoading = isEditing && isChannelLoading
   const supportsMultiKeyAddMode =
     currentType !== 57 && !(currentType === 41 && vertexKeyType === 'api_key')
+  const useUnifiedKeyEditor =
+    currentType !== CHANNEL_TYPE_TASK_PLUGIN &&
+    currentType !== 57 &&
+    !(currentType === 41 && vertexKeyType !== 'api_key') &&
+    multiKeyMode !== 'batch' &&
+    (!isEditing || channelData?.data?.key_configs !== undefined)
   const addModeOptions = useMemo(
     () =>
       supportsMultiKeyAddMode
@@ -1098,6 +1111,13 @@ export function ChannelMutateDrawer({
     }
   }, [isEditing, channelId, channelData, form, open])
 
+  useEffect(() => {
+    if (!open || isEditing) return
+    // The unified editor starts with cost-aware failover; complex credentials
+    // and batch creation retain their existing strategy defaults.
+    form.setValue('multi_key_type', useUnifiedKeyEditor ? 'failover' : 'random')
+  }, [form, open, isEditing, useUnifiedKeyEditor])
+
   // Handle type change - set default values for specific types
   useEffect(() => {
     if (isEditing) return // Don't auto-set defaults when editing
@@ -1232,7 +1252,9 @@ export function ChannelMutateDrawer({
     !isEditing ||
     (currentType === CHANNEL_TYPE_ADVANCED_CUSTOM && canEditSensitive)
   const canDiscoverModels = previewModels ? canEditSensitive : canOperateChannel
-  const previewKey = isEditing ? undefined : currentKey
+  const previewKey = isEditing
+    ? undefined
+    : currentKey || currentKeyConfigs?.find((key) => key.key)?.key
   const previewRequest = useMemo<ChannelModelDiscoveryRequest>(
     () => ({
       kind: 'preview',
@@ -1634,8 +1656,51 @@ export function ChannelMutateDrawer({
     async (data: ChannelFormValues) => {
       if (isEditing && !channelData?.data) return
       if (!isEditing && (!providerTarget || !canEditSensitive)) return
+      if (!useUnifiedKeyEditor) {
+        delete data.key_configs
+        delete data.key_config_revision
+      }
+      if (useUnifiedKeyEditor) {
+        const added = data.key
+          .split(/\r?\n/)
+          .map((key) => key.trim())
+          .filter(Boolean)
+          .map((key) => ({
+            key,
+            key_index: -1,
+            key_identity: '',
+            key_preview: '',
+            groups: [],
+            upstream_cost_ratio: null,
+            effective_upstream_cost_ratio: null,
+            status: 1,
+          }))
+        data.key_configs = [...(data.key_configs ?? []), ...added]
+        data.key = ''
+        if (
+          data.key_configs.some(
+            (row) => !row.key_identity && /[\r\n]|^\s*[{[]/.test(row.key ?? '')
+          )
+        ) {
+          form.setError('key_configs', {
+            type: 'manual',
+            message: 'Enter one API key per row',
+          })
+          return
+        }
+        if (
+          !data.key_configs.length ||
+          data.key_configs.some((key) => !key.key_identity && !key.key?.trim())
+        ) {
+          form.setError('key_configs', {
+            type: 'manual',
+            message: 'At least one key is required',
+          })
+          return
+        }
+      }
       // Validate key is required when creating
-      if (!isEditing && !data.key?.trim()) {
+      if (!isEditing && !data.key?.trim() && !data.key_configs?.length) {
         form.setError('key', {
           type: 'manual',
           message: ERROR_MESSAGES.REQUIRED_KEY,
@@ -1754,6 +1819,7 @@ export function ChannelMutateDrawer({
     },
     [
       isEditing,
+      useUnifiedKeyEditor,
       providerTarget,
       canEditSensitive,
       sensitiveLocked,
@@ -4513,181 +4579,209 @@ export function ChannelMutateDrawer({
                 />
               )}
 
-              <FormField
-                control={form.control}
-                name='key'
-                render={({ field }) => {
-                  let keyPlaceholder = t(getKeyPromptForType(currentType))
-                  if (isEditing) {
-                    keyPlaceholder = t('Leave empty to keep existing key')
-                  } else if (
-                    currentType === 33 &&
-                    awsKeyType === 'api_key' &&
-                    isBatchMode
-                  ) {
-                    keyPlaceholder = t(
-                      'Enter API Key, one per line, format: APIKey|Region'
-                    )
-                  } else if (currentType === 33 && awsKeyType === 'api_key') {
-                    keyPlaceholder = t('Enter API Key, format: APIKey|Region')
-                  } else if (currentType === 33 && isBatchMode) {
-                    keyPlaceholder = t(
-                      'Enter key, one per line, format: AccessKey|SecretAccessKey|Region'
-                    )
-                  } else if (currentType === 33) {
-                    keyPlaceholder = t(
-                      'Enter key, format: AccessKey|SecretAccessKey|Region'
-                    )
-                  } else if (isBatchMode) {
-                    keyPlaceholder = t(
-                      'Enter one key per line for batch creation'
-                    )
-                  }
-
-                  let keyDescription: ReactNode = t(FIELD_DESCRIPTIONS.KEY)
-                  if (isEditing) {
-                    let keyModeDescription = t(
-                      'Append mode: New keys will be added to the end of the existing key list'
-                    )
-                    if (keyMode === 'replace') {
-                      keyModeDescription = t(
-                        'Replace mode: Will completely replace all existing keys'
+              {useUnifiedKeyEditor ? (
+                <FormField
+                  control={form.control}
+                  name='key_configs'
+                  render={({ field }) => (
+                    <FormItem>
+                      <ChannelKeyEditor
+                        key={channelId ?? `new-${currentType}`}
+                        value={Array.isArray(field.value) ? field.value : []}
+                        onChange={field.onChange}
+                        mode={multiKeyType ?? 'failover'}
+                        onModeChange={(mode) =>
+                          form.setValue('multi_key_type', mode, {
+                            shouldDirty: true,
+                          })
+                        }
+                        channelGroups={formValues.group}
+                        channelCost={formValues.upstream_cost_ratio ?? null}
+                        channel={channelData?.data}
+                        disabled={sensitiveLocked || isSubmitting}
+                        sensitiveVisible={sensitiveVisible}
+                        keyPlaceholder={t(getKeyPromptForType(currentType))}
+                        pendingKeys={currentKey}
+                        onPendingKeysChange={(key) =>
+                          form.setValue('key', key, { shouldDirty: true })
+                        }
+                      />
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ) : (
+                <FormField
+                  control={form.control}
+                  name='key'
+                  render={({ field }) => {
+                    let keyPlaceholder = t(getKeyPromptForType(currentType))
+                    if (isEditing) {
+                      keyPlaceholder = t('Leave empty to keep existing key')
+                    } else if (
+                      currentType === 33 &&
+                      awsKeyType === 'api_key' &&
+                      isBatchMode
+                    ) {
+                      keyPlaceholder = t(
+                        'Enter API Key, one per line, format: APIKey|Region'
+                      )
+                    } else if (currentType === 33 && awsKeyType === 'api_key') {
+                      keyPlaceholder = t('Enter API Key, format: APIKey|Region')
+                    } else if (currentType === 33 && isBatchMode) {
+                      keyPlaceholder = t(
+                        'Enter key, one per line, format: AccessKey|SecretAccessKey|Region'
+                      )
+                    } else if (currentType === 33) {
+                      keyPlaceholder = t(
+                        'Enter key, format: AccessKey|SecretAccessKey|Region'
+                      )
+                    } else if (isBatchMode) {
+                      keyPlaceholder = t(
+                        'Enter one key per line for batch creation'
                       )
                     }
-                    keyDescription = (
-                      <>
-                        {t(
-                          'Enter new key to update, or leave empty to keep current key'
-                        )}
-                        {isMultiKeyChannel && (
-                          <span className='text-warning mt-1 block'>
-                            {keyModeDescription}
-                          </span>
-                        )}
-                      </>
-                    )
-                  } else if (isBatchMode) {
-                    keyDescription = t(
-                      'Enter one API key per line for batch creation'
-                    )
-                  }
-                  return (
-                    <FormItem>
-                      <FormLabel required>{t('API Key')}</FormLabel>
-                      <FormControl>
-                        <Textarea
-                          placeholder={keyPlaceholder}
-                          rows={isBatchMode ? 8 : 4}
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        <span className='flex flex-col gap-2'>
-                          <span>{keyDescription}</span>
-                          {!isEditing && isBatchMode && (
-                            <Button
-                              type='button'
-                              variant='outline'
-                              size='sm'
-                              onClick={handleDeduplicateKeys}
-                              className='w-fit'
-                            >
-                              <Trash2 className='mr-2 h-4 w-4' />
-                              {t('Remove Duplicates')}
-                            </Button>
+
+                    let keyDescription: ReactNode = t(FIELD_DESCRIPTIONS.KEY)
+                    if (isEditing) {
+                      let keyModeDescription = t(
+                        'Append mode: New keys will be added to the end of the existing key list'
+                      )
+                      if (keyMode === 'replace') {
+                        keyModeDescription = t(
+                          'Replace mode: Will completely replace all existing keys'
+                        )
+                      }
+                      keyDescription = (
+                        <>
+                          {t(
+                            'Enter new key to update, or leave empty to keep current key'
                           )}
-                        </span>
-                      </FormDescription>
-                      {isEditing && canRevealChannelKey && (
-                        <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>
-                          <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                            <div>
-                              <p className='text-sm font-medium'>
-                                {t('Current key')}
-                                {isMultiKeyChannel && (
-                                  <Badge
-                                    variant='secondary'
-                                    className='ml-2 font-normal'
-                                    aria-label={t('Count')}
-                                  >
-                                    {formatNumber(savedKeyCount)}
-                                  </Badge>
-                                )}
-                              </p>
-                              <p className='text-muted-foreground text-xs'>
-                                {t(
-                                  'Verification required to reveal the saved key.'
-                                )}
-                              </p>
-                            </div>
-                            <div className='flex items-center gap-2'>
+                          {isMultiKeyChannel && (
+                            <span className='text-warning mt-1 block'>
+                              {keyModeDescription}
+                            </span>
+                          )}
+                        </>
+                      )
+                    } else if (isBatchMode) {
+                      keyDescription = t(
+                        'Enter one API key per line for batch creation'
+                      )
+                    }
+                    return (
+                      <FormItem>
+                        <FormLabel required>{t('API Key')}</FormLabel>
+                        <FormControl>
+                          <Textarea
+                            placeholder={keyPlaceholder}
+                            rows={isBatchMode ? 8 : 4}
+                            {...field}
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          <span className='flex flex-col gap-2'>
+                            <span>{keyDescription}</span>
+                            {!isEditing && isBatchMode && (
                               <Button
                                 type='button'
                                 variant='outline'
                                 size='sm'
-                                onClick={handleRevealKey}
-                                disabled={
-                                  isChannelKeyLoading || verification.isActive
-                                }
+                                onClick={handleDeduplicateKeys}
+                                className='w-fit'
                               >
-                                {isChannelKeyLoading ||
-                                verification.isActive ? (
-                                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                                ) : (
-                                  <Eye className='mr-2 h-4 w-4' />
-                                )}
-                                {t('Reveal key')}
+                                <Trash2 className='mr-2 h-4 w-4' />
+                                {t('Remove Duplicates')}
                               </Button>
-                              <Button
-                                type='button'
-                                variant='ghost'
-                                size='sm'
-                                onClick={async () => {
-                                  if (channelKey) {
-                                    await copyToClipboard(channelKey)
-                                  }
-                                }}
-                                disabled={!channelKey}
-                              >
-                                <Copy className='mr-2 h-4 w-4' />
-                                {t('Copy')}
-                              </Button>
-                            </div>
-                          </div>
-                          {isMultiKeyChannel ||
-                          /[\r\n]/.test(channelKey ?? '') ? (
-                            <Textarea
-                              readOnly
-                              aria-label={t('Current key')}
-                              value={
-                                channelKey ??
-                                Array(Math.min(8, savedKeyCount))
-                                  .fill('••••••••')
-                                  .join('\n')
-                              }
-                              placeholder={t('Hidden — verify to reveal')}
-                              rows={isMultiKeyChannel ? savedKeyRows : 4}
-                              wrap='off'
-                              autoComplete='off'
-                              spellCheck={false}
-                              className='field-sizing-fixed max-h-64 font-mono'
-                            />
-                          ) : (
-                            <Input
-                              readOnly
-                              aria-label={t('Current key')}
-                              value={channelKey ?? ''}
-                              placeholder={t('Hidden — verify to reveal')}
-                              className='font-mono'
-                            />
-                          )}
-                        </div>
-                      )}
-                      <FormMessage />
-                    </FormItem>
-                  )
-                }}
-              />
+                            )}
+                          </span>
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )
+                  }}
+                />
+              )}
+
+              {isEditing && canRevealChannelKey && (
+                <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>
+                  <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                    <div>
+                      <p className='text-sm font-medium'>
+                        {t('Current key')}
+                        {isMultiKeyChannel && (
+                          <Badge
+                            variant='secondary'
+                            className='ml-2 font-normal'
+                            aria-label={t('Count')}
+                          >
+                            {formatNumber(savedKeyCount)}
+                          </Badge>
+                        )}
+                      </p>
+                      <p className='text-muted-foreground text-xs'>
+                        {t('Verification required to reveal the saved key.')}
+                      </p>
+                    </div>
+                    <div className='flex items-center gap-2'>
+                      <Button
+                        type='button'
+                        variant='outline'
+                        size='sm'
+                        onClick={handleRevealKey}
+                        disabled={isChannelKeyLoading || verification.isActive}
+                      >
+                        {isChannelKeyLoading || verification.isActive ? (
+                          <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                        ) : (
+                          <Eye className='mr-2 h-4 w-4' />
+                        )}
+                        {t('Reveal key')}
+                      </Button>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='sm'
+                        onClick={async () => {
+                          if (channelKey) {
+                            await copyToClipboard(channelKey)
+                          }
+                        }}
+                        disabled={!channelKey}
+                      >
+                        <Copy className='mr-2 h-4 w-4' />
+                        {t('Copy')}
+                      </Button>
+                    </div>
+                  </div>
+                  {isMultiKeyChannel || /[\r\n]/.test(channelKey ?? '') ? (
+                    <Textarea
+                      readOnly
+                      aria-label={t('Current key')}
+                      value={
+                        channelKey ??
+                        Array(Math.min(8, savedKeyCount))
+                          .fill('••••••••')
+                          .join('\n')
+                      }
+                      placeholder={t('Hidden — verify to reveal')}
+                      rows={isMultiKeyChannel ? savedKeyRows : 4}
+                      wrap='off'
+                      autoComplete='off'
+                      spellCheck={false}
+                      className='field-sizing-fixed max-h-64 font-mono'
+                    />
+                  ) : (
+                    <Input
+                      readOnly
+                      aria-label={t('Current key')}
+                      value={channelKey ?? ''}
+                      placeholder={t('Hidden — verify to reveal')}
+                      className='font-mono'
+                    />
+                  )}
+                </div>
+              )}
 
               {currentType === 57 && (
                 <div className='border-border/60 flex flex-col gap-3 border-y py-4'>
@@ -4730,7 +4824,7 @@ export function ChannelMutateDrawer({
                 </div>
               )}
 
-              {isEditing && isMultiKeyChannel && (
+              {!useUnifiedKeyEditor && isEditing && isMultiKeyChannel && (
                 <FormField
                   control={form.control}
                   name='key_mode'
@@ -4783,63 +4877,64 @@ export function ChannelMutateDrawer({
                 />
               )}
 
-              {(isMultiKeyChannel ||
-                (!isEditing && multiKeyMode === 'multi_to_single')) && (
-                <FormField
-                  control={form.control}
-                  name='multi_key_type'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t('Multi-Key Strategy')}</FormLabel>
-                      <Select
-                        disabled={sensitiveLocked}
-                        items={[
-                          {
-                            value: 'random',
-                            label: t('Random'),
-                          },
-                          {
-                            value: 'polling',
-                            label: t('Polling'),
-                          },
-                        ]}
-                        onValueChange={field.onChange}
-                        value={field.value}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent alignItemWithTrigger={false}>
-                          <SelectGroup>
-                            <SelectItem value='random'>
-                              {t('Random')}
-                            </SelectItem>
-                            <SelectItem value='polling'>
-                              {t('Polling')}
-                            </SelectItem>
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                      <FormDescription>
-                        {multiKeyType === 'polling' ? (
-                          <span className='text-warning'>
-                            {t(
-                              'Polling mode requires Redis and memory cache, otherwise performance will be significantly degraded'
-                            )}
-                          </span>
-                        ) : (
-                          t(
-                            'Randomly select a key from the pool for each request'
-                          )
-                        )}
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              )}
+              {!useUnifiedKeyEditor &&
+                (isMultiKeyChannel ||
+                  (!isEditing && multiKeyMode === 'multi_to_single')) && (
+                  <FormField
+                    control={form.control}
+                    name='multi_key_type'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Multi-Key Strategy')}</FormLabel>
+                        <Select
+                          disabled={sensitiveLocked}
+                          items={[
+                            {
+                              value: 'random',
+                              label: t('Random'),
+                            },
+                            {
+                              value: 'polling',
+                              label: t('Polling'),
+                            },
+                          ]}
+                          onValueChange={field.onChange}
+                          value={field.value}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent alignItemWithTrigger={false}>
+                            <SelectGroup>
+                              <SelectItem value='random'>
+                                {t('Random')}
+                              </SelectItem>
+                              <SelectItem value='polling'>
+                                {t('Polling')}
+                              </SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <FormDescription>
+                          {multiKeyType === 'polling' ? (
+                            <span className='text-warning'>
+                              {t(
+                                'Polling mode requires Redis and memory cache, otherwise performance will be significantly degraded'
+                              )}
+                            </span>
+                          ) : (
+                            t(
+                              'Randomly select a key from the pool for each request'
+                            )
+                          )}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
             </ChannelAuthSection>
           </fieldset>
         </div>

@@ -24,6 +24,11 @@ import {
   RouterContextProvider,
 } from '@tanstack/react-router'
 import {
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from '@tanstack/react-table'
+import {
   act,
   cleanup,
   fireEvent,
@@ -55,7 +60,8 @@ import {
 } from '../../lib/channel-form'
 import { channelSchema, type Channel } from '../../types'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
-import { ChannelsProvider } from '../channels-provider'
+import { useChannelsColumns } from '../channels-columns'
+import { ChannelsProvider, useChannels } from '../channels-provider'
 import { ChannelMutateDrawer } from '../drawers/channel-mutate-drawer'
 
 const originalAuth = useAuthStore.getState().auth
@@ -104,7 +110,31 @@ function deferredResponse<T>() {
   return { promise, resolve }
 }
 
+function KeyEditEntry() {
+  const { open, setOpen, currentRow } = useChannels()
+  const table = useReactTable({
+    data: [editingChannel],
+    columns: useChannelsColumns({ enableSelection: false }),
+    getCoreRowModel: getCoreRowModel(),
+  })
+  const cell = table
+    .getRowModel()
+    .rows[0]?.getAllCells()
+    .find((item) => item.column.id === 'type')
+  return (
+    <>
+      {cell && flexRender(cell.column.columnDef.cell, cell.getContext())}
+      <ChannelMutateDrawer
+        open={open === 'update-channel'}
+        onOpenChange={(value) => !value && setOpen(null)}
+        currentRow={currentRow}
+      />
+    </>
+  )
+}
+
 function ConfigurationHarness(props: {
+  keyEntry?: boolean
   initialOpen?: boolean
   currentRow?: Channel
   clearRowOnClose?: boolean
@@ -123,13 +153,17 @@ function ConfigurationHarness(props: {
           <button type='button' onClick={() => setOpen(true)}>
             Open channel
           </button>
-          <ChannelMutateDrawer
-            open={open}
-            onOpenChange={setOpen}
-            currentRow={
-              open || !props.clearRowOnClose ? props.currentRow : null
-            }
-          />
+          {props.keyEntry ? (
+            <KeyEditEntry />
+          ) : (
+            <ChannelMutateDrawer
+              open={open}
+              onOpenChange={setOpen}
+              currentRow={
+                open || !props.clearRowOnClose ? props.currentRow : null
+              }
+            />
+          )}
         </ChannelsProvider>
       </QueryClientProvider>
     </RouterContextProvider>
@@ -953,11 +987,13 @@ test.each(['create', 'edit'])(
         expect(post).toHaveBeenCalledWith(
           '/api/channel',
           expect.objectContaining({
+            key_configs: [
+              { key: 'channel-key', groups: [], upstream_cost_ratio: null },
+            ],
             channel: expect.objectContaining({
               type: 1,
               name: 'Combined channel',
               base_url: 'https://channel.example',
-              key: 'channel-key',
               models: 'sora-2',
             }),
           }),
@@ -2275,6 +2311,18 @@ test('an operator without sensitive write permission can discover saved models a
       },
     },
   })
+  editingChannel.key_config_revision = 'readonly-revision'
+  editingChannel.key_configs = [
+    {
+      key_identity: 'readonly-key',
+      key_index: 0,
+      key_preview: 'masked-readonly',
+      groups: [],
+      upstream_cost_ratio: null,
+      effective_upstream_cost_ratio: null,
+      status: 1,
+    },
+  ]
   const put = vi
     .spyOn(api, 'put')
     .mockResolvedValue({ data: { success: true } })
@@ -2282,7 +2330,10 @@ test('an operator without sensitive write permission can discover saved models a
   render(<ConfigurationHarness currentRow={editingChannel} />)
   await screen.findByDisplayValue('Existing channel')
   expect(screen.getByRole('button', { name: 'Change provider' })).toBeDisabled()
-  expect(screen.getByLabelText('API Key *')).toBeDisabled()
+  expect(screen.getByRole('textbox', { name: 'Add keys' })).toBeDisabled()
+  expect(
+    screen.getByRole('spinbutton', { name: 'Upstream cost multiplier' })
+  ).toBeDisabled()
   const quick = within(screen.getByRole('group', { name: 'Quick options' }))
   for (const name of [
     'Pass Through Body',
@@ -2317,6 +2368,9 @@ test('an operator without sensitive write permission can discover saved models a
   expect(put.mock.calls[0]?.[1]).toMatchObject({ id: 42, priority: 8 })
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('setting')
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
+  expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key_configs')
+  expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key_config_revision')
+  expect(put.mock.calls[0]?.[1]).not.toHaveProperty('multi_key_mode')
 })
 
 test.each([
@@ -3584,4 +3638,150 @@ test('upstream cost multiplier cannot be changed without sensitive channel permi
   expect(
     screen.getByRole('spinbutton', { name: 'Upstream cost multiplier' })
   ).toBeDisabled()
+})
+
+test('key entry opens channel editing and preserves drafts while testing an exact key before atomic save', async () => {
+  editingChannel.group = 'default,premium'
+  editingChannel.channel_info = {
+    ...editingChannel.channel_info,
+    is_multi_key: true,
+    multi_key_size: 2,
+    multi_key_mode: 'failover',
+  }
+  editingChannel.key_config_revision = 'revision-before-edit'
+  editingChannel.key_configs = [
+    {
+      key_identity: 'identity-a',
+      key_index: 0,
+      key_preview: 'masked-first',
+      groups: ['default'],
+      upstream_cost_ratio: 0.3,
+      effective_upstream_cost_ratio: 0.3,
+      status: 1,
+    },
+    {
+      key_identity: 'identity-b',
+      key_index: 1,
+      key_preview: 'masked-second',
+      groups: [],
+      upstream_cost_ratio: 1.1,
+      effective_upstream_cost_ratio: 1.1,
+      status: 1,
+    },
+  ]
+  const originalGet = vi.mocked(api.get).getMockImplementation()
+  if (!originalGet) throw new Error('Missing request fixture')
+  const get = vi.mocked(api.get).mockImplementation(async (...args) => {
+    if (args[0] === '/api/channel/test/42') {
+      return {
+        data: { success: true, time: 0.2, data: { tested: 1, succeeded: 1 } },
+      }
+    }
+    return originalGet(...args)
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness keyEntry />)
+  screen.getByRole('button', { name: 'Manage Keys' }).focus()
+  await user.keyboard('{Enter}')
+  const name = await screen.findByDisplayValue('Existing channel')
+  await user.clear(name)
+  await user.type(name, 'Unsaved channel name')
+  const first = () => {
+    const item = screen.getByText('masked-first').closest('li')
+    if (!item) throw new Error('Missing first key')
+    return within(item)
+  }
+  const cost = first().getByRole('spinbutton', {
+    name: 'Upstream cost multiplier',
+  })
+  await user.clear(cost)
+  await user.type(cost, '0.2')
+  await user.click(first().getByRole('switch', { name: 'Enabled' }))
+  await user.click(first().getByRole('button', { name: 'Move Key #1 down' }))
+  await user.click(first().getByRole('button', { name: 'Test key' }))
+  expect(await screen.findByText('Selected key: #1')).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Test Connection' }))
+  expect(await screen.findByText('Success', { exact: true })).toBeVisible()
+  expect(get).toHaveBeenCalledWith(
+    '/api/channel/test/42',
+    expect.objectContaining({
+      params: expect.objectContaining({
+        key_index: 0,
+        key_identity: 'identity-a',
+        stream: true,
+      }),
+    })
+  )
+  await user.keyboard('{Escape}')
+  expect(await screen.findByDisplayValue('Unsaved channel name')).toBeVisible()
+  expect(
+    first().getByRole('spinbutton', { name: 'Upstream cost multiplier' })
+  ).toHaveValue(0.2)
+  expect(first().getByRole('switch', { name: 'Enabled' })).not.toBeChecked()
+  expect(
+    within(screen.getByRole('list', { name: 'Key fallback order' }))
+      .getAllByRole('listitem')
+      .map((item) => within(item).getByText(/^masked-/).textContent)
+  ).toEqual(['masked-second', 'masked-first'])
+  await user.type(
+    screen.getByRole('textbox', { name: 'Add keys' }),
+    'new-key-without-add-click'
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalledOnce())
+  const payload = put.mock.calls[0]?.[1]
+  expect(payload).toMatchObject({
+    name: 'Unsaved channel name',
+    key_config_revision: 'revision-before-edit',
+    multi_key_mode: 'failover',
+    key_configs: [
+      {
+        key_identity: 'identity-b',
+        key_index: 1,
+        groups: [],
+        upstream_cost_ratio: 1.1,
+      },
+      {
+        key_identity: 'identity-a',
+        key_index: 0,
+        groups: ['default'],
+        upstream_cost_ratio: 0.2,
+        enabled: false,
+      },
+      {
+        key: 'new-key-without-add-click',
+        groups: [],
+        upstream_cost_ratio: null,
+      },
+    ],
+  })
+  expect(payload).not.toHaveProperty('key')
+  expect(payload).not.toHaveProperty('key_mode')
+})
+
+test('task plugin JSON credentials retain the legacy single credential path', async () => {
+  const post = vi
+    .spyOn(api, 'post')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  const credential =
+    '{\n  "type": "service_account",\n  "private_key": "fixture-private-key"\n}'
+  render(<ConfigurationHarness />)
+  await user.click(await screen.findByRole('option', { name: /Video A/ }))
+  expect(
+    screen.queryByRole('region', { name: 'Channel keys' })
+  ).not.toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('API Key *'), {
+    target: { value: credential },
+  })
+  await user.click(screen.getByRole('button', { name: 'Create Channel' }))
+  await waitFor(() => expect(post).toHaveBeenCalledOnce())
+  expect(post.mock.calls[0]?.[1]).toMatchObject({
+    mode: 'single',
+    channel: { key: credential, type: 61 },
+  })
+  expect(post.mock.calls[0]?.[1]).not.toHaveProperty('key_configs')
 })

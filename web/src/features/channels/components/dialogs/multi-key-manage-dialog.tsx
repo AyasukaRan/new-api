@@ -293,9 +293,11 @@ function MultiKeyManageContent({
             {channel.channel_info?.multi_key_mode && (
               <StatusBadge
                 label={
-                  channel.channel_info.multi_key_mode === 'random'
-                    ? t('Random')
-                    : t('Polling')
+                  {
+                    random: t('Random'),
+                    polling: t('Polling'),
+                    failover: t('Key failover'),
+                  }[channel.channel_info.multi_key_mode]
                 }
                 variant='neutral'
                 copyable={false}

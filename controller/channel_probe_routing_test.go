@@ -224,9 +224,23 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 					name, unavailable, affinityMode                         string
 					singleChannel, invalid, auto, pinned, written, canceled bool
 					allFail, normalized                                     bool
+					keyFailover, noGroupRouting, splitKeyGroups             bool
+					mirrors, staleMode                                      bool
 					retries, calls, status                                  int
 				}{
 					{name: "cross_channel_tiers", retries: 3, calls: 4, status: 200},
+					{name: "ordered_keys_respect_group_tiers", keyFailover: true, retries: 3, calls: 4, status: 200},
+					{name: "ordered_keys_fall_back_within_channel", keyFailover: true, noGroupRouting: true, singleChannel: true, retries: 3, calls: 3, status: 200},
+					{name: "ordered_keys_respect_global_budget", keyFailover: true, noGroupRouting: true, singleChannel: true, retries: 1, calls: 2, status: 503},
+					{name: "ordered_keys_never_repeat_after_exhaustion", keyFailover: true, noGroupRouting: true, singleChannel: true, allFail: true, retries: 5, calls: 3, status: 503},
+					{name: "ordered_keys_then_lower_channel_priority", keyFailover: true, noGroupRouting: true, allFail: true, retries: 3, calls: 4, status: 200},
+					{name: "ordered_keys_skip_exhausted_channel_mirrors", keyFailover: true, noGroupRouting: true, allFail: true, mirrors: true, retries: 3, calls: 3, status: 200},
+					{name: "ordered_keys_use_fresh_mode_with_stale_channel_cache", keyFailover: true, noGroupRouting: true, singleChannel: true, staleMode: true, retries: 3, calls: 3, status: 200},
+					{name: "ordered_keys_skip_disabled_primary", keyFailover: true, noGroupRouting: true, singleChannel: true, unavailable: "disabled", retries: 3, calls: 2, status: 200},
+					{name: "ordered_keys_never_replay_written_response", keyFailover: true, noGroupRouting: true, singleChannel: true, written: true, retries: 3, calls: 1, status: 200},
+					{name: "ordered_keys_never_replay_cancelled_request", keyFailover: true, noGroupRouting: true, singleChannel: true, canceled: true, retries: 3, calls: 1, status: 503},
+					{name: "ordered_keys_preserve_auto_group_retry", keyFailover: true, noGroupRouting: true, singleChannel: true, auto: true, allFail: true, retries: 1, calls: 3, status: 200},
+					{name: "ordered_keys_exhaustion_is_group_scoped", keyFailover: true, noGroupRouting: true, singleChannel: true, auto: true, allFail: true, splitKeyGroups: true, retries: 3, calls: 2, status: 200},
 					{name: "normalized_backup_follows_all_exact_tiers", normalized: true, retries: 3, calls: 4, status: 200},
 					{name: "lower_preferred_affinity_does_not_override_tier", affinityMode: "prefer", retries: 3, calls: 4, status: 200},
 					{name: "strict_affinity_stays_on_bound_channel", affinityMode: "strict", retries: 3, calls: 1, status: 503},
@@ -252,6 +266,18 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 						t.Cleanup(func() { *affinity = caseAffinity })
 						channelA := &model.Channel{Name: "tier-A", Type: constant.ChannelTypeDeepSeek, Key: "tier-key-a1\ntier-key-a2\ntier-key-a3", Models: requestModel, Group: "default", Status: common.ChannelStatusEnabled, BaseURL: common.GetPointer("https://api.deepseek.com"), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling}}
 						channelB := &model.Channel{Name: "tier-B", Type: constant.ChannelTypeDeepSeek, Key: "tier-key-b1", Models: "deepseek-flash", Group: "default", Status: common.ChannelStatusEnabled, BaseURL: channelA.BaseURL}
+						if test.keyFailover && !test.staleMode {
+							channelA.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+						}
+						if test.mirrors {
+							channelA.SetSetting(kitdto.ChannelSettings{EndpointMode: "failover", AdditionalBaseURLs: []string{"https://key-failover-mirror.invalid"}})
+						}
+						if test.noGroupRouting {
+							channelA.Priority, channelB.Priority = common.GetPointer(int64(20)), common.GetPointer(int64(10))
+						}
+						if test.splitKeyGroups {
+							channelA.Group = "default,vip"
+						}
 						if test.invalid {
 							channelA.Weight = common.GetPointer(uint(100))
 							channelB.Weight = common.GetPointer(uint(0))
@@ -260,7 +286,7 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 						if !test.singleChannel {
 							channels = append(channels, channelB)
 						}
-						if test.auto {
+						if test.auto && !test.splitKeyGroups {
 							channels = append(channels, &model.Channel{Name: "other-group", Type: constant.ChannelTypeDeepSeek, Key: "other-group-key", Models: "deepseek-flash", Group: "vip", Status: common.ChannelStatusEnabled, BaseURL: channelA.BaseURL})
 						}
 						for _, channel := range channels {
@@ -269,6 +295,13 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 								require.NoError(t, channel.Delete())
 								model.InvalidateChannelProbeRouting(channel.Id)
 							})
+						}
+						if test.keyFailover {
+							channelA.ChannelInfo.KeyOrder = []string{channelA.KeyIdentity("tier-key-a2"), channelA.KeyIdentity("tier-key-a1"), channelA.KeyIdentity("tier-key-a3")}
+							if test.splitKeyGroups {
+								channelA.ChannelInfo.KeyGroups = map[string][]string{channelA.KeyIdentity("tier-key-a1"): {"vip"}, channelA.KeyIdentity("tier-key-a2"): {"default"}, channelA.KeyIdentity("tier-key-a3"): {"vip"}}
+							}
+							require.NoError(t, db.Model(channelA).Update("channel_info", channelA.ChannelInfo).Error)
 						}
 						order, err := model.GetGroupKeyRouting("default")
 						require.NoError(t, err)
@@ -288,8 +321,10 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 							}
 							changes = append(changes, model.GroupKeyRoutingChange{ChannelID: channelB.Id, KeyIdentity: channelB.KeyIdentity("tier-key-b1"), Priority: &priority})
 						}
-						_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: order.Revision, Items: changes})
-						require.NoError(t, err)
+						if !test.noGroupRouting {
+							_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: order.Revision, Items: changes})
+							require.NoError(t, err)
+						}
 						switch test.unavailable {
 						case "disabled":
 							_, err = model.UpdateChannelStatusWithError(channelA.Id, "tier-key-a1", common.ChannelStatusManuallyDisabled, "fixture disabled")
@@ -300,6 +335,10 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 							require.NoError(t, model.RecordChannelKeyObservation(channelA, "deepseek-flash", "tier-key-a1", time.Now().UnixMilli(), common.GetPointer(false), 503, "fixture probe failure", "probe"))
 						}
 						model.InitChannelCache()
+						if test.staleMode {
+							channelA.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+							require.NoError(t, db.Model(channelA).Update("channel_info", channelA.ChannelInfo).Error)
+						}
 						group := "default"
 						if test.auto {
 							group = "auto"
@@ -341,7 +380,7 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 								status = http.StatusUnauthorized
 								body = `{"error":{"message":"Authentication Fails, Your api key: ****test is invalid","type":"authentication_error","code":"invalid_request_error"}}`
 							}
-							if (key == "tier-key-a3" && !test.allFail && !test.normalized) || key == "other-group-key" || (test.normalized && key == "tier-key-b1") {
+							if (key == "tier-key-a3" && !test.allFail && !test.normalized) || key == "other-group-key" || (test.normalized && key == "tier-key-b1") || (test.noGroupRouting && !test.singleChannel && key == "tier-key-b1") || (test.splitKeyGroups && key == "tier-key-a1") {
 								status = http.StatusOK
 								body = `{"id":"chat_fixture","model":"deepseek-flash","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
 							}
@@ -360,7 +399,27 @@ func TestGroupKeyTierFailoverDatabaseMatrix(t *testing.T) {
 						Relay(c, types.RelayFormatOpenAI)
 						assert.Equal(t, test.status, recorder.Code, recorder.Body.String())
 						require.Len(t, used, test.calls)
-						assert.NotContains(t, used, "other-group-key", "fallback must never switch to a different billing group")
+						if !test.noGroupRouting {
+							assert.NotContains(t, used, "other-group-key", "fallback must never switch to a different billing group")
+						}
+						if test.keyFailover {
+							expected := []string{"tier-key-a2", "tier-key-a1", "tier-key-a3"}
+							if test.splitKeyGroups {
+								expected = []string{"tier-key-a2", "tier-key-a1"}
+							} else if test.mirrors {
+								expected = []string{"tier-key-a2", "tier-key-a2", "tier-key-b1"}
+							} else if test.auto {
+								expected = []string{"tier-key-a2", "tier-key-a1", "other-group-key"}
+							} else if !test.noGroupRouting {
+								expected = []string{"tier-key-a2", "tier-key-a1", "tier-key-b1", "tier-key-a3"}
+							} else if !test.singleChannel {
+								expected = append(expected, "tier-key-b1")
+							} else if test.unavailable != "" {
+								expected = []string{"tier-key-a2", "tier-key-a3"}
+							}
+							assert.Equal(t, expected[:test.calls], used)
+							return
+						}
 						if test.normalized {
 							assert.Equal(t, []string{"tier-key-a1", "tier-key-a2", "tier-key-a3", "tier-key-b1"}, used)
 							return

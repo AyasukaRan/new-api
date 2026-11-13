@@ -1198,6 +1198,191 @@ func TestChannelMultiKeyProbeUsesAvailableKey(t *testing.T) {
 	}
 }
 
+func TestChannelTestSelectedKey(t *testing.T) {
+	previousConsume, previousExport, previousInterval := common.LogConsumeEnabled, common.DataExportEnabled, common.RequestInterval
+	common.LogConsumeEnabled, common.DataExportEnabled, common.RequestInterval = true, false, 0
+	t.Cleanup(func() {
+		common.LogConsumeEnabled, common.DataExportEnabled, common.RequestInterval = previousConsume, previousExport, previousInterval
+	})
+	withSelfUseModeDisabled(t)
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}, &model.ChannelBalanceSample{}, &model.Log{}))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "true"}))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"selected-key-model":1,"selected-key-next":1}`))
+			user := &model.User{Username: "selected-key-user", Password: "unused", Group: "default", Status: common.UserStatusEnabled, Role: common.RoleRootUser, AffCode: "selectedkey"}
+			require.NoError(t, db.Create(user).Error)
+			for _, test := range []struct {
+				name                                  string
+				invalidQuery                          string
+				fail, disabled, single, reorder, edit bool
+				wantCalls                             int
+				wantMessage                           string
+			}{
+				{name: "selected_success", wantCalls: 1},
+				{name: "selected_failure_does_not_try_another_key", fail: true, wantCalls: 1, wantMessage: "upstream rejected"},
+				{name: "disabled_key_and_channel_can_be_diagnosed", disabled: true, wantCalls: 1},
+				{name: "single_key_channel", single: true, wantCalls: 1},
+				{name: "stale_cached_order", reorder: true, wantMessage: "The key list changed. Refresh and try again."},
+				{name: "order_changes_between_models", edit: true, wantCalls: 1, wantMessage: "The key list changed. Refresh and try again."},
+				{name: "missing_identity", invalidQuery: "key_index=1", wantMessage: "Invalid parameters"},
+				{name: "missing_index", invalidQuery: "key_identity=identity", wantMessage: "Invalid parameters"},
+				{name: "empty_selection", invalidQuery: "key_index=&key_identity=", wantMessage: "Invalid parameters"},
+				{name: "invalid_index", invalidQuery: "key_index=bad&key_identity=identity", wantMessage: "Invalid parameters"},
+				{name: "duplicate_index", invalidQuery: "key_index=0&key_index=1&key_identity=identity", wantMessage: "Invalid parameters"},
+				{name: "out_of_range", invalidQuery: "key_index=2&key_identity=identity", wantMessage: "Key index out of range"},
+				{name: "negative_index", invalidQuery: "key_index=-1&key_identity=identity", wantMessage: "Key index out of range"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					const selectedKey = "fixture-selected-private-key"
+					const otherKey = "fixture-other-private-key"
+					requests := make(chan string, 4)
+					var channel *model.Channel
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						select {
+						case requests <- r.Header.Get("Authorization"):
+						default:
+							t.Error("unexpected additional key attempt")
+						}
+						if test.edit {
+							assert.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("key", selectedKey+"\n"+otherKey).Error)
+						}
+						if test.fail {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusServiceUnavailable)
+							_, _ = fmt.Fprintf(w, `{"error":{"message":"upstream rejected %s","type":"upstream_error"}}`, selectedKey)
+							return
+						}
+						writeChannelTestSuccess(w, false)
+					}))
+					t.Cleanup(upstream.Close)
+					var backupCalls atomic.Int32
+					backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						backupCalls.Add(1)
+						writeChannelTestSuccess(w, false)
+					}))
+					t.Cleanup(backup.Close)
+					settings, err := common.Marshal(dto.ChannelSettings{EndpointMode: "failover", AdditionalBaseURLs: []string{backup.URL}})
+					require.NoError(t, err)
+					channel = &model.Channel{
+						Type: constant.ChannelTypeOpenAI, Key: otherKey + "\n" + selectedKey, Status: common.ChannelStatusEnabled,
+						Models: "selected-key-model", Group: user.Group, BaseURL: common.GetPointer(upstream.URL), Setting: common.GetPointer(string(settings)), TestTime: 100,
+						ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling, MultiKeyPollingIndex: 1},
+					}
+					index := 1
+					if test.disabled {
+						channel.Status = common.ChannelStatusManuallyDisabled
+						channel.ChannelInfo.MultiKeyStatusList = map[int]int{index: common.ChannelStatusManuallyDisabled}
+					}
+					if test.single {
+						index = 0
+						channel.Key, channel.ChannelInfo = selectedKey, model.ChannelInfo{}
+					}
+					if test.edit {
+						channel.Models += ",selected-key-next"
+					}
+					require.NoError(t, db.Create(channel).Error)
+					before := time.Now().Add(-time.Minute).UnixMilli()
+					require.NoError(t, model.RecordChannelModelProbe(channel.Id, "selected-key-model", before, common.GetPointer(true)))
+					originalActivity, err := model.GetChannelModelActivity(channel.Id, "selected-key-model")
+					require.NoError(t, err)
+					if !test.single {
+						require.NoError(t, model.RecordChannelKeyObservation(channel, "selected-key-model", otherKey, before, common.GetPointer(true), http.StatusOK, "", perfmetrics.SourceProbe))
+					}
+					if test.reorder {
+						common.MemoryCacheEnabled = true
+						t.Cleanup(func() { common.MemoryCacheEnabled = false })
+						model.InitChannelCache()
+						require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("key", selectedKey+"\n"+otherKey).Error)
+					}
+					query := url.Values{"key_index": {strconv.Itoa(index)}, "key_identity": {channel.KeyIdentity(selectedKey)}, "stream": {"false"}}
+					queryString := query.Encode()
+					if test.invalidQuery != "" {
+						queryString = test.invalidQuery
+					}
+					recorder := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(recorder)
+					c.Params = gin.Params{{Key: "id", Value: strconv.Itoa(channel.Id)}}
+					c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/test/"+strconv.Itoa(channel.Id)+"?"+queryString, nil)
+					c.Set("id", user.Id)
+					TestChannel(c)
+					require.Equal(t, http.StatusOK, recorder.Code)
+					var response struct {
+						Success    bool   `json:"success"`
+						Message    string `json:"message"`
+						MessageKey string `json:"message_key"`
+					}
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+					assert.Equal(t, test.wantMessage == "", response.Success)
+					if test.wantMessage != "" {
+						assert.Contains(t, response.Message, test.wantMessage)
+						if !test.fail {
+							assert.Equal(t, test.wantMessage, response.MessageKey)
+						}
+					}
+					assert.NotContains(t, recorder.Body.String(), selectedKey)
+					assert.NotContains(t, recorder.Body.String(), otherKey)
+					assert.Len(t, requests, test.wantCalls)
+					for len(requests) > 0 {
+						assert.Equal(t, "Bearer "+selectedKey, <-requests)
+					}
+					assert.Zero(t, backupCalls.Load(), "a selected-key test must not retry through another endpoint")
+					activity, err := model.GetChannelModelActivity(channel.Id, "selected-key-model")
+					require.NoError(t, err)
+					assert.Equal(t, originalActivity, activity, "one key cannot replace aggregate health or defer other keys' automatic checks")
+					var aggregateCount int64
+					require.NoError(t, db.Model(&model.ChannelPerfMetric{}).Where("channel_id = ?", channel.Id).Count(&aggregateCount).Error)
+					assert.Zero(t, aggregateCount)
+					var stored model.Channel
+					require.NoError(t, db.First(&stored, channel.Id).Error)
+					assert.Equal(t, channel.ChannelInfo, stored.ChannelInfo, "the polling cursor and disabled status must be preserved")
+					assert.Equal(t, channel.Status, stored.Status)
+					assert.Equal(t, channel.TestTime, stored.TestTime)
+					selectedID, err := model.ChannelKeyObservationID(channel, "selected-key-model", selectedKey)
+					require.NoError(t, err)
+					var selectedObservations []model.ChannelKeyObservation
+					require.NoError(t, db.Where("id = ?", selectedID).Find(&selectedObservations).Error)
+					if test.wantCalls == 0 {
+						assert.Empty(t, selectedObservations)
+					} else {
+						require.Len(t, selectedObservations, 1)
+						assert.Equal(t, !test.fail, selectedObservations[0].Success)
+						assert.NotContains(t, selectedObservations[0].ErrorText, selectedKey)
+						if !test.fail {
+							var log model.Log
+							require.NoError(t, db.Where("channel_id = ? AND type = ?", channel.Id, model.LogTypeTestConsume).First(&log).Error)
+							var other struct {
+								AdminInfo struct {
+									IsMultiKey bool `json:"is_multi_key"`
+									KeyIndex   int  `json:"multi_key_index"`
+								} `json:"admin_info"`
+							}
+							require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+							assert.Equal(t, !test.single, other.AdminInfo.IsMultiKey)
+							if !test.single {
+								assert.Equal(t, index, other.AdminInfo.KeyIndex)
+							}
+						}
+					}
+					if !test.single {
+						otherID, err := model.ChannelKeyObservationID(channel, "selected-key-model", otherKey)
+						require.NoError(t, err)
+						var observation model.ChannelKeyObservation
+						require.NoError(t, db.First(&observation, "id = ?", otherID).Error)
+						assert.Equal(t, before, observation.ObservedAt)
+						assert.True(t, observation.Success)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestChannelHealthChecksAllConfiguredModelsMonitoringOnly(t *testing.T) {
 	previousTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 10

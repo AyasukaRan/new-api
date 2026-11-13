@@ -3,6 +3,9 @@ package controller
 import "github.com/QuantumNous/new-api/model"
 
 func channelHasSensitiveChanges(channel *PatchChannel, origin *model.Channel, requestData map[string]any) bool {
+	if channel.KeyConfigs != nil {
+		return true
+	}
 	if _, ok := requestData["type"]; ok && channel.Type != origin.Type {
 		return true
 	}
@@ -71,6 +74,7 @@ var channelSensitiveFields = map[string]struct{}{
 	"other":               {},
 	"settings":            {},
 	"key_mode":            {},
+	"key_configs":         {},
 }
 
 // channelOperationalFields lists fields managed by operation endpoints instead
@@ -82,6 +86,7 @@ var channelOperationalFields = map[string]struct{}{
 // channelReadOnlyFields lists server-managed/accounting fields that the general
 // channel edit endpoint must ignore even if a client sends them.
 var channelReadOnlyFields = map[string]struct{}{
+	"key_config_revision":  {},
 	"created_time":         {},
 	"test_time":            {},
 	"response_time":        {},

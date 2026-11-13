@@ -75,6 +75,7 @@ const ErrorCodeChannelGroupUnavailable types.ErrorCode = "channel_no_group_key"
 var ErrChannelDisabled = errors.New("channel is disabled")
 
 type ChannelInfo struct {
+	KeyOrder               []string                    `json:"key_order,omitempty"`
 	KeyGroupPriorities     map[string]map[string]int64 `json:"key_group_priorities,omitempty"`
 	KeyCostRatios          map[string]float64          `json:"key_cost_ratios,omitempty"`
 	KeyGroups              map[string][]string         `json:"key_groups,omitempty"`
@@ -239,6 +240,7 @@ func (channel *Channel) GetNextRelayKey(batchRequest ...bool) (string, int, *typ
 // GetNextRelayKeyForModel excludes failed probes as well as known debt without
 // changing the key status or preventing administrative tests from recovering it.
 type RelayKeySelection struct {
+	Channel           *Channel
 	Key               string
 	Index             int
 	UpstreamCostRatio *float64
@@ -335,7 +337,7 @@ func (channel *Channel) SelectRelayKeyForModel(modelName string, batchRequest bo
 	if batchRequest {
 		batchBaseURL, key = channel.GetBatchEndpoint(key)
 	}
-	return RelayKeySelection{Key: key, Index: index, UpstreamCostRatio: channel.UpstreamCostRatioForKey(key), BatchBaseURL: batchBaseURL}, nil
+	return RelayKeySelection{Channel: channel, Key: key, Index: index, UpstreamCostRatio: channel.UpstreamCostRatioForKey(key), BatchBaseURL: batchBaseURL}, nil
 }
 
 func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, *types.NewAPIError) {
@@ -388,6 +390,13 @@ func (channel *Channel) nextEnabledKey(negativeKeys map[int]bool) (string, int, 
 	}
 
 	switch channel.ChannelInfo.MultiKeyMode {
+	case constant.MultiKeyModeFailover:
+		for _, index := range channel.OrderedKeyIndices() {
+			if getStatus(index) == common.ChannelStatusEnabled && !negativeKeys[index] {
+				return keys[index], index, nil
+			}
+		}
+		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
 	case constant.MultiKeyModeRandom:
 		// Randomly pick one enabled key
 		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
@@ -446,6 +455,7 @@ func (channel *Channel) SaveChannelInfo() error {
 		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
 		channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
 		channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
+		channel.ChannelInfo.KeyOrder = current.ChannelInfo.KeyOrder
 		return tx.Model(channel).Update("channel_info", channel.ChannelInfo).Error
 	})
 }
@@ -636,6 +646,7 @@ func (channel *Channel) saveStatusStateWithDB(tx *gorm.DB) error {
 			channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
 			channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
 			channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
+			channel.ChannelInfo.KeyOrder = current.ChannelInfo.KeyOrder
 			updates["channel_info"] = channel.ChannelInfo
 		}
 		return tx.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
@@ -721,9 +732,12 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 	return channel, nil
 }
 
-func BatchInsertChannels(channels []Channel) error {
+func BatchInsertChannels(channels []Channel, keyConfigs ...[]ChannelKeyConfig) error {
 	if len(channels) == 0 {
 		return nil
+	}
+	if len(keyConfigs) > 1 || len(keyConfigs) == 1 && len(channels) != 1 {
+		return common.NewMessage("Invalid parameters")
 	}
 	tx := DB.Begin()
 	if tx.Error != nil {
@@ -742,8 +756,19 @@ func BatchInsertChannels(channels []Channel) error {
 			tx.Rollback()
 			return err
 		}
-		for _, channel_ := range chunk {
-			if err := channel_.AddAbilities(tx); err != nil {
+		for index := range chunk {
+			channel := &chunk[index]
+			if len(keyConfigs) == 1 {
+				if err := channel.ApplyKeyConfigs(keyConfigs[0], true); err != nil {
+					tx.Rollback()
+					return err
+				}
+				if err := tx.Model(channel).Updates(map[string]any{"key": channel.Key, "channel_info": channel.ChannelInfo, "status": channel.Status, "other_info": channel.OtherInfo}).Error; err != nil {
+					tx.Rollback()
+					return err
+				}
+			}
+			if err := channel.AddAbilities(tx); err != nil {
 				tx.Rollback()
 				return err
 			}
@@ -847,6 +872,10 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	return channel.UpdateWithKeyConfigs(nil)
+}
+
+func (channel *Channel) UpdateWithKeyConfigs(configuration *ChannelKeyConfigUpdate) error {
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -893,6 +922,33 @@ func (channel *Channel) Update() error {
 		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
 		channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
 		channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
+		channel.ChannelInfo.KeyOrder = current.ChannelInfo.KeyOrder
+		if configuration != nil {
+			_, revision, err := current.KeyConfiguration()
+			if err != nil {
+				return err
+			}
+			if configuration.Revision == "" || revision != configuration.Revision {
+				return common.NewMessage("The key list changed. Refresh and try again.")
+			}
+			effective := current
+			if channel.Group != "" {
+				effective.Group = channel.Group
+			}
+			if channel.Type != 0 {
+				effective.Type = channel.Type
+			}
+			if channel.OtherSettings != "" {
+				effective.OtherSettings = channel.OtherSettings
+			}
+			effective.ChannelInfo.MultiKeyMode = channel.ChannelInfo.MultiKeyMode
+			if err := effective.ApplyKeyConfigs(configuration.Items, false); err != nil {
+				return err
+			}
+			channel.Key, channel.Keys = effective.Key, nil
+			channel.ChannelInfo = effective.ChannelInfo
+			channel.Status, channel.OtherInfo = effective.Status, effective.OtherInfo
+		}
 		keySnapshot := *channel
 		keySnapshot.Keys = nil
 		if keySnapshot.Key == "" {
@@ -901,6 +957,13 @@ func (channel *Channel) Update() error {
 		channel.retainKeyGroups(keySnapshot.GetKeys())
 		channel.retainKeyCostRatios(keySnapshot.relayKeys())
 		channel.retainKeyGroupPriorities(keySnapshot.relayKeys())
+		retainedOrder := make([]string, 0, len(channel.ChannelInfo.KeyOrder))
+		for _, identity := range channel.ChannelInfo.KeyOrder {
+			if slices.ContainsFunc(keySnapshot.relayKeys(), func(key string) bool { return keySnapshot.KeyIdentity(key) == identity }) {
+				retainedOrder = append(retainedOrder, identity)
+			}
+		}
+		channel.ChannelInfo.KeyOrder = retainedOrder
 		if channel.Group != "" && channel.Group != current.Group {
 			for _, groups := range channel.ChannelInfo.KeyGroups {
 				for _, group := range groups {

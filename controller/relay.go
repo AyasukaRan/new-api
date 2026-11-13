@@ -476,6 +476,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			if service.HasGroupKeyRouting(c) {
 				return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgRelayChannelNoGroupKey)), types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 			}
+			if service.HasChannelKeyFailover(c) {
+				return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgRelayRetryNoAvailableChannel, map[string]any{"Group": selectGroup, "Model": info.OriginModelName})), types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+			}
 			return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryNoAvailableChannel, map[string]any{"Group": selectGroup, "Model": info.OriginModelName})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 		}
 		newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
@@ -755,6 +758,13 @@ func executeTaskSubmissionWith(
 					channel, selectErr = service.SelectGroupKeyRetry(c, relayInfo.OriginModelName)
 					if selectErr != nil || channel == nil || channel.Id != lockedCh.Id {
 						taskErr = service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelayChannelNoGroupKey)), "channel_no_available_key", http.StatusServiceUnavailable)
+						break
+					}
+				} else if service.HasChannelKeyFailover(c) {
+					var selectErr error
+					channel, selectErr = service.SelectChannelKeyRetry(c, relayInfo.OriginModelName)
+					if selectErr != nil || channel == nil || channel.Id != lockedCh.Id {
+						taskErr = service.TaskErrorWrapperLocal(errors.New("no enabled keys"), "channel_no_available_key", http.StatusServiceUnavailable)
 						break
 					}
 				}

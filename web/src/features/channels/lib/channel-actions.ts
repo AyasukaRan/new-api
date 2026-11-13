@@ -297,6 +297,7 @@ export async function handleTestChannel(
     testModel?: string
     endpointType?: string
     stream?: boolean
+    selectedKey?: { key_index: number; key_identity: string }
     silent?: boolean
   },
   onTestComplete?: (
@@ -312,6 +313,7 @@ export async function handleTestChannel(
     ...(options?.testModel ? { model: options.testModel } : {}),
     ...(options?.endpointType ? { endpoint_type: options.endpointType } : {}),
     stream: options?.stream ?? true,
+    ...options?.selectedKey,
   }
 
   try {

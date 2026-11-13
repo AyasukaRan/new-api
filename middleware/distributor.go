@@ -713,6 +713,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		selected, newAPIError = channel.SelectRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
 		key, index, upstreamCostRatio = selected.Key, selected.Index, selected.UpstreamCostRatio
 		batchBaseURL = selected.BatchBaseURL
+		if selected.Channel != nil {
+			channel = selected.Channel
+			c.Set(service.ChannelKeySelectionContext, channel)
+		}
 	}
 	if newAPIError != nil {
 		if newAPIError.GetErrorCode() == model.ErrorCodeChannelGroupUnavailable {

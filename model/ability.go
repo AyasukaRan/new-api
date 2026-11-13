@@ -110,14 +110,24 @@ func GetChannel(
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
+	exclusions ...map[int]bool,
 ) (*Channel, error) {
+	var excluded map[int]bool
+	if len(exclusions) > 0 {
+		excluded = exclusions[0]
+	}
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
 		return nil, err
 	}
 	abilities, probeError := filterRelayAbilities(abilities, model, filters)
-	if len(abilities) == 0 {
+	hasUnexcluded := false
+	for _, ability := range abilities {
+		hasUnexcluded = hasUnexcluded || !excluded[ability.ChannelId]
+	}
+	if !hasUnexcluded {
+		abilities = nil
 		if normalized := ratio_setting.RoutingMatchModelName(model); normalized != "" && normalized != model {
 			if err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, normalized, true).Order("priority DESC, weight DESC").Find(&abilities).Error; err != nil {
 				return nil, err
@@ -150,8 +160,28 @@ func GetChannel(
 			retry = len(priorities) - 1
 		}
 		targetPriority := priorities[retry]
+		if len(excluded) > 0 {
+			found := false
+			selectedPriority := targetPriority
+			for _, ability := range abilities {
+				candidatePriority := int64(0)
+				if ability.Priority != nil {
+					candidatePriority = *ability.Priority
+				}
+				if excluded[ability.ChannelId] || candidatePriority > targetPriority {
+					continue
+				}
+				if !found || candidatePriority > selectedPriority {
+					selectedPriority, found = candidatePriority, true
+				}
+			}
+			if !found {
+				return nil, nil
+			}
+			targetPriority = selectedPriority
+		}
 		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
-			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
+			return !excluded[ability.ChannelId] && (ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority)
 		})
 	}
 	channel := Channel{}

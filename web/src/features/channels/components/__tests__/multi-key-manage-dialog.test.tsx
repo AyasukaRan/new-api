@@ -17,11 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import {
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-} from '@tanstack/react-table'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next, { createInstance, type i18n } from 'i18next'
@@ -35,7 +30,6 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import type { Channel, MultiKeyManageParams } from '../../types'
-import { useChannelsColumns } from '../channels-columns'
 import { ChannelsProvider, useChannels } from '../channels-provider'
 import { MultiKeyManageDialog } from '../dialogs/multi-key-manage-dialog'
 
@@ -114,37 +108,10 @@ function statusResponse(overrides: Record<string, unknown> = {}) {
   }
 }
 
-const entryChannels = [
-  {
-    id: 3,
-    name: 'Keyboard channel',
-    type: 1,
-    channel_info: {
-      is_multi_key: true,
-      multi_key_size: 3,
-      multi_key_mode: 'polling',
-    },
-  } as Channel,
-]
-
-function KeyManagementEntry() {
-  const table = useReactTable({
-    data: entryChannels,
-    columns: useChannelsColumns({ enableSelection: false }),
-    getCoreRowModel: getCoreRowModel(),
-  })
-  const cell = table
-    .getRowModel()
-    .rows[0]?.getAllCells()
-    .find((item) => item.column.id === 'type')
-  return cell ? flexRender(cell.column.columnDef.cell, cell.getContext()) : null
-}
-
 function Fixture() {
   const { open, setOpen, setCurrentRow } = useChannels()
   return (
     <>
-      <KeyManagementEntry />
       {[1, 2].map((id) => (
         <Button
           key={id}
@@ -371,21 +338,6 @@ test('a completed balance update from a closed channel cannot replace a new chan
   await act(async () => finish({ data: { success: true } }))
   expect(screen.getByText('key-2**********hint')).toBeVisible()
   expect(screen.queryByText('key-1**********hint')).not.toBeInTheDocument()
-})
-
-test('the shared table and card multi-key entry opens management with a keyboard', async () => {
-  const post = vi.spyOn(api, 'post').mockResolvedValue(statusResponse())
-  const { user } = setup()
-  screen.getByRole('button', { name: 'Manage Keys' }).focus()
-  await user.keyboard('{Enter}')
-  expect(await screen.findByText('sk-a**********0001')).toBeVisible()
-  expect(
-    within(screen.getByRole('dialog')).getByText('Keyboard channel')
-  ).toBeVisible()
-  expect(post.mock.calls[0]?.[1]).toMatchObject({
-    channel_id: 3,
-    action: 'get_key_status',
-  })
 })
 
 test('a failed status request exposes retry without enabling any key action', async () => {

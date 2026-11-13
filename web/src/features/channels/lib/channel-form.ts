@@ -31,7 +31,13 @@ import {
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../constants'
-import type { Channel } from '../types'
+import {
+  channelKeyConfigSchema,
+  type AddChannelRequest,
+  type Channel,
+  type ChannelKeyConfigInput,
+  type UpdateChannelRequest,
+} from '../types'
 import {
   CHANNEL_TYPE_ADVANCED_CUSTOM,
   advancedCustomConfigUsesRelativeUpstreamPath,
@@ -228,6 +234,23 @@ export const channelFormSchema = z
     task_plugin_key: z.string().optional(),
     task_extend_plugin_keys: z.array(z.string()).optional(),
     key: z.string(),
+    key_config_revision: z.string().optional(),
+    key_configs: z
+      .array(
+        channelKeyConfigSchema.extend({
+          draft_id: z.string().optional(),
+          key: z.string().optional(),
+          enabled: z.boolean().optional(),
+          upstream_cost_ratio: z
+            .number({
+              error: 'Upstream cost multiplier must be between 0 and 10000',
+            })
+            .min(0, 'Upstream cost multiplier must be between 0 and 10000')
+            .max(10000, 'Upstream cost multiplier must be between 0 and 10000')
+            .nullable(),
+        })
+      )
+      .optional(),
     openai_organization: z.string().optional(),
     models: z.string().min(1, ERROR_MESSAGES.REQUIRED_MODELS),
     group: z.array(z.string()).min(1, ERROR_MESSAGES.REQUIRED_GROUP),
@@ -281,7 +304,7 @@ export const channelFormSchema = z
     other: z.string().optional(),
     // Multi-key options (not sent to backend directly)
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
-    multi_key_type: z.enum(['random', 'polling']).optional(),
+    multi_key_type: z.enum(['random', 'polling', 'failover']).optional(),
     batch_add_set_key_prefix_2_name: z.boolean().optional(),
     key_mode: z.enum(['append', 'replace']).optional(), // For editing multi-key channels
     // Channel extra settings (stored in setting JSON, not sent directly)
@@ -339,6 +362,23 @@ export const channelFormSchema = z
     upstream_model_update_ignored_models: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.key_configs) {
+      if (!data.key_configs.length && !data.key.trim()) {
+        addRequiredIssue(ctx, 'key_configs', 'At least one key is required')
+      }
+      for (const row of data.key_configs) {
+        if (
+          !row.key_identity &&
+          (!row.key?.trim() ||
+            /[\r\n]/.test(row.key) ||
+            /^[{[]/.test(row.key.trim()))
+        ) {
+          addRequiredIssue(ctx, 'key_configs', 'Enter one API key per row')
+          break
+        }
+      }
+    }
+
     if (data.endpoint_mode) {
       const mirrors = (data.additional_base_urls || '')
         .split(/\r?\n/)
@@ -522,6 +562,9 @@ export const channelFormSchema = z
   })
 
 export type ChannelFormValues = z.infer<typeof channelFormSchema>
+export type ChannelKeyDraft = NonNullable<
+  ChannelFormValues['key_configs']
+>[number]
 
 // ============================================================================
 // Default Form Values
@@ -753,6 +796,8 @@ export function transformChannelToFormDefaults(
     type: channel.type,
     base_url: channel.base_url || '',
     key: '', // Never populate key from backend for security
+    key_configs: channel.key_configs,
+    key_config_revision: channel.key_config_revision,
     openai_organization: channel.openai_organization || '',
     models: channel.models || '',
     group: parseGroups(channel.group || 'default'),
@@ -1067,12 +1112,9 @@ function normalizeBaseUrl(value: string | undefined): string {
 /**
  * Transform form data to API payload for creating channel
  */
-export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
-  mode: 'single' | 'batch' | 'multi_to_single'
-  multi_key_mode?: 'random' | 'polling'
-  batch_add_set_key_prefix_2_name?: boolean
-  channel: Partial<Channel>
-} {
+export function transformFormDataToCreatePayload(
+  formData: ChannelFormValues
+): AddChannelRequest {
   const mode = formData.multi_key_mode || 'single'
 
   const channel: Partial<Channel> = {
@@ -1107,12 +1149,17 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
   })
 
   return {
-    mode,
+    mode: formData.key_configs ? 'multi_to_single' : mode,
     multi_key_mode:
-      mode === 'multi_to_single' ? formData.multi_key_type : undefined,
+      formData.key_configs || mode === 'multi_to_single'
+        ? formData.multi_key_type
+        : undefined,
+    ...(formData.key_configs
+      ? { key_configs: serializeChannelKeyConfigs(formData.key_configs) }
+      : {}),
     batch_add_set_key_prefix_2_name:
       mode === 'batch' ? formData.batch_add_set_key_prefix_2_name : undefined,
-    channel,
+    channel: formData.key_configs ? { ...channel, key: undefined } : channel,
   }
 }
 
@@ -1122,8 +1169,8 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
 export function transformFormDataToUpdatePayload(
   formData: ChannelFormValues,
   channelId: number
-): Partial<Channel> {
-  const payload: Partial<Channel> = {
+): UpdateChannelRequest {
+  const payload: UpdateChannelRequest = {
     id: channelId,
     name: formData.name,
     type: formData.type,
@@ -1147,7 +1194,11 @@ export function transformFormDataToUpdatePayload(
   }
 
   // Only include key if it was changed (not empty)
-  if (formData.key && formData.key.trim()) {
+  if (formData.key_configs) {
+    payload.key_configs = serializeChannelKeyConfigs(formData.key_configs)
+    payload.key_config_revision = formData.key_config_revision
+    payload.multi_key_mode = formData.multi_key_type
+  } else if (formData.key && formData.key.trim()) {
     payload.key = formData.key
   }
 
@@ -1170,6 +1221,19 @@ export function transformFormDataToUpdatePayload(
   payload.header_override = formData.header_override || ''
 
   return payload
+}
+
+function serializeChannelKeyConfigs(
+  keys: ChannelKeyDraft[]
+): ChannelKeyConfigInput[] {
+  return keys.map((key) => ({
+    ...(key.key_identity
+      ? { key_identity: key.key_identity, key_index: key.key_index }
+      : { key: key.key?.trim() || '' }),
+    groups: key.groups,
+    upstream_cost_ratio: key.upstream_cost_ratio,
+    ...(key.enabled === undefined ? {} : { enabled: key.enabled }),
+  }))
 }
 
 // ============================================================================

@@ -44,6 +44,7 @@ import type {
   SearchChannelsParams,
   SearchChannelsResponse,
   TagOperationParams,
+  UpdateChannelRequest,
 } from './types'
 
 const channelActionConfig = (
@@ -204,7 +205,7 @@ export async function createChannel(
  */
 export async function updateChannel(
   id: number,
-  data: Partial<Channel>
+  data: UpdateChannelRequest
 ): Promise<{ success: boolean; message?: string; data?: Channel }> {
   const res = await api.put(
     '/api/channel/',
@@ -287,7 +288,13 @@ export async function batchSetChannelTag(
  */
 export async function testChannel(
   id: number,
-  params?: { model?: string; endpoint_type?: string; stream?: boolean }
+  params?: {
+    model?: string
+    endpoint_type?: string
+    stream?: boolean
+    key_index?: number
+    key_identity?: string
+  }
 ): Promise<ChannelTestResponse> {
   const res = await api.get(
     `/api/channel/test/${id}`,

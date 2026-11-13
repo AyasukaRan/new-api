@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -63,6 +64,218 @@ func setupChannelManagementTest(t *testing.T) int {
 	require.NoError(t, database.Raw(versionQuery).Scan(&version).Error)
 	t.Logf("database=%s version=%s", common.MainDatabaseType(), version)
 	return root.Id
+}
+
+func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
+	rootID := setupChannelManagementTest(t)
+	const keyA, keyB, keyC = "config-key-a-secret", "config-key-b-secret", "config-key-c-secret"
+	type response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ID         int                          `json:"id"`
+			Key        string                       `json:"key"`
+			KeyConfigs []model.ChannelKeyConfigView `json:"key_configs"`
+			Revision   string                       `json:"key_config_revision"`
+		} `json:"data"`
+	}
+	role := common.RoleRootUser
+	request := func(handler gin.HandlerFunc, method string, id int, body any) response {
+		t.Helper()
+		encoded, err := common.Marshal(body)
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Set("id", rootID)
+		c.Set("role", role)
+		c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(id)}}
+		c.Request = httptest.NewRequest(method, "/api/channel/", bytes.NewReader(encoded))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handler(c)
+		var result response
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &result))
+		for _, secret := range []string{keyA, keyB, keyC} {
+			assert.NotContains(t, recorder.Body.String(), secret)
+		}
+		return result
+	}
+	channel := &model.Channel{Name: t.Name(), Type: constant.ChannelTypeOpenAI, Models: "config-model", Group: "default,vip", Status: common.ChannelStatusEnabled}
+	invalid := *channel
+	invalid.Name += " invalid"
+	invalid.Type, invalid.OtherSettings = constant.ChannelTypeVertexAi, "{malformed"
+	assert.False(t, request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeFailover, Channel: &invalid, KeyConfigs: []model.ChannelKeyConfig{{Key: keyA}}}).Success)
+	var invalidCount int64
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", invalid.Name).Count(&invalidCount).Error)
+	assert.Zero(t, invalidCount, "invalid settings must not create a partial channel")
+	for _, channelType := range []int{constant.ChannelTypeCodex, constant.ChannelTypeVertexAi, constant.ChannelTypeTaskPlugin} {
+		structured := &model.Channel{Type: channelType, Key: "{\n  \"private_key\": \"fixture-only\"\n}", Group: "default"}
+		original := structured.Key
+		assert.Error(t, structured.ApplyKeyConfigs([]model.ChannelKeyConfig{{KeyIdentity: structured.KeyIdentity(original), KeyIndex: common.GetPointer(0)}}, false))
+		assert.Equal(t, original, structured.Key, "structured credentials must remain on the legacy editing path")
+		assert.False(t, structured.ChannelInfo.IsMultiKey)
+	}
+	newAPI := &model.Channel{Type: constant.ChannelTypeNewAPI, Group: "default"}
+	require.NoError(t, newAPI.ApplyKeyConfigs([]model.ChannelKeyConfig{{Key: "gateway-api-key"}}, true), "New API wrappers still use simple API keys")
+	channel.SetSetting(kitdto.ChannelSettings{UpstreamCostRatio: common.GetPointer(1.5)})
+	created := request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeFailover, Channel: channel, KeyConfigs: []model.ChannelKeyConfig{
+		{Key: keyA, Groups: []string{"default"}, UpstreamCostRatio: common.GetPointer(0.0)},
+		{Key: keyB},
+	}})
+	require.True(t, created.Success)
+	require.Positive(t, created.Data.ID)
+	id := created.Data.ID
+	t.Cleanup(func() { require.NoError(t, (&model.Channel{Id: id}).Delete()) })
+	view := request(GetChannel, http.MethodGet, id, nil)
+	require.True(t, view.Success)
+	require.Len(t, view.Data.KeyConfigs, 2)
+	assert.Empty(t, view.Data.Key)
+	require.NotEmpty(t, view.Data.Revision)
+	assert.Equal(t, (&model.Channel{Id: id}).KeyIdentity(keyA), view.Data.KeyConfigs[0].KeyIdentity, "identity must use the allocated channel ID")
+	require.NotNil(t, view.Data.KeyConfigs[0].EffectiveUpstreamCostRatio)
+	assert.Zero(t, *view.Data.KeyConfigs[0].EffectiveUpstreamCostRatio)
+	require.NotNil(t, view.Data.KeyConfigs[1].EffectiveUpstreamCostRatio)
+	assert.Equal(t, 1.5, *view.Data.KeyConfigs[1].EffectiveUpstreamCostRatio)
+	items := []model.ChannelKeyConfig{
+		{KeyIdentity: view.Data.KeyConfigs[1].KeyIdentity, KeyIndex: common.GetPointer(1)},
+		{KeyIdentity: view.Data.KeyConfigs[0].KeyIdentity, KeyIndex: common.GetPointer(0), Groups: []string{"default"}, UpstreamCostRatio: common.GetPointer(0.0), Enabled: common.GetPointer(false)},
+	}
+	patch := map[string]any{"id": id, "name": "saved ordered config", "multi_key_mode": "failover", "key_configs": items, "key_config_revision": view.Data.Revision}
+	role = common.RoleAdminUser
+	assert.False(t, request(UpdateChannel, http.MethodPut, id, patch).Success)
+	role = common.RoleRootUser
+	require.True(t, request(UpdateChannel, http.MethodPut, id, patch).Success)
+	stored, err := model.GetChannelById(id, true)
+	require.NoError(t, err)
+	assert.Equal(t, keyA+"\n"+keyB, stored.Key, "dragging must not reorder physical credentials")
+	assert.Equal(t, []string{stored.KeyIdentity(keyB), stored.KeyIdentity(keyA)}, stored.ChannelInfo.KeyOrder)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, stored.ChannelInfo.MultiKeyStatusList[0])
+	for range 2 {
+		key, index, apiErr := stored.GetNextEnabledKey()
+		require.Nil(t, apiErr)
+		assert.Equal(t, keyB, key)
+		assert.Equal(t, 1, index)
+	}
+	cloned := request(CopyChannel, http.MethodPost, id, nil)
+	require.True(t, cloned.Success)
+	clone, err := model.GetChannelById(cloned.Data.ID, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, clone.Delete()) })
+	assert.Equal(t, []string{clone.KeyIdentity(keyB), clone.KeyIdentity(keyA)}, clone.ChannelInfo.KeyOrder)
+	assert.NotEqual(t, stored.ChannelInfo.KeyOrder, clone.ChannelInfo.KeyOrder)
+	require.True(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "random"}).Success)
+	require.True(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "failover"}).Success)
+	assert.False(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "unknown"}).Success)
+	stored, err = model.GetChannelById(id, true)
+	require.NoError(t, err)
+	assert.Equal(t, []string{stored.KeyIdentity(keyB), stored.KeyIdentity(keyA)}, stored.ChannelInfo.KeyOrder)
+
+	current := request(GetChannel, http.MethodGet, id, nil)
+	require.True(t, current.Success)
+	require.NoError(t, model.SetChannelKeyCostRatio(id, 1, stored.KeyIdentity(keyB), common.GetPointer(0.4)))
+	patch["key_config_revision"], patch["name"] = current.Data.Revision, "must not persist"
+	assert.False(t, request(UpdateChannel, http.MethodPut, id, patch).Success)
+	unchanged, err := model.GetChannelById(id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "saved ordered config", unchanged.Name, "stale key settings must roll back the channel edit")
+	require.NotNil(t, unchanged.UpstreamCostRatioForKey(keyB))
+	assert.Equal(t, 0.4, *unchanged.UpstreamCostRatioForKey(keyB))
+
+	current = request(GetChannel, http.MethodGet, id, nil)
+	for _, invalid := range [][]model.ChannelKeyConfig{{}, {items[0], items[0]}, {{Key: keyB}}, {{Key: keyC, Groups: []string{"forbidden"}}}} {
+		patch["key_config_revision"], patch["key_configs"] = current.Data.Revision, invalid
+		assert.False(t, request(UpdateChannel, http.MethodPut, id, patch).Success)
+	}
+	patch["key_configs"] = []model.ChannelKeyConfig{items[0], {Key: keyC, Groups: []string{"vip"}}}
+	require.True(t, request(UpdateChannel, http.MethodPut, id, patch).Success)
+	stored, err = model.GetChannelById(id, true)
+	require.NoError(t, err)
+	assert.Equal(t, keyB+"\n"+keyC, stored.Key)
+	assert.NotContains(t, stored.ChannelInfo.KeyGroups, stored.KeyIdentity(keyA))
+	assert.NotContains(t, stored.ChannelInfo.KeyCostRatios, stored.KeyIdentity(keyA))
+	assert.NotContains(t, stored.ChannelInfo.KeyOrder, stored.KeyIdentity(keyA))
+	assert.True(t, stored.KeyAllowedForGroup(keyC, "vip"))
+	assert.False(t, stored.KeyAllowedForGroup(keyC, "default"))
+
+	var audits []model.AuditLog
+	require.NoError(t, model.DB.Where("user_id = ?", rootID).Find(&audits).Error)
+	encoded, err := common.Marshal(audits)
+	require.NoError(t, err)
+	for _, secret := range []string{keyA, keyB, keyC} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+}
+
+func TestMultiKeyConfigurationLegacyDuplicatesAndSingleKey(t *testing.T) {
+	setupChannelManagementTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.ChannelBalanceSample{}, &model.ChannelKeyObservation{}))
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("duplicate=%t", duplicate), func(t *testing.T) {
+			channel := &model.Channel{Name: t.Name(), Type: constant.ChannelTypeOpenAI, Key: "legacy-config-key", Models: "config-model", Group: "default,vip", Status: common.ChannelStatusEnabled}
+			if duplicate {
+				channel.Key += "\nlegacy-config-key\nlegacy-config-other"
+				channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModeFailover, MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled}}
+			}
+			require.NoError(t, channel.Insert())
+			t.Cleanup(func() {
+				require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.ChannelBalanceSample{}).Error)
+				require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.ChannelKeyObservation{}).Error)
+				require.NoError(t, channel.Delete())
+				model.InvalidateChannelProbeRouting(channel.Id)
+			})
+			if duplicate {
+				require.NoError(t, model.RecordChannelBalanceSample(channel, &model.ChannelBalanceSample{Success: true, KnownBalance: 3, KeyBalances: []model.ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(-1.0)}, {Index: 1, Balance: common.GetPointer(2.0)}, {Index: 2, Balance: common.GetPointer(2.0)}}}))
+				require.NoError(t, model.RecordChannelKeyObservation(channel, "config-model", "legacy-config-key", time.Now().UnixMilli(), common.GetPointer(false), 503, "fixture probe failure", "probe"))
+			}
+			views, revision, err := channel.KeyConfiguration()
+			require.NoError(t, err)
+			configs := make([]model.ChannelKeyConfig, 0, len(views))
+			for _, item := range views {
+				configs = append(configs, model.ChannelKeyConfig{KeyIdentity: item.KeyIdentity, KeyIndex: common.GetPointer(item.KeyIndex), Groups: []string{"default"}, UpstreamCostRatio: common.GetPointer(0.0)})
+			}
+			if duplicate {
+				require.Len(t, views, 2)
+				assert.Equal(t, 1, views[0].KeyIndex)
+				key, index, apiErr := channel.GetNextEnabledKey()
+				require.Nil(t, apiErr)
+				assert.Equal(t, "legacy-config-key", key)
+				assert.Equal(t, 1, index)
+			} else {
+				require.Len(t, views, 1)
+				assert.Nil(t, views[0].EffectiveUpstreamCostRatio)
+				configs[0].Enabled = common.GetPointer(false)
+			}
+			channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+			require.NoError(t, channel.UpdateWithKeyConfigs(&model.ChannelKeyConfigUpdate{Items: configs, Revision: revision}))
+			assert.True(t, channel.ChannelInfo.IsMultiKey)
+			assert.True(t, channel.KeyAllowedForGroup("legacy-config-key", "default"))
+			assert.False(t, channel.HasKeyForGroup("vip"))
+			require.NotNil(t, channel.UpstreamCostRatioForKey("legacy-config-key"))
+			assert.Zero(t, *channel.UpstreamCostRatioForKey("legacy-config-key"))
+			if duplicate {
+				assert.Equal(t, "legacy-config-key\nlegacy-config-other", channel.Key)
+				assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
+				monitor, err := model.GetChannelBalanceMonitor(channel.Id)
+				require.NoError(t, err)
+				require.NotNil(t, monitor)
+				assert.True(t, monitor.ConfigurationChanged)
+				assert.NotNil(t, channel.RelayCredentialProbeError("config-model", "legacy-config-key"), "the same credential must retain its real probe failure after duplicate removal")
+			} else {
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, channel.Status)
+				_, revision, err = channel.KeyConfiguration()
+				require.NoError(t, err)
+				configs[0].Enabled = common.GetPointer(true)
+				require.NoError(t, channel.UpdateWithKeyConfigs(&model.ChannelKeyConfigUpdate{Items: configs, Revision: revision}))
+				assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+				_, err = model.UpdateChannelStatusWithError(channel.Id, "", common.ChannelStatusManuallyDisabled, "manual channel disable")
+				require.NoError(t, err)
+				channel, err = model.GetChannelById(channel.Id, true)
+				require.NoError(t, err)
+				_, revision, err = channel.KeyConfiguration()
+				require.NoError(t, err)
+				require.NoError(t, channel.UpdateWithKeyConfigs(&model.ChannelKeyConfigUpdate{Items: configs, Revision: revision}))
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, channel.Status, "enabling a key must preserve a separate manual channel disable")
+			}
+		})
+	}
 }
 
 func TestMultiKeyStatusReturnsMatchingBalancesAndMaskedCredentials(t *testing.T) {
