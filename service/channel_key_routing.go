@@ -140,12 +140,9 @@ func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, pref
 	if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModeRandom {
 		selected = keys[rand.Intn(len(keys))]
 	} else if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-		cursor := selected.ChannelInfo.MultiKeyPollingIndex
-		for _, candidate := range keys {
-			if candidate.RelayKeyIndex >= cursor {
-				selected = candidate
-				break
-			}
+		selected, err = model.ReserveGroupKeyCandidate(keys)
+		if err != nil {
+			return nil, true, err
 		}
 	}
 	if common.GetContextKeyString(c, constant.ContextKeyUsingGroup) == "auto" {

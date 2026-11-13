@@ -129,3 +129,27 @@ func GetGroupKeyCandidates(group, modelName string, filters []dto.ChannelFilter,
 	}
 	return nil, true, nil
 }
+
+// ReserveGroupKeyCandidate advances the existing polling cursor atomically
+// within a selected tier. Setup later validates this reservation but does not
+// allocate again, so interleaved requests cannot reuse or rewind its position.
+func ReserveGroupKeyCandidate(candidates []*Channel) (*Channel, error) {
+	channel := candidates[0]
+	excluded := make(map[int]bool)
+	for index := range channel.relayKeys() {
+		excluded[index] = true
+	}
+	for _, candidate := range candidates {
+		delete(excluded, candidate.RelayKeyIndex)
+	}
+	_, index, err := channel.nextEnabledKey(excluded)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range candidates {
+		if candidate.RelayKeyIndex == index {
+			return candidate, nil
+		}
+	}
+	return nil, ErrChannelDisabled
+}

@@ -142,6 +142,42 @@ func TestGroupKeyRoutingDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, model.ErrorCodeChannelGroupUnavailable, apiErr.GetErrorCode(), "a cached single-key candidate cannot retain revoked group permission")
 				require.NoError(t, single.Delete())
 			}
+			for _, cached := range []bool{false, true} {
+				t.Run(fmt.Sprintf("polling_reservation/cache=%t", cached), func(t *testing.T) {
+					common.MemoryCacheEnabled = cached
+					channel := &model.Channel{Name: "polling reservation", Type: constant.ChannelTypeOpenAI, Key: "polling-key-a\npolling-key-b\npolling-key-c", Models: "polling-reservation-model", Group: "default", Status: common.ChannelStatusEnabled, Priority: common.GetPointer(int64(20)), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling}}
+					require.NoError(t, channel.Insert())
+					t.Cleanup(func() { require.NoError(t, channel.Delete()) })
+					order, err := model.GetGroupKeyRouting("default")
+					require.NoError(t, err)
+					_, err = model.SetGroupKeyRouting(model.GroupKeyRoutingUpdate{Group: "default", Revision: order.Revision, Items: []model.GroupKeyRoutingChange{{ChannelID: channel.Id, KeyIdentity: channel.KeyIdentity("polling-key-a"), Priority: common.GetPointer(int64(20))}}})
+					require.NoError(t, err)
+					model.InitChannelCache()
+					var contexts []*gin.Context
+					var selected []*model.Channel
+					for range 2 {
+						c, _ := probeRoutingContext(channel.Models, "default")
+						candidate, _, selectErr := service.SelectChannelForRequest(c, channel.Models, &service.RetryParam{Ctx: c, TokenGroup: "default", ModelName: channel.Models})
+						require.Nil(t, selectErr)
+						require.NotNil(t, candidate)
+						contexts = append(contexts, c)
+						selected = append(selected, candidate)
+					}
+					// Both requests choose before either reaches setup. Reverse
+					// completion order must neither repeat a key nor rewind polling.
+					for _, index := range []int{1, 0} {
+						require.Nil(t, middleware.SetupContextForSelectedChannel(contexts[index], selected[index], channel.Models))
+					}
+					assert.Equal(t, "polling-key-a", common.GetContextKeyString(contexts[0], constant.ContextKeyChannelKey))
+					assert.Equal(t, "polling-key-b", common.GetContextKeyString(contexts[1], constant.ContextKeyChannelKey))
+					third, _ := probeRoutingContext(channel.Models, "default")
+					candidate, _, selectErr := service.SelectChannelForRequest(third, channel.Models, &service.RetryParam{Ctx: third, TokenGroup: "default", ModelName: channel.Models})
+					require.Nil(t, selectErr)
+					require.NotNil(t, candidate)
+					require.Nil(t, middleware.SetupContextForSelectedChannel(third, candidate, channel.Models))
+					assert.Equal(t, "polling-key-c", common.GetContextKeyString(third, constant.ContextKeyChannelKey))
+				})
+			}
 		})
 	}
 }

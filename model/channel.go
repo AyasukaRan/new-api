@@ -303,16 +303,33 @@ func (channel *Channel) SelectRelayKeyForModel(modelName string, batchRequest bo
 	for index := range failures {
 		excluded[index] = true
 	}
+	var key string
+	var index int
 	if channel.RelayKeyIdentity != "" {
-		for index, key := range channel.relayKeys() {
-			if channel.KeyIdentity(key) != channel.RelayKeyIdentity {
-				excluded[index] = true
+		// The tier planner already reserved this credential under the polling
+		// lock. Revalidate it without advancing or rewinding the shared cursor.
+		found := false
+		for candidateIndex, candidateKey := range channel.relayKeys() {
+			if channel.KeyIdentity(candidateKey) != channel.RelayKeyIdentity || excluded[candidateIndex] {
+				continue
 			}
+			if channel.ChannelInfo.IsMultiKey {
+				if status, explicit := channel.ChannelInfo.MultiKeyStatusList[candidateIndex]; explicit && status != common.ChannelStatusEnabled {
+					continue
+				}
+			}
+			key, index, found = candidateKey, candidateIndex, true
+			break
 		}
-	}
-	key, index, apiErr := channel.nextEnabledKey(excluded)
-	if apiErr != nil {
-		return RelayKeySelection{}, apiErr
+		if !found {
+			return RelayKeySelection{}, types.NewErrorWithStatusCode(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+		}
+	} else {
+		var apiErr *types.NewAPIError
+		key, index, apiErr = channel.nextEnabledKey(excluded)
+		if apiErr != nil {
+			return RelayKeySelection{}, apiErr
+		}
 	}
 	batchBaseURL := ""
 	if batchRequest {
