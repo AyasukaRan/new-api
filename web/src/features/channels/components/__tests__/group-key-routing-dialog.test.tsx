@@ -101,7 +101,8 @@ function setup(canWrite = true) {
       return { data: { success: true, data: ['DS', 'backup'] } }
     }
     if (url === '/api/channel/group_key_routing') {
-      const group = config?.params?.group
+      const params = config?.params as { group?: string } | undefined
+      const group = params?.group
       return {
         data: {
           success: true,
@@ -286,12 +287,12 @@ test('group switches keep separate drafts and account changes discard them', asy
   await user.clear(tier('Channel A', 3))
   await user.type(tier('Channel A', 3), '2')
   await user.click(screen.getByRole('combobox', { name: 'Group' }))
-  await user.click(screen.getByRole('option', { name: 'backup', exact: true }))
+  await user.click(screen.getByRole('option', { name: /^backup$/ }))
   expect(
     await screen.findByText('No eligible keys in this group')
   ).toBeVisible()
   await user.click(screen.getByRole('combobox', { name: 'Group' }))
-  await user.click(screen.getByRole('option', { name: 'DS', exact: true }))
+  await user.click(screen.getByRole('option', { name: /^DS$/ }))
   await screen.findByText('a-***1')
   expect(tier('Channel A', 3)).toHaveValue('2')
   await act(() =>
