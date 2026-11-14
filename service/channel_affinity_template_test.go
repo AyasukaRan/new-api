@@ -31,7 +31,16 @@ func setupChannelKeyAffinityTest(t *testing.T, redisAddress string) *model.Chann
 	common.MemoryCacheEnabled = false
 	require.NoError(t, db.AutoMigrate(&model.ChannelKeyObservation{}, &model.ChannelBalanceSample{}))
 	previousDBType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	previousLogDB, previousMaster := model.LOG_DB, common.IsMasterNode
+	t.Cleanup(func() {
+		model.LOG_DB, common.IsMasterNode = previousLogDB, previousMaster
+		common.SetDatabaseTypes(previousDBType, previousLogType)
+	})
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, previousLogType)
+	common.IsMasterNode = false
+	t.Setenv("LOG_SQL_DSN", "")
+	// Initialize the reserved-column quoting used by fresh key selection.
+	require.NoError(t, model.InitLogDB())
 	previousRedis, previousRDB := common.RedisEnabled, common.RDB
 	common.RedisEnabled = redisAddress != ""
 	if redisAddress != "" {
@@ -53,7 +62,6 @@ func setupChannelKeyAffinityTest(t *testing.T, redisAddress string) *model.Chann
 		require.NoError(t, err)
 		*settings = previousSettings
 		common.RedisEnabled, common.RDB = previousRedis, previousRDB
-		common.SetDatabaseTypes(previousDBType, previousLogType)
 		channelKeyAffinityCacheOnce = sync.Once{}
 		channelKeyAffinityCache = nil
 	})
