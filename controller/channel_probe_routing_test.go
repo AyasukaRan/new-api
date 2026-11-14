@@ -61,6 +61,150 @@ func requireProbeRoutingError(t *testing.T, apiErr *types.NewAPIError, message s
 	assert.Nil(t, perfmetrics.RelayObservation(nil, info, apiErr))
 }
 
+func TestFailoverKeyRecoveryDatabaseMatrix(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.ChannelModelActivity{}, &model.Log{}))
+			previousConfig := config.GlobalConfig.ExportAllConfigs()
+			previousGroups, previousLogs := ratio_setting.GroupRatio2JSONString(), common.LogConsumeEnabled
+			previousStreamingTimeout := constant.StreamingTimeout
+			t.Setenv("CHANNEL_TEST_ENABLED", "")
+			t.Setenv("CHANNEL_TEST_FREQUENCY", "")
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_enabled": "false", "perf_metrics_setting.enabled": "false"}))
+			common.LogConsumeEnabled = false
+			constant.StreamingTimeout = 30
+			t.Cleanup(func() {
+				common.LogConsumeEnabled = previousLogs
+				constant.StreamingTimeout = previousStreamingTimeout
+				require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_enabled": previousConfig["monitor_setting.auto_test_channel_enabled"], "perf_metrics_setting.enabled": previousConfig["perf_metrics_setting.enabled"]}))
+			})
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"recovery-model":0}`))
+			user := &model.User{Username: "recovery-root", Password: "unused", Role: common.RoleRootUser, Status: common.UserStatusEnabled, Group: "default", AffCode: "recoveryroot"}
+			require.NoError(t, db.Create(user).Error)
+			requests := make(chan string, 8)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				requests <- strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: {\"id\":\"recovered\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"recovered\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\ndata: [DONE]\n\n")
+			}))
+			t.Cleanup(upstream.Close)
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: "recovery", Key: "recovery-primary\nrecovery-backup\nrecovery-disabled", Models: "recovery-model", Group: "default", BaseURL: common.GetPointer(upstream.URL), Status: common.ChannelStatusEnabled,
+				ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModeFailover, MultiKeyStatusList: map[int]int{2: common.ChannelStatusManuallyDisabled}}}
+			require.NoError(t, channel.Insert())
+			t.Cleanup(func() { model.InvalidateChannelProbeRouting(channel.Id) })
+			now := time.Now()
+			failedAt := now.Add(-2 * time.Minute).UnixMilli()
+			require.NoError(t, model.RecordChannelKeyRoutingFailure(channel, channel.Models, "recovery-primary", failedAt, 503, "recovery-primary upstream unavailable"))
+			require.NoError(t, model.RecordChannelKeyRoutingFailure(channel, channel.Models, "recovery-disabled", failedAt, 503, "disabled key unavailable"))
+			for _, cached := range []bool{false, true} {
+				common.MemoryCacheEnabled = cached
+				model.InitChannelCache()
+				model.InvalidateChannelProbeRouting(channel.Id)
+				selected, err := model.GetRandomSatisfiedChannel("default", channel.Models, 0, nil)
+				require.NoError(t, err)
+				require.NotNil(t, selected)
+				key, _, apiErr := selected.GetNextRelayKeyForModel(channel.Models, false)
+				require.Nil(t, apiErr)
+				assert.Equal(t, "recovery-backup", key, "a new request must skip the persisted failed key")
+			}
+			common.MemoryCacheEnabled = false
+			for _, source := range []string{"request", "probe"} {
+				require.NoError(t, model.RecordChannelKeyObservation(channel, channel.Models, "recovery-primary", now.UnixMilli(), common.GetPointer(true), 200, "", source, failedAt-1))
+				model.InvalidateChannelProbeRouting(channel.Id)
+				require.NotNil(t, channel.RelayCredentialProbeError(channel.Models, "recovery-primary"), "a success started before the failure cannot recover it")
+			}
+			oldMode := *channel
+			oldMode.ChannelInfo.MultiKeyMode = constant.MultiKeyModePolling
+			require.NoError(t, model.RecordChannelKeyObservation(&oldMode, channel.Models, "recovery-primary", now.UnixMilli(), common.GetPointer(true), 200, "", "request", failedAt-1))
+			model.InvalidateChannelProbeRouting(channel.Id)
+			require.NotNil(t, channel.RelayCredentialProbeError(channel.Models, "recovery-primary"), "an in-flight request started before switching to failover cannot clear the new gate")
+			candidates, err := model.GetChannelKeyRecoveryCandidates(now, time.Minute)
+			require.NoError(t, err)
+			require.Len(t, candidates, 1)
+			assert.Equal(t, 0, candidates[0].KeyIndex)
+			assert.Equal(t, channel.KeyIdentity("recovery-primary"), candidates[0].KeyIdentity)
+			rows, err := model.GetChannelKeyObservations([]int{channel.Id}, channel.Models)
+			require.NoError(t, err)
+			require.Len(t, rows, 1, "routing state remains private rather than a second diagnostic key")
+			assert.Equal(t, now.UnixMilli(), rows[0].ObservedAt, "diagnostics retain completion time")
+			failure := channel.RelayCredentialProbeError(channel.Models, "recovery-primary")
+			require.NotNil(t, failure)
+			assert.NotContains(t, failure.Message, "recovery-primary")
+
+			// A busy backup and disabled full monitoring must not prevent recovery.
+			require.NoError(t, model.RecordChannelModelRequest(channel.Id, channel.Models, now.UnixMilli(), now.Add(10*time.Minute).UnixMilli(), nil))
+			due, err := (channelTestHandler{}).ShouldSchedule(now, nil)
+			require.NoError(t, err)
+			assert.True(t, due)
+			summary, err := runChannelTestTask(context.Background(), "", false, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, channelTestSummary{Tested: 1, Succeeded: 1}, summary)
+			require.Len(t, requests, 1, "only the blocked enabled key is probed")
+			assert.Equal(t, "recovery-primary", <-requests)
+			model.InvalidateChannelProbeRouting(channel.Id)
+			assert.Nil(t, channel.RelayCredentialProbeError(channel.Models, "recovery-primary"))
+			var current model.Channel
+			require.NoError(t, db.First(&current, channel.Id).Error)
+			assert.Equal(t, common.ChannelStatusManuallyDisabled, current.ChannelInfo.MultiKeyStatusList[2])
+			key, _, apiErr := current.GetNextRelayKeyForModel(channel.Models, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, "recovery-primary", key, "new unbound requests may use a recovered primary")
+			due, err = (channelTestHandler{}).ShouldSchedule(time.Now(), nil)
+			require.NoError(t, err)
+			assert.False(t, due, "disabled full monitoring cannot enqueue healthy-key probes")
+			// Use newer synthetic failures after the completed recovery above.
+			fairAt := time.Now().Add(time.Second).UnixMilli()
+			require.NoError(t, model.RecordChannelKeyRoutingFailure(channel, channel.Models, "recovery-primary", fairAt, 503, "first"))
+			require.NoError(t, model.RecordChannelKeyRoutingFailure(channel, channel.Models, "recovery-backup", fairAt-1, 503, "second"))
+			fairNow := time.UnixMilli(fairAt).Add(2 * time.Minute)
+			candidates, err = model.GetChannelKeyRecoveryCandidates(fairNow, time.Minute)
+			require.NoError(t, err)
+			require.Len(t, candidates, 2)
+			assert.Equal(t, 1, candidates[0].KeyIndex, "oldest untested failure is recovered first")
+			require.NoError(t, model.RecordChannelKeyObservation(channel, channel.Models, "recovery-backup", fairAt+1, common.GetPointer(false), 504, "probe timeout", "probe"))
+			candidates, err = model.GetChannelKeyRecoveryCandidates(fairNow, time.Minute)
+			require.NoError(t, err)
+			require.Len(t, candidates, 2)
+			assert.Equal(t, 0, candidates[0].KeyIndex, "a completed failed probe moves behind waiting keys")
+			for _, key := range []string{"recovery-primary", "recovery-backup"} {
+				require.NoError(t, model.RecordChannelKeyObservation(channel, channel.Models, key, fairAt+2, common.GetPointer(true), 200, "", "probe"))
+			}
+
+			// Current identity, status and endpoint eligibility are rechecked.
+			for _, fixture := range []struct {
+				name, models string
+				status       int
+				mode         constant.MultiKeyMode
+			}{
+				{"polling", "recovery-model", common.ChannelStatusEnabled, constant.MultiKeyModePolling},
+				{"disabled", "recovery-model", common.ChannelStatusManuallyDisabled, constant.MultiKeyModeFailover},
+				{"image", "gpt-image-1", common.ChannelStatusEnabled, constant.MultiKeyModeFailover},
+				{"tool", constant.DeepSeekSearchModel, common.ChannelStatusEnabled, constant.MultiKeyModeFailover},
+			} {
+				other := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: fixture.name, Key: "other-primary\nother-backup", Models: fixture.models, Group: "default", Status: fixture.status, ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeyMode: fixture.mode}}
+				require.NoError(t, db.Create(other).Error)
+				require.NoError(t, model.RecordChannelKeyObservation(other, other.Models, "other-primary", failedAt, common.GetPointer(false), 503, "fixture failed", "probe"))
+			}
+			eligible, err := channelKeyRecoveryCandidates(time.Now())
+			require.NoError(t, err)
+			assert.Empty(t, eligible)
+			require.NoError(t, model.RecordChannelKeyRoutingFailure(channel, channel.Models, "recovery-primary", fairAt+3, 503, "failure"))
+			require.NoError(t, db.Model(channel).Update("key", "replacement-primary\nrecovery-backup\nrecovery-disabled").Error)
+			eligible, err = channelKeyRecoveryCandidates(time.Now().Add(2 * time.Minute))
+			require.NoError(t, err)
+			assert.Empty(t, eligible, "a replaced credential never inherits recovery work")
+		})
+	}
+}
+
 func TestGroupKeyRoutingDatabaseMatrix(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {

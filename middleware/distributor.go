@@ -710,7 +710,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		key, index, newAPIError = channel.GetNextEnabledKey()
 	} else {
 		var selected model.RelayKeySelection
-		selected, newAPIError = channel.SelectRelayKeyForModel(modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable), service.GetSelectedRequestGroup(c))
+		selected, newAPIError = service.SelectChannelKeyForRequest(c, channel, modelName, service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable))
 		key, index, upstreamCostRatio = selected.Key, selected.Index, selected.UpstreamCostRatio
 		batchBaseURL = selected.BatchBaseURL
 		if selected.Channel != nil {

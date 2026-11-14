@@ -1,6 +1,7 @@
 package model
 
 import (
+	"cmp"
 	"context"
 	"maps"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/modelmapping"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -163,6 +165,14 @@ func channelProbeFailureForKey(channel *Channel, modelName, key string, rows map
 	if err != nil {
 		return nil
 	}
+	if state, exists := rows[channelProbeStateID(id)]; exists && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+		// The state uses the start of successful attempts; a later diagnostic
+		// completion timestamp must not bypass its recovery ordering.
+		if state.Success {
+			return nil
+		}
+		return &ChannelProbeError{ObservedAt: state.ObservedAt, StatusCode: state.StatusCode, Message: state.ErrorText}
+	}
 	legacyID, _ := LegacyChannelKeyObservationID(channel, modelName, key)
 	var latest *ChannelKeyObservation
 	// Include old observations for upgrades and mixed-version deployments.
@@ -180,6 +190,81 @@ func channelProbeFailureForKey(channel *Channel, modelName, key string, rows map
 		return nil
 	}
 	return &ChannelProbeError{ObservedAt: latest.ObservedAt, StatusCode: latest.StatusCode, Message: latest.ErrorText}
+}
+
+type ChannelKeyRecoveryCandidate struct {
+	Channel     *Channel
+	ModelName   string
+	KeyIndex    int
+	KeyIdentity string
+	ObservedAt  int64
+}
+
+// GetChannelKeyRecoveryCandidates reads durable state, so a busy healthy key
+// cannot postpone recovery of another key and another node can run the probe.
+func GetChannelKeyRecoveryCandidates(now time.Time, interval time.Duration) ([]ChannelKeyRecoveryCandidate, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
+	defer cancel()
+	var channels []*Channel
+	if err := DB.WithContext(ctx).Where("status = ?", common.ChannelStatusEnabled).Order("id ASC").Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	ids := make([]int, 0)
+	for _, channel := range channels {
+		if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+			ids = append(ids, channel.Id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []ChannelKeyObservation
+	if err := DB.WithContext(ctx).Where("channel_id IN ? AND source = ? AND success = ? AND observed_at <= ?", ids, channelProbeStateSource, false, now.Add(-interval).UnixMilli()).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	byChannel := make(map[int]map[string]map[string]ChannelKeyObservation)
+	for _, row := range rows {
+		if byChannel[row.ChannelID] == nil {
+			byChannel[row.ChannelID] = make(map[string]map[string]ChannelKeyObservation)
+		}
+		if byChannel[row.ChannelID][row.ModelName] == nil {
+			byChannel[row.ChannelID][row.ModelName] = make(map[string]ChannelKeyObservation)
+		}
+		byChannel[row.ChannelID][row.ModelName][row.ID] = row
+	}
+	var candidates []ChannelKeyRecoveryCandidate
+	for _, channel := range channels {
+		if len(byChannel[channel.Id]) == 0 || !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+			continue
+		}
+		for _, name := range channel.GetModels() {
+			observations := byChannel[channel.Id][name]
+			if len(observations) == 0 {
+				continue
+			}
+			seen := make(map[string]bool)
+			for index, key := range channel.GetKeys() {
+				identity := channel.KeyIdentity(key)
+				if seen[identity] || key == "" {
+					continue
+				}
+				if status, configured := channel.ChannelInfo.MultiKeyStatusList[index]; configured && status != common.ChannelStatusEnabled {
+					continue
+				}
+				seen[identity] = true
+				if failure := channelProbeFailureForKey(channel, name, key, observations); failure != nil {
+					candidates = append(candidates, ChannelKeyRecoveryCandidate{channel, name, index, identity, failure.ObservedAt})
+				}
+			}
+		}
+	}
+	// Slow failures move to the back after their completed probe, so a bounded
+	// round cannot starve credentials later in the channel/key order.
+	slices.SortStableFunc(candidates, func(a, b ChannelKeyRecoveryCandidate) int { return cmp.Compare(a.ObservedAt, b.ObservedAt) })
+	return candidates, nil
 }
 
 // RelayCredentialProbeError checks a credential already bound to a relay.

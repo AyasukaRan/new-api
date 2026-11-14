@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/modelmapping"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	sqlitedriver "github.com/glebarez/go-sqlite"
@@ -198,9 +199,14 @@ type channelKeyObservationTarget struct {
 	probeObservationID string
 }
 
-var channelKeySuccessWrites common.CoalescedWrites[channelKeyObservationTarget, ChannelKeyObservation]
+type channelKeyObservationWrite struct {
+	row     ChannelKeyObservation
+	stateAt int64
+}
 
-func RecordChannelKeyObservation(channel *Channel, modelName, key string, observedAt int64, success *bool, statusCode int, errorMessage, source string) error {
+var channelKeySuccessWrites common.CoalescedWrites[channelKeyObservationTarget, channelKeyObservationWrite]
+
+func RecordChannelKeyObservation(channel *Channel, modelName, key string, observedAt int64, success *bool, statusCode int, errorMessage, source string, attemptStartedAt ...int64) error {
 	if success == nil {
 		return nil
 	}
@@ -220,6 +226,11 @@ func RecordChannelKeyObservation(channel *Channel, modelName, key string, observ
 		errorMessage = SanitizeChannelObservationError(channel, key, errorMessage)
 	}
 	row := ChannelKeyObservation{ID: id, ChannelID: channel.Id, ModelName: modelName, ObservedAt: observedAt, Success: *success, StatusCode: statusCode, ErrorText: errorMessage, Source: source}
+	stateAt := observedAt
+	if row.Success && len(attemptStartedAt) > 0 && attemptStartedAt[0] > 0 {
+		// An old in-flight success cannot clear a failure observed after it began.
+		stateAt = min(observedAt, attemptStartedAt[0])
+	}
 	probeModel := channel.probeModelName(modelName)
 	target := channelKeyObservationTarget{database: DB, observationID: id, probeObservationID: id}
 	if probeModel != modelName {
@@ -229,19 +240,47 @@ func RecordChannelKeyObservation(channel *Channel, modelName, key string, observ
 		}
 	}
 	if source == "request" && row.Success {
-		return channelKeySuccessWrites.Write(target, row, func(earlier, later ChannelKeyObservation) ChannelKeyObservation {
-			if earlier.ObservedAt > later.ObservedAt {
-				return earlier
+		return channelKeySuccessWrites.Write(target, channelKeyObservationWrite{row, stateAt}, func(earlier, later channelKeyObservationWrite) channelKeyObservationWrite {
+			if earlier.row.ObservedAt > later.row.ObservedAt {
+				later.row = earlier.row
 			}
+			later.stateAt = max(earlier.stateAt, later.stateAt)
 			return later
-		}, func(observation ChannelKeyObservation) error {
-			return target.persist(channel, probeModel, key, observation)
+		}, func(observation channelKeyObservationWrite) error {
+			return target.persist(channel, probeModel, key, observation.row, observation.stateAt)
 		})
 	}
-	return target.persist(channel, probeModel, key, row)
+	return target.persist(channel, probeModel, key, row, stateAt)
 }
 
-func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, key string, row ChannelKeyObservation) error {
+// RecordChannelKeyRoutingFailure blocks a failed failover credential without
+// changing its enabled status. Only the relay's upstream-failure classifier
+// calls this, after exhausting same-credential endpoint retries.
+func RecordChannelKeyRoutingFailure(channel *Channel, modelName, key string, observedAt int64, statusCode int, errorMessage string) error {
+	if channel == nil || !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+		return nil
+	}
+	modelName = channel.probeModelName(modelName)
+	id, err := ChannelKeyObservationID(channel, modelName, key)
+	if err != nil {
+		return err
+	}
+	if DB == nil || observedAt <= 0 {
+		return errors.New("invalid channel key observation")
+	}
+	row := ChannelKeyObservation{ID: channelProbeStateID(id), ChannelID: channel.Id, ModelName: modelName, ObservedAt: observedAt, StatusCode: statusCode,
+		ErrorText: SanitizeChannelObservationError(channel, key, errorMessage), Source: channelProbeStateSource}
+	ctx, cancel := context.WithTimeout(context.Background(), channelActivityDatabaseTimeout)
+	defer cancel()
+	database := DB
+	if err := upsertChannelKeyObservation(database.WithContext(ctx), row, false); err != nil {
+		return err
+	}
+	cacheCommittedChannelObservations(database, []ChannelKeyObservation{row})
+	return nil
+}
+
+func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, key string, row ChannelKeyObservation, stateAt int64) error {
 	stateID := channelProbeStateID(target.probeObservationID)
 	_, stateKnown := channelProbeObservations(channel, probeModel)[stateID]
 	committed := []ChannelKeyObservation{row}
@@ -264,7 +303,12 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 			return err
 		}
 		for _, existing := range previous {
-			if existing.Source != "probe" && !(existing.Source == "request" && existing.Success) {
+			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover && existing.Success {
+				// Legacy successes have no attempt start and cannot prove recovery
+				// from a concurrently established failover quarantine.
+				continue
+			}
+			if existing.Source != "probe" && !(existing.Source == "request" && existing.Success && channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover) {
 				continue
 			}
 			existing.ID, existing.ModelName, existing.Source = stateID, probeModel, channelProbeStateSource
@@ -280,7 +324,7 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 		// Both rows commit together so cache invalidation never exposes a
 		// partially recorded result. Ordinary monitoring retains its raw name.
 		state := row
-		state.ID, state.ModelName, state.Source = stateID, probeModel, channelProbeStateSource
+		state.ID, state.ModelName, state.Source, state.ObservedAt = stateID, probeModel, channelProbeStateSource, stateAt
 		committed = append(committed, state)
 		return upsertChannelKeyObservation(tx, state, state.Success)
 	}

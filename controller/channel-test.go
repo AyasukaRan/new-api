@@ -57,6 +57,10 @@ type channelTestKeySelection struct {
 	identity string
 }
 
+type channelKeyRecoveryContext struct{}
+
+const channelKeyRecoveryInterval = time.Minute
+
 func (selection channelTestKeySelection) credential(channel *model.Channel) (string, error) {
 	keys := []string{channel.Key}
 	if channel.ChannelInfo.IsMultiKey {
@@ -291,6 +295,7 @@ func scheduledChannelTestAllowed(ctx context.Context, channelID int) (bool, erro
 
 func testChannelModel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
 	selectedKey, specificKey := ctx.Value(channelTestKeySelection{}).(channelTestKeySelection)
+	recoveryDeadline, recovery := ctx.Value(channelKeyRecoveryContext{}).(time.Time)
 	if !specificKey && shouldSkipChannelTest(ctx, channel, testModel, endpointType) {
 		return testResult{summary: channelTestSummary{Skipped: 1}}
 	}
@@ -343,7 +348,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 			}
 		}
 	}
-	snapshot.ChannelInfo = model.ChannelInfo{}
+	snapshot.ChannelInfo = model.ChannelInfo{MultiKeyMode: channel.ChannelInfo.MultiKeyMode}
 	snapshot.Keys = nil
 	lock.Unlock()
 	if len(keys) == 0 {
@@ -378,6 +383,9 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 			if status, configured := current.ChannelInfo.MultiKeyStatusList[key.index]; key.index >= 0 && configured && status != common.ChannelStatusEnabled {
 				continue
 			}
+			if recovery && (current.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover || current.RelayCredentialProbeError(testModel, key.value) == nil) {
+				continue
+			}
 		}
 		if !attempted && !specificKey {
 			if err := model.RecordChannelModelProbe(channel.Id, testModel, time.Now().UnixMilli(), nil); err != nil {
@@ -390,8 +398,12 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		probe := snapshot
 		probe.Key, probe.Keys = key.value, nil
 		probe.ChannelInfo.IsMultiKey = false
+		attemptStartedAt := time.Now().UnixMilli()
 		result = testChannelModelAttempt(ctx, &probe, testUserID, testModel, endpointType, isStream, key.index)
-		for result.context != nil && !specificKey {
+		for result.context != nil && (!specificKey || recovery) {
+			if recovery && !time.Now().Before(recoveryDeadline) {
+				break
+			}
 			// The attempt's deadline is already closed; cancellation of the
 			// parent probe, rather than that completed attempt, stops failover.
 			result.context.Request = result.context.Request.WithContext(ctx)
@@ -423,7 +435,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 		} else if result.localErr != nil {
 			statusCode, errorMessage = 0, result.localErr.Error()
 		}
-		if err := model.RecordChannelKeyObservation(&snapshot, testModel, key.value, time.Now().UnixMilli(), &result.sample.Success, statusCode, errorMessage, perfmetrics.SourceProbe); err != nil {
+		if err := model.RecordChannelKeyObservation(&snapshot, testModel, key.value, time.Now().UnixMilli(), &result.sample.Success, statusCode, errorMessage, perfmetrics.SourceProbe, attemptStartedAt); err != nil {
 			common.SysError(fmt.Sprintf("channel key observation persistence failed: channel_id=%d model=%q", channel.Id, testModel))
 		}
 		// A selected credential does not represent the remaining keys or delay
@@ -506,7 +518,11 @@ func testChannelModelAttempt(ctx context.Context, channel *model.Channel, testUs
 	requestCtx := ctx
 	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); scheduled {
 		var cancel context.CancelFunc
-		requestCtx, cancel = context.WithTimeout(ctx, time.Minute)
+		deadline := time.Now().Add(time.Minute)
+		if recoveryDeadline, recovery := ctx.Value(channelKeyRecoveryContext{}).(time.Time); recovery {
+			deadline = recoveryDeadline
+		}
+		requestCtx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
 
@@ -1624,22 +1640,83 @@ func runChannelTestTask(ctx context.Context, _ string, notify bool, report func(
 	if err != nil {
 		return channelTestSummary{}, err
 	}
-	channels, err := model.GetAllChannels(0, 0, true, false)
-	if err != nil {
-		return channelTestSummary{}, err
+	_, automatic := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration)
+	var summary channelTestSummary
+	if automatic {
+		summary, err = runChannelKeyRecoveryTests(ctx, testUserID)
+		if err != nil {
+			return summary, err
+		}
 	}
-	selected := channels
-	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); scheduled {
-		selected = selectChannelsForAutomaticTest(channels)
+	if !automatic || operation_setting.GetMonitorSetting().AutoTestChannelEnabled {
+		channels, err := model.GetAllChannels(0, 0, true, false)
+		if err != nil {
+			return summary, err
+		}
+		selected := channels
+		if automatic {
+			selected = selectChannelsForAutomaticTest(channels)
+		}
+		concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
+		monitored := performChannelTests(ctx, selected, testUserID, concurrency, report)
+		summary.Tested += monitored.Tested
+		summary.Succeeded += monitored.Succeeded
+		summary.Failed += monitored.Failed
+		summary.Skipped += monitored.Skipped
 	}
-	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
-	summary := performChannelTests(ctx, selected, testUserID, concurrency, report)
 	if notify && (ctx == nil || ctx.Err() == nil) {
 		service.NotifyChannelWatchers(dto.NotifyTypeChannelTest, func(lang string) (string, string) {
 			return i18n.Translate(lang, i18n.MsgChannelTestCompletedSubject), i18n.Translate(lang, i18n.MsgChannelTestCompletedContent)
 		})
 	}
 	return summary, nil
+}
+
+func channelKeyRecoveryCandidates(now time.Time) ([]model.ChannelKeyRecoveryCandidate, error) {
+	candidates, err := model.GetChannelKeyRecoveryCandidates(now, channelKeyRecoveryInterval)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.WithValue(context.Background(), channelIdleProbeIntervalKey{}, channelKeyRecoveryInterval)
+	eligible := candidates[:0]
+	for _, candidate := range candidates {
+		if !shouldSkipChannelTest(ctx, candidate.Channel, candidate.ModelName, "") {
+			eligible = append(eligible, candidate)
+		}
+	}
+	return eligible, nil
+}
+
+func runChannelKeyRecoveryTests(ctx context.Context, testUserID int) (channelTestSummary, error) {
+	candidates, err := channelKeyRecoveryCandidates(time.Now())
+	if err != nil {
+		return channelTestSummary{}, err
+	}
+	// Share the existing channel_test lease, and bound one recovery round even
+	// when many failed credentials or mirrors are waiting for their response.
+	roundCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	roundCtx = context.WithValue(roundCtx, channelIdleProbeIntervalKey{}, channelKeyRecoveryInterval)
+	var summary channelTestSummary
+	for _, candidate := range candidates {
+		if roundCtx.Err() != nil {
+			break
+		}
+		probeCtx := context.WithValue(roundCtx, channelKeyRecoveryContext{}, time.Now().Add(time.Minute))
+		probeCtx = context.WithValue(probeCtx, channelTestKeySelection{}, channelTestKeySelection{index: candidate.KeyIndex, identity: candidate.KeyIdentity})
+		result := testChannelModel(probeCtx, candidate.Channel, testUserID, candidate.ModelName, "", shouldUseStreamForAutomaticChannelTest(candidate.Channel))
+		if result.sample == nil {
+			summary.Skipped++
+			continue
+		}
+		summary.Tested++
+		if result.sample.Success {
+			summary.Succeeded++
+		} else {
+			summary.Failed++
+		}
+	}
+	return summary, ctx.Err()
 }
 
 func selectChannelsForAutomaticTest(channels []*model.Channel) []*model.Channel {

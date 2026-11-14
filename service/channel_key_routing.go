@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -87,6 +88,9 @@ func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, pref
 		eligible = append(eligible, candidate)
 		hasExact = hasExact || candidate.RelayModelExact
 	}
+	if preferred := selectGroupKeyAffinityCandidate(c, eligible, preferredID, group, modelName, hasExact); preferred != nil {
+		return preferred, true, nil
+	}
 	for _, candidate := range eligible {
 		if hasExact && !candidate.RelayModelExact {
 			continue
@@ -131,6 +135,11 @@ func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, pref
 		}
 	}
 	var keys []*model.Channel
+	if selectedID != preferredID {
+		if preferred := selectGroupKeyAffinityCandidate(c, eligible, selectedID, group, modelName, hasExact); preferred != nil {
+			return preferred, true, nil
+		}
+	}
 	for _, candidate := range tier {
 		if candidate.Id == selectedID {
 			keys = append(keys, candidate)
@@ -157,6 +166,32 @@ func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, pref
 		common.SetContextKey(c, constant.ContextKeyAutoGroup, group)
 	}
 	return selected, true, nil
+}
+
+func selectGroupKeyAffinityCandidate(c *gin.Context, eligible []*model.Channel, channelID int, group, modelName string, hasExact bool) *model.Channel {
+	if channelID <= 0 || RequestPolicy(c).Attempts != 0 {
+		return nil
+	}
+	binding := prepareChannelKeyAffinity(c, channelID, group)
+	if binding == nil || binding.Expected == "" {
+		return nil
+	}
+	for _, candidate := range eligible {
+		if candidate.Id != channelID || candidate.RelayCredentialIdentity != binding.Expected ||
+			candidate.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover || hasExact && !candidate.RelayModelExact {
+			continue
+		}
+		// A recovered higher tier serves new sessions. A known channel binding
+		// keeps its healthy key after current permissions and health are checked.
+		selected, err := candidate.SelectRelayKeyForModel(modelName, GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), group)
+		if err == nil && selected.Channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+			if common.GetContextKeyString(c, constant.ContextKeyUsingGroup) == "auto" {
+				common.SetContextKey(c, constant.ContextKeyAutoGroup, group)
+			}
+			return selected.Channel
+		}
+	}
+	return nil
 }
 
 func groupKeySelectionError(err error) *ChannelSelectError {

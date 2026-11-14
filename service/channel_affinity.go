@@ -43,19 +43,20 @@ var (
 )
 
 type channelAffinityMeta struct {
-	CacheKey       string
-	TTLSeconds     int
-	RuleName       string
-	SkipRetry      bool
-	ParamTemplate  map[string]any
-	KeySourceType  string
-	KeySourceKey   string
-	KeySourcePath  string
-	KeyHint        string
-	KeyFingerprint string
-	UsingGroup     string
-	ModelName      string
-	RequestPath    string
+	CacheKey         string
+	KeyAffinityScope string
+	TTLSeconds       int
+	RuleName         string
+	SkipRetry        bool
+	ParamTemplate    map[string]any
+	KeySourceType    string
+	KeySourceKey     string
+	KeySourcePath    string
+	KeyHint          string
+	KeyFingerprint   string
+	UsingGroup       string
+	ModelName        string
+	RequestPath      string
 }
 
 type ChannelAffinityStatsContext struct {
@@ -198,6 +199,9 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 }
 
 func ClearChannelAffinityCacheAll() int {
+	if err := getChannelKeyAffinityCache().Purge(); err != nil {
+		common.SysError(common.LogText("channel key affinity cache clear failed: %v", err))
+	}
 	cache := getChannelAffinityCache()
 	keys, err := cache.Keys()
 	if err != nil {
@@ -244,7 +248,8 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return deleted, nil
+	keyDeleted, err := getChannelKeyAffinityCache().DeleteByPrefix(common.GenerateHMAC(ruleName))
+	return deleted + keyDeleted, err
 }
 
 func matchAnyRegexCached(patterns []string, s string) bool {
@@ -596,20 +601,30 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
 		state.SessionMode, state.SessionModeSource = EffectiveSessionMode(setting, rule)
 		state.RuleName = rule.Name
+		keyAffinityScope := ""
+		if c.GetInt("id") > 0 && c.GetInt("token_id") >= 0 {
+			// The existing channel cache may intentionally omit dimensions. Key
+			// bindings always isolate the authenticated account, token and scope.
+			identity, err := common.Marshal([]any{c.GetInt("id"), c.GetInt("token_id"), rule.Name, modelName, usingGroup, path, usedSource, affinityValue})
+			if err == nil {
+				keyAffinityScope = common.GenerateHMAC(rule.Name) + ":" + common.GenerateHMAC(string(identity))
+			}
+		}
 		setChannelAffinityContext(c, channelAffinityMeta{
-			CacheKey:       cacheKeyFull,
-			TTLSeconds:     ttlSeconds,
-			RuleName:       rule.Name,
-			SkipRetry:      state.SessionMode == "strict",
-			ParamTemplate:  cloneStringAnyMap(rule.ParamOverrideTemplate),
-			KeySourceType:  strings.TrimSpace(usedSource.Type),
-			KeySourceKey:   strings.TrimSpace(usedSource.Key),
-			KeySourcePath:  strings.TrimSpace(usedSource.Path),
-			KeyHint:        buildChannelAffinityKeyHint(affinityValue),
-			KeyFingerprint: affinityFingerprint(affinityValue),
-			UsingGroup:     usingGroup,
-			ModelName:      modelName,
-			RequestPath:    path,
+			CacheKey:         cacheKeyFull,
+			KeyAffinityScope: keyAffinityScope,
+			TTLSeconds:       ttlSeconds,
+			RuleName:         rule.Name,
+			SkipRetry:        state.SessionMode == "strict",
+			ParamTemplate:    cloneStringAnyMap(rule.ParamOverrideTemplate),
+			KeySourceType:    strings.TrimSpace(usedSource.Type),
+			KeySourceKey:     strings.TrimSpace(usedSource.Key),
+			KeySourcePath:    strings.TrimSpace(usedSource.Path),
+			KeyHint:          buildChannelAffinityKeyHint(affinityValue),
+			KeyFingerprint:   affinityFingerprint(affinityValue),
+			UsingGroup:       usingGroup,
+			ModelName:        modelName,
+			RequestPath:      path,
 		})
 
 		state.AddEvent(PolicyEvent{Decision: PolicyDecision{Action: "match", Reason: "session_rule_matched", Source: "session_rule"}})
@@ -651,6 +666,11 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	if c == nil {
 		return false
+	}
+	if meta, ok := getChannelAffinityMeta(c); ok && meta.KeyAffinityScope != "" {
+		if _, err := getChannelKeyAffinityCache().DeleteByPrefix(meta.KeyAffinityScope); err != nil {
+			common.SysError(common.LogText("channel key affinity cache clear failed: %v", err))
+		}
 	}
 	cacheKey, _, ok := getChannelAffinityContext(c)
 	if !ok || cacheKey == "" {

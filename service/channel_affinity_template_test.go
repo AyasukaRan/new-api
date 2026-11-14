@@ -1,24 +1,305 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func setupChannelKeyAffinityTest(t *testing.T, redisAddress string) *model.Channel {
+	t.Helper()
+	db := setupChannelSelectAutoGroupsTest(t)
+	common.MemoryCacheEnabled = false
+	require.NoError(t, db.AutoMigrate(&model.ChannelKeyObservation{}, &model.ChannelBalanceSample{}))
+	previousDBType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, previousLogType)
+	previousRedis, previousRDB := common.RedisEnabled, common.RDB
+	common.RedisEnabled = redisAddress != ""
+	if redisAddress != "" {
+		client := redis.NewClient(&redis.Options{Addr: redisAddress})
+		require.NoError(t, client.Ping(context.Background()).Err())
+		common.RDB = client
+		t.Cleanup(func() { require.NoError(t, client.Close()) })
+	}
+	channelKeyAffinityCacheOnce = sync.Once{}
+	channelKeyAffinityCache = nil
+	settings := operation_setting.GetChannelAffinitySetting()
+	previousSettings := *settings
+	*settings = operation_setting.ChannelAffinitySetting{Enabled: true, DefaultTTLSeconds: 60, MaxEntries: 100, Rules: []operation_setting.ChannelAffinityRule{{
+		Name: t.Name(), ModelRegex: []string{"^affinity-model$"}, PathRegex: []string{"^/v1/messages$"}, SessionMode: "prefer",
+		KeySources: []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Affinity-Key"}},
+	}}}
+	t.Cleanup(func() {
+		_, err := getChannelKeyAffinityCache().DeleteByPrefix(common.GenerateHMAC(t.Name()))
+		require.NoError(t, err)
+		*settings = previousSettings
+		common.RedisEnabled, common.RDB = previousRedis, previousRDB
+		common.SetDatabaseTypes(previousDBType, previousLogType)
+		channelKeyAffinityCacheOnce = sync.Once{}
+		channelKeyAffinityCache = nil
+	})
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: t.Name(), Models: "affinity-model", Group: "default,vip", Status: common.ChannelStatusEnabled, Key: "affinity-primary-secret\naffinity-backup-secret"}
+	channel.ChannelInfo.IsMultiKey = true
+	channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+	require.NoError(t, db.Create(channel).Error)
+	return channel
+}
+
+func newChannelKeyAffinityContext(t *testing.T, session string, userID, tokenID int, group string, channelID int) *gin.Context {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Request.Header.Set("X-Affinity-Key", session)
+	c.Set("id", userID)
+	c.Set("token_id", tokenID)
+	c.Set("channel_id", channelID)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
+	GetPreferredChannelByAffinity(c, "affinity-model", group)
+	return c
+}
+
+func TestChannelKeyAffinityFailover(t *testing.T) {
+	for _, backend := range []string{"memory", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			address := ""
+			if backend == "redis" {
+				address = os.Getenv("TEST_REDIS_ADDR")
+				if address == "" {
+					t.Skip("TEST_REDIS_ADDR is not configured")
+				}
+			}
+			channel := setupChannelKeyAffinityTest(t, address)
+			keys := channel.GetKeys()
+			initial := newChannelKeyAffinityContext(t, "existing-session", 1, 11, "default", channel.Id)
+			selected, apiErr := SelectChannelKeyForRequest(initial, channel, channel.Models, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, keys[0], selected.Key)
+			MarkRequestPolicySuccess(initial, nil)
+			RecordChannelKeyAffinity(initial)
+			late := newChannelKeyAffinityContext(t, "existing-session", 1, 11, "default", channel.Id)
+			_, apiErr = SelectChannelKeyForRequest(late, channel, channel.Models, false)
+			require.Nil(t, apiErr)
+			retrying := newChannelKeyAffinityContext(t, "existing-session", 1, 11, "default", channel.Id)
+			_, apiErr = SelectChannelKeyForRequest(retrying, channel, channel.Models, false)
+			require.Nil(t, apiErr)
+			RequestPolicy(retrying).BeginAttempt(channel, "default")
+			now := time.Now().UnixMilli()
+			require.NoError(t, model.RecordChannelKeyObservation(channel, channel.Models, keys[0], now, common.GetPointer(false), http.StatusBadGateway, "upstream unavailable", "probe"))
+			selected, apiErr = SelectChannelKeyForRequest(retrying, channel, channel.Models, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, keys[1], selected.Key)
+			MarkRequestPolicySuccess(retrying, nil)
+			RecordChannelKeyAffinity(retrying)
+			require.NoError(t, model.RecordChannelKeyObservation(channel, channel.Models, keys[0], now+1, common.GetPointer(true), http.StatusOK, "", "probe"))
+			MarkRequestPolicySuccess(late, nil)
+			RecordChannelKeyAffinity(late)
+			for _, tc := range []struct {
+				name, session, group string
+				user, token, want    int
+			}{
+				{name: "existing session after recovery and late success", session: "existing-session", group: "default", user: 1, token: 11, want: 1},
+				{name: "new session", session: "new-session", group: "default", user: 1, token: 11},
+				{name: "different account", session: "existing-session", group: "default", user: 2, token: 11},
+				{name: "different token", session: "existing-session", group: "default", user: 1, token: 12},
+				{name: "different group", session: "existing-session", group: "vip", user: 1, token: 11},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					c := newChannelKeyAffinityContext(t, tc.session, tc.user, tc.token, tc.group, channel.Id)
+					selected, err := SelectChannelKeyForRequest(c, channel, channel.Models, false)
+					require.Nil(t, err)
+					assert.Equal(t, keys[tc.want], selected.Key)
+				})
+			}
+			// Both requests missed a cold cache. An old primary success can fill
+			// it before the request that actually failed over finishes.
+			coldOld := newChannelKeyAffinityContext(t, "cold-session", 1, 11, "default", channel.Id)
+			coldLate := newChannelKeyAffinityContext(t, "cold-session", 1, 11, "default", channel.Id)
+			coldRetry := newChannelKeyAffinityContext(t, "cold-session", 1, 11, "default", channel.Id)
+			for _, c := range []*gin.Context{coldOld, coldLate, coldRetry} {
+				selected, apiErr := SelectChannelKeyForRequest(c, channel, channel.Models, false)
+				require.Nil(t, apiErr)
+				assert.Equal(t, keys[0], selected.Key)
+			}
+			MarkRequestPolicySuccess(coldOld, nil)
+			RecordChannelKeyAffinity(coldOld)
+			RequestPolicy(coldRetry).BeginAttempt(channel, "default")
+			backup := *channel
+			backup.RelayKeyIdentity = channel.KeyIdentity(keys[1])
+			selected, apiErr = SelectChannelKeyForRequest(coldRetry, &backup, channel.Models, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, keys[1], selected.Key)
+			MarkRequestPolicySuccess(coldRetry, nil)
+			RecordChannelKeyAffinity(coldRetry)
+			MarkRequestPolicySuccess(coldLate, nil)
+			RecordChannelKeyAffinity(coldLate)
+			coldNext := newChannelKeyAffinityContext(t, "cold-session", 1, 11, "default", channel.Id)
+			selected, apiErr = SelectChannelKeyForRequest(coldNext, channel, channel.Models, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, keys[1], selected.Key, "the successful fallback must replace an intervening original-key binding")
+			cacheKeys, err := getChannelKeyAffinityCache().Keys()
+			require.NoError(t, err)
+			for _, key := range cacheKeys {
+				if !strings.Contains(key, common.GenerateHMAC(t.Name())+":") {
+					continue
+				}
+				assert.NotContains(t, key, "existing-session")
+				value, _, err := getChannelKeyAffinityCache().Get(key)
+				require.NoError(t, err)
+				assert.Equal(t, channel.KeyIdentity(keys[1]), value)
+				assert.NotContains(t, value, "secret")
+			}
+		})
+	}
+}
+
+func TestChannelKeyAffinityRejectsFailedOutcomesAndStaleKeys(t *testing.T) {
+	channel := setupChannelKeyAffinityTest(t, "")
+	keys := channel.GetKeys()
+	for _, outcome := range []string{"failure", "stream failure", "client cancellation"} {
+		t.Run(outcome, func(t *testing.T) {
+			c := newChannelKeyAffinityContext(t, outcome, 1, 11, "default", channel.Id)
+			backup := *channel
+			backup.RelayKeyIdentity = channel.KeyIdentity(keys[1])
+			_, apiErr := SelectChannelKeyForRequest(c, &backup, channel.Models, false)
+			require.Nil(t, apiErr)
+			if outcome == "stream failure" {
+				stream := relaycommon.NewStreamStatus()
+				stream.MarkFailed("upstream_error", "upstream", 502)
+				MarkRequestPolicySuccess(c, stream)
+			} else if outcome == "client cancellation" {
+				MarkRequestPolicySuccess(c, nil)
+				ctx, cancel := context.WithCancel(c.Request.Context())
+				cancel()
+				c.Request = c.Request.WithContext(ctx)
+			}
+			RecordChannelKeyAffinity(c)
+			next := newChannelKeyAffinityContext(t, outcome, 1, 11, "default", channel.Id)
+			selected, apiErr := SelectChannelKeyForRequest(next, channel, channel.Models, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, keys[0], selected.Key)
+		})
+	}
+	for _, change := range []string{"group permission", "disabled key", "removed key", "reordered keys", "failed health", "negative balance", "disabled channel"} {
+		t.Run(change, func(t *testing.T) {
+			current := *channel
+			current.Id = 0
+			current.Keys = nil
+			require.NoError(t, model.DB.Create(&current).Error)
+			c := newChannelKeyAffinityContext(t, change, 1, 11, "default", current.Id)
+			backup := current
+			backup.RelayKeyIdentity = current.KeyIdentity(keys[1])
+			_, apiErr := SelectChannelKeyForRequest(c, &backup, current.Models, false)
+			require.Nil(t, apiErr)
+			MarkRequestPolicySuccess(c, nil)
+			RecordChannelKeyAffinity(c)
+			switch change {
+			case "group permission":
+				current.ChannelInfo.KeyGroups = map[string][]string{current.KeyIdentity(keys[1]): {"vip"}}
+			case "disabled key":
+				current.ChannelInfo.MultiKeyStatusList = map[int]int{1: common.ChannelStatusManuallyDisabled}
+			case "removed key":
+				current.Key = keys[0]
+			case "reordered keys":
+				current.Key = keys[1] + "\n" + keys[0]
+			case "failed health":
+				require.NoError(t, model.RecordChannelKeyObservation(&current, current.Models, keys[1], time.Now().UnixMilli(), common.GetPointer(false), 502, "unavailable", "probe"))
+			case "negative balance":
+				require.NoError(t, model.RecordChannelBalanceSample(&current, &model.ChannelBalanceSample{CheckedAt: time.Now().UnixMilli(), KeyBalances: []model.ChannelKeyBalance{{Index: 1, Balance: common.GetPointer(-1.0)}}}))
+			case "disabled channel":
+				current.Status = common.ChannelStatusManuallyDisabled
+			}
+			require.NoError(t, model.DB.Model(&current).Select("key", "channel_info", "status").Updates(&current).Error)
+			next := newChannelKeyAffinityContext(t, change, 1, 11, "default", current.Id)
+			stale := *channel
+			stale.Id = current.Id
+			selected, apiErr := SelectChannelKeyForRequest(next, &stale, current.Models, false)
+			if change == "disabled channel" {
+				require.NotNil(t, apiErr)
+				return
+			}
+			require.Nil(t, apiErr)
+			want := keys[0]
+			if change == "reordered keys" {
+				want = keys[1]
+			}
+			assert.Equal(t, want, selected.Key, "cached affinity must not bypass current eligibility")
+		})
+	}
+}
+
+func TestChannelKeyAffinityGroupTier(t *testing.T) {
+	channel := setupChannelKeyAffinityTest(t, "")
+	keys := channel.GetKeys()
+	channel.ChannelInfo.KeyGroupPriorities = map[string]map[string]int64{
+		channel.KeyIdentity(keys[0]): {"default": 100},
+		channel.KeyIdentity(keys[1]): {"default": 1},
+	}
+	channel.ChannelInfo.KeyCostRatios = map[string]float64{channel.KeyIdentity(keys[0]): 1, channel.KeyIdentity(keys[1]): 2}
+	require.NoError(t, model.DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+	c := newChannelKeyAffinityContext(t, "tier-session", 1, 11, "default", channel.Id)
+	backup := *channel
+	backup.RelayKeyIdentity = channel.KeyIdentity(keys[1])
+	selected, apiErr := SelectChannelKeyForRequest(c, &backup, channel.Models, false)
+	require.Nil(t, apiErr)
+	require.NotNil(t, selected.UpstreamCostRatio)
+	assert.Equal(t, 2.0, *selected.UpstreamCostRatio)
+	MarkRequestPolicySuccess(c, nil)
+	RecordChannelKeyAffinity(c)
+	for _, session := range []string{"tier-session", "new-tier-session"} {
+		next := newChannelKeyAffinityContext(t, session, 1, 11, "default", channel.Id)
+		candidate, enabled, err := selectGroupKeyTier(next, "default", channel.Models, 0, channel.Id)
+		require.NoError(t, err)
+		require.True(t, enabled)
+		require.NotNil(t, candidate)
+		selected, apiErr = SelectChannelKeyForRequest(next, candidate, channel.Models, false)
+		require.Nil(t, apiErr)
+		want, ratio := keys[0], 1.0
+		if session == "tier-session" {
+			want, ratio = keys[1], 2
+		}
+		assert.Equal(t, want, selected.Key)
+		require.NotNil(t, selected.UpstreamCostRatio)
+		assert.Equal(t, ratio, *selected.UpstreamCostRatio, "affinity must retain the selected physical credential's cost")
+	}
+	// The recovered primary may belong to a different, higher-priority channel.
+	higher := &model.Channel{Type: channel.Type, Name: "recovered higher tier", Models: channel.Models, Group: channel.Group,
+		Status: common.ChannelStatusEnabled, Key: "recovered-primary-secret", Priority: common.GetPointer(int64(200))}
+	higher.ChannelInfo.IsMultiKey, higher.ChannelInfo.MultiKeyMode = true, constant.MultiKeyModeFailover
+	require.NoError(t, model.DB.Create(higher).Error)
+	for _, session := range []string{"tier-session", "new-tier-session"} {
+		next := newChannelKeyAffinityContext(t, session, 1, 11, "default", channel.Id)
+		candidate, enabled, err := selectGroupKeyTier(next, "default", channel.Models, 0, channel.Id)
+		require.NoError(t, err)
+		require.True(t, enabled)
+		require.NotNil(t, candidate)
+		selected, apiErr = SelectChannelKeyForRequest(next, candidate, channel.Models, false)
+		require.Nil(t, apiErr)
+		want := higher.Key
+		if session == "tier-session" {
+			want = keys[1]
+		}
+		assert.Equal(t, want, selected.Key, "healthy established sessions survive recovery of a higher channel tier")
+	}
+}
 
 func buildChannelAffinityTemplateContextForTest(meta channelAffinityMeta) *gin.Context {
 	rec := httptest.NewRecorder()

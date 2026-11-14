@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -80,14 +81,23 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 		cancel, written bool
 		wantKeys        []string
 		wantStatus      int
+		responseStatus  int
 	}{
 		{name: "timeout_uses_next_ordered_key", retries: 3, wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "upstream_unavailable_uses_next_ordered_key", retries: 3, responseStatus: 503, wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "client_validation_rejection_not_quarantined", retries: 3, responseStatus: 400, wantKeys: []string{"header-primary"}, wantStatus: 400},
 		{name: "timeout_respects_retry_budget", retries: 0, wantKeys: []string{"header-primary"}, wantStatus: 500},
 		{name: "client_cancel_stops_upstream_and_retry", retries: 3, cancel: true, wantKeys: []string{"header-primary"}, wantStatus: 500},
 		{name: "business_output_is_never_replayed", retries: 3, written: true, wantKeys: []string{"header-primary"}, wantStatus: 200},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			common.RetryTimes = test.retries
+			affinity.Enabled = test.name == "timeout_uses_next_ordered_key"
+			affinity.Rules = []operation_setting.ChannelAffinityRule{{
+				Name: "header-failover-affinity", ModelRegex: []string{"^claude-header-fixture$"},
+				SessionMode: "prefer", TTLSeconds: 3600, IncludeModelName: true, IncludeUsingGroup: true, IncludeRuleName: true,
+				KeySources: []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Fixture-Session"}},
+			}}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var mutex sync.Mutex
@@ -99,6 +109,16 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 				mutex.Lock()
 				used = append(used, key)
 				mutex.Unlock()
+				if key == "header-primary" && test.responseStatus > 0 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(test.responseStatus)
+					errorType := "api_error"
+					if test.responseStatus == http.StatusBadRequest {
+						errorType = "invalid_request_error"
+					}
+					_, _ = io.WriteString(w, `{"type":"error","error":{"type":"`+errorType+`","message":"fixture rejection"}}`)
+					return
+				}
 				if key == "header-primary" && !test.written {
 					if test.cancel {
 						cancel()
@@ -134,6 +154,7 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 			c, recorder := probeRoutingContext(ch.Models, "default")
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-header-fixture","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
 			c.Request.Header.Set("Content-Type", "application/json")
+			c.Request.Header.Set("X-Fixture-Session", "session-before-failure")
 			common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
 			common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
 			selected, _, selectErr := service.SelectChannelForRequest(c, ch.Models, &service.RetryParam{Ctx: c, TokenGroup: "default", ModelName: ch.Models})
@@ -150,7 +171,7 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 			} else {
 				assert.NoError(t, ctx.Err(), "a transport header timeout must not cancel the inbound request")
 			}
-			if !test.written {
+			if !test.written && test.responseStatus == 0 {
 				select {
 				case <-upstreamCanceled:
 				case <-time.After(time.Second):
@@ -164,6 +185,59 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 				assert.Contains(t, recorder.Body.String(), "event: message_start")
 				assert.Contains(t, recorder.Body.String(), "event: error")
 			}
+			nextKey := func(session string) string {
+				next, _ := probeRoutingContext(ch.Models, "default")
+				next.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+				next.Request.Header.Set("X-Fixture-Session", session)
+				common.SetContextKey(next, constant.ContextKeyUserId, user.Id)
+				common.SetContextKey(next, constant.ContextKeyTokenGroup, "default")
+				selected, _, selectionErr := service.SelectChannelForRequest(next, ch.Models, &service.RetryParam{Ctx: next, TokenGroup: "default", ModelName: ch.Models})
+				require.Nil(t, selectionErr)
+				require.NotNil(t, selected)
+				require.Nil(t, middleware.SetupContextForSelectedChannel(next, selected, ch.Models))
+				return common.GetContextKeyString(next, constant.ContextKeyChannelKey)
+			}
+			if test.cancel || test.responseStatus == http.StatusBadRequest {
+				assert.Nil(t, ch.RelayCredentialProbeError(ch.Models, "header-primary"), "a client cancellation must not quarantine a healthy credential")
+				assert.Equal(t, "header-primary", nextKey("fresh-session"))
+				return
+			}
+			failure := ch.RelayCredentialProbeError(ch.Models, "header-primary")
+			require.NotNil(t, failure, "failure must be remembered even without remaining retries")
+			assert.Equal(t, "header-backup", nextKey("fresh-session"), "later requests must skip the failed primary immediately")
+			require.NoError(t, model.RecordChannelKeyObservation(ch, ch.Models, "header-primary", failure.ObservedAt+1, common.GetPointer(true), http.StatusOK, "", "probe"))
+			assert.Nil(t, ch.RelayCredentialProbeError(ch.Models, "header-primary"))
+			assert.Equal(t, "header-primary", nextKey("session-after-recovery"), "new sessions prefer the recovered primary")
+			if affinity.Enabled {
+				assert.Equal(t, "header-backup", nextKey("session-before-failure"), "recovery must not move the successful fallback session back to the primary")
+			}
+		})
+	}
+}
+
+func TestFailoverRecoveryDoesNotProbeNonConversationRequests(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	for _, test := range []struct {
+		path, model string
+		format      types.RelayFormat
+	}{
+		{"/v1/images/generations", "gpt-image-1", types.RelayFormatOpenAI},
+		{"/v1/audio/speech", "tts-1", types.RelayFormatOpenAI},
+		{"/v1/embeddings", "text-embedding-3-small", types.RelayFormatOpenAI},
+		{"/v1/tools/search", "deepseek-search", types.RelayFormatOpenAI},
+		{"/v1beta/models/gemini-image:generateContent", "gemini-image", types.RelayFormatGemini},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			ch := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: test.model, Models: test.model, Group: "default", Key: "scope-primary\nscope-backup", Status: common.ChannelStatusEnabled,
+				ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModeFailover}}
+			require.NoError(t, db.Create(ch).Error)
+			c, _ := probeRoutingContext(test.model, "default")
+			c.Request = httptest.NewRequest(http.MethodPost, test.path, nil)
+			service.MarkGroupKeyAttempt(c, ch, "scope-primary")
+			info := &relaycommon.RelayInfo{OriginModelName: test.model, RelayFormat: test.format, RelayMode: relayconstant.Path2RelayMode(test.path), ChannelMeta: &relaycommon.ChannelMeta{ApiKey: "scope-primary"}}
+			apiErr := types.NewOpenAIError(errors.New("upstream unavailable"), types.ErrorCodeBadResponseStatusCode, http.StatusServiceUnavailable)
+			recordChannelKeyFailoverFailure(c, ch, info, apiErr, common.GetPointer(false))
+			assert.Nil(t, ch.RelayCredentialProbeError(test.model, "scope-primary"), "an unprobeable endpoint must not create a permanent recovery gate")
 		})
 	}
 }

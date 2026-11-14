@@ -1009,7 +1009,8 @@ func TestChannelIdleScheduleUsesPairDeadline(t *testing.T) {
 	t.Setenv("CHANNEL_TEST_FREQUENCY", "")
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_enabled": "false"}))
 	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_minutes": "10"}))
-	assert.False(t, (channelTestHandler{}).Enabled(), "an existing explicit opt-out survives unrelated configuration reloads")
+	assert.False(t, operation_setting.GetMonitorSetting().AutoTestChannelEnabled, "an existing explicit opt-out survives unrelated configuration reloads")
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"monitor_setting.auto_test_channel_enabled": "true"}))
 	t.Cleanup(func() {
 		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 			"monitor_setting.auto_test_channel_minutes": strconv.FormatFloat(previousMinutes, 'g', -1, 64),

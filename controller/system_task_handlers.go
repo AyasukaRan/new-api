@@ -33,7 +33,8 @@ type channelTestHandler struct{}
 func (channelTestHandler) Type() string { return model.SystemTaskTypeChannelTest }
 
 func (channelTestHandler) Enabled() bool {
-	return operation_setting.GetMonitorSetting().AutoTestChannelEnabled
+	// Failover recovery remains available when full channel monitoring is off.
+	return true
 }
 
 func (channelTestHandler) Interval() time.Duration {
@@ -43,6 +44,16 @@ func (channelTestHandler) Interval() time.Duration {
 func (channelTestHandler) NewPayload() any { return channelTestTaskPayload{Scheduled: true} }
 
 func (channelTestHandler) ShouldSchedule(now time.Time, latest *model.SystemTask) (bool, error) {
+	recovery, err := channelKeyRecoveryCandidates(now)
+	if err != nil {
+		return false, err
+	}
+	if len(recovery) > 0 && (latest == nil || now.Sub(time.Unix(latest.UpdatedAt, 0)) >= channelKeyRecoveryInterval) {
+		return true, nil
+	}
+	if !operation_setting.GetMonitorSetting().AutoTestChannelEnabled {
+		return false, nil
+	}
 	var channels []model.Channel
 	if err := model.DB.Select("id", "models", "type", "model_mapping", "setting").Where("status = ?", common.ChannelStatusEnabled).Find(&channels).Error; err != nil {
 		return false, err

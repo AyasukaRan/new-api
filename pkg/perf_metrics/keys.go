@@ -102,7 +102,7 @@ func RecordChannelKeyResult(info *relaycommon.RelayInfo, channel *model.Channel,
 	if channel.Key == "" {
 		return
 	}
-	if err := model.RecordChannelKeyObservation(channel, info.OriginModelName, info.ApiKey, time.Now().UnixMilli(), success, statusCode, errorMessage, SourceRequest); err != nil {
+	if err := model.RecordChannelKeyObservation(channel, info.OriginModelName, info.ApiKey, time.Now().UnixMilli(), success, statusCode, errorMessage, SourceRequest, info.ChannelAttemptStartTime.UnixMilli()); err != nil {
 		common.SysError(fmt.Sprintf("channel key observation persistence failed: channel_id=%d model=%q", channel.Id, info.OriginModelName))
 	}
 }

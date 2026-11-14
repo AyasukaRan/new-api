@@ -203,6 +203,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		// Reuse the exact snapshot that selected this credential, including a
+		// newly changed key mode, rather than a stale channel cache entry.
+		if value, ok := c.Get(service.ChannelKeySelectionContext); ok {
+			if selected, ok := value.(*model.Channel); ok && selected != nil && selected.Id == channel.Id {
+				channel = selected
+			}
+		}
 		usingKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
 		if channel.ChannelInfo.IsMultiKey {
 			if initialChannelKeys[channel.Id] == nil {
@@ -266,7 +273,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		perfmetrics.RecordChannelKeyResult(relayInfo, channel, observation, statusCode, errorMessage)
 
 		if newAPIError == nil {
+			recordChannelKeyFailoverFailure(c, channel, relayInfo, nil, observation)
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
+			service.RecordChannelKeyAffinity(c)
 			relayInfo.LastError = nil
 			return
 		}
@@ -326,6 +335,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				decision = service.PolicyDecision{Action: "retry", Reason: "channel_endpoint_unavailable", Source: "channel"}
 			}
 		}
+		if !invalidCredential && sameChannelRetry == nil {
+			recordChannelKeyFailoverFailure(c, channel, relayInfo, newAPIError, observation)
+		}
 		if c.Writer.Written() || c.Request.Context().Err() != nil {
 			sameChannelRetry = nil
 			decision = service.PolicyDecision{Action: "stop", Reason: "request_no_longer_replayable", Source: "system"}
@@ -353,6 +365,63 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if len(useChannel) > 1 {
 		retryLogStr := common.LogText("retry: %s", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(useChannel)), "->"), "[]"))
 		logger.LogInfo(c, retryLogStr)
+	}
+}
+
+// recordChannelKeyFailoverFailure runs after mirror failover is exhausted. It
+// quarantines an upstream failure, independently of this request's retry budget.
+func recordChannelKeyFailoverFailure(c *gin.Context, channel *model.Channel, info *relaycommon.RelayInfo, apiErr *types.NewAPIError, observation *bool) {
+	if c == nil || c.Request == nil || c.Request.Context().Err() != nil || !service.HasChannelKeyFailover(c) ||
+		info == nil || info.IsChannelTest || info.TaskRelayInfo != nil || info.ApiKey == "" || channel == nil ||
+		observation == nil || *observation {
+		return
+	}
+	// Only conversational models have safe recovery probes.
+	if info.RelayFormat != types.RelayFormatClaude {
+		switch info.RelayMode {
+		case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeCompletions, relayconstant.RelayModeGemini,
+			relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact:
+		default:
+			return
+		}
+	}
+	if isImageChannelTest(channel, info.OriginModelName, "") {
+		return
+	}
+	status, message := 0, ""
+	if apiErr != nil {
+		root := apiErr
+		for {
+			var inner *types.NewAPIError
+			if !errors.As(root.Unwrap(), &inner) || inner == root {
+				break
+			}
+			root = inner
+		}
+		if root.GetErrorCode() != types.ErrorCodeDoRequestFailed {
+			if root.GetErrorType() == types.ErrorTypeNewAPIError {
+				return
+			}
+			switch root.StatusCode {
+			case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+			default:
+				if root.StatusCode < 500 || root.StatusCode > 599 {
+					return
+				}
+			}
+		}
+		status, message = root.StatusCode, root.Error()
+	} else if info.StreamStatus != nil {
+		outcome := info.StreamStatus.OutcomeSnapshot()
+		if outcome.EndReason == relaycommon.StreamEndReasonPanic {
+			return
+		}
+		status, message = outcome.ErrorStatus, info.StreamStatus.Summary()
+	} else {
+		return
+	}
+	if err := model.RecordChannelKeyRoutingFailure(channel, info.OriginModelName, info.ApiKey, time.Now().UnixMilli(), status, message); err != nil {
+		common.SysError(fmt.Sprintf("failed to persist failover key health: channel_id=%d", channel.Id))
 	}
 }
 
