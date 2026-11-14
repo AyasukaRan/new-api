@@ -126,6 +126,33 @@ func TestFailoverKeyRecoveryDatabaseMatrix(t *testing.T) {
 			require.NoError(t, model.RecordChannelKeyObservation(&oldMode, channel.Models, "recovery-primary", now.UnixMilli(), common.GetPointer(true), 200, "", "request", failedAt-1))
 			model.InvalidateChannelProbeRouting(channel.Id)
 			require.NotNil(t, channel.RelayCredentialProbeError(channel.Models, "recovery-primary"), "an in-flight request started before switching to failover cannot clear the new gate")
+			t.Run("stale_cache_cannot_migrate_success_over_remote_failure", func(t *testing.T) {
+				remote := *channel
+				remote.Id = 0
+				require.NoError(t, db.Create(&remote).Error)
+				t.Cleanup(func() {
+					require.NoError(t, db.Delete(&remote).Error)
+					model.InvalidateChannelProbeRouting(remote.Id)
+				})
+				id, err := model.ChannelKeyObservationID(&remote, remote.Models, "recovery-primary")
+				require.NoError(t, err)
+				require.NoError(t, db.Create(&model.ChannelKeyObservation{ID: id, ChannelID: remote.Id, ModelName: remote.Models, ObservedAt: failedAt + 100, Success: true, Source: "request"}).Error)
+				require.Nil(t, remote.RelayCredentialProbeError(remote.Models, "recovery-primary"), "warm this node's cache before the remote failure")
+				model.DB = db.Session(&gorm.Session{NewDB: true})
+				err = model.RecordChannelKeyRoutingFailure(&remote, remote.Models, "recovery-primary", failedAt, 503, "remote failure")
+				model.DB = db
+				require.NoError(t, err)
+				stale := remote
+				stale.ChannelInfo.MultiKeyMode = constant.MultiKeyModePolling
+				require.NoError(t, model.RecordChannelKeyObservation(&stale, stale.Models, "recovery-primary", failedAt+200, common.GetPointer(true), 200, "", "request", failedAt-1))
+				require.NotNil(t, remote.RelayCredentialProbeError(remote.Models, "recovery-primary"), "cold-path migration must refresh this node with the real state")
+				model.InvalidateChannelProbeRouting(remote.Id)
+				failure := remote.RelayCredentialProbeError(remote.Models, "recovery-primary")
+				require.NotNil(t, failure, "raw completion time must not overwrite another node's failed state")
+				assert.Equal(t, failedAt, failure.ObservedAt)
+				require.NoError(t, model.RecordChannelKeyObservation(&stale, stale.Models, "recovery-primary", failedAt+201, common.GetPointer(true), 200, "", "request", failedAt))
+				require.NotNil(t, remote.RelayCredentialProbeError(remote.Models, "recovery-primary"), "failure still wins an equal start-time tie")
+			})
 			candidates, err := model.GetChannelKeyRecoveryCandidates(now, time.Minute)
 			require.NoError(t, err)
 			require.Len(t, candidates, 1)

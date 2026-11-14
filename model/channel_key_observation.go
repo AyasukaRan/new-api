@@ -295,14 +295,21 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 			// overwrites the normal observation. Once dedicated state exists,
 			// the cache avoids this compatibility read on the hot path.
 			legacyID, _ := LegacyChannelKeyObservationID(channel, probeModel, key)
-			if err := tx.Where("id IN ?", []string{row.ID, target.probeObservationID, legacyID}).Find(&previous).Error; err != nil {
+			if err := tx.Where("id IN ?", []string{row.ID, target.probeObservationID, legacyID, stateID}).Find(&previous).Error; err != nil {
 				return err
 			}
 		}
 		if err := upsertChannelKeyObservation(tx, row, false); err != nil {
 			return err
 		}
+		var legacyState *ChannelKeyObservation
+		stateExists := false
 		for _, existing := range previous {
+			if existing.ID == stateID {
+				committed = append(committed, existing)
+				stateExists = true
+				break
+			}
 			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover && existing.Success {
 				// Legacy successes have no attempt start and cannot prove recovery
 				// from a concurrently established failover quarantine.
@@ -311,11 +318,22 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 			if existing.Source != "probe" && !(existing.Source == "request" && existing.Success && channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover) {
 				continue
 			}
-			existing.ID, existing.ModelName, existing.Source = stateID, probeModel, channelProbeStateSource
-			if err := upsertChannelKeyObservation(tx, existing, existing.Success); err != nil {
+			if legacyState == nil || existing.ObservedAt > legacyState.ObservedAt || existing.ObservedAt == legacyState.ObservedAt && !existing.Success {
+				legacyState = &existing
+			}
+		}
+		if !stateExists && legacyState != nil {
+			legacyState.ID, legacyState.ModelName, legacyState.Source = stateID, probeModel, channelProbeStateSource
+			// A stale cache miss must never promote raw completion time over
+			// state another node established; migration only fills an absent row.
+			if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoNothing: true}).Create(legacyState).Error; err != nil {
 				return err
 			}
-			committed = append(committed, existing)
+			var persisted ChannelKeyObservation
+			if err := lockForUpdate(tx).Where("id = ?", stateID).Take(&persisted).Error; err != nil {
+				return err
+			}
+			committed = append(committed, persisted)
 		}
 		if row.Source != "probe" && !row.Success {
 			return nil
