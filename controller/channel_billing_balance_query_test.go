@@ -445,6 +445,181 @@ func TestMultiKeyBalanceSumsEveryKey(t *testing.T) {
 	assert.Equal(t, result.KeyBalances, monitor.KeyBalances)
 }
 
+func TestChannelBalanceAggregationModes(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db, _ := newAuditTestDatabase(t, dialect.kind, os.Getenv(dialect.env))
+			oldDB, oldKind := model.DB, common.MainDatabaseType()
+			model.DB = db
+			common.SetMainDatabaseType(common.DatabaseType(dialect.kind))
+			t.Cleanup(func() { model.DB = oldDB; common.SetMainDatabaseType(oldKind) })
+			require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.ChannelBalanceSample{}))
+			for _, tc := range []struct {
+				name     string
+				mode     constant.MultiKeyMode
+				balances []float64
+				multi    bool
+				want     float64
+			}{
+				{"failover duplicates", constant.MultiKeyModeFailover, []float64{100, 100, 200}, true, 300},
+				{"failover identical", constant.MultiKeyModeFailover, []float64{20.66160738, 20.66160738, 20.66160738}, true, 20.66160738},
+				{"polling", constant.MultiKeyModePolling, []float64{100, 100, 200}, true, 400},
+				{"random", constant.MultiKeyModeRandom, []float64{100, 100, 200}, true, 400},
+				{"unrounded precision", constant.MultiKeyModeFailover, []float64{1.000001, 1.000002, 1.000001}, true, 2.000003},
+				{"zero and debt", constant.MultiKeyModeFailover, []float64{-5, 0, -5}, true, 0},
+				{"debt does not offset", constant.MultiKeyModeFailover, []float64{-5, 10, 10}, true, 10},
+				{"single debt", constant.MultiKeyModeFailover, []float64{-5}, false, -5},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					keys := make([]string, len(tc.balances))
+					limits := make(map[string]float64)
+					for i, balance := range tc.balances {
+						keys[i] = fmt.Sprintf("fixture-%d", i)
+						limits[keys[i]] = balance
+					}
+					server := billingServerForKeys(t, limits)
+					channel := &model.Channel{Name: tc.name, Type: constant.ChannelTypeOpenAI, Key: strings.Join(keys, "\n"), BaseURL: &server.URL,
+						ChannelInfo: model.ChannelInfo{IsMultiKey: tc.multi, MultiKeySize: len(keys), MultiKeyMode: tc.mode, MultiKeyStatusList: map[int]int{0: common.ChannelStatusManuallyDisabled}}}
+					require.NoError(t, db.Create(channel).Error)
+					result, err := updateChannelBalance(channel)
+					require.NoError(t, err)
+					assert.Equal(t, tc.want, result.Balance)
+					assert.Equal(t, common.GetPointer(tc.want), result.Monitor.Balance)
+					monitor, err := model.GetChannelBalanceMonitor(channel.Id)
+					require.NoError(t, err)
+					assert.Equal(t, result.Monitor, monitor)
+					var stored model.Channel
+					require.NoError(t, db.First(&stored, channel.Id).Error)
+					assert.Equal(t, tc.want, stored.Balance)
+					assert.Equal(t, channel.ChannelInfo, stored.ChannelInfo)
+					for i, balance := range tc.balances {
+						assert.Equal(t, common.GetPointer(balance), monitor.KeyBalances[i].Balance)
+					}
+				})
+			}
+			t.Run("old snapshots partial checks and mode edits", func(t *testing.T) {
+				server := billingServerForKeys(t, map[string]float64{"a": 100, "b": 100, "c": 200})
+				channel := &model.Channel{Name: t.Name(), Type: constant.ChannelTypeOpenAI, Key: "a\nb\nc", BaseURL: &server.URL,
+					ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling}}
+				require.NoError(t, db.Create(channel).Error)
+				result, err := updateChannelBalance(channel)
+				require.NoError(t, err)
+				require.Equal(t, 400.0, result.Balance)
+				channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+				require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+				listed := &model.Channel{Id: channel.Id, Balance: 400, BalanceUpdatedTime: result.Monitor.CheckedAt}
+				require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{listed}))
+				assert.Equal(t, 300.0, listed.Balance, "read projection fixes legacy totals without querying the provider")
+				assert.Equal(t, common.GetPointer(300.0), listed.BalanceMonitor.Balance)
+				partial := &model.ChannelBalanceSample{StartedAt: time.Now().UnixNano(), CheckedAt: result.Monitor.CheckedAt + 1, Partial: true,
+					KeyBalances: []model.ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(90.0)}, {Index: 1, Error: "balance_query_failed"}, {Index: 2, Balance: common.GetPointer(150.0)}}}
+				require.NoError(t, model.RecordChannelBalanceSample(channel, partial))
+				assert.Equal(t, common.GetPointer(300.0), partial.Balance)
+				assert.Equal(t, 240.0, partial.KnownBalance)
+				channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModePolling
+				require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+				monitor, err := model.GetChannelBalanceMonitor(channel.Id)
+				require.NoError(t, err)
+				assert.Equal(t, common.GetPointer(400.0), monitor.Balance, "do not combine the latest 90/150 with an older per-key 100")
+				assert.Equal(t, result.Monitor.CheckedAt, monitor.BalanceUpdatedTime)
+				failed := &model.ChannelBalanceSample{StartedAt: time.Now().UnixNano(), CheckedAt: partial.CheckedAt + 1,
+					KeyBalances: []model.ChannelKeyBalance{{Index: 0, Error: "balance_query_failed"}, {Index: 1, Error: "balance_query_failed"}, {Index: 2, Error: "balance_query_failed"}}}
+				require.NoError(t, model.RecordChannelBalanceSample(channel, failed))
+				channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+				require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+				monitor, err = model.GetChannelBalanceMonitor(channel.Id)
+				require.NoError(t, err)
+				assert.Equal(t, common.GetPointer(300.0), monitor.Balance)
+				assert.False(t, monitor.Success)
+				history, err := model.ListChannelBalanceSamples(channel.Id, 0, 0, 100)
+				require.NoError(t, err)
+				require.Len(t, history, 3)
+				assert.Equal(t, 400.0, history[0].KnownBalance, "history remains evidence of the original check")
+				assert.Equal(t, result.KeyBalances, history[0].KeyBalances)
+				legacy := &model.Channel{Name: "legacy distinct without readings", Type: constant.ChannelTypeOpenAI, Key: "x\ny", Balance: 400, BalanceUpdatedTime: 123,
+					ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModeFailover}}
+				require.NoError(t, db.Create(legacy).Error)
+				require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{legacy}))
+				assert.Nil(t, legacy.BalanceMonitor.Balance)
+				assert.Zero(t, legacy.BalanceUpdatedTime)
+				legacy.ChannelInfo.MultiKeyMode = constant.MultiKeyModePolling
+				require.NoError(t, db.Model(legacy).Update("channel_info", legacy.ChannelInfo).Error)
+				old := &model.ChannelBalanceSample{StartedAt: 1, CheckedAt: 123, Success: true, KnownBalance: 400}
+				require.NoError(t, model.RecordChannelBalanceSample(legacy, old))
+				require.NoError(t, db.Model(old).Update("key_balances_json", "").Error)
+				legacy.ChannelInfo.MultiKeyMode = constant.MultiKeyModeFailover
+				require.NoError(t, db.Model(legacy).Update("channel_info", legacy.ChannelInfo).Error)
+				require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{legacy}))
+				assert.Nil(t, legacy.BalanceMonitor.Balance)
+				assert.Zero(t, legacy.BalanceMonitor.CheckedAt, "legacy aggregate without raw readings remains unknown")
+				legacyHistory, err := model.ListChannelBalanceSamples(legacy.Id, 0, 0, 100)
+				require.NoError(t, err)
+				require.Len(t, legacyHistory, 1)
+				assert.Empty(t, legacyHistory[0].KeyBalances)
+				assert.Equal(t, 400.0, legacyHistory[0].KnownBalance)
+			})
+			t.Run("locked mode and email amounts", func(t *testing.T) {
+				channel := &model.Channel{Name: t.Name(), Type: constant.ChannelTypeOpenAI, Key: "a\nb\nc",
+					ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling}}
+				channel.SetSetting(dto.ChannelSettings{BalanceEmailEnabled: true, BalanceEmailThreshold: common.GetPointer(350.0)})
+				var switchMode atomic.Bool
+				switchMode.Store(true)
+				failoverInfo := channel.ChannelInfo
+				failoverInfo.MultiKeyMode = constant.MultiKeyModeFailover
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if switchMode.Swap(false) {
+						if err := db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("channel_info", failoverInfo).Error; err != nil {
+							t.Error(err)
+							w.WriteHeader(http.StatusInternalServerError)
+							return
+						}
+					}
+					if strings.HasSuffix(request.URL.Path, "/subscription") {
+						balance := 100
+						if request.Header.Get("Authorization") == "Bearer c" {
+							balance = 200
+						}
+						fmt.Fprintf(w, `{"hard_limit_usd":%d}`, balance)
+					} else {
+						fmt.Fprint(w, `{"total_usage":0}`)
+					}
+				}))
+				t.Cleanup(server.Close)
+				channel.BaseURL = &server.URL
+				require.NoError(t, db.Create(channel).Error)
+				notice, err := queryChannelBalance(context.Background(), channel, true)
+				require.NoError(t, err)
+				assert.Equal(t, 300.0, notice.Balance, "mode switched after query began is resolved under the channel row lock")
+				delivered, err := notice.sample.DeliverBalanceEmail(1, func(*model.Channel) error { assert.Equal(t, 300.0, notice.sample.KnownBalance); return nil })
+				require.NoError(t, err)
+				assert.True(t, delivered)
+				notice, err = queryChannelBalance(context.Background(), channel, true)
+				require.NoError(t, err)
+				delivered, err = notice.sample.DeliverBalanceEmail(1, func(*model.Channel) error { t.Error("duplicate low-balance notice"); return nil })
+				require.NoError(t, err)
+				assert.False(t, delivered)
+				require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error) // polling again
+				delivered, err = notice.sample.DeliverBalanceEmail(2, func(*model.Channel) error { t.Error("mode changed before email delivery"); return nil })
+				require.NoError(t, err)
+				assert.False(t, delivered)
+				notice, err = queryChannelBalance(context.Background(), channel, true)
+				require.NoError(t, err)
+				assert.Equal(t, 400.0, notice.Balance)
+				assert.Nil(t, notice.sample.EmailState, "400 is above the threshold")
+				require.NoError(t, db.Model(channel).Update("channel_info", failoverInfo).Error)
+				notice, err = queryChannelBalance(context.Background(), channel, true)
+				require.NoError(t, err)
+				delivered, err = notice.sample.DeliverBalanceEmail(1, func(*model.Channel) error { assert.Equal(t, 300.0, notice.sample.KnownBalance); return nil })
+				require.NoError(t, err)
+				assert.True(t, delivered, "the new low-balance episode is rearmed")
+			})
+		})
+	}
+}
+
 func TestMultiKeyBalanceDoesNotOffsetAvailableFunds(t *testing.T) {
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		t.Run(dialect.kind, func(t *testing.T) {

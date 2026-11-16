@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -62,7 +64,7 @@ func (channel *Channel) BalanceKeyAccounts() []ChannelKeyAccount {
 
 // ChannelBalanceSample is a monitoring observation, independent of channel
 // configuration and routing state. Balance carries the last complete reading;
-// KnownBalance is the sum of the keys that answered this particular check.
+// KnownBalance aggregates the keys that answered this particular check.
 type ChannelBalanceSample struct {
 	EmailState         *channelBalanceEmailState `json:"-" gorm:"type:text;serializer:json"`
 	Scheduled          bool                      `json:"-" gorm:"-"`
@@ -83,6 +85,66 @@ type ChannelBalanceSample struct {
 
 var ErrChannelBalanceConfigurationChanged = errors.New("channel balance configuration changed; retry the balance query")
 var ErrChannelBalanceQueryDisabled = errors.New("channel balance query is disabled")
+
+func (channel *Channel) balanceAggregationMode() string {
+	if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+		return "distinct"
+	}
+	return "sum"
+}
+
+// AggregateKeyBalances uses normalized numeric readings, never rounded display
+// values or last-known values from different checks. Exhausted multi-key
+// accounts cannot reduce the funds available from another account.
+func (channel *Channel) AggregateKeyBalances(keys []ChannelKeyBalance) (float64, error) {
+	var available decimal.Decimal
+	seen := make(map[float64]bool)
+	distinct := channel.balanceAggregationMode() == "distinct"
+	for _, key := range keys {
+		if key.Balance == nil || key.Error != "" {
+			continue
+		}
+		balance := *key.Balance
+		if math.IsNaN(balance) || math.IsInf(balance, 0) {
+			return 0, errors.New("invalid key balance")
+		}
+		if channel.ChannelInfo.IsMultiKey && balance <= 0 || distinct && seen[balance] {
+			continue
+		}
+		seen[balance] = true
+		available = available.Add(decimal.NewFromFloat(balance))
+	}
+	balance := available.InexactFloat64()
+	if math.IsInf(balance, 0) {
+		return 0, errors.New("invalid channel balance")
+	}
+	return balance, nil
+}
+
+// completeBalance projects one complete observation through the current mode.
+// Legacy aggregates without raw readings cannot establish a distinct total.
+func (channel *Channel) completeBalance(sample *ChannelBalanceSample) (*float64, int64, error) {
+	if sample == nil || !sample.Success || sample.Partial {
+		return nil, 0, nil
+	}
+	var keys []ChannelKeyBalance
+	if sample.KeyBalancesJSON != "" {
+		if err := common.UnmarshalJsonStr(sample.KeyBalancesJSON, &keys); err != nil {
+			return nil, 0, err
+		}
+	}
+	if len(keys) == 0 {
+		if channel.balanceAggregationMode() == "distinct" {
+			return nil, 0, nil
+		}
+		return sample.Balance, sample.BalanceUpdatedTime, nil
+	}
+	balance, err := channel.AggregateKeyBalances(keys)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &balance, sample.CheckedAt, nil
+}
 
 // CheckBalanceQueryEnabled reads the setting without modifying malformed
 // configuration. Callers starting a query must use a freshly loaded channel.
@@ -174,6 +236,16 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 		if currentHash != configurationHash {
 			return ErrChannelBalanceConfigurationChanged
 		}
+		// Mode is a presentation/aggregation choice, not account identity. A
+		// concurrent mode edit must use the locked current choice at commit.
+		if len(sample.KeyBalances) > 0 {
+			sample.KnownBalance, err = current.AggregateKeyBalances(sample.KeyBalances)
+			if err != nil {
+				return err
+			}
+		} else if current.balanceAggregationMode() == "distinct" && sample.Success {
+			return errors.New("a complete key balance snapshot is required")
+		}
 		var previous ChannelBalanceSample
 		previousErr := tx.Where("channel_id = ?", channel.Id).Order("id DESC").First(&previous).Error
 		if previousErr != nil && !errors.Is(previousErr, gorm.ErrRecordNotFound) {
@@ -184,8 +256,10 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 		}
 		previousBalances := make(map[int]*float64)
 		if previousErr == nil && previous.ConfigurationHash == configurationHash {
-			sample.Balance = previous.Balance
-			sample.BalanceUpdatedTime = previous.BalanceUpdatedTime
+			if current.balanceAggregationMode() != "distinct" {
+				sample.Balance = previous.Balance
+				sample.BalanceUpdatedTime = previous.BalanceUpdatedTime
+			}
 			if previous.KeyBalancesJSON != "" {
 				var keys []ChannelKeyBalance
 				if err := common.UnmarshalJsonStr(previous.KeyBalancesJSON, &keys); err != nil {
@@ -199,12 +273,28 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 					previousBalances[key.Index] = known
 				}
 			}
-		} else if errors.Is(previousErr, gorm.ErrRecordNotFound) && current.BalanceUpdatedTime > 0 {
+		} else if errors.Is(previousErr, gorm.ErrRecordNotFound) && current.BalanceUpdatedTime > 0 && current.balanceAggregationMode() != "distinct" {
 			// Preserve the last known full balance when upgrading an existing
 			// installation, including if its first monitored check fails.
 			balance := current.Balance
 			sample.Balance = &balance
 			sample.BalanceUpdatedTime = current.BalanceUpdatedTime
+		}
+		if !sample.Success || sample.Partial {
+			complete := previous
+			if previousErr != nil || previous.ConfigurationHash != configurationHash || !previous.Success || previous.Partial {
+				complete = ChannelBalanceSample{}
+				if err := tx.Where("channel_id = ? AND configuration_hash = ? AND success = ? AND partial = ?", channel.Id, configurationHash, true, false).
+					Order("id DESC").Limit(1).Find(&complete).Error; err != nil {
+					return err
+				}
+			}
+			if complete.ID > 0 {
+				sample.Balance, sample.BalanceUpdatedTime, err = current.completeBalance(&complete)
+				if err != nil {
+					return err
+				}
+			}
 		}
 		for index := range sample.KeyBalances {
 			key := &sample.KeyBalances[index]
@@ -234,7 +324,7 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 				return err
 			}
 		}
-		sample.EmailState = nextChannelBalanceEmailState(current.GetSetting(), sample, &previous)
+		sample.EmailState = nextChannelBalanceEmailState(current.GetSetting(), current.balanceAggregationMode(), sample, &previous)
 		return tx.Create(sample).Error
 	})
 	if err == nil {
@@ -246,24 +336,29 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 // The latest observation carries successful recipients across restarts and failed checks.
 // A positive recipient value is a short delivery lease; -1 marks successful delivery.
 type channelBalanceEmailState struct {
-	Generation int64         `json:"generation"`
-	Threshold  *float64      `json:"threshold,omitempty"`
-	Recipients map[int]int64 `json:"recipients,omitempty"`
+	Generation  int64         `json:"generation"`
+	Threshold   *float64      `json:"threshold,omitempty"`
+	Recipients  map[int]int64 `json:"recipients,omitempty"`
+	Aggregation string        `json:"aggregation,omitempty"`
 }
 
 func sameBalanceThreshold(a, b *float64) bool {
 	return a == b || (a != nil && b != nil && *a == *b)
 }
 
-func nextChannelBalanceEmailState(setting dto.ChannelSettings, current, previous *ChannelBalanceSample) *channelBalanceEmailState {
+func nextChannelBalanceEmailState(setting dto.ChannelSettings, aggregation string, current, previous *ChannelBalanceSample) *channelBalanceEmailState {
 	if !setting.BalanceEmailEnabled || setting.BalanceQueryDisabled || setting.BalanceEmailThreshold == nil {
 		return nil
 	}
 	threshold := setting.BalanceEmailThreshold
 	state := previous.EmailState
+	previousAggregation := "sum"
+	if state != nil && state.Aggregation != "" {
+		previousAggregation = state.Aggregation
+	}
 	// Older releases could notify at equality. Balance retains the last full
 	// reading through partial checks, so equality re-arms those old episodes too.
-	if state != nil && (current.ConfigurationHash != previous.ConfigurationHash || !sameBalanceThreshold(state.Threshold, threshold) ||
+	if state != nil && (aggregation != previousAggregation || current.ConfigurationHash != previous.ConfigurationHash || !sameBalanceThreshold(state.Threshold, threshold) ||
 		(previous.Balance != nil && *previous.Balance >= *threshold)) {
 		state = nil
 	}
@@ -274,7 +369,7 @@ func nextChannelBalanceEmailState(setting dto.ChannelSettings, current, previous
 		return nil
 	}
 	if state == nil {
-		state = &channelBalanceEmailState{Generation: current.StartedAt, Threshold: threshold}
+		state = &channelBalanceEmailState{Generation: current.StartedAt, Threshold: threshold, Aggregation: aggregation}
 	}
 	return state
 }
@@ -299,6 +394,13 @@ func (sample *ChannelBalanceSample) DeliverBalanceEmail(userID int, send func(*C
 			return err
 		}
 		setting := channel.GetSetting()
+		aggregation := sample.EmailState.Aggregation
+		if aggregation == "" {
+			aggregation = "sum"
+		}
+		if aggregation != channel.balanceAggregationMode() {
+			return nil
+		}
 		if !setting.BalanceEmailEnabled || setting.BalanceEmailThreshold == nil || sample.KnownBalance >= *setting.BalanceEmailThreshold || !sameBalanceThreshold(setting.BalanceEmailThreshold, sample.EmailState.Threshold) {
 			return nil
 		}
@@ -365,8 +467,9 @@ func GetChannelBalanceMonitor(channelID int) (*ChannelBalanceMonitor, error) {
 	return channel.BalanceMonitor, nil
 }
 
-// PopulateChannelBalanceMonitors uses two batched queries, including a private
-// configuration read because admin channel lists intentionally omit keys.
+// PopulateChannelBalanceMonitors batches configuration and latest observations,
+// with one additional complete-snapshot query when readings are incomplete.
+// Configuration is read privately because admin channel lists omit keys.
 func PopulateChannelBalanceMonitors(channels []*Channel) error {
 	if len(channels) == 0 {
 		return nil
@@ -382,6 +485,7 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 		return err
 	}
 	configurationHashes := make(map[int]string, len(configurations))
+	currentChannels := make(map[int]*Channel, len(configurations))
 	keyAccounts := make(map[int][]ChannelKeyAccount, len(configurations))
 	for _, channel := range configurations {
 		configurationHash, err := channelBalanceConfigurationHash(channel)
@@ -389,6 +493,7 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 			return err
 		}
 		configurationHashes[channel.Id] = configurationHash
+		currentChannels[channel.Id] = channel
 		keyAccounts[channel.Id] = channel.BalanceKeyAccounts()
 	}
 	var samples []ChannelBalanceSample
@@ -396,20 +501,73 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 	if err := DB.Where("id IN (?)", latestIDs).Find(&samples).Error; err != nil {
 		return err
 	}
+	// Partial readings retain a single earlier complete snapshot, not a mix
+	// of each key's most recent successful value. Fetch all fallbacks together.
+	incompleteIDs := make([]int, 0)
+	incompleteHashes := make([]string, 0)
+	for _, sample := range samples {
+		if sample.ConfigurationHash == configurationHashes[sample.ChannelID] && (!sample.Success || sample.Partial) {
+			incompleteIDs = append(incompleteIDs, sample.ChannelID)
+			incompleteHashes = append(incompleteHashes, sample.ConfigurationHash)
+		}
+	}
+	completeSamples := make(map[int]ChannelBalanceSample)
+	if len(incompleteIDs) > 0 {
+		completeIDs := DB.Model(&ChannelBalanceSample{}).Select("MAX(id)").
+			Where("channel_id IN ? AND configuration_hash IN ? AND success = ? AND partial = ?", incompleteIDs, incompleteHashes, true, false).
+			Group("channel_id, configuration_hash")
+		var complete []ChannelBalanceSample
+		if err := DB.Where("id IN (?)", completeIDs).Find(&complete).Error; err != nil {
+			return err
+		}
+		for _, sample := range complete {
+			if sample.ConfigurationHash == configurationHashes[sample.ChannelID] {
+				completeSamples[sample.ChannelID] = sample
+			}
+		}
+	}
 	monitors := make(map[int]*ChannelBalanceMonitor, len(samples))
 	for _, sample := range samples {
 		monitor := &ChannelBalanceMonitor{KeyBalances: []ChannelKeyBalance{}}
-		if configurationHashes[sample.ChannelID] != sample.ConfigurationHash {
+		if currentChannels[sample.ChannelID] == nil || configurationHashes[sample.ChannelID] != sample.ConfigurationHash {
 			monitor.ConfigurationChanged = true
 		} else {
+			current := currentChannels[sample.ChannelID]
 			monitor.CheckedAt = sample.CheckedAt
-			monitor.Balance = sample.Balance
-			monitor.BalanceUpdatedTime = sample.BalanceUpdatedTime
 			monitor.KnownBalance = sample.KnownBalance
 			monitor.Partial = sample.Partial
 			monitor.Success = sample.Success
-			if err := common.UnmarshalJsonStr(sample.KeyBalancesJSON, &monitor.KeyBalances); err != nil {
-				return err
+			if sample.KeyBalancesJSON != "" {
+				if err := common.UnmarshalJsonStr(sample.KeyBalancesJSON, &monitor.KeyBalances); err != nil {
+					return err
+				}
+			}
+			if len(monitor.KeyBalances) > 0 {
+				var err error
+				monitor.KnownBalance, err = current.AggregateKeyBalances(monitor.KeyBalances)
+				if err != nil {
+					return err
+				}
+			} else if current.balanceAggregationMode() == "distinct" {
+				monitor.KnownBalance = 0
+				if sample.Success && !sample.Partial {
+					monitor.Success = false
+					monitor.CheckedAt = 0
+				}
+			}
+			complete := sample
+			if !sample.Success || sample.Partial {
+				complete = completeSamples[sample.ChannelID]
+				if complete.ID == 0 && current.balanceAggregationMode() != "distinct" {
+					monitor.Balance, monitor.BalanceUpdatedTime = sample.Balance, sample.BalanceUpdatedTime
+				}
+			}
+			if complete.ID > 0 {
+				var err error
+				monitor.Balance, monitor.BalanceUpdatedTime, err = current.completeBalance(&complete)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		monitors[sample.ChannelID] = monitor
@@ -430,11 +588,13 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 				}
 				if configurationHash != configurationHashes[channel.Id] {
 					channel.BalanceMonitor = &ChannelBalanceMonitor{ConfigurationChanged: true, KeyBalances: []ChannelKeyBalance{}, KeyAccounts: accounts}
+					channel.Balance, channel.BalanceUpdatedTime = 0, 0
 					continue
 				}
 			}
 			channel.BalanceMonitor = monitors[channel.Id]
-			if channel.BalanceMonitor == nil && channel.BalanceUpdatedTime > 0 {
+			current := currentChannels[channel.Id]
+			if channel.BalanceMonitor == nil && channel.BalanceUpdatedTime > 0 && current != nil && current.balanceAggregationMode() != "distinct" {
 				balance := channel.Balance
 				channel.BalanceMonitor = &ChannelBalanceMonitor{
 					Balance: &balance, BalanceUpdatedTime: channel.BalanceUpdatedTime,
@@ -446,6 +606,11 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 				channel.BalanceMonitor = &ChannelBalanceMonitor{KeyBalances: []ChannelKeyBalance{}}
 			}
 			channel.BalanceMonitor.KeyAccounts = accounts
+			channel.Balance, channel.BalanceUpdatedTime = 0, 0
+			if channel.BalanceMonitor.Balance != nil {
+				channel.Balance = *channel.BalanceMonitor.Balance
+				channel.BalanceUpdatedTime = channel.BalanceMonitor.BalanceUpdatedTime
+			}
 		}
 	}
 	return nil
@@ -471,7 +636,9 @@ func ListChannelBalanceSamples(channelID int, start, end int64, limit int) ([]Ch
 	}
 	slices.Reverse(samples)
 	for index := range samples {
-		if err := common.UnmarshalJsonStr(samples[index].KeyBalancesJSON, &samples[index].KeyBalances); err != nil {
+		if samples[index].KeyBalancesJSON == "" {
+			samples[index].KeyBalances = []ChannelKeyBalance{}
+		} else if err := common.UnmarshalJsonStr(samples[index].KeyBalancesJSON, &samples[index].KeyBalances); err != nil {
 			return nil, err
 		}
 	}

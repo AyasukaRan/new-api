@@ -34,11 +34,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getCodexUsage, updateChannelBalance } from '../../api'
-import {
-  channelsQueryKeys,
-  isMultiKeyChannel,
-  parseChannelSettings,
-} from '../../lib'
+import { channelsQueryKeys, parseChannelSettings } from '../../lib'
 import { ChannelBalanceSummary } from '../channel-balance-summary'
 import { useChannels } from '../channels-provider'
 import {
@@ -128,14 +124,9 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
       }
       if (response.partial) {
         toast.warning(
-          isMultiKeyChannel(currentRow) ||
-            (response.balance_monitor?.key_accounts?.length ?? 0) > 1
-            ? t(
-                'Some key balances could not be queried. Check each key for its latest result.'
-              )
-            : t(
-                'Some accounts could not be queried. The total retains the last complete balance.'
-              )
+          t(
+            'Some accounts could not be queried. The total retains the last complete balance.'
+          )
         )
         setRawResponse(null)
       } else if (
@@ -252,7 +243,6 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
           ) : (
             <ChannelBalanceSummary
               queryDisabled={balanceQueryDisabled}
-              multiKey={isMultiKeyChannel(currentRow)}
               monitor={
                 currentRow.balance_monitor ?? {
                   balance: currentRow.balance_updated_time

@@ -76,6 +76,7 @@ function BalanceDialogFixture(props: { type?: number; disabled?: boolean }) {
               balance: 7,
               balance_updated_time: complete.balance_updated_time,
               balance_monitor: complete,
+              channel_info: { is_multi_key: true, multi_key_mode: 'failover' },
             } as Channel)
             setOpen('balance-query')
           }}
@@ -126,7 +127,8 @@ function renderBalance(
   monitor?: ChannelBalanceMonitor,
   multi = true,
   disabled = false,
-  layout: 'table' | 'card' = 'table'
+  layout: 'table' | 'card' = 'table',
+  mode: 'random' | 'polling' | 'failover' = 'failover'
 ) {
   const channel = {
     id: 1,
@@ -141,7 +143,7 @@ function renderBalance(
       is_multi_key: multi,
       multi_key_size: 2,
       multi_key_polling_index: 0,
-      multi_key_mode: 'random',
+      multi_key_mode: mode,
     },
   } as Channel
   const client = new QueryClient({
@@ -162,17 +164,101 @@ function renderBalance(
 }
 
 describe('channel balance monitoring', () => {
-  test('disabled balance queries retain separate key balances without sending mouse or keyboard requests', async () => {
+  test.each([
+    ['polling', 400],
+    ['random', 400],
+    ['failover', 300],
+  ] as const)(
+    '%s mode displays its server-calculated balance while preserving every key in details',
+    async (mode, balance) => {
+      renderBalance(
+        {
+          ...complete,
+          balance,
+          known_balance: balance,
+          key_accounts: [0, 1, 2].map((index) => ({
+            index,
+            groups: [`Group ${index + 1}`],
+            status: 1,
+          })),
+          key_balances: [
+            { index: 0, balance: 100 },
+            { index: 1, balance: 100 },
+            { index: 2, balance: 200 },
+          ],
+        },
+        true,
+        false,
+        'table',
+        mode
+      )
+      expect(
+        screen.getByRole('button', { name: 'Update balance' })
+      ).toHaveTextContent(`$${balance}`)
+      expect(screen.queryByTestId('multi-key-balances')).not.toBeInTheDocument()
+      await userEvent.click(
+        screen.getByRole('button', { name: 'View all 3 keys' })
+      )
+      const table = within(screen.getByRole('dialog')).getByRole('table')
+      expect(within(table).getAllByText('$100')).toHaveLength(2)
+      expect(within(table).getByText('Group 2')).toBeVisible()
+      expect(
+        within(screen.getByRole('dialog')).getByText(`$${balance}`)
+      ).toBeVisible()
+    }
+  )
+
+  test('priority keys with equal balances show a single balance summary', () => {
+    renderBalance({
+      ...complete,
+      balance: 100,
+      known_balance: 100,
+      key_balances: [
+        { index: 0, balance: 100 },
+        { index: 1, balance: 100 },
+      ],
+    })
+    expect(screen.getAllByText('$100')).toHaveLength(1)
+    expect(screen.queryByText('$200')).not.toBeInTheDocument()
+  })
+
+  test('partial queries retain the last complete server total and each key result in the dialog', () => {
+    render(
+      <ChannelBalanceSummary
+        monitor={{
+          ...complete,
+          partial: true,
+          known_balance: 3,
+          key_balances: [
+            { index: 0, balance: 3 },
+            {
+              index: 1,
+              balance: null,
+              last_known_balance: 4,
+              error: 'balance_query_failed',
+            },
+          ],
+        }}
+      />
+    )
+    expect(screen.getByText('$7')).toBeVisible()
+    expect(screen.getByText('Last known balance: $4')).toBeVisible()
+    expect(
+      screen.getByText(
+        'Some accounts could not be queried. The total retains the last complete balance.'
+      )
+    ).toBeVisible()
+  })
+
+  test('disabled balance queries retain the total without sending mouse or keyboard requests', async () => {
     const request = vi.spyOn(api, 'get')
     const user = userEvent.setup()
     renderBalance(complete, true, true)
     const badge = screen.getByRole('button', { name: 'Update balance' })
     expect(badge).toHaveAttribute('aria-disabled', 'true')
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(screen.getByText('$7')).toBeVisible()
     expect(screen.getByText('Balance queries disabled')).toBeVisible()
-    const breakdown = screen.getByTestId('multi-key-balances')
-    expect(within(breakdown).getByText('$3')).toBeVisible()
-    expect(within(breakdown).getByText('$4')).toBeVisible()
+    expect(screen.queryByTestId('multi-key-balances')).not.toBeInTheDocument()
     expect(
       screen.queryByText('Click to update balance')
     ).not.toBeInTheDocument()
@@ -195,7 +281,7 @@ describe('channel balance monitoring', () => {
         'Balance queries are disabled. Previously recorded balances are retained.'
       )
     ).toBeVisible()
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(screen.getByText('$7')).toBeVisible()
     expect(screen.getByText('$3')).toBeVisible()
     expect(screen.getByText('$4')).toBeVisible()
     expect(request).not.toHaveBeenCalled()
@@ -215,7 +301,7 @@ describe('channel balance monitoring', () => {
         'Balance queries are disabled. Previously recorded balances are retained.'
       )
     )
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(screen.getByText('$7')).toBeVisible()
     expect(screen.getByText('$3')).toBeVisible()
     expect(screen.getByText('$4')).toBeVisible()
   })
@@ -280,18 +366,21 @@ describe('channel balance monitoring', () => {
     expect(screen.queryByText('old@example.com')).not.toBeInTheDocument()
   })
 
-  test('shows each key balance and its own groups without a combined amount', () => {
+  test('the balance dialog keeps each key balance, groups and status beneath the total', async () => {
     renderBalance(complete)
-    const rows = screen.getByTestId('multi-key-balances')
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View all 2 keys' })
+    )
+    const rows = screen.getByRole('table')
     expect(within(rows).getByText('$3')).toBeVisible()
     expect(within(rows).getByText('$4')).toBeVisible()
     expect(within(rows).getByText('Low cost')).toBeVisible()
     expect(within(rows).getByText('Premium')).toBeVisible()
     expect(within(rows).getByText('Manual Disabled')).toBeVisible()
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('dialog')).getByText('$7')).toBeVisible()
   })
 
-  test('keeps configured key order, including unqueried accounts and equal balances', () => {
+  test('details keep configured key order, including unqueried accounts and equal balances', async () => {
     renderBalance({
       ...complete,
       key_accounts: [
@@ -304,49 +393,44 @@ describe('channel balance monitoring', () => {
         { index: 1, balance: 3 },
       ],
     })
-    const rows = screen.getByTestId('multi-key-balances')
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View all 3 keys' })
+    )
+    const rows = screen.getByRole('table')
     expect(
       within(rows)
-        .getAllByLabelText(/Key #/)
+        .getAllByText(/Key #/)
         .map((node) => node.textContent)
-    ).toEqual(['#2', '#3', '#1'])
+    ).toEqual(['Key #2', 'Key #3', 'Key #1'])
     expect(within(rows).getAllByText('$3')).toHaveLength(2)
     expect(within(rows).getByText('Not queried')).toBeVisible()
     expect(within(rows).getByText('No groups')).toBeVisible()
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('dialog')).getByText('$7')).toBeVisible()
   })
 
-  test('cards also separate key balances and hiding them removes amounts, groups and stale amounts', async () => {
-    renderBalance(
-      {
-        ...complete,
-        partial: true,
-        key_balances: [
-          { index: 0, balance: 3 },
-          {
-            index: 1,
-            balance: null,
-            last_known_balance: 4,
-            error: 'balance_query_failed',
-          },
-        ],
-      },
-      true,
-      false,
-      'card'
-    )
-    expect(screen.getByText('$3')).toBeVisible()
-    expect(screen.getByText('Last known balance: $4')).toBeVisible()
+  test('cards show the total and sensitive mode hides the amount, tooltip and key details', async () => {
+    renderBalance(complete, true, false, 'card')
+    const badge = screen.getByRole('button', { name: 'Update balance' })
+    expect(badge).toHaveTextContent('7')
     await userEvent.click(screen.getByRole('button', { name: 'Hide balances' }))
-    expect(screen.queryByText('$3')).not.toBeInTheDocument()
-    expect(screen.queryByText(/Last known balance/)).not.toBeInTheDocument()
+    expect(badge).toHaveTextContent('••••')
+    await userEvent.hover(badge)
+    expect(await screen.findByText('••••', { selector: 'p' })).toBeVisible()
+    expect(document.querySelector('[title="7"]')).toBeNull()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View all 2 keys' })
+    )
+    expect(
+      within(screen.getByRole('dialog')).getByText(
+        'Sensitive information is hidden'
+      )
+    ).toBeVisible()
     expect(screen.queryByText('Low cost')).not.toBeInTheDocument()
     expect(screen.queryByText('Premium')).not.toBeInTheDocument()
-    expect(document.querySelector('[title="$3"]')).toBeNull()
-    expect(document.querySelector('[title="Premium"]')).toBeNull()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
   })
 
-  test('refreshes all key balances without announcing a combined amount', async () => {
+  test('refreshes the channel balance and retains the server-calculated total', async () => {
     vi.spyOn(api, 'get').mockResolvedValueOnce({
       data: { success: true, balance: 7, balance_monitor: complete },
     })
@@ -358,7 +442,7 @@ describe('channel balance monitoring', () => {
     await waitFor(() =>
       expect(success).toHaveBeenCalledWith('Balance updated successfully')
     )
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(screen.getByText('$7')).toBeVisible()
   })
 
   test('keeps the list short and opens every current key in the balance dialog', async () => {
@@ -375,7 +459,9 @@ describe('channel balance monitoring', () => {
       })),
     }
     renderBalance(monitor)
-    expect(screen.getByText('$10')).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: 'Update balance' })
+    ).toHaveTextContent('$7')
     expect(screen.queryByText('$13')).not.toBeInTheDocument()
     await userEvent.click(
       screen.getByRole('button', { name: 'View all 4 keys' })
@@ -384,13 +470,14 @@ describe('channel balance monitoring', () => {
     expect(within(dialog).getByText('Key #4')).toBeVisible()
     expect(within(dialog).getByText('Group 4')).toBeVisible()
     expect(within(dialog).getByText('$13')).toBeVisible()
-    expect(within(dialog).queryByText('$7')).not.toBeInTheDocument()
+    expect(within(dialog).getByText('$7')).toBeVisible()
   })
 
-  test('multi-key accounts without any query do not fall back to the old aggregate', () => {
+  test('a legacy channel without monitor data uses its recorded server balance', () => {
     renderBalance()
-    expect(screen.getByText('Not queried')).toBeVisible()
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Update balance' })
+    ).toHaveTextContent('$7')
   })
 
   test.each(['list', 'dialog'] as const)(
@@ -443,30 +530,40 @@ describe('channel balance monitoring', () => {
         },
       ],
     })
-    const rows = screen.getByTestId('multi-key-balances')
-    expect(within(rows).getByText('$3')).toBeVisible()
-    expect(within(rows).getByText('Query failed')).toBeVisible()
-    expect(within(rows).getByText('Last known balance: $4')).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: 'Update balance' })
+    ).toHaveTextContent('$7')
     await userEvent.hover(
       screen.getByRole('button', { name: 'Update balance' })
     )
     expect(await screen.findByText('Partial result')).toBeVisible()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View all 2 keys' })
+    )
+    const rows = screen.getByRole('table')
+    expect(within(rows).getByText('$3')).toBeVisible()
+    expect(within(rows).getByText('Query failed')).toBeVisible()
+    expect(within(rows).getByText('Last known balance: $4')).toBeVisible()
     expect(screen.queryByText(/Queried subtotal/)).not.toBeInTheDocument()
-    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('dialog')).getByText('$7')).toBeVisible()
   })
 
-  test('changed accounts retain current groups but never reuse old key amounts', async () => {
-    renderBalance({ ...complete, balance: null, configuration_changed: true })
-    const rows = screen.getByTestId('multi-key-balances')
+  test('changed accounts hide stale totals and keep current groups without stale key amounts', async () => {
+    renderBalance({ ...complete, configuration_changed: true })
+    expect(
+      screen.getByRole('button', { name: 'Update balance' })
+    ).toHaveTextContent('Not queried')
+    expect(screen.queryByText('$7')).not.toBeInTheDocument()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View all 2 keys' })
+    )
+    const rows = screen.getByRole('table')
     expect(within(rows).getAllByText('Not queried')).toHaveLength(2)
     expect(within(rows).getByText('Low cost')).toBeVisible()
     expect(screen.queryByText('$3')).not.toBeInTheDocument()
     expect(screen.queryByText('$4')).not.toBeInTheDocument()
-    await userEvent.hover(
-      screen.getByRole('button', { name: 'Update balance' })
-    )
     expect(
-      await screen.findByText(
+      within(screen.getByRole('dialog')).getByText(
         'Channel accounts changed. Refresh balances to see the current accounts.'
       )
     ).toBeVisible()
@@ -568,7 +665,7 @@ describe('channel balance monitoring', () => {
         ).toBeVisible()
         expect(within(history).queryByText('Premium')).not.toBeInTheDocument()
         expect(history.querySelector('svg')).toBeNull()
-        expect(screen.queryByText('$7')).not.toBeInTheDocument()
+        expect(screen.getByText('$7')).toBeVisible()
         expect(
           screen.getByText(
             'Key numbers reflect the configuration at query time.'

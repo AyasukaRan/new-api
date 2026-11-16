@@ -22,7 +22,6 @@ import { StaticDataTable } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
 import { formatCurrencyFromUSD } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 
@@ -78,36 +77,18 @@ export function ChannelKeyBalanceValue({
   )
 }
 
-function KeyBalanceGroups({
-  groups,
-  compact = false,
-}: {
-  groups?: string[]
-  compact?: boolean
-}) {
+function KeyBalanceGroups(props: { groups?: string[] }) {
   const { t } = useTranslation()
-  if (!groups?.length) {
+  if (!props.groups?.length) {
     return (
       <span className='text-muted-foreground text-xs'>
-        {groups ? t('No groups') : t('Unknown group')}
+        {props.groups ? t('No groups') : t('Unknown group')}
       </span>
-    )
-  }
-  if (compact) {
-    return (
-      <GroupBadge
-        group={groups[0]}
-        label={groups.join(' · ')}
-        size='sm'
-        showDot={false}
-        copyable={false}
-        className='max-w-full text-[10px]'
-      />
     )
   }
   return (
     <div className='flex min-w-0 flex-wrap gap-0.5'>
-      {groups.map((group) => (
+      {props.groups.map((group) => (
         <GroupBadge
           key={group}
           group={group}
@@ -121,88 +102,14 @@ function KeyBalanceGroups({
   )
 }
 
-export function ChannelKeyBalanceList(props: {
-  monitor: ChannelBalanceMonitor | null | undefined
-  sensitiveVisible: boolean
-  onViewAll: () => void
-}) {
-  const { t } = useTranslation()
-  const rows = getChannelKeyBalanceRows(props.monitor)
-  return (
-    <div
-      className='w-full min-w-0 space-y-1.5 pl-1.5'
-      data-testid='multi-key-balances'
-    >
-      {rows.length === 0 && (
-        <span className='text-muted-foreground text-xs'>
-          {t('Not queried')}
-        </span>
-      )}
-      {rows.slice(0, 3).map((row) => {
-        const status = getMultiKeyStatusConfig(row.status ?? 1)
-        return (
-          <div
-            key={row.index}
-            className='border-border min-w-0 space-y-0.5 border-l-2 pl-2'
-          >
-            <div className='flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5'>
-              <span
-                className='text-muted-foreground text-[10px]'
-                aria-label={t('Key #{{index}}', { index: row.index + 1 })}
-              >
-                #{row.index + 1}
-              </span>
-              <div className='min-w-0 text-sm font-medium tabular-nums'>
-                <ChannelKeyBalanceValue
-                  row={row}
-                  sensitiveVisible={props.sensitiveVisible}
-                />
-              </div>
-              {row.status != null && row.status !== 1 && (
-                <StatusBadge
-                  label={t(status.label)}
-                  variant={status.variant}
-                  size='sm'
-                  showDot={false}
-                  copyable={false}
-                  className='text-[10px]'
-                />
-              )}
-            </div>
-            {props.sensitiveVisible ? (
-              <KeyBalanceGroups groups={row.groups} compact />
-            ) : (
-              <span className='text-muted-foreground text-[10px]'>••••</span>
-            )}
-          </div>
-        )
-      })}
-      {rows.length > 3 && (
-        <Button
-          variant='link'
-          size='sm'
-          className='h-auto p-0 text-xs'
-          onClick={props.onViewAll}
-        >
-          {t('View all {{count}} keys', { count: rows.length })}
-        </Button>
-      )}
-    </div>
-  )
-}
-
 export function ChannelBalanceSummary(props: {
   monitor: ChannelBalanceMonitor | null | undefined
   queryDisabled?: boolean
-  multiKey?: boolean
 }) {
   const { t } = useTranslation()
   const monitor = props.monitor
   const rows = getChannelKeyBalanceRows(monitor)
-  const multiKey = props.multiKey || rows.length > 1
-  const updatedAt = multiKey
-    ? monitor?.checked_at
-    : monitor?.balance_updated_time
+  const updatedAt = monitor?.balance_updated_time
   const formatBalance = (value: number | null | undefined) =>
     value == null
       ? t('Not queried')
@@ -221,39 +128,24 @@ export function ChannelBalanceSummary(props: {
       'Channel accounts changed. Refresh balances to see the current accounts.'
     )
   } else if (monitor?.partial) {
-    notice = multiKey
-      ? t(
-          'Some key balances could not be queried. Check each key for its latest result.'
-        )
-      : t(
-          'Some accounts could not be queried. The total retains the last complete balance.'
-        )
+    notice = t(
+      'Some accounts could not be queried. The total retains the last complete balance.'
+    )
   } else if (monitor && !monitor.success && monitor.checked_at > 0) {
-    notice = multiKey
-      ? t(
-          'The latest balance query failed. Check each key for its last known balance.'
-        )
-      : t(
-          'The latest balance query failed. The last complete balance is retained.'
-        )
+    notice = t(
+      'The latest balance query failed. The last complete balance is retained.'
+    )
   }
 
   return (
     <section className='space-y-3' aria-label={t('Balance monitoring')}>
       <div className='bg-muted/30 rounded-lg border p-4'>
-        <p className='text-muted-foreground text-sm'>
-          {multiKey ? t('Key balances') : t('Total balance')}
+        <p className='text-muted-foreground text-sm'>{t('Total balance')}</p>
+        <p className='mt-1 text-2xl font-semibold tabular-nums'>
+          {formatBalance(
+            monitor?.configuration_changed ? null : monitor?.balance
+          )}
         </p>
-        {!multiKey && (
-          <p className='mt-1 text-2xl font-semibold tabular-nums'>
-            {formatBalance(
-              monitor?.configuration_changed ? null : monitor?.balance
-            )}
-          </p>
-        )}
-        {multiKey && rows.length === 0 && (
-          <p className='mt-1 text-sm'>{t('Not queried')}</p>
-        )}
         <p className='text-muted-foreground mt-2 text-xs'>
           {t('Last updated:')}{' '}
           {updatedAt ? formatTimestampToDate(updatedAt) : t('Never')}

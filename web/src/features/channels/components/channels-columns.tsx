@@ -88,7 +88,6 @@ import {
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
-import { ChannelKeyBalanceList } from './channel-balance-summary'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
@@ -351,7 +350,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const monitor = channel.balance_monitor
   const balance = monitor ? (monitor.balance ?? 0) : channel.balance || 0
   const balanceUnknown = monitor
-    ? monitor.balance == null
+    ? monitor.configuration_changed || monitor.balance == null
     : !channel.balance_updated_time
   const usedQuota = channel.used_quota || 0
   const [isUpdating, setIsUpdating] = useState(false)
@@ -443,10 +442,12 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const variant = getBalanceVariant(balance)
   const isInferenceChannel =
     channel.type === CHANNEL_TYPE_VLLM || channel.type === CHANNEL_TYPE_SGLANG
-  const showKeyBalances =
-    (isMultiKeyChannel(channel) ||
-      (monitor?.key_accounts?.length ?? monitor?.key_balances.length ?? 0) >
-        1) &&
+  const keyCount =
+    monitor?.key_accounts?.length ??
+    (channel.channel_info?.multi_key_size || monitor?.key_balances.length || 0)
+  const showKeyDetails =
+    keyCount > 0 &&
+    (isMultiKeyChannel(channel) || keyCount > 1) &&
     channel.type !== 57 &&
     !isInferenceChannel
   const inferenceStatusLabel =
@@ -489,13 +490,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       })
       if (response.partial) {
         toast.warning(
-          showKeyBalances
-            ? t(
-                'Some key balances could not be queried. Check each key for its latest result.'
-              )
-            : t(
-                'Some accounts could not be queried. The total retains the last complete balance.'
-              )
+          t(
+            'Some accounts could not be queried. The total retains the last complete balance.'
+          )
         )
       } else if (
         response.success &&
@@ -525,7 +522,6 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     }
   }
   let remainingBadgeLabel = sensitiveVisible ? remainingDisplay : SENSITIVE_MASK
-  if (showKeyBalances) remainingBadgeLabel = t('Key balances')
   if (sensitiveVisible && isUpdating) {
     remainingBadgeLabel = t('Updating...')
   } else if (sensitiveVisible && channel.type === 57) {
@@ -533,9 +529,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   } else if (sensitiveVisible && isInferenceChannel) {
     remainingBadgeLabel = inferenceStatusLabel
   }
-  let remainingTooltipLabel = showKeyBalances
-    ? t('Key balances')
-    : remainingLabel
+  let remainingTooltipLabel = remainingLabel
   if (!sensitiveVisible) {
     remainingTooltipLabel = maskedRemainingLabel
   } else if (channel.type === 57) {
@@ -543,9 +537,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   } else if (isInferenceChannel) {
     remainingTooltipLabel = inferenceStatusLabel
   }
-  let remainingBadgeVariant: StatusBadgeProps['variant'] = showKeyBalances
-    ? 'neutral'
-    : variant
+  let remainingBadgeVariant: StatusBadgeProps['variant'] = variant
   if (channel.type === 57 || isInferenceChannel) {
     remainingBadgeVariant = 'info'
   } else if (isUpdating) {
@@ -664,15 +656,18 @@ export function BalanceCell({ channel }: { channel: Channel }) {
             </div>
           </TooltipContent>
         </Tooltip>
-        {showKeyBalances && (
-          <ChannelKeyBalanceList
-            monitor={monitor}
-            sensitiveVisible={sensitiveVisible}
-            onViewAll={() => {
+        {showKeyDetails && (
+          <Button
+            variant='link'
+            size='sm'
+            className='h-auto basis-full justify-start p-0 pl-1.5 text-xs'
+            onClick={() => {
               setCurrentRow(channel)
               setOpen('balance-query')
             }}
-          />
+          >
+            {t('View all {{count}} keys', { count: keyCount })}
+          </Button>
         )}
         {balanceQueryDisabled && (
           <span className='text-muted-foreground basis-full pl-1.5 text-[10px]'>

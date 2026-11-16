@@ -609,7 +609,6 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 	}
 	result := channelBalanceResult{KeyBalances: make([]model.ChannelKeyBalance, 0, len(keys))}
 	succeeded := 0
-	var available decimal.Decimal
 	for index, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return channelBalanceResult{}, err
@@ -645,18 +644,11 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 			entry.Error = "balance_query_failed"
 		} else if keyResult.RawResponse != "" {
 			entry.Error = "non_numeric_balance"
-		} else if math.IsNaN(keyResult.Balance) || math.IsInf(keyResult.Balance, 0) ||
-			math.IsInf(result.Balance+keyResult.Balance, 0) {
+		} else if math.IsNaN(keyResult.Balance) || math.IsInf(keyResult.Balance, 0) {
 			entry.Error = "invalid_balance"
 		} else {
 			balance := keyResult.Balance
 			entry.Balance = &balance
-			// Each key owns a separate account. An exhausted account cannot
-			// reduce the funds available from another account.
-			if !channel.ChannelInfo.IsMultiKey || balance > 0 {
-				available = available.Add(decimal.NewFromFloat(balance))
-				result.Balance = available.InexactFloat64()
-			}
 			succeeded++
 		}
 		result.KeyBalances = append(result.KeyBalances, entry)
@@ -670,6 +662,7 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 	if err := model.RecordChannelBalanceSample(channel, sample); err != nil {
 		return channelBalanceResult{}, err
 	}
+	result.Balance = sample.KnownBalance
 	result.sample = sample
 	result.Monitor = &model.ChannelBalanceMonitor{
 		CheckedAt: sample.CheckedAt, Balance: sample.Balance,

@@ -115,7 +115,6 @@ export function ChannelMonitoringContent(props: {
       </p>
       <ChannelBalanceSummary
         monitor={data.balance}
-        multiKey={multiKey}
         queryDisabled={props.balanceQueryDisabled}
       />
       {data.balance_history.length === 0 ? (
