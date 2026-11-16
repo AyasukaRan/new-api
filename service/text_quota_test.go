@@ -433,7 +433,7 @@ func runMeteredAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			assert.Equal(t, startingQuota-tc.want, token.RemainQuota)
 			assert.Equal(t, tc.want, user.UsedQuota)
 			assert.Equal(t, tc.want, token.UsedQuota)
-			assert.Equal(t, tc.want, channel.UsedQuota)
+			assert.Equal(t, int64(tc.want), channel.UsedQuota)
 			if !tc.refund && !tc.insufficient {
 				assert.Equal(t, 1, user.RequestCount)
 			} else {

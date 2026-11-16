@@ -169,6 +169,7 @@ func TestResponsesWSRequestRunnerRefreshesBillingContextAndCleansBody(t *testing
 		"group": "updated", "setting": `{"billing_preference":"wallet_only"}`,
 	}).Error)
 	request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"second"}`))
+	var secondStorage common.BodyStorage
 	require.Nil(t, runner(request, "ws-second", func(c *gin.Context) *types.NewAPIError {
 		assert.Equal(t, 2, c.GetInt("token_quota"))
 		assert.True(t, c.GetBool("token_model_limit_enabled"))
@@ -181,10 +182,19 @@ func TestResponsesWSRequestRunnerRefreshesBillingContextAndCleansBody(t *testing
 		assert.Equal(t, "ws-second", c.GetString(common.RequestIdKey))
 		_, leaked := c.Get("previous_turn")
 		assert.False(t, leaked)
-		_, leaked = c.Get(common.KeyBodyStorage)
-		assert.False(t, leaked)
+		// File-reference authorization legitimately reads this frame before the
+		// handler. Its storage must belong to this frame, not the previous turn.
+		var err error
+		secondStorage, err = common.GetBodyStorage(c)
+		require.NoError(t, err)
+		assert.NotSame(t, storage, secondStorage)
+		data, err := secondStorage.Bytes()
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"input":"second"}`, string(data))
 		return nil
 	}))
+	_, err = secondStorage.Bytes()
+	assert.ErrorIs(t, err, common.ErrStorageClosed)
 }
 
 func TestResponsesWSRequestRunnerRejectsRevokedCredentials(t *testing.T) {
