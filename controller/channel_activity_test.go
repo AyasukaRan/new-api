@@ -16,6 +16,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
@@ -1113,6 +1114,7 @@ func (transport channelProbeTestTransport) RoundTrip(request *http.Request) (*ht
 }
 
 func TestAutomaticChannelProbeDeadlineAndIncompleteSetup(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	previousInterval, previousStreamingTimeout := common.RequestInterval, constant.StreamingTimeout
 	previousPerf, previousGroups := perf_metrics_setting.GetSetting(), ratio_setting.GroupRatio2JSONString()
 	common.RequestInterval, constant.StreamingTimeout = 0, 10
