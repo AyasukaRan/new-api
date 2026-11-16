@@ -129,7 +129,8 @@ func testRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T, kind, dsn stri
 			}
 			affinity.Enabled = test.name == "timeout_uses_next_ordered_key" || test.once
 			affinity.Rules = []operation_setting.ChannelAffinityRule{{
-				Name: "header-failover-affinity", ModelRegex: []string{"^claude-header-fixture$"},
+				// Affinity caches survive database fixture changes, including reused IDs.
+				Name: t.Name(), ModelRegex: []string{"^claude-header-fixture$"},
 				SessionMode: "prefer", TTLSeconds: 3600, IncludeModelName: true, IncludeUsingGroup: true, IncludeRuleName: true,
 				KeySources: []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Fixture-Session"}},
 			}}
