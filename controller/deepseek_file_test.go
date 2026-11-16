@@ -17,6 +17,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -42,6 +43,7 @@ type releasedRelayFile struct {
 func (releasedRelayFile) TableName() string { return "relay_files" }
 
 func TestDeepSeekFilesOwnershipAndMigration(t *testing.T) {
+	require.NoError(t, i18n.Init())
 	service.InitHttpClient()
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		t.Run(dialect.kind, func(t *testing.T) {
