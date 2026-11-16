@@ -448,6 +448,8 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			modelRequest.Model = midjourneyModel
 		}
 		c.Set("relay_mode", relayMode)
+	} else if c.Request.URL.Path == "/v1/tools/tts" {
+		modelRequest.Model = constant.DeepSeekTTSModel
 	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/files") {
 		// Only the upload picks a channel, and it does so from the model its
 		// own middleware already resolved. Every other file operation is pinned
@@ -532,6 +534,10 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 		modelRequest.Model = constant.DeepSeekSearchModel
 	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/tools/fetch") {
 		modelRequest.Model = constant.DeepSeekFetchModel
+	} else if c.Request.URL.Path == "/v1/tools/ocr" {
+		modelRequest.Model = constant.DeepSeekOCRModel
+	} else if c.Request.URL.Path == "/v1/tools/asr" {
+		modelRequest.Model = constant.DeepSeekASRModel
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/images/generations") {
 		modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "dall-e")

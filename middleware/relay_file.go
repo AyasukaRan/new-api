@@ -55,6 +55,17 @@ func scopeToBatchChannels(c *gin.Context, modelName string) {
 // to run it.
 func PrepareRelayFileUpload() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		file, err := service.InspectDeepSeekFileUpload(c)
+		if err != nil {
+			abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		if file != nil {
+			c.Set("deepseek_file_upload", file)
+			c.Set("resolved_task_model", file.Model)
+			c.Next()
+			return
+		}
 		modelName, err := service.BatchUploadModel(c)
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, err.Error())
@@ -97,7 +108,12 @@ func PrepareRelayFile() gin.HandlerFunc {
 		}
 		c.Set(relayFileRecordContextKey, file)
 		c.Set(relayFileModelContextKey, file.Model)
-		scopeToBatchChannels(c, file.Model)
+		if file.Provider == "deepseek" {
+			c.Set("relay_file_key_identity", file.KeyIdentity)
+			c.Set("relay_file_channel_id", file.ChannelId)
+		} else {
+			scopeToBatchChannels(c, file.Model)
+		}
 		service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
 			ChannelId: file.ChannelId,
 			Source:    dto.PinSourceRelayFile,

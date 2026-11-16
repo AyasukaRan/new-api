@@ -86,13 +86,21 @@ export const ENDPOINT_TYPES = {
   EMBEDDINGS: 'embeddings',
   DEEPSEEK_SEARCH: 'deepseek-tools-search',
   DEEPSEEK_FETCH: 'deepseek-tools-fetch',
+  DEEPSEEK_OCR: 'deepseek-tools-ocr',
+  DEEPSEEK_ASR: 'deepseek-tools-asr',
+  DEEPSEEK_TTS: 'deepseek-tools-tts',
+  DEEPSEEK_FILES: 'deepseek-files',
   OPENAI_VIDEO: 'openai-video',
 } as const
 
 export function isDeepSeekToolEndpoint(type: string): boolean {
   return (
     type === ENDPOINT_TYPES.DEEPSEEK_SEARCH ||
-    type === ENDPOINT_TYPES.DEEPSEEK_FETCH
+    type === ENDPOINT_TYPES.DEEPSEEK_FETCH ||
+    type === ENDPOINT_TYPES.DEEPSEEK_OCR ||
+    type === ENDPOINT_TYPES.DEEPSEEK_ASR ||
+    type === ENDPOINT_TYPES.DEEPSEEK_TTS ||
+    type === ENDPOINT_TYPES.DEEPSEEK_FILES
   )
 }
 
@@ -114,6 +122,10 @@ export function getEndpointTypeLabels(
     [ENDPOINT_TYPES.EMBEDDINGS]: t('Embeddings'),
     [ENDPOINT_TYPES.DEEPSEEK_SEARCH]: 'DeepSeek Search',
     [ENDPOINT_TYPES.DEEPSEEK_FETCH]: 'DeepSeek Fetch',
+    [ENDPOINT_TYPES.DEEPSEEK_OCR]: t('DeepSeek OCR'),
+    [ENDPOINT_TYPES.DEEPSEEK_ASR]: t('DeepSeek speech recognition'),
+    [ENDPOINT_TYPES.DEEPSEEK_TTS]: t('DeepSeek speech synthesis'),
+    [ENDPOINT_TYPES.DEEPSEEK_FILES]: t('DeepSeek files'),
     [ENDPOINT_TYPES.OPENAI_VIDEO]: t('Video'),
   }
 }

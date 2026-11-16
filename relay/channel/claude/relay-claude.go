@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 )
 
@@ -93,8 +94,14 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		common.SysLog(common.LogText("error unmarshalling stream response: %s", err.Error()))
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	info.ApplyVendorToolUsage(common.StringToByteSlice(data))
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
+	}
+	if claudeResponse.Type == "message_delta" {
+		if measured := vendorBilledClaudeUsage(info, common.StringToByteSlice(data)); measured != nil {
+			claudeInfo.Usage = measured
+		}
 	}
 	if claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
 		info.ObserveResponseModel(claudeResponse.Message.Model)
@@ -260,12 +267,17 @@ func recordClaudeServerToolUse(info *relaycommon.RelayInfo, serverToolUse *dto.C
 	if info == nil || serverToolUse == nil {
 		return
 	}
-	for name, count := range map[string]int{
-		cmp.Or(info.WebSearchBillingKey, dto.BuildInToolWebSearch): serverToolUse.WebSearchRequests,
-		cmp.Or(info.WebFetchBillingKey, "web_fetch"):               serverToolUse.WebFetchRequests,
+	counts := map[string]int{
 		"code_execution": serverToolUse.CodeExecutionRequests,
 		"tool_search":    serverToolUse.ToolSearchRequests,
-	} {
+	}
+	// DeepSeek's Anthropic-compatible request counts are display metadata;
+	// its vendor usage hook reports the actual billable queries and reads.
+	if info.VendorToolUsage == nil || !info.WebSearchBilledByUsage {
+		counts[cmp.Or(info.WebSearchBillingKey, dto.BuildInToolWebSearch)] = serverToolUse.WebSearchRequests
+		counts[cmp.Or(info.WebFetchBillingKey, "web_fetch")] = serverToolUse.WebFetchRequests
+	}
+	for name, count := range counts {
 		if count > 0 {
 			info.SetBillableToolCount(name, count)
 		}
@@ -279,7 +291,8 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	// was streamed, so a refusal before any output keeps its zeros.
 	missingInputUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage).PromptTokens == 0
 	missingOutputUsage := claudeInfo.Usage.CompletionTokens == 0 && claudeInfo.ResponseText.Len() > 0
-	if missingInputUsage || missingOutputUsage || !claudeInfo.Done {
+	if (missingInputUsage || missingOutputUsage || !claudeInfo.Done) &&
+		!(info.VendorToolUsage != nil && claudeInfo.Usage.UsageSource == "upstream") {
 		if common.DebugEnabled {
 			common.SysLog(common.LogText("claude response usage is not complete, maybe upstream error"))
 		}
@@ -340,15 +353,19 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		Usage:        &dto.Usage{},
 	}
 	var err *types.NewAPIError
+	var billedFailureUsage *dto.Usage
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		err = HandleStreamResponseData(c, info, claudeInfo, data)
 		if err != nil {
+			if ojson.Get(data, "error").IsObject() {
+				billedFailureUsage = vendorBilledClaudeUsage(info, common.StringToByteSlice(data))
+			}
 			sr.Stop(err)
 		}
 	})
 	info.StreamStatus.RequireTerminal()
 	if err != nil {
-		return nil, err
+		return billedFailureUsage, err
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
@@ -361,6 +378,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	info.ApplyVendorToolUsage(data)
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
@@ -455,7 +473,59 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 	logger.LogDebug(c, "responseBody: %s", responseBody)
 	handleErr := HandleClaudeResponseData(c, info, claudeInfo, resp, responseBody)
 	if handleErr != nil {
-		return nil, handleErr
+		var usage *dto.Usage
+		if ojson.GetBytes(responseBody, "error").IsObject() {
+			usage = vendorBilledClaudeUsage(info, responseBody)
+		}
+		if usage != nil {
+			info.StreamStatus = relaycommon.NewStreamStatus()
+			info.StreamStatus.MarkFailed(string(handleErr.GetErrorCode()), handleErr.ToClaudeError().Type, handleErr.StatusCode)
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, handleErr)
+		}
+		return usage, handleErr
 	}
 	return claudeInfo.Usage, nil
+}
+
+// vendorBilledClaudeUsage preserves the final bill, including generation errors. It
+// never fills missing counters from the request or an earlier stream chunk.
+func vendorBilledClaudeUsage(info *relaycommon.RelayInfo, body []byte) *dto.Usage {
+	if info.VendorToolUsage == nil {
+		return nil
+	}
+	raw := ojson.GetBytes(body, "usage")
+	if !raw.IsObject() {
+		return nil
+	}
+	var usage dto.ClaudeUsage
+	if common.UnmarshalJsonStr(raw.Raw, &usage) != nil {
+		return nil
+	}
+	for _, value := range []int{usage.InputTokens, usage.OutputTokens, usage.CacheReadInputTokens,
+		usage.CacheCreationInputTokens, usage.GetCacheCreation5mTokens(), usage.GetCacheCreation1hTokens()} {
+		if value < 0 || value > common.MaxQuota {
+			return nil
+		}
+	}
+	if usage.InputTokens > common.MaxQuota-usage.OutputTokens {
+		return nil
+	}
+	valid := raw.Get("input_tokens").Type == ojson.Number && raw.Get("output_tokens").Type == ojson.Number
+	for _, count := range info.VendorToolUsage(body) {
+		valid = valid || count > 0
+	}
+	if !valid {
+		return nil
+	}
+	return &dto.Usage{
+		PromptTokens: usage.InputTokens, CompletionTokens: usage.OutputTokens,
+		TotalTokens: usage.InputTokens + usage.OutputTokens, UsageSemantic: "anthropic",
+		UsageSource: "upstream",
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedTokens: usage.CacheReadInputTokens, CachedCreationTokens: usage.CacheCreationInputTokens,
+		},
+		ClaudeCacheCreation5mTokens: usage.GetCacheCreation5mTokens(),
+		ClaudeCacheCreation1hTokens: usage.GetCacheCreation1hTokens(),
+		BillingUsage:                dto.NewClaudeMessagesBillingUsage(&usage),
+	}
 }

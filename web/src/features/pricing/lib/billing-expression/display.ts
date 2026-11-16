@@ -21,6 +21,9 @@ import { compileBillingExpression } from './parser'
 import { evaluateBillingCondition } from './runtime'
 import {
   TIME_FUNCTIONS,
+  METERED_VARIABLES,
+  isMeteredVariable,
+  type BillingUnit,
   expressionDependencies,
   type ExpressionNode,
   type CompiledBillingExpression,
@@ -35,7 +38,7 @@ export type TokenTierCondition = {
 export type TokenTier = {
   conditionText?: string
   imageCount?: boolean
-  billingUnit?: 'token' | 'request'
+  billingUnit?: BillingUnit
   fixedPrice?: number
   label: string
   conditions: TokenTierCondition[]
@@ -142,7 +145,8 @@ function tokenTier(
     if (
       input.kind === 'variable' &&
       input.name !== 'len' &&
-      input.name !== 'image_count'
+      input.name !== 'image_count' &&
+      !isMeteredVariable(input.name)
     ) {
       variable = input.name
     } else {
@@ -218,11 +222,16 @@ export function readTokenTierChain(node: ExpressionNode): TokenTier[] | null {
       [node.left, node.right],
       [node.right, node.left],
     ]) {
-      if (factor.kind === 'variable' && factor.name === 'image_count') {
+      if (
+        factor.kind === 'variable' &&
+        (factor.name === 'image_count' || isMeteredVariable(factor.name))
+      ) {
         return (
           readTokenTierChain(pricing)?.map((tier) => ({
             ...tier,
-            imageCount: true,
+            ...(isMeteredVariable(factor.name)
+              ? { billingUnit: METERED_VARIABLES[factor.name].unit }
+              : { imageCount: true }),
           })) ?? null
         )
       }

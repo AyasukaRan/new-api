@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { BillingUnit } from '@/features/pricing/lib/billing-expression/types'
+
 import {
   normalizeTierLabel,
   type ParsedTaskTier,
@@ -44,13 +46,13 @@ export function isBreakdownTierMatched(
   tiers: readonly BreakdownMatchTier[],
   matchedTierLabel?: string | null,
   usageFacts?: Record<string, string | number>,
-  billingUnit?: 'token' | 'request',
+  billingUnit?: BillingUnit,
   fixedPrice?: number
 ): boolean {
   if (!('unitPrices' in tier) && billingUnit) {
     if ((tier.billingUnit ?? 'token') !== billingUnit) return false
     if (
-      billingUnit === 'request' &&
+      billingUnit !== 'token' &&
       fixedPrice !== undefined &&
       tier.fixedPrice !== fixedPrice
     ) {

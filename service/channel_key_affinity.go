@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -83,6 +84,14 @@ func prepareChannelKeyAffinity(c *gin.Context, channelID int, group string) *cha
 // The model selector remains the authority for current permissions and health.
 func SelectChannelKeyForRequest(c *gin.Context, channel *model.Channel, modelName string, batch bool) (model.RelayKeySelection, *types.NewAPIError) {
 	group := GetSelectedRequestGroup(c)
+	if identity := c.GetString("relay_file_key_identity"); identity != "" {
+		if c.GetInt("relay_file_channel_id") != channel.Id {
+			return model.RelayKeySelection{}, types.NewError(fmt.Errorf("file credential does not belong to the selected channel"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		candidate := *channel
+		candidate.RelayKeyIdentity = identity
+		return candidate.SelectRelayKeyForModel(modelName, false, group)
+	}
 	var state *channelKeyAffinityState
 	if !batch && channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover && RequestPolicy(c).Attempts == 0 && channel.RelayKeyIdentity == "" {
 		state = prepareChannelKeyAffinity(c, channel.Id, group)

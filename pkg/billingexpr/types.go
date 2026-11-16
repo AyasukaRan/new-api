@@ -13,7 +13,8 @@ type RequestInput struct {
 	Usage   map[string]any
 	// ImageCount is a validated billing quantity, separate from the frozen
 	// request's n. Settlement can replace it with the actual returned count.
-	ImageCount *int
+	ImageCount   *int
+	MeteredUsage *MeteredUsage
 }
 
 // TokenParams holds all token dimensions passed into an Expr evaluation.
@@ -50,6 +51,7 @@ const (
 
 // TraceResult holds side-channel info captured while an expression runs.
 type TraceResult struct {
+	MeteredUsage *MeteredUsage      `json:"metered_usage,omitempty"`
 	ImageCount   *int               `json:"image_count,omitempty"`
 	BillingUnit  BillingUnit        `json:"billing_unit"`
 	FixedPrice   *float64           `json:"fixed_price,omitempty"`
@@ -63,6 +65,7 @@ type TraceResult struct {
 // auto-group retry and settlement. It is fully serializable and contains no
 // compiled program pointers.
 type BillingSnapshot struct {
+	EstimatedMeteredUsage     *MeteredUsage  `json:"estimated_metered_usage,omitempty"`
 	EstimatedImageCount       *int           `json:"estimated_image_count,omitempty"`
 	BillingMode               string         `json:"billing_mode"`
 	ModelName                 string         `json:"model_name"`
@@ -85,6 +88,7 @@ type BillingSnapshot struct {
 
 // TieredResult holds everything needed after running tiered settlement.
 type TieredResult struct {
+	MeteredUsage *MeteredUsage `json:"metered_usage,omitempty"`
 	// BillingTokens records the actual normalized inputs for successful token
 	// billing that explicitly references img_cr. Logs serialize these through
 	// the shared injection path, not as additional snapshot state.

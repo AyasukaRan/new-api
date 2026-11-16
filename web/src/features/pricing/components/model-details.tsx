@@ -1181,7 +1181,10 @@ function ProviderGroupPricingSection(
         )
       : getDynamicPricingTiers(props.model)
     const hasRequestPrice = dynamicTiers.some(
-      (tier) => !('unitPrices' in tier) && tier.billingUnit === 'request'
+      (tier) =>
+        !('unitPrices' in tier) &&
+        tier.billingUnit &&
+        tier.billingUnit !== 'token'
     )
 
     if (dynamicTiers.length === 0) {
@@ -1394,7 +1397,9 @@ function ProviderGroupPricingSection(
           })}
           <p className='text-muted-foreground/40 mt-1.5 text-[10px]'>
             {dynamicTiers.some(
-              (tier) => 'unitPrices' in tier || tier.billingUnit === 'request'
+              (tier) =>
+                'unitPrices' in tier ||
+                (tier.billingUnit && tier.billingUnit !== 'token')
             )
               ? t('Prices shown per usage unit')
               : t('Prices shown per {{unit}} tokens', { unit: tokenUnitLabel })}

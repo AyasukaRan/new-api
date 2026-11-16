@@ -389,6 +389,9 @@ func InjectTieredBillingInfo(other *model.LogOther, relayInfo *relaycommon.Relay
 	other.SetPublic("billing_mode", "tiered_expr")
 	other.SetPublic("expr_b64", base64.StdEncoding.EncodeToString([]byte(snap.ExprString)))
 	if result != nil {
+		if result.MeteredUsage != nil {
+			other.SetPublic("metered_usage", *result.MeteredUsage)
+		}
 		if tokens := result.BillingTokens; tokens != nil && result.BillingUnit == billingexpr.BillingUnitToken {
 			other.SetPublic("image_cache_tokens", tokens.ImgCR)
 			other.SetPublic("billing_tokens", map[string]float64{
@@ -412,6 +415,10 @@ func InjectTieredBillingInfo(other *model.LogOther, relayInfo *relaycommon.Relay
 			other.SetPublic("request_rules", result.RequestRules)
 		}
 	} else if snap.EstimatedBillingUnit != "" {
+		if snap.EstimatedMeteredUsage != nil {
+			other.SetPublic("metered_usage", *snap.EstimatedMeteredUsage)
+			other.SetPublic("metered_usage_estimated", true)
+		}
 		if snap.EstimatedImageCount != nil {
 			other.SetPublic("image_count", *snap.EstimatedImageCount)
 		}

@@ -47,9 +47,14 @@ import {
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
+import { toIntlLocale } from '@/i18n/languages'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
+import {
+  formatLogQuota,
+  formatTimestampToDate,
+  formatNumber,
+} from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -186,7 +191,11 @@ function buildTypeDetailSegments(
 
   const segments: DetailSegment[] = []
 
-  const priceOpts = { digitsLarge: 4, digitsSmall: 6, abbreviate: false }
+  const priceOpts = {
+    digitsLarge: 4,
+    digitsSmall: other.metered_usage ? 8 : 6,
+    abbreviate: false,
+  }
   const formatPrice = (price: number) =>
     `${formatBillingCurrencyFromUSD(price, priceOpts)}/M`
   const formatPriceCompact = (price: number) =>
@@ -375,7 +384,8 @@ export function useCommonLogsColumns(
   source: LogSource = 'usage',
   showBillingSource = false
 ): ColumnDef<UsageLog>[] {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const currency = useSystemConfigStore((state) => state.config.currency)
   return useMemo(() => {
     const columns: ColumnDef<UsageLog>[] = [
@@ -759,6 +769,21 @@ export function useCommonLogsColumns(
 
           const other = parseLogOther(log.other)
 
+          if (other?.metered_usage) {
+            return (
+              <div className='flex flex-col gap-0.5 text-xs'>
+                <span className='font-mono font-medium tabular-nums'>
+                  {formatNumber(other.metered_usage.count, locale)}{' '}
+                  {t(other.metered_usage.unit)}
+                </span>
+                {other.metered_usage_estimated && (
+                  <span className='text-muted-foreground'>
+                    {t('Estimated usage')}
+                  </span>
+                )}
+              </div>
+            )
+          }
           const promptTokens = log.prompt_tokens || 0
           const completionTokens = log.completion_tokens || 0
           const cacheReadTokens = other?.cache_tokens || 0

@@ -31,7 +31,38 @@ export const TOKEN_VARIABLES = [
   'ao',
 ] as const
 export type TokenVariable = (typeof TOKEN_VARIABLES)[number]
-export const BILLING_VARIABLES = [...TOKEN_VARIABLES, 'image_count'] as const
+export const METERED_VARIABLES = {
+  document_pages: { unit: 'page', limit: 1000, label: 'Billable pages' },
+  audio_seconds: {
+    unit: 'second',
+    limit: 120,
+    label: 'Billable audio seconds',
+  },
+  speech_characters: {
+    unit: 'character',
+    limit: 10000,
+    label: 'Billable characters',
+  },
+} as const
+export type MeteredVariable = keyof typeof METERED_VARIABLES
+export type MeteredUnit = (typeof METERED_VARIABLES)[MeteredVariable]['unit']
+export type BillingUnit = 'token' | 'request' | MeteredUnit
+export const UNIT_PRICE_LABELS = {
+  request: { label: 'Price per request', shortLabel: 'Per-call' },
+  page: { label: 'Price per page', shortLabel: 'Per page' },
+  second: { label: 'Price per second', shortLabel: 'Per second' },
+  character: { label: 'Price per character', shortLabel: 'Per character' },
+} as const
+export function isMeteredVariable(name: string): name is MeteredVariable {
+  return Object.hasOwn(METERED_VARIABLES, name)
+}
+export const BILLING_VARIABLES = [
+  ...TOKEN_VARIABLES,
+  'image_count',
+  'document_pages',
+  'audio_seconds',
+  'speech_characters',
+] as const
 export type BillingVariable = (typeof BILLING_VARIABLES)[number]
 export const TIME_FUNCTIONS = [
   'hour',
@@ -127,6 +158,7 @@ export type ExpressionFailure = {
 export type CompilationResult = CompiledBillingExpression | ExpressionFailure
 export type BillingSimulationContext = {
   imageCount?: number
+  meteredUsage?: { unit: MeteredUnit; count: number }
   /** Already normalized billable counts; no implicit cache subtraction. */
   tokens?: Partial<Record<TokenVariable, number>>
   /** Absent means unknown. An explicitly provided empty request means empty. */
@@ -140,7 +172,7 @@ export type BillingEvaluationResult =
       status: 'success'
       /** Token expressions are unscaled; task expressions already return cost. */
       cost: number
-      billingUnit: 'token' | 'request'
+      billingUnit: BillingUnit
       fixedPrice?: number
       imageCount?: number
       matchedTier: string

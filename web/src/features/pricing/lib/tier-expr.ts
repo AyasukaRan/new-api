@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { BillingUnit } from '@/features/pricing/lib/billing-expression/types'
+
 import {
   BILLING_CACHE_VAR_MAP,
   CLAUDE_CACHE_CREATION_1H_MULTIPLIER,
@@ -281,7 +283,7 @@ export type EvalResult = {
   cost: number
   matchedTier: string
   error: string | null
-  billingUnit?: 'token' | 'request'
+  billingUnit?: BillingUnit
 }
 
 export function evalExprLocally(
@@ -311,7 +313,7 @@ export function evalExprLocally(
     cost: result.cost,
     matchedTier: result.matchedTier,
     error: null,
-    ...(result.billingUnit === 'request'
+    ...(result.billingUnit !== 'token'
       ? { billingUnit: result.billingUnit }
       : {}),
   }

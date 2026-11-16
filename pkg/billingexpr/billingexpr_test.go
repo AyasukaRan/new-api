@@ -1,6 +1,7 @@
 package billingexpr_test
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"testing"
@@ -57,6 +58,42 @@ func TestFixedPriceRejectsInvalidLeavesIncludingUnselectedBranches(t *testing.T)
 		t.Run(expression, func(t *testing.T) {
 			_, err := billingexpr.CompileFromCache(expression)
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestMeteredUsageSettlementAndBounds(t *testing.T) {
+	for _, tc := range []struct {
+		unit       billingexpr.BillingUnit
+		variable   string
+		count, max int
+		price      float64
+		quota      int
+	}{
+		{billingexpr.BillingUnitPage, "document_pages", 2, 1000, 0.000225, 45},
+		{billingexpr.BillingUnitSecond, "audio_seconds", 36, 120, 0.058 / 3600, 58},
+		{billingexpr.BillingUnitCharacter, "speech_characters", 4, 10000, 0.0000225, 9},
+	} {
+		t.Run(string(tc.unit), func(t *testing.T) {
+			expression := fmt.Sprintf(`tier("unit", fixed(%.18f)) * %s`, tc.price, tc.variable)
+			snapshot := &billingexpr.BillingSnapshot{ExprString: expression, GroupRatio: 0.2, QuotaPerUnit: 500000}
+			for _, count := range []int{0, tc.count, tc.max} {
+				usage := &billingexpr.MeteredUsage{Unit: tc.unit, Count: count}
+				result, err := billingexpr.ComputeTieredQuotaWithRequest(snapshot, billingexpr.TokenParams{P: 999, C: 999}, billingexpr.RequestInput{MeteredUsage: usage})
+				require.NoError(t, err)
+				assert.Equal(t, tc.unit, result.BillingUnit)
+				assert.Equal(t, usage, result.MeteredUsage)
+				if count == tc.count {
+					assert.Equal(t, tc.quota, result.ActualQuotaAfterGroup)
+				}
+				if count == 0 {
+					assert.Zero(t, result.ActualQuotaAfterGroup)
+				}
+			}
+			for _, count := range []int{-1, tc.max + 1, math.MaxInt} {
+				_, _, err := billingexpr.RunExprWithRequest(expression, billingexpr.TokenParams{}, billingexpr.RequestInput{MeteredUsage: &billingexpr.MeteredUsage{Unit: tc.unit, Count: count}})
+				require.Error(t, err)
+			}
 		})
 	}
 }

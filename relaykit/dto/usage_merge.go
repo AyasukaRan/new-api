@@ -1,6 +1,7 @@
 package dto
 
 import (
+	"bytes"
 	"reflect"
 	"strings"
 )
@@ -82,6 +83,10 @@ func MergeUsageNonZero(current *Usage, incoming *Usage) *Usage {
 	}
 	if incoming.BillingUsage != nil {
 		current.BillingUsage = MergeBillingUsageNonZero(current.BillingUsage, incoming.BillingUsage)
+	}
+	if len(incoming.ServerToolUse) > 0 {
+		// Vendor counts are a complete snapshot; explicit zeros must survive.
+		current.ServerToolUse = bytes.Clone(incoming.ServerToolUse)
 	}
 	if incoming.Cost != nil && !reflect.ValueOf(incoming.Cost).IsZero() {
 		current.Cost = incoming.Cost

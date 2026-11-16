@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   BILLING_FUNCTIONS,
+  isMeteredVariable,
   BILLING_VARIABLES,
   TIME_FUNCTIONS,
   BillingExpressionError,
@@ -443,7 +444,10 @@ function validateFixedPricingTree(
       [node.right, node.left],
       [node.left, node.right],
     ]) {
-      if (factor.kind === 'variable' && factor.name === 'image_count') {
+      if (
+        factor.kind === 'variable' &&
+        (factor.name === 'image_count' || isMeteredVariable(factor.name))
+      ) {
         validateFixedPricingTree(pricing, rules)
         return
       }
@@ -520,6 +524,20 @@ export function compileBillingExpression(source: string): CompilationResult {
     })
     if (dependencies.functions.has('fixed')) {
       validateFixedPricingTree(ast, requestRules)
+    }
+    const meteredVariables = [...dependencies.variables].filter(
+      isMeteredVariable
+    )
+    if (meteredVariables.length > 0) {
+      if (
+        meteredVariables.length !== 1 ||
+        !dependencies.functions.has('fixed')
+      ) {
+        throw new BillingExpressionError({
+          code: 'type',
+          detail: 'Use one metered quantity with a fixed unit price.',
+        })
+      }
     }
     result = {
       status: 'ready',

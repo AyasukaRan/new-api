@@ -19,6 +19,9 @@ For commercial licensing, please contact support@quantumnous.com
 import { compileBillingExpression } from './parser'
 import {
   BillingExpressionError,
+  METERED_VARIABLES,
+  isMeteredVariable,
+  type BillingUnit,
   TIME_FUNCTIONS,
   expressionFailure,
   type BillingEvaluationResult,
@@ -180,7 +183,7 @@ export function timeInBillingZone(
 class BillingRuntime {
   readonly requestRules: BillingRequestRule[]
   matchedTier = ''
-  billingUnit: 'token' | 'request' = 'token'
+  billingUnit: BillingUnit = 'token'
   fixedPrice?: number
   private readonly now: Date
   private readonly timeValues = new Map<string, Record<TimeFunction, number>>()
@@ -258,6 +261,29 @@ class BillingRuntime {
           })
         }
         return { value }
+      }
+      if (isMeteredVariable(node.name)) {
+        const definition = METERED_VARIABLES[node.name]
+        const usage = this.context.meteredUsage
+        if (!usage || usage.unit !== definition.unit) {
+          throw new BillingExpressionError({
+            code: 'missing_context',
+            detail: node.name,
+            position: node.start,
+          })
+        }
+        if (
+          !Number.isInteger(usage.count) ||
+          usage.count < 0 ||
+          usage.count > definition.limit
+        ) {
+          throw new BillingExpressionError({
+            code: 'number',
+            detail: `${node.name} must be between 0 and ${definition.limit}`,
+            position: node.start,
+          })
+        }
+        return { value: usage.count }
       }
       const value = this.context.tokens?.[node.name]
       if (value === undefined) {
@@ -557,7 +583,12 @@ export function evaluateBillingExpression(
     return {
       status: 'success',
       cost: result,
-      billingUnit: runtime.billingUnit,
+      billingUnit:
+        runtime.billingUnit === 'request' &&
+        context.meteredUsage &&
+        [...compiled.variables].some(isMeteredVariable)
+          ? context.meteredUsage.unit
+          : runtime.billingUnit,
       ...(compiled.variables.has('image_count')
         ? { imageCount: context.imageCount ?? 1 }
         : {}),

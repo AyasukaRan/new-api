@@ -27,8 +27,11 @@ func containsPricingMarker(node ast.Node) bool {
 }
 
 func isRequestPriceMultiplier(node ast.Node) bool {
-	if identifier, ok := node.(*ast.IdentifierNode); ok && identifier.Value == "image_count" {
-		return true
+	if identifier, ok := node.(*ast.IdentifierNode); ok {
+		switch identifier.Value {
+		case "image_count", "document_pages", "audio_seconds", "speech_characters":
+			return true
+		}
 	}
 	conditional, ok := node.(*ast.ConditionalNode)
 	if !ok || !usesRequestProbe(conditional.Cond) || containsPricingMarker(conditional.Cond) {

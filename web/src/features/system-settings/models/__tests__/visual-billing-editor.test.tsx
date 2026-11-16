@@ -1023,3 +1023,27 @@ test('preserves legacy numeric drafts when editing an independent time multiplie
   fireEvent.blur(start)
   expect(start).toHaveValue(0)
 })
+
+test('edits a character price without removing its billing quantity', async () => {
+  const onBillingExprChange = vi.fn()
+  render(
+    <TieredPricingEditor
+      billingExpr='tier("speech", fixed(0.0000225)) * speech_characters'
+      requestRuleExpr=''
+      onBillingExprChange={onBillingExprChange}
+      onRequestRuleExprChange={vi.fn()}
+    />
+  )
+  const edit = screen.getByRole('button', { name: 'Edit pricing rule speech' })
+  if (edit.getAttribute('aria-expanded') !== 'true') {
+    await userEvent.setup().click(edit)
+  }
+  const price = screen.getByRole('textbox', { name: 'Price per character' })
+  fireEvent.change(price, { target: { value: '0.00003' } })
+  expect(onBillingExprChange).toHaveBeenLastCalledWith(
+    'tier("speech", fixed(0.00003)) * speech_characters'
+  )
+  expect(
+    screen.queryByRole('combobox', { name: 'Tier billing mode' })
+  ).not.toBeInTheDocument()
+})

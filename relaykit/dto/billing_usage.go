@@ -1,6 +1,9 @@
 package dto
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+)
 
 const (
 	BillingUsageSourceClaudeMessages = "claude_messages"
@@ -390,6 +393,7 @@ func cloneOpenAIUsage(usage *Usage) *Usage {
 		return nil
 	}
 	clone := *usage
+	clone.ServerToolUse = bytes.Clone(usage.ServerToolUse)
 	clone.BillingUsage = nil
 	clone.PromptTokensDetails = usage.PromptTokensDetails.Clone()
 	if usage.InputTokensDetails != nil {

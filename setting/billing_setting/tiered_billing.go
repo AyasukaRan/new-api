@@ -459,7 +459,7 @@ func usageSmokeCombinationCount(dimensions []usageSmokeDimension, stopAfter int)
 }
 
 func billingExprSmokeRequests() []billingexpr.RequestInput {
-	return []billingexpr.RequestInput{
+	requests := []billingexpr.RequestInput{
 		{},
 		{
 			Headers: map[string]string{
@@ -468,4 +468,14 @@ func billingExprSmokeRequests() []billingexpr.RequestInput {
 			Body: []byte(`{"service_tier":"fast","stream_options":{"include_usage":true},"messages":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21]}`),
 		},
 	}
+	for _, limit := range []billingexpr.MeteredUsage{
+		{Unit: billingexpr.BillingUnitPage, Count: 1000},
+		{Unit: billingexpr.BillingUnitSecond, Count: 120},
+		{Unit: billingexpr.BillingUnitCharacter, Count: 10000},
+	} {
+		for _, count := range []int{0, 1, limit.Count} {
+			requests = append(requests, billingexpr.RequestInput{MeteredUsage: &billingexpr.MeteredUsage{Unit: limit.Unit, Count: count}})
+		}
+	}
+	return requests
 }

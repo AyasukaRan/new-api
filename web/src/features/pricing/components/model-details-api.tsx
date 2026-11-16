@@ -426,18 +426,71 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
 }
 
 function buildDeepSeekToolSample(lang: Lang, ctx: SampleContext): string {
-  const body = JSON.stringify(
-    ctx.endpointType === ENDPOINT_TYPES.DEEPSEEK_SEARCH
-      ? { query: 'DeepSeek API', count: 3 }
-      : { url: 'https://example.com/' }
-  )
   const url = JSON.stringify(ctx.baseUrl + ctx.endpointPath)
+  const upload = [
+    ENDPOINT_TYPES.DEEPSEEK_OCR,
+    ENDPOINT_TYPES.DEEPSEEK_ASR,
+    ENDPOINT_TYPES.DEEPSEEK_FILES,
+  ].some((type) => type === ctx.endpointType)
+  if (upload) {
+    const fileName =
+      ctx.endpointType === ENDPOINT_TYPES.DEEPSEEK_ASR
+        ? 'audio.wav'
+        : 'document.pdf'
+    const purpose = ctx.endpointType !== ENDPOINT_TYPES.DEEPSEEK_ASR
+    if (lang === 'curl') {
+      return [
+        `curl -X POST ${url} \\`,
+        `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
+        ...(purpose ? ['  -F "purpose=text_recognition" \\'] : []),
+        `  -F "file=@${fileName}"`,
+      ].join('\n')
+    }
+    if (lang === 'python') {
+      return [
+        'import os',
+        'import requests',
+        '',
+        `with open("${fileName}", "rb") as file:`,
+        `    response = requests.post(${url},`,
+        `        headers={"Authorization": "Bearer " + os.environ["${ctx.apiKeyEnv}"]},`,
+        '        files={"file": file},',
+        ...(purpose ? ['        data={"purpose": "text_recognition"},'] : []),
+        '    )',
+        'response.raise_for_status()',
+        'print(response.json())',
+      ].join('\n')
+    }
+    return [
+      "import { readFile } from 'node:fs/promises'",
+      '',
+      'const form = new FormData()',
+      `form.append('file', new Blob([await readFile('${fileName}')]), '${fileName}')`,
+      ...(purpose ? ["form.append('purpose', 'text_recognition')"] : []),
+      `const response = await fetch(${url}, {`,
+      "  method: 'POST',",
+      `  headers: { Authorization: \`Bearer \${process.env.${ctx.apiKeyEnv}}\` },`,
+      '  body: form,',
+      '})',
+      'if (!response.ok) throw new Error(await response.text())',
+      'console.log(await response.json())',
+    ].join('\n')
+  }
+  const audio = ctx.endpointType === ENDPOINT_TYPES.DEEPSEEK_TTS
+  let requestBody: Record<string, unknown> = { url: 'https://example.com/' }
+  if (ctx.endpointType === ENDPOINT_TYPES.DEEPSEEK_SEARCH) {
+    requestBody = { query: 'DeepSeek API', count: 3 }
+  }
+  if (audio) {
+    requestBody = { text: 'Hello world', voice_id: 'stella', format: 'wav' }
+  }
+  const body = JSON.stringify(requestBody)
   if (lang === 'curl') {
     return [
       `curl -X POST ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       '  -H "Content-Type: application/json" \\',
-      `  -d '${body}'`,
+      `  -d '${body}'${audio ? ' --output speech.wav' : ''}`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -450,10 +503,16 @@ function buildDeepSeekToolSample(lang: Lang, ctx: SampleContext): string {
       `    json=${body},`,
       ')',
       'response.raise_for_status()',
-      'print(response.json())',
+      ...(audio
+        ? [
+            'with open("speech.wav", "wb") as file:',
+            '    file.write(response.content)',
+          ]
+        : ['print(response.json())']),
     ].join('\n')
   }
   return [
+    ...(audio ? ["import { writeFile } from 'node:fs/promises'", ''] : []),
     `const response = await fetch(${url}, {`,
     "  method: 'POST',",
     '  headers: {',
@@ -463,7 +522,9 @@ function buildDeepSeekToolSample(lang: Lang, ctx: SampleContext): string {
     `  body: JSON.stringify(${body}),`,
     '})',
     'if (!response.ok) throw new Error(await response.text())',
-    'console.log(await response.json())',
+    audio
+      ? "await writeFile('speech.wav', Buffer.from(await response.arrayBuffer()))"
+      : 'console.log(await response.json())',
   ].join('\n')
 }
 

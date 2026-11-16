@@ -27,11 +27,15 @@ type RelayFile struct {
 	ChannelId int    `json:"channel_id" gorm:"index"`
 	// Model is the model named inside the uploaded batch file. It selects the
 	// channel on upload and prices the batch that later consumes the file.
-	Model     string `json:"model" gorm:"type:varchar(191)"`
-	Purpose   string `json:"purpose" gorm:"type:varchar(32)"`
-	Filename  string `json:"filename" gorm:"type:varchar(255)"`
-	Bytes     int64  `json:"bytes"`
-	CreatedAt int64  `json:"created_at" gorm:"index"`
+	Model          string `json:"model" gorm:"type:varchar(191)"`
+	Purpose        string `json:"purpose" gorm:"type:varchar(32)"`
+	Filename       string `json:"filename" gorm:"type:varchar(255)"`
+	Bytes          int64  `json:"bytes"`
+	CreatedAt      int64  `json:"created_at" gorm:"index"`
+	Provider       string `json:"-" gorm:"type:varchar(32)"`
+	UpstreamFileId string `json:"-" gorm:"type:varchar(191)"`
+	KeyIdentity    string `json:"-" gorm:"type:varchar(64)"`
+	ExpiresAt      int64  `json:"expires_at,omitempty"`
 }
 
 // ErrRelayFileNotFound distinguishes "this caller owns no such file" from a
@@ -45,12 +49,16 @@ func (file *RelayFile) Insert() error {
 	// the newer upload has to win rather than collide with the stale row.
 	return DB.Where("user_id = ? AND file_id = ?", file.UserId, file.FileId).
 		Assign(map[string]any{
-			"channel_id": file.ChannelId,
-			"model":      file.Model,
-			"purpose":    file.Purpose,
-			"filename":   file.Filename,
-			"bytes":      file.Bytes,
-			"created_at": file.CreatedAt,
+			"channel_id":       file.ChannelId,
+			"model":            file.Model,
+			"purpose":          file.Purpose,
+			"filename":         file.Filename,
+			"bytes":            file.Bytes,
+			"created_at":       file.CreatedAt,
+			"provider":         file.Provider,
+			"upstream_file_id": file.UpstreamFileId,
+			"key_identity":     file.KeyIdentity,
+			"expires_at":       file.ExpiresAt,
 		}).
 		FirstOrCreate(file).Error
 }
@@ -69,6 +77,9 @@ func GetRelayFile(userId int, fileId string) (*RelayFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	if file.ExpiresAt > 0 && file.ExpiresAt <= common.GetTimestamp() {
+		return nil, ErrRelayFileNotFound
+	}
 	return &file, nil
 }
 
@@ -80,6 +91,7 @@ func ListRelayFiles(userId int, purpose string, limit int) ([]*RelayFile, error)
 		limit = 20
 	}
 	query := DB.Where("user_id = ?", userId)
+	query = query.Where("expires_at IS NULL OR expires_at = 0 OR expires_at > ?", common.GetTimestamp())
 	if purpose != "" {
 		query = query.Where("purpose = ?", purpose)
 	}
@@ -90,4 +102,51 @@ func ListRelayFiles(userId int, purpose string, limit int) ([]*RelayFile, error)
 
 func DeleteRelayFile(userId int, fileId string) error {
 	return DB.Where("user_id = ? AND file_id = ?", userId, fileId).Delete(&RelayFile{}).Error
+}
+
+// ListRelayFilesPage paginates only the caller's records. The numeric tie-break
+// keeps same-second uploads stable without exposing the shared provider list.
+func ListRelayFilesPage(userId int, purpose, after, before, order string, limit int) ([]*RelayFile, bool, error) {
+	if userId <= 0 {
+		return nil, false, ErrRelayFileNotFound
+	}
+	if limit < 1 || limit > 1000 || after != "" && before != "" {
+		return nil, false, errors.New("invalid file pagination")
+	}
+	if order != "asc" && order != "desc" {
+		return nil, false, errors.New("invalid file order")
+	}
+	query := DB.Where("user_id = ?", userId).Where("expires_at IS NULL OR expires_at = 0 OR expires_at > ?", common.GetTimestamp())
+	if purpose != "" {
+		query = query.Where("purpose = ?", purpose)
+	}
+	cursor := after
+	if before != "" {
+		cursor = before
+	}
+	if cursor != "" {
+		file, err := GetRelayFile(userId, cursor)
+		if err != nil {
+			return nil, false, err
+		}
+		operator := ">"
+		if order == "desc" {
+			operator = "<"
+		}
+		if before != "" {
+			if operator == ">" {
+				operator = "<"
+			} else {
+				operator = ">"
+			}
+		}
+		query = query.Where("(created_at "+operator+" ? OR (created_at = ? AND id "+operator+" ?))", file.CreatedAt, file.CreatedAt, file.Id)
+	}
+	var files []*RelayFile
+	err := query.Order("created_at " + order + ", id " + order).Limit(limit + 1).Find(&files).Error
+	more := len(files) > limit
+	if more {
+		files = files[:limit]
+	}
+	return files, more, err
 }

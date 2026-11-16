@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -48,6 +50,17 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err := applyDeepSeekV4ClaudeThinkingSuffix(info, claudeRequest); err != nil {
 		return nil, err
 	}
+	if claudeRequest.Model == "deepseek-flash" && claudeRequest.Tools != nil {
+		tools, err := common.Marshal(claudeRequest.Tools)
+		if err != nil {
+			return nil, err
+		}
+		tools, err = normalizeWebTools(claudeRequest.Model, tools, true)
+		if err != nil {
+			return nil, err
+		}
+		claudeRequest.Tools = common.RawMessage(tools)
+	}
 	return claudeRequest, nil
 }
 
@@ -67,10 +80,8 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 	// model name the client sent.
 	info.WebSearchBillingKey = SearchToolPriceKey
 	info.WebFetchBillingKey = FetchToolPriceKey
-	if info.RelayMode == constant.RelayModeResponses {
-		info.WebSearchBilledByUsage = true
-		info.VendorToolUsage = responsesToolUsage
-	}
+	info.WebSearchBilledByUsage = true
+	info.VendorToolUsage = serverToolUsage
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
@@ -91,6 +102,28 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			return fmt.Sprintf("%s/v1/tools/search", info.ChannelBaseUrl), nil
 		case constant.RelayModeToolsFetch:
 			return fmt.Sprintf("%s/v1/tools/fetch", info.ChannelBaseUrl), nil
+		case constant.RelayModeToolsOCR:
+			return fmt.Sprintf("%s/v1/tools/ocr", info.ChannelBaseUrl), nil
+		case constant.RelayModeToolsASR:
+			return fmt.Sprintf("%s/v1/tools/asr", info.ChannelBaseUrl), nil
+		case constant.RelayModeToolsTTS:
+			endpoint := fmt.Sprintf("%s/v1/tools/tts", info.ChannelBaseUrl)
+			if request, ok := info.Request.(*dto.DeepSeekTTSRequest); ok && request.WebSocket {
+				query := url.Values{}
+				if request.VoiceID != "" {
+					query.Set("voice_id", request.VoiceID)
+				}
+				if request.Format != "" {
+					query.Set("format", request.Format)
+				}
+				if request.FilterMarkdown != nil {
+					query.Set("filter_markdown", strconv.FormatBool(*request.FilterMarkdown))
+				}
+				if len(query) > 0 {
+					endpoint += "?" + query.Encode()
+				}
+			}
+			return endpoint, nil
 		default:
 			return fmt.Sprintf("%s/v1/chat/completions", info.ChannelBaseUrl), nil
 		}
@@ -116,6 +149,25 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 	}
 	if err := applyDeepSeekV4OpenAIThinkingSuffix(info, request); err != nil {
 		return nil, err
+	}
+	if request.Model == "deepseek-flash" && request.WebSearchOptions != nil &&
+		(len(request.WebSearchOptions.UserLocation) == 0 || string(request.WebSearchOptions.UserLocation) == "null") {
+		compatible, hasSearch := true, false
+		for _, tool := range request.Tools {
+			switch tool.Type {
+			case "", "function", "deepseek_read_url":
+			case "deepseek_web_search":
+				hasSearch = true
+			default:
+				compatible = false
+			}
+		}
+		if compatible {
+			if !hasSearch {
+				request.Tools = append(request.Tools, dto.ToolCallRequest{Type: "deepseek_web_search", Native: common.RawMessage(`{"type":"deepseek_web_search"}`)})
+			}
+			request.WebSearchOptions = nil
+		}
 	}
 	completeDeepSeekThinkingHistory(info, request)
 
@@ -264,6 +316,11 @@ func (a *Adaptor) ConvertEmbeddingRequest(c *gin.Context, info *relaycommon.Rela
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(_ *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
 	applyDeepSeekV4ResponsesThinkingSuffix(info, &request)
+	tools, err := normalizeWebTools(request.Model, request.Tools, false)
+	if err != nil {
+		return nil, err
+	}
+	request.Tools = tools
 	return request, nil
 }
 

@@ -27,6 +27,8 @@ For commercial licensing, please contact support@quantumnous.com
  * stay intact; executable custom expressions do not imply fixed unit prices.
  */
 
+import type { BillingUnit } from '@/features/pricing/lib/billing-expression/types'
+
 import type { BillingUsageSchema } from '../types'
 import {
   readTokenTierChain,
@@ -272,7 +274,7 @@ export type TierCondition = {
 }
 
 export type ParsedTier = {
-  billingUnit?: 'token' | 'request'
+  billingUnit?: BillingUnit
   fixedPrice?: number
   conditionText?: string
   label: string
@@ -304,7 +306,7 @@ function mapTokenTier(
     label: tier.label,
     ...(tier.imageCount ? { imageCount: true } : {}),
     conditions: tier.conditions,
-    ...(tier.billingUnit === 'request'
+    ...(tier.billingUnit && tier.billingUnit !== 'token'
       ? { billingUnit: tier.billingUnit, fixedPrice: tier.fixedPrice }
       : {}),
     ...(tier.conditionText ? { conditionText: tier.conditionText } : {}),
@@ -635,8 +637,13 @@ export function splitBillingExprAndRequestRules(expr: string): {
     }
   })
 
-  const quantityParts = baseParts.filter(
-    (part) => unwrapOuterParens(part) === 'image_count'
+  const quantityParts = baseParts.filter((part) =>
+    [
+      'image_count',
+      'document_pages',
+      'audio_seconds',
+      'speech_characters',
+    ].includes(unwrapOuterParens(part))
   )
   if (ruleParts.length === 0 || baseParts.length - quantityParts.length !== 1) {
     return { billingExpr: trimmed, requestRuleExpr: '' }

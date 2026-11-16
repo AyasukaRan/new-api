@@ -1,0 +1,37 @@
+# Merge into the home compose file; mount document-pages-socket read-only at
+# /run/document-pages on the gateway and set DEEPSEEK_DOCUMENT_PAGES_SOCKET
+# to /run/document-pages/pages.sock. This sidecar has no network or host mounts.
+services:
+  document-pages:
+    container_name: new-api-document-pages
+    build:
+      context: .
+    image: new-api:document-pages
+    user: "65532:65532"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 2
+    restart: unless-stopped
+    tmpfs:
+      - /work:rw,noexec,nosuid,nodev,size=512m,uid=65532,gid=65532,mode=0700
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,uid=65532,gid=65532,mode=0700
+    volumes:
+      - document-pages-socket:/run/document-pages
+    healthcheck:
+      test: [CMD, python3, -c, "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect('/run/document-pages/pages.sock'); s.sendall(b'GET /health HTTP/1.0\r\n\r\n'); assert b' 200 ' in s.recv(64)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+volumes:
+  document-pages-socket:
+    name: new-api-document-pages-socket
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=65532,gid=65532,mode=0770

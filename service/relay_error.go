@@ -80,6 +80,9 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		tokenId := c.GetInt("token_id")
 		userGroup := c.GetString("group")
 		other := model.NewLogOther()
+		if c.GetBool("deepseek_tts_cost_unconfirmed") || c.GetBool("deepseek_file_cost_unconfirmed") {
+			other.SetAdmin("cost_unconfirmed", true)
+		}
 		if c.Request != nil && c.Request.URL != nil {
 			other.SetPublic("request_path", c.Request.URL.Path)
 		}

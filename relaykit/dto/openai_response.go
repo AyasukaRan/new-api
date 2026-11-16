@@ -81,10 +81,11 @@ type FlexibleEmbeddingResponse struct {
 }
 
 type ChatCompletionsStreamResponseChoice struct {
-	Delta        ChatCompletionsStreamResponseChoiceDelta `json:"delta"`
-	Logprobs     *any                                     `json:"logprobs"`
-	FinishReason *string                                  `json:"finish_reason"`
-	Index        int                                      `json:"index"`
+	Delta           ChatCompletionsStreamResponseChoiceDelta `json:"delta"`
+	Logprobs        *any                                     `json:"logprobs"`
+	FinishReason    *string                                  `json:"finish_reason"`
+	Index           int                                      `json:"index"`
+	ServerToolEvent json.RawMessage                          `json:"server_tool_event,omitempty"`
 }
 
 type ChatCompletionsStreamResponseChoiceDelta struct {
@@ -96,7 +97,9 @@ type ChatCompletionsStreamResponseChoiceDelta struct {
 	// Annotations is an OpenAI-compatible streaming extension supported by
 	// providers such as OpenRouter. Relaykit uses it to preserve streaming URL
 	// citations, including Claude round-trip metadata.
-	Annotations json.RawMessage `json:"annotations,omitempty"`
+	Annotations     json.RawMessage `json:"annotations,omitempty"`
+	ServerToolCalls json.RawMessage `json:"server_tool_calls,omitempty"`
+	Title           json.RawMessage `json:"title,omitempty"`
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) SetContentString(s string) {
@@ -153,6 +156,7 @@ type ChatCompletionsStreamResponse struct {
 	SystemFingerprint *string                               `json:"system_fingerprint"`
 	Choices           []ChatCompletionsStreamResponseChoice `json:"choices"`
 	Usage             *Usage                                `json:"usage"`
+	Error             any                                   `json:"error,omitempty"`
 }
 
 func (c *ChatCompletionsStreamResponse) IsFinished() bool {
@@ -200,6 +204,7 @@ func (c *ChatCompletionsStreamResponse) Copy() *ChatCompletionsStreamResponse {
 		SystemFingerprint: c.SystemFingerprint,
 		Choices:           choices,
 		Usage:             c.Usage,
+		Error:             c.Error,
 	}
 }
 
@@ -227,13 +232,14 @@ type CompletionsStreamResponse struct {
 }
 
 type Usage struct {
-	PromptTokens         int           `json:"prompt_tokens"`
-	CompletionTokens     int           `json:"completion_tokens"`
-	TotalTokens          int           `json:"total_tokens"`
-	PromptCacheHitTokens int           `json:"prompt_cache_hit_tokens,omitempty"`
-	UsageSemantic        string        `json:"usage_semantic,omitempty"`
-	UsageSource          string        `json:"usage_source,omitempty"`
-	BillingUsage         *BillingUsage `json:"billing_usage,omitempty"`
+	PromptTokens         int             `json:"prompt_tokens"`
+	CompletionTokens     int             `json:"completion_tokens"`
+	TotalTokens          int             `json:"total_tokens"`
+	PromptCacheHitTokens int             `json:"prompt_cache_hit_tokens,omitempty"`
+	UsageSemantic        string          `json:"usage_semantic,omitempty"`
+	UsageSource          string          `json:"usage_source,omitempty"`
+	BillingUsage         *BillingUsage   `json:"billing_usage,omitempty"`
+	ServerToolUse        json.RawMessage `json:"server_tool_use,omitempty"`
 
 	PromptTokensDetails    InputTokenDetails   `json:"prompt_tokens_details"`
 	CompletionTokenDetails OutputTokenDetails  `json:"completion_tokens_details"`
@@ -439,6 +445,7 @@ type OpenAIResponsesResponse struct {
 	Usage              *Usage             `json:"usage"`
 	User               json.RawMessage    `json:"user"`
 	Metadata           json.RawMessage    `json:"metadata"`
+	Title              json.RawMessage    `json:"title,omitempty"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构
@@ -466,6 +473,9 @@ type ResponsesOutput struct {
 	Arguments           json.RawMessage                 `json:"arguments,omitempty"`
 	Input               json.RawMessage                 `json:"input,omitempty"`
 	Action              json.RawMessage                 `json:"action,omitempty"`
+	Kind                string                          `json:"kind,omitempty"`
+	Page                json.RawMessage                 `json:"page,omitempty"`
+	Signature           string                          `json:"signature,omitempty"`
 	Queries             json.RawMessage                 `json:"queries,omitempty"`
 	Results             json.RawMessage                 `json:"results,omitempty"`
 	Sources             json.RawMessage                 `json:"sources,omitempty"`
@@ -503,11 +513,16 @@ func (r ResponsesOutput) MarshalJSON() ([]byte, error) {
 		}{Type: r.Type, ID: r.ID, Status: r.Status, CallID: r.CallId, Name: r.Name, Namespace: r.Namespace, Input: input})
 	case "web_search_call":
 		return kitutil.Marshal(struct {
-			Type   string          `json:"type"`
-			ID     string          `json:"id"`
-			Status string          `json:"status,omitempty"`
-			Action json.RawMessage `json:"action,omitempty"`
-		}{Type: r.Type, ID: r.ID, Status: r.Status, Action: r.Action})
+			Type      string          `json:"type"`
+			ID        string          `json:"id"`
+			Status    string          `json:"status,omitempty"`
+			Action    json.RawMessage `json:"action,omitempty"`
+			Kind      string          `json:"kind,omitempty"`
+			Page      json.RawMessage `json:"page,omitempty"`
+			Signature string          `json:"signature,omitempty"`
+			Error     json.RawMessage `json:"error,omitempty"`
+		}{Type: r.Type, ID: r.ID, Status: r.Status, Action: r.Action,
+			Kind: r.Kind, Page: r.Page, Signature: r.Signature, Error: r.ItemError})
 	case "mcp_call":
 		return kitutil.Marshal(struct {
 			Type              string          `json:"type"`

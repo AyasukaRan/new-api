@@ -16,12 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-
+import type { DashboardFinance } from '@/features/dashboard/types'
+import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
 /**
  * Type definitions for usage logs
  */
-import type { DashboardFinance } from '@/features/dashboard/types'
-import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
+import type { BillingUnit } from '@/features/pricing/lib/billing-expression/types'
 import type { PolicyEvent } from '@/features/system-settings/request-policies/api'
 
 import type { UsageLog } from './data/schema'
@@ -133,6 +133,7 @@ export interface LogCostEstimate {
 export interface LogOtherData {
   admin_info?: {
     cost?: LogCostEstimate
+    cost_unconfirmed?: boolean
     request_policy?: PolicyEvent[]
     is_multi_key?: boolean
     multi_key_index?: number
@@ -251,9 +252,13 @@ export interface LogOtherData {
   // expression; the matched tier and request-rule traces come from the actual
   // settlement run.
   billing_mode?: string
-  billing_unit?: 'token' | 'request'
+  billing_unit?: BillingUnit
   fixed_price?: number
   image_count?: number
+  metered_usage?: { unit: 'page' | 'second' | 'character'; count: number }
+  metered_usage_basis?: 'request_text' | 'local_pagination'
+  metered_usage_engine?: string
+  metered_usage_estimated?: boolean
   expr_b64?: string
   matched_tier?: string
   request_rules?: RequestRuleTrace[]

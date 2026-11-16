@@ -125,6 +125,10 @@ func cloneRequestInput(src billingexpr.RequestInput) billingexpr.RequestInput {
 		count := *src.ImageCount
 		input.ImageCount = &count
 	}
+	if src.MeteredUsage != nil {
+		usage := *src.MeteredUsage
+		input.MeteredUsage = &usage
+	}
 	if len(src.Body) > 0 {
 		input.Body = append([]byte(nil), src.Body...)
 	}

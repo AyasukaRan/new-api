@@ -16,6 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import {
+  UNIT_PRICE_LABELS,
+  type BillingUnit,
+} from '@/features/pricing/lib/billing-expression/types'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 
 import { TOKEN_UNIT_DIVISORS } from '../constants'
@@ -73,7 +77,7 @@ export type DynamicPriceEntry = {
   formattedRange?: string
   minValue?: number
   maxValue?: number
-  unit: 'token' | BillingUsageUnit | 'request' | 'image'
+  unit: BillingUnit | BillingUsageUnit | 'image'
   unitLabel?: string | Record<string, string>
   variable?: BillingVar
   description?: string | Record<string, string>
@@ -134,7 +138,16 @@ export function getDynamicPriceUnitLabelKey(
   if (entry.unit === 'token' && !entry.variable) return '1M token'
   if (entry.unit === 'request') return 'request'
   if (entry.unit === 'image') return 'image'
+  if (entry.unit === 'page' || entry.unit === 'character') return entry.unit
   return null
+}
+
+function isFixedUnitPrice(entry: DynamicPriceEntry): boolean {
+  return (
+    entry.field === 'fixedPrice' ||
+    entry.unit === 'request' ||
+    entry.unit === 'image'
+  )
 }
 
 const PRIMARY_DYNAMIC_FIELDS = new Set(['inputPrice', 'outputPrice'])
@@ -249,7 +262,7 @@ export function formatTaskUsageUnitPrice(
   return formatBillingCurrencyFromUSD(displayPrice, {
     showSymbol: options.showCurrencySymbol ?? true,
     digitsLarge: 4,
-    digitsSmall: 6,
+    digitsSmall: 8,
     abbreviate: false,
   })
 }
@@ -294,19 +307,24 @@ export function getDynamicPriceEntries(
   if (!tier) return []
   if (
     !isTaskPricingTier(tier) &&
-    tier.billingUnit === 'request' &&
+    tier.billingUnit &&
+    tier.billingUnit !== 'token' &&
     typeof tier.fixedPrice === 'number'
   ) {
     return [
       {
         key: 'fixed',
         field: 'fixedPrice',
-        label: tier.imageCount ? 'Price per image' : 'Price per request',
-        shortLabel: tier.imageCount ? 'Per image' : 'Per-call',
+        label: tier.imageCount
+          ? 'Price per image'
+          : UNIT_PRICE_LABELS[tier.billingUnit].label,
+        shortLabel: tier.imageCount
+          ? 'Per image'
+          : UNIT_PRICE_LABELS[tier.billingUnit].shortLabel,
         labelKind: 'i18n',
         value: tier.fixedPrice,
         formatted: formatTaskUsageUnitPrice(tier.fixedPrice, options),
-        unit: tier.imageCount ? 'image' : 'request',
+        unit: tier.imageCount ? 'image' : tier.billingUnit,
       },
     ]
   }
@@ -479,11 +497,11 @@ function getChannelPricingSummary(
         entries,
         primaryEntries: entries.filter(
           (entry) =>
-            entry.unit === 'request' || PRIMARY_DYNAMIC_FIELDS.has(entry.field)
+            isFixedUnitPrice(entry) || PRIMARY_DYNAMIC_FIELDS.has(entry.field)
         ),
         secondaryEntries: entries.filter(
           (entry) =>
-            entry.unit !== 'request' && !PRIMARY_DYNAMIC_FIELDS.has(entry.field)
+            !isFixedUnitPrice(entry) && !PRIMARY_DYNAMIC_FIELDS.has(entry.field)
         ),
         isTaskUsage: false,
       }
@@ -527,9 +545,7 @@ function getChannelPricingSummary(
     }
   })
   const hasTokenPrice = entries.some((entry) => entry.variable)
-  const hasRequestPrice = entries.some(
-    (entry) => entry.unit === 'request' || entry.unit === 'image'
-  )
+  const hasRequestPrice = entries.some((entry) => isFixedUnitPrice(entry))
   return {
     tiers: summaries.flatMap((summary) => summary.tiers),
     tier: summaries.length === 1 ? summaries[0].tier : null,
@@ -632,9 +648,7 @@ export function getDynamicPricingSummary(
       )
     )
     const primary = entries.filter(
-      (entry) =>
-        (entry.unit !== 'request' && entry.unit !== 'image') ||
-        entry.field === 'modelPrice'
+      (entry) => !isFixedUnitPrice(entry) || entry.field === 'modelPrice'
     )
     primary.sort(
       (a, b) => Number(primaryKeys.has(b.key)) - Number(primaryKeys.has(a.key))
@@ -653,9 +667,7 @@ export function getDynamicPricingSummary(
       entries,
       primaryEntries: primary,
       secondaryEntries: entries.filter(
-        (entry) =>
-          (entry.unit === 'request' || entry.unit === 'image') &&
-          entry.field !== 'modelPrice'
+        (entry) => isFixedUnitPrice(entry) && entry.field !== 'modelPrice'
       ),
       isTaskUsage: true,
       providerCount: variants.length >= 2 ? variants.length : undefined,
@@ -687,10 +699,15 @@ export function getDynamicPricingSummary(
   let isMixedBilling = false
   if (!isTaskUsage) {
     const tokenTier = summaryTiers.find(
-      (item) => !isTaskPricingTier(item) && item.billingUnit !== 'request'
+      (item) =>
+        !isTaskPricingTier(item) &&
+        (!item.billingUnit || item.billingUnit === 'token')
     )
     const requestTier = summaryTiers.find(
-      (item) => !isTaskPricingTier(item) && item.billingUnit === 'request'
+      (item) =>
+        !isTaskPricingTier(item) &&
+        item.billingUnit &&
+        item.billingUnit !== 'token'
     )
     if (tokenTier && requestTier) {
       isMixedBilling = true
@@ -741,24 +758,16 @@ export function getDynamicPricingSummary(
     rawExpression,
     entries,
     primaryEntries: isTaskUsage
-      ? entries.filter(
-          (entry) => entry.unit !== 'request' && entry.unit !== 'image'
-        )
+      ? entries.filter((entry) => !isFixedUnitPrice(entry))
       : entries.filter(
           (entry) =>
-            entry.unit === 'request' ||
-            entry.unit === 'image' ||
-            PRIMARY_DYNAMIC_FIELDS.has(entry.field)
+            isFixedUnitPrice(entry) || PRIMARY_DYNAMIC_FIELDS.has(entry.field)
         ),
     secondaryEntries: isTaskUsage
-      ? entries.filter(
-          (entry) => entry.unit === 'request' || entry.unit === 'image'
-        )
+      ? entries.filter((entry) => isFixedUnitPrice(entry))
       : entries.filter(
           (entry) =>
-            entry.unit !== 'request' &&
-            entry.unit !== 'image' &&
-            !PRIMARY_DYNAMIC_FIELDS.has(entry.field)
+            !isFixedUnitPrice(entry) && !PRIMARY_DYNAMIC_FIELDS.has(entry.field)
         ),
     isTaskUsage,
     isTimePricing: timeTiers !== null,

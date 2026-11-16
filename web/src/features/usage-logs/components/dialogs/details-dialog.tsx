@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -74,8 +75,14 @@ import { BILLING_PRICING_VARS } from '@/features/pricing/lib/billing-expr'
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { PolicyDecisionRecord } from '@/features/system-settings/request-policies/decision-record'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
+import {
+  formatLogQuota,
+  formatTokens,
+  formatUseTime,
+  formatNumber,
+} from '@/lib/format'
 import { ROLE } from '@/lib/roles'
 import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -208,7 +215,11 @@ function BillingBreakdown(props: {
   const tieredSummary = getTieredBillingSummary(other)
 
   const rows: Array<{ label: string; value: string }> = []
-  const priceOpts = { digitsLarge: 4, digitsSmall: 6, abbreviate: false }
+  const priceOpts = {
+    digitsLarge: 4,
+    digitsSmall: other.metered_usage ? 8 : 6,
+    abbreviate: false,
+  }
   const fmtPrice = (usd: number) => formatBillingCurrencyFromUSD(usd, priceOpts)
   const baseInputUSD = other.model_ratio != null ? other.model_ratio * 2.0 : 0
 
@@ -700,7 +711,8 @@ interface DetailsDialogProps {
 }
 
 export function DetailsDialog(props: DetailsDialogProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const other = parseLogOther(props.log.other)
   const typeConfig = getLogTypeConfig(props.log.type, props.source)
@@ -1410,6 +1422,45 @@ export function DetailsDialog(props: DetailsDialogProps) {
             other={other}
             isAdmin={props.isAdmin}
             showCostEstimate={props.source !== 'test' && props.log.type === 2}
+          />
+        )}
+
+        {other?.metered_usage && (
+          <DetailSection
+            label={t(
+              other.metered_usage_estimated
+                ? 'Estimated usage'
+                : 'Billable usage'
+            )}
+          >
+            <DetailRow
+              label={t(other.metered_usage.unit)}
+              value={formatNumber(other.metered_usage.count, locale)}
+            />
+            {other.metered_usage_basis === 'request_text' && (
+              <DetailRow
+                label={t('Usage basis')}
+                value={t('Submitted text; not an upstream usage receipt')}
+              />
+            )}
+            {other.metered_usage_basis === 'local_pagination' && (
+              <DetailRow
+                label={t('Usage basis')}
+                value={t('Locally counted document pages')}
+              />
+            )}
+            {other.metered_usage_engine && (
+              <DetailRow
+                label={t('Pagination engine')}
+                value={other.metered_usage_engine}
+              />
+            )}
+          </DetailSection>
+        )}
+        {props.isAdmin && other?.admin_info?.cost_unconfirmed && (
+          <DetailRow
+            label={t('Upstream cost')}
+            value={t('Unconfirmed after interruption')}
           />
         )}
 

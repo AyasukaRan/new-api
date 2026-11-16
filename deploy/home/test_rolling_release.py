@@ -111,6 +111,48 @@ class FakeRollout(release.Rollout):
 
 
 class RollingReleaseTests(unittest.TestCase):
+
+    def test_additive_schema_failure_does_not_start_bridge(self):
+        flow = FakeRollout()
+        flow.release['relay_file_schema'] = True
+        with patch.object(release, 'prepare_relay_file_schema', side_effect=RuntimeError('locked')):
+            with self.assertRaisesRegex(RuntimeError, 'locked'):
+                self.run_fake(flow)
+        self.assertNotIn('start:' + release.BRIDGE + ':new', flow.events)
+        self.assertTrue(flow.containers[release.APP]['State']['Running'])
+        self.assertFalse(flow.state.get('relay_file_schema_prepared'))
+
+
+
+    def test_document_pagination_mount_requires_isolated_verified_worker(self):
+        receipt = {'document_pages': {'container_name': 'new-api-document-pages',
+                   'image_id': 'sha256:' + '1' * 64, 'volume_name': 'new-api-document-pages-socket'}}
+        worker = {'Image': receipt['document_pages']['image_id'], 'State': {'Health': {'Status': 'healthy'}},
+                  'Config': {'User': '65532:65532'},
+                  'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True, 'Privileged': False,
+                                 'CapDrop': ['ALL'], 'SecurityOpt': ['no-new-privileges:true'], 'Memory': 1024 ** 3},
+                  'Mounts': [{'Type': 'volume', 'Name': 'new-api-document-pages-socket',
+                              'Destination': '/run/document-pages', 'Source': '/volume/_data',
+                              'Driver': 'local', 'Mode': 'rw', 'RW': True, 'Propagation': ''}]}
+        with patch.object(release, 'inspect', return_value=worker):
+            mount = release.document_pages_mount(receipt)
+        self.assertFalse(mount['RW'])
+        self.assertEqual(mount['Mode'], 'ro')
+        self.assertTrue(worker['Mounts'][0]['RW'])
+        for field, value in [('NetworkMode', 'bridge'), ('Privileged', True), ('ReadonlyRootfs', False),
+                             ('Memory', 0), ('CapDrop', []), ('SecurityOpt', [])]:
+            changed = copy.deepcopy(worker)
+            changed['HostConfig'][field] = value
+            with self.subTest(field=field), patch.object(release, 'inspect', return_value=changed):
+                with self.assertRaisesRegex(RuntimeError, 'document_pages_isolation_changed'):
+                    release.document_pages_mount(receipt)
+        changed = copy.deepcopy(worker)
+        changed['Mounts'].append({'Type': 'bind', 'Destination': '/data'})
+        with patch.object(release, 'inspect', return_value=changed), self.assertRaisesRegex(RuntimeError, 'document_pages_mounts_changed'):
+            release.document_pages_mount(receipt)
+        self.assertIsNone(release.document_pages_mount({}))
+
+
     def test_optional_inspect_only_accepts_exact_named_missing_object(self):
         for message in ('Error: No such object: fixture-bridge', 'error: no such object: fixture-bridge',
                         'Error response from daemon: No such container: fixture-bridge',

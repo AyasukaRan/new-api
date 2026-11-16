@@ -68,19 +68,22 @@ func runProgram(prog *vm.Program, requestRules []RequestRuleTrace, usedVars map[
 	}
 
 	env := map[string]any{
-		"image_count": float64(imageCount),
-		"p":           params.P,
-		"c":           params.C,
-		"len":         params.Len,
-		"cr":          params.CR,
-		"cc":          params.CC,
-		"cc1h":        params.CC1h,
-		"cc12h":       params.CC12h,
-		"img":         params.Img,
-		"img_cr":      params.ImgCR,
-		"img_o":       params.ImgO,
-		"ai":          params.AI,
-		"ao":          params.AO,
+		"document_pages":    float64(0),
+		"audio_seconds":     float64(0),
+		"speech_characters": float64(0),
+		"image_count":       float64(imageCount),
+		"p":                 params.P,
+		"c":                 params.C,
+		"len":               params.Len,
+		"cr":                params.CR,
+		"cc":                params.CC,
+		"cc1h":              params.CC1h,
+		"cc12h":             params.CC12h,
+		"img":               params.Img,
+		"img_cr":            params.ImgCR,
+		"img_o":             params.ImgO,
+		"ai":                params.AI,
+		"ao":                params.AO,
 		"tier": func(name string, value float64) float64 {
 			trace.MatchedTier = name
 			trace.Cost = value
@@ -147,6 +150,16 @@ func runProgram(prog *vm.Program, requestRules []RequestRuleTrace, usedVars map[
 		"floor":   math.Floor,
 	}
 
+	if usage := request.MeteredUsage; usage != nil {
+		if err := usage.Validate(); err != nil {
+			return 0, trace, err
+		}
+		env[usage.Variable()] = float64(usage.Count)
+		if usedVars[usage.Variable()] {
+			measured := *usage
+			trace.MeteredUsage = &measured
+		}
+	}
 	out, err := expr.Run(prog, env)
 	if err != nil {
 		return 0, trace, fmt.Errorf("expr run error: %w", err)
@@ -154,6 +167,9 @@ func runProgram(prog *vm.Program, requestRules []RequestRuleTrace, usedVars map[
 	f, ok := out.(float64)
 	if !ok {
 		return 0, trace, fmt.Errorf("expr result is %T, want float64", out)
+	}
+	if trace.MeteredUsage != nil && trace.BillingUnit == BillingUnitRequest {
+		trace.BillingUnit = trace.MeteredUsage.Unit
 	}
 	return f, trace, nil
 }

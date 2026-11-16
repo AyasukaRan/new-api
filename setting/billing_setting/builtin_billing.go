@@ -36,4 +36,10 @@ var builtinBillingExpr = map[string]string{
 	// requests each, the same pricing page. The calls carry no tokens.
 	constant.DeepSeekSearchModel: `tier("request", fixed(0.00075))`,
 	constant.DeepSeekFetchModel:  `tier("request", fixed(0.00075))`,
+	// https://api-docs.deepseek.com/quick_start/pricing (2026-11-16).
+	// Speech uses the published limited-time prices; quantities are not tokens.
+	"deepseek-files": `tier("page", fixed(0.000225)) * document_pages`,
+	"deepseek-ocr":   `tier("page", fixed(0.000225)) * document_pages`,
+	"deepseek-asr":   `tier("second", fixed(0.00001611111111111111)) * audio_seconds`,
+	"deepseek-tts":   `tier("character", fixed(0.0000225)) * speech_characters`,
 }

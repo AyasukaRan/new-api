@@ -527,8 +527,19 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 
 func TokenAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		// 先检测是否为ws
-		applyWebSocketSubprotocolAuthorization(c.Request.Header)
+		// TTS browser clients authenticate with tts,bearer.<local token>. Strip
+		// the credential before logging, protocol negotiation or upstream setup.
+		if c.Request.Method == http.MethodGet && c.Request.URL.Path == "/v1/tools/tts" {
+			if err := applyTTSWebSocketAuthorization(c.Request.Header); err != nil {
+				abortWithOpenAiMessage(c, http.StatusUnauthorized, i18n.T(c, i18n.MsgTokenInvalid))
+				return
+			}
+		} else {
+			applyWebSocketSubprotocolAuthorization(c.Request.Header)
+		}
+		if (c.Request.URL.Path == "/v1/files" || strings.HasPrefix(c.Request.URL.Path, "/v1/files/")) && c.GetHeader("Authorization") == "" && c.GetHeader("x-api-key") != "" {
+			c.Request.Header.Set("Authorization", "Bearer "+c.GetHeader("x-api-key"))
+		}
 		// 检查path包含/v1/messages 或 /v1/models
 		if strings.Contains(c.Request.URL.Path, "/v1/messages") || strings.Contains(c.Request.URL.Path, "/v1/models") {
 			anthropicKey := c.Request.Header.Get("x-api-key")
@@ -719,5 +730,42 @@ func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) e
 			return errors.New("regular users cannot specify a channel")
 		}
 	}
+	return nil
+}
+
+// applyTTSWebSocketAuthorization only applies at the dedicated TTS route.
+func applyTTSWebSocketAuthorization(header http.Header) error {
+	var key string
+	hasTTS := false
+	protocols := strings.Join(header.Values("Sec-WebSocket-Protocol"), ",")
+	header.Del("Sec-WebSocket-Protocol")
+	for protocol := range strings.SplitSeq(protocols, ",") {
+		protocol = strings.TrimSpace(protocol)
+		if protocol == "tts" {
+			hasTTS = true
+			continue
+		}
+		if candidate, ok := strings.CutPrefix(protocol, "bearer."); ok {
+			if key != "" || candidate == "" {
+				return errors.New("invalid TTS authentication")
+			}
+			key = candidate
+		}
+	}
+	header.Del("Sec-WebSocket-Protocol")
+	if hasTTS {
+		header.Set("Sec-WebSocket-Protocol", "tts")
+	}
+	if key == "" {
+		return nil
+	}
+	if !hasTTS {
+		return errors.New("invalid TTS authentication")
+	}
+	authorization := "Bearer " + key
+	if current := header.Get("Authorization"); current != "" && current != authorization {
+		return errors.New("conflicting TTS authentication")
+	}
+	header.Set("Authorization", authorization)
 	return nil
 }

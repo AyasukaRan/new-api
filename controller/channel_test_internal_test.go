@@ -580,6 +580,12 @@ export const protocols={openai_image:{decodeRequest(ctx){return ctx;},render(ctx
 	for _, test := range []struct{ name, mapping, endpoint string }{
 		{name: constant.DeepSeekSearchModel},
 		{name: constant.DeepSeekFetchModel},
+		{name: constant.DeepSeekOCRModel},
+		{name: constant.DeepSeekASRModel},
+		{name: constant.DeepSeekTTSModel},
+		{name: "ocr-alias", mapping: `{"ocr-alias":"deepseek-ocr"}`},
+		{name: "asr-alias", endpoint: string(constant.EndpointTypeDeepSeekToolsASR)},
+		{name: "tts-alias", endpoint: string(constant.EndpointTypeDeepSeekToolsTTS)},
 		{name: "search-alias", mapping: `{"search-alias":"deepseek-search"}`},
 		{name: "fetch-alias", endpoint: string(constant.EndpointTypeDeepSeekToolsFetch)},
 	} {

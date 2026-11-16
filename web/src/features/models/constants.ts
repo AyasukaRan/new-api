@@ -167,6 +167,12 @@ export const ENDPOINT_TEMPLATES: Record<
   'jina-rerank': { path: '/rerank', method: 'POST' },
   'image-generation': { path: '/v1/images/generations', method: 'POST' },
   embeddings: { path: '/v1/embeddings', method: 'POST' },
+  'deepseek-tools-search': { path: '/v1/tools/search', method: 'POST' },
+  'deepseek-tools-fetch': { path: '/v1/tools/fetch', method: 'POST' },
+  'deepseek-tools-ocr': { path: '/v1/tools/ocr', method: 'POST' },
+  'deepseek-tools-asr': { path: '/v1/tools/asr', method: 'POST' },
+  'deepseek-tools-tts': { path: '/v1/tools/tts', method: 'POST' },
+  'deepseek-files': { path: '/v1/files', method: 'POST' },
 }
 
 // ============================================================================

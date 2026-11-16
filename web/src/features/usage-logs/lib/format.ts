@@ -24,6 +24,10 @@ import {
   splitBillingExprAndRequestRules,
   type ParsedTier,
 } from '@/features/pricing/lib/billing-expr'
+import {
+  UNIT_PRICE_LABELS,
+  type BillingUnit,
+} from '@/features/pricing/lib/billing-expression/types'
 import { formatNumber, formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 
@@ -360,7 +364,7 @@ export interface TieredBillingSummary {
     field: string
     shortLabel: string
     price: number
-    unit?: 'request' | 'image'
+    unit?: Exclude<BillingUnit, 'token'> | 'image'
   }>
 }
 
@@ -394,7 +398,9 @@ export function getTieredBillingSummary(
   )
   const tier = resolveMatchedTier(tiers, other.matched_tier)
   if (
-    other.billing_unit === 'request' &&
+    other.billing_unit &&
+    other.billing_unit !== 'token' &&
+    Object.hasOwn(UNIT_PRICE_LABELS, other.billing_unit) &&
     typeof other.fixed_price === 'number' &&
     Number.isFinite(other.fixed_price) &&
     other.fixed_price >= 0
@@ -404,12 +410,12 @@ export function getTieredBillingSummary(
       (entry) =>
         normalizeTierLabel(entry.label) ===
           normalizeTierLabel(other.matched_tier) &&
-        entry.billingUnit === 'request' &&
+        entry.billingUnit === other.billing_unit &&
         entry.fixedPrice === fixedPrice
     ) ?? {
       label: other.matched_tier || '',
       conditions: [],
-      billingUnit: 'request' as const,
+      billingUnit: other.billing_unit,
       fixedPrice,
     }
     return {
@@ -419,24 +425,32 @@ export function getTieredBillingSummary(
         {
           field: 'fixedPrice',
           shortLabel:
-            other.image_count !== undefined ? 'Per image' : 'Per-call',
+            other.image_count !== undefined
+              ? 'Per image'
+              : UNIT_PRICE_LABELS[other.billing_unit].shortLabel,
           price: fixedPrice,
-          unit: other.image_count !== undefined ? 'image' : 'request',
+          unit: other.image_count !== undefined ? 'image' : other.billing_unit,
         },
       ],
     }
   }
   if (!tier) return null
-  if (tier.billingUnit === 'request' && typeof tier.fixedPrice === 'number') {
+  if (
+    tier.billingUnit &&
+    tier.billingUnit !== 'token' &&
+    typeof tier.fixedPrice === 'number'
+  ) {
     return {
       tiers,
       tier,
       priceEntries: [
         {
           field: 'fixedPrice',
-          shortLabel: tier.imageCount ? 'Per image' : 'Per-call',
+          shortLabel: tier.imageCount
+            ? 'Per image'
+            : UNIT_PRICE_LABELS[tier.billingUnit].shortLabel,
           price: tier.fixedPrice,
-          unit: tier.imageCount ? 'image' : 'request',
+          unit: tier.imageCount ? 'image' : tier.billingUnit,
         },
       ],
     }

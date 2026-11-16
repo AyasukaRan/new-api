@@ -56,6 +56,7 @@ func TestToolPriceHardcodedFallbacksSurviveMissingOperatorConfig(t *testing.T) {
 		{"x_search_profiles", "", 10},
 		{"deepseek_search", "", 0.75},
 		{"deepseek_fetch", "", 0.75},
+		{"deepseek_image_search", "", 0.75},
 		{"deepseek_search", "claude-sonnet-4-5", 0.75},
 	}
 	for _, tt := range tests {

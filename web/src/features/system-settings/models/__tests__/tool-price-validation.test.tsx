@@ -88,7 +88,11 @@ describe('tool price validation', () => {
       </QueryClientProvider>
     )
 
-    for (const key of ['deepseek_search', 'deepseek_fetch']) {
+    for (const key of [
+      'deepseek_search',
+      'deepseek_image_search',
+      'deepseek_fetch',
+    ]) {
       expect(
         screen.getByRole('spinbutton', { name: `Price ($/1K calls): ${key}` })
       ).toHaveValue(0.75)

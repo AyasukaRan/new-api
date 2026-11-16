@@ -93,6 +93,7 @@ func seedHardcodedToolPrices(prices map[string]float64) {
 	// deepseek-search and deepseek-fetch model prices instead.
 	prices["deepseek_search"] = 0.75
 	prices["deepseek_fetch"] = 0.75
+	prices["deepseek_image_search"] = 0.75
 }
 
 // ToolPriceSetting is managed by config.GlobalConfig.Register.

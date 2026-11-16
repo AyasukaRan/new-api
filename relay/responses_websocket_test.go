@@ -333,6 +333,13 @@ func TestRestoreConnectionContextEnforcesCurrentKeyGroups(t *testing.T) {
 	channel.ChannelInfo.KeyGroups = nil
 	require.NoError(t, database.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
 	require.Nil(t, session.restoreConnectionContext(c, "ws-model"), "clearing restores inheritance on the existing connection")
+	c.Set("relay_file_key_identity", channel.KeyIdentity("ws-key-two"))
+	fileErr := session.restoreConnectionContext(c, "ws-model")
+	require.NotNil(t, fileErr)
+	assert.Equal(t, http.StatusForbidden, fileErr.StatusCode, "a file bound to a different key requires a new connection")
+	c.Set("relay_file_key_identity", channel.KeyIdentity(session.lockedKey))
+	require.Nil(t, session.restoreConnectionContext(c, "ws-model"))
+	c.Set("relay_file_key_identity", "")
 	for _, cost := range []*float64{common.GetPointer(0.0), common.GetPointer(0.5), nil} {
 		require.NoError(t, model.SetChannelKeyCostRatio(channel.Id, 0, channel.KeyIdentity(session.lockedKey), cost))
 		require.Nil(t, session.restoreConnectionContext(c, "ws-model"))

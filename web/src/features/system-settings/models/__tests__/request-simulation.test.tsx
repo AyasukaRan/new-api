@@ -252,3 +252,30 @@ describe('request simulation', () => {
     expect(onRequestRuleExprChange).not.toHaveBeenCalled()
   })
 })
+
+test('simulates speech characters and rejects counts above the provider limit', async () => {
+  render(
+    <RequestSimulation
+      expression='tier("speech", fixed(0.0000225)) * speech_characters'
+      mode='token'
+      currency={USD_PRICING_CURRENCY}
+    />
+  )
+  await userEvent
+    .setup()
+    .click(screen.getByRole('button', { name: 'Request simulation' }))
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Billable characters' }),
+    { target: { value: '1000' } }
+  )
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Simulated request cost: $0.0225'
+  )
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Billable characters' }),
+    { target: { value: '10001' } }
+  )
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'speech_characters must be between 0 and 10000'
+  )
+})

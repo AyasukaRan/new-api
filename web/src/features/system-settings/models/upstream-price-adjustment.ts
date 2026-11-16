@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
 import {
   expressionDependencies,
+  isMeteredVariable,
   type ExpressionNode,
 } from '@/features/pricing/lib/billing-expression/types'
 import {
@@ -78,7 +79,9 @@ export function adjustSyncPrice(
     if (node.kind === 'binary' && node.operator === '*') {
       const factor = [node.left, node.right].find(
         (candidate) =>
-          (candidate.kind === 'variable' && candidate.name === 'image_count') ||
+          (candidate.kind === 'variable' &&
+            (candidate.name === 'image_count' ||
+              isMeteredVariable(candidate.name))) ||
           compiled.requestRules.some((rule) => rule.node === candidate)
       )
       if (!factor) return unsupported

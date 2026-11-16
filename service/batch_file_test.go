@@ -2,10 +2,16 @@ package service
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +21,97 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDeepSeekFilePDFPageCount(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the production PDF parser requires Linux resource limits")
+	}
+	qpdf, err := exec.LookPath("qpdf")
+	if err != nil {
+		t.Skip("qpdf is required for the real parser regression")
+	}
+	_, err = exec.LookPath("prlimit")
+	require.NoError(t, err)
+	one, err := os.ReadFile("testdata/deepseek-file-1page.pdf")
+	require.NoError(t, err)
+	two, err := os.ReadFile("testdata/deepseek-file-2page.pdf")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name  string
+		data  []byte
+		pages int
+	}{
+		{"one page", one, 1},
+		{"two pages", two, 2},
+		{"non PDF", []byte("not a PDF"), 0},
+		{"low declared Count", bytes.Replace(two, []byte("/Count 2"), []byte("/Count 1"), 1), 0},
+		{"high declared Count", bytes.Replace(one, []byte("/Count 1"), []byte("/Count 2"), 1), 0},
+		{"cyclic page tree", bytes.Replace(deepSeekPageCountFixture(1), []byte("/Kids [3 0 R ]"), []byte("/Kids [2 0 R ]"), 1), 0},
+		{"damaged cross reference", two[:len(two)-20], 0},
+		{"zero pages", deepSeekPageCountFixture(0), 0},
+		{"page limit", deepSeekPageCountFixture(1001), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pages, err := CountDeepSeekFilePages(t.Context(), bytes.NewReader(tc.data), int64(len(tc.data)))
+			if tc.pages == 0 {
+				require.Error(t, err)
+				assert.Zero(t, pages)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.pages, pages)
+		})
+	}
+	t.Run("size mismatch", func(t *testing.T) {
+		pages, err := CountDeepSeekFilePages(t.Context(), bytes.NewReader(one), int64(len(one)-1))
+		require.Error(t, err)
+		assert.Zero(t, pages)
+	})
+	t.Run("canceled request", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		pages, err := CountDeepSeekFilePages(ctx, bytes.NewReader(one), int64(len(one)))
+		require.Error(t, err)
+		assert.Zero(t, pages)
+	})
+	t.Run("password protected", func(t *testing.T) {
+		filename := filepath.Join(t.TempDir(), "encrypted.pdf")
+		command := exec.CommandContext(t.Context(), qpdf, "--encrypt", "fixture-password", "fixture-owner-password", "256", "--", "testdata/deepseek-file-1page.pdf", filename)
+		output, err := command.CombinedOutput()
+		require.NoError(t, err, string(output))
+		data, err := os.ReadFile(filename)
+		require.NoError(t, err)
+		pages, err := CountDeepSeekFilePages(t.Context(), bytes.NewReader(data), int64(len(data)))
+		require.Error(t, err)
+		assert.Zero(t, pages)
+	})
+}
+
+// Build explicit blank-page fixtures with a valid cross-reference table. The
+// small structural mutations above preserve byte offsets deliberately.
+func deepSeekPageCountFixture(pages int) []byte {
+	objects := []string{"<< /Type /Catalog /Pages 2 0 R >>", ""}
+	var kids strings.Builder
+	for index := range pages {
+		fmt.Fprintf(&kids, "%d 0 R ", index+3)
+		objects = append(objects, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>")
+	}
+	objects[1] = fmt.Sprintf("<< /Type /Pages /Count %d /Kids [%s] >>", pages, kids.String())
+	var document bytes.Buffer
+	document.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects))
+	for index, object := range objects {
+		offsets[index] = document.Len()
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+	xref := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, offset := range offsets {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offset)
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return document.Bytes()
+}
 
 // batchUploadContext builds the multipart upload a client would send.
 func batchUploadContext(t *testing.T, fields map[string]string, filename string, content string) *gin.Context {

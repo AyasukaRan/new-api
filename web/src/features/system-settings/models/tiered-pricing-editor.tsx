@@ -82,6 +82,8 @@ import {
   type TimeCondition,
   type TimeFunc,
 } from '@/features/pricing/lib/billing-expr'
+import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
+import { isMeteredVariable } from '@/features/pricing/lib/billing-expression/types'
 import {
   parseVisualBillingDocument,
   serializeVisualBillingDocument,
@@ -765,6 +767,20 @@ function CostEstimator({ effectiveExpr, fullExpr, currency }: EstimatorProps) {
       }),
     [effectiveExpr, promptTokens, completionTokens, extras, tokens, billingTime]
   )
+
+  const compiledMetered = compileBillingExpression(effectiveExpr)
+  if (
+    compiledMetered.status === 'ready' &&
+    [...compiledMetered.variables].some(isMeteredVariable)
+  ) {
+    return (
+      <RequestSimulation
+        expression={fullExpr}
+        currency={currency}
+        mode='token'
+      />
+    )
+  }
 
   if (result.error === 'task usage') {
     return (

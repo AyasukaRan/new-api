@@ -35,6 +35,10 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import type { PricingCurrency } from '@/features/model-pricing/currency'
 import { PricingAmountInput } from '@/features/model-pricing/pricing-amount-input'
 import { BILLING_EXTRA_VARS } from '@/features/pricing/lib/billing-expr'
+import {
+  UNIT_PRICE_LABELS,
+  type MeteredUnit,
+} from '@/features/pricing/lib/billing-expression/types'
 import type { VisualPrice } from '@/features/pricing/lib/billing-expression/visual'
 import {
   CACHE_MODE_GENERIC,
@@ -111,6 +115,7 @@ function PriceField({
 
 type TierPriceFieldsProps = {
   imageCount?: boolean
+  meteredUnit?: MeteredUnit
   billingUnit?: 'token' | 'request'
   fixedPrice?: string
   onBillingUnitChange?: (unit: 'token' | 'request') => void
@@ -163,7 +168,7 @@ export function TierPriceFields(props: TierPriceFieldsProps) {
       />
     )
   }
-  const billingControl = props.onBillingUnitChange && (
+  const billingControl = !props.meteredUnit && props.onBillingUnitChange && (
     <Select
       items={[
         { value: 'token', label: t('Per token') },
@@ -203,11 +208,13 @@ export function TierPriceFields(props: TierPriceFieldsProps) {
         <PriceField
           currency={props.currency}
           label={
-            props.imageCount ? t('Price per image') : t('Price per request')
+            props.imageCount
+              ? t('Price per image')
+              : t(UNIT_PRICE_LABELS[props.meteredUnit ?? 'request'].label)
           }
           value={props.fixedPrice ?? ''}
           onChange={(value) => props.onFixedPriceChange?.(value)}
-          hint={`${props.currency.symbol}/${props.imageCount ? t('image') : t('request')}`}
+          hint={`${props.currency.symbol}/${t(props.imageCount ? 'image' : (props.meteredUnit ?? 'request'))}`}
           invalid={props.invalidVariables?.includes('fixed')}
         />
       </>

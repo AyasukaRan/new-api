@@ -187,6 +187,7 @@ type RelayInfo struct {
 	TieredBillingSnapshot *billingexpr.BillingSnapshot
 	BillingRequestInput   *billingexpr.RequestInput
 	BillingImageCount     *int
+	BillingMeteredUsage   *billingexpr.MeteredUsage
 	// ImageRequestCount is the effective quantity sent on the current attempt;
 	// ImageQuotaBeforeGroup is the frozen legacy estimate before request ratios.
 	ImageRequestCount     int

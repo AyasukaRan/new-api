@@ -20,6 +20,8 @@ import { flattenBinary } from './display'
 import { compileBillingExpression } from './parser'
 import {
   TIME_FUNCTIONS,
+  isMeteredVariable,
+  type MeteredVariable,
   type ExpressionNode,
   type TimeFunction,
   type TokenVariable,
@@ -61,6 +63,7 @@ export type VisualBillingDocument = {
   source: string
   root: VisualPricingNode
   imageCount?: boolean
+  meteredVariable?: MeteredVariable
 }
 export type VisualBillingIssue = { id: string; message: string }
 export type VisualBillingSerialization =
@@ -181,6 +184,7 @@ function readVisualPricing(node: ExpressionNode): VisualPricingNode | null {
       term.left.kind !== 'variable' ||
       term.left.name === 'len' ||
       term.left.name === 'image_count' ||
+      isMeteredVariable(term.left.name) ||
       term.right.kind !== 'literal' ||
       typeof term.right.value !== 'number' ||
       term.right.value < 0
@@ -205,12 +209,18 @@ function readVisualPricing(node: ExpressionNode): VisualPricingNode | null {
   }
 }
 
-function imageCountPricingRoot(node: ExpressionNode): ExpressionNode | null {
+function quantityPricingRoot(node: ExpressionNode): ExpressionNode | null {
   if (node.kind !== 'binary' || node.operator !== '*') return null
-  if (node.right.kind === 'variable' && node.right.name === 'image_count') {
+  if (
+    node.right.kind === 'variable' &&
+    (node.right.name === 'image_count' || isMeteredVariable(node.right.name))
+  ) {
     return node.left
   }
-  if (node.left.kind === 'variable' && node.left.name === 'image_count') {
+  if (
+    node.left.kind === 'variable' &&
+    (node.left.name === 'image_count' || isMeteredVariable(node.left.name))
+  ) {
     return node.right
   }
   return null
@@ -221,10 +231,16 @@ export function parseVisualBillingDocument(
 ): VisualBillingDocument | null {
   const compiled = compileBillingExpression(source)
   if (compiled.status !== 'ready') return null
-  const pricing = imageCountPricingRoot(compiled.ast) ?? compiled.ast
+  const pricing = quantityPricingRoot(compiled.ast) ?? compiled.ast
   const root = readVisualPricing(pricing)
   if (!root) return null
-  const document = { source, root, imageCount: pricing !== compiled.ast }
+  const meteredVariable = [...compiled.variables].find(isMeteredVariable)
+  const document = {
+    source,
+    root,
+    imageCount: compiled.variables.has('image_count'),
+    meteredVariable,
+  }
   return serializeVisualBillingDocument(document).ok ? document : null
 }
 
@@ -483,7 +499,7 @@ export function serializeVisualBillingDocument(
   const issues: VisualBillingIssue[] = []
   let body = writeVisualPricing(document.root, document.source, issues)
   if (
-    document.imageCount &&
+    (document.imageCount || document.meteredVariable) &&
     document.root.kind === 'branch' &&
     document.root.origin?.kind !== 'conditional'
   ) {
@@ -503,9 +519,10 @@ export function serializeVisualBillingDocument(
       ],
     }
   }
-  const pricingOrigin = document.imageCount
-    ? imageCountPricingRoot(original.ast)
-    : original.ast
+  const pricingOrigin =
+    document.imageCount || document.meteredVariable
+      ? quantityPricingRoot(original.ast)
+      : original.ast
   if (!pricingOrigin) {
     return {
       ok: false,

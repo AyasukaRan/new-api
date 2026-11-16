@@ -19,6 +19,23 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'page',
+  'character',
+  'Billable pages',
+  'Billable audio seconds',
+  'Billable characters',
+  'Price per page',
+  'Per page',
+  'Price per second',
+  'Per second',
+  'Price per character',
+  'Per character',
+  'Billable usage',
+  'Usage basis',
+  'Submitted text; not an upstream usage receipt',
+  'Locally counted document pages',
+  'Unconfirmed after interruption',
+
   'Model test',
   'Text to search for',
   'Number of search results to return',
@@ -26,6 +43,10 @@ export const STATIC_I18N_KEYS = [
   'IP address used to localize results',
   'Include page content in search results',
   'HTTP or HTTPS page URL',
+  'Text to synthesize',
+  'Voice',
+  'Remove Markdown formatting',
+  'Upload purpose',
 
   'The adjusted price is outside the supported range.',
   'This expression cannot be adjusted automatically. Keep the source price or edit it manually.',

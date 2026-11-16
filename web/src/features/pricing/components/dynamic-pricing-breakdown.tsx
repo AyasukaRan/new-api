@@ -27,6 +27,10 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
+import {
+  UNIT_PRICE_LABELS,
+  type BillingUnit,
+} from '@/features/pricing/lib/billing-expression/types'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -78,7 +82,7 @@ type DynamicPricingBreakdownProps = {
    * the usage-log details dialog to show which tier the engine selected.
    */
   matchedTierLabel?: string | null
-  matchedBillingUnit?: 'token' | 'request'
+  matchedBillingUnit?: BillingUnit
   matchedFixedPrice?: number
   /** Request-rule traces emitted by the settlement run. */
   requestRules?: RequestRuleTrace[] | null
@@ -113,7 +117,7 @@ type BreakdownPriceField = {
   id: string
   label: string
   labelKind: DynamicPriceLabelKind
-  unit: BillingUsageUnit | 'request' | 'token' | 'image'
+  unit: BillingUsageUnit | BillingUnit | 'image'
   unitLabel?: string | Record<string, string>
   showTokenUnit?: boolean
   value: (tier: BreakdownTier) => number
@@ -242,9 +246,7 @@ function formatBreakdownPrice(
   language: string
 ): string {
   const amount =
-    field.labelKind === 'schema' ||
-    field.unit === 'request' ||
-    field.unit === 'image'
+    field.labelKind === 'schema' || field.unit !== 'token'
       ? formatTaskUsageUnitPrice(value, { tokenUnit: 'M', ...taskPriceOptions })
       : `${symbol}${(value * rate).toFixed(4)}`
   if (field.unit === 'second') return `${amount}/${t('s')}`
@@ -256,6 +258,9 @@ function formatBreakdownPrice(
     return `${amount}/${t('1M token')}`
   }
   if (field.unit === 'request') return `${amount}/${t('request')}`
+  if (field.unit === 'page' || field.unit === 'character') {
+    return `${amount}/${t(field.unit)}`
+  }
   if (field.unit === 'image') return `${amount}/${t('image')}`
   return amount
 }
@@ -463,27 +468,27 @@ export function DynamicPricingBreakdown({
           ? 0
           : Number(tier[variable.field as string as keyof ParsedTier] || 0),
     }))
-    if (
-      tiers.some(
-        (tier) => !isTaskBreakdownTier(tier) && tier.billingUnit === 'request'
-      )
-    ) {
-      for (const field of fields) field.showTokenUnit = true
+    for (const unit of ['request', 'page', 'second', 'character'] as const) {
+      if (
+        !tiers.some(
+          (tier) => !isTaskBreakdownTier(tier) && tier.billingUnit === unit
+        )
+      ) {
+        continue
+      }
+      for (const field of fields) {
+        if (field.unit === 'token') field.showTokenUnit = true
+      }
+      const imageCount =
+        unit === 'request' &&
+        tiers.some((tier) => !isTaskBreakdownTier(tier) && tier.imageCount)
       fields.push({
-        id: 'fixedPrice',
-        label: tiers.some(
-          (tier) => !isTaskBreakdownTier(tier) && tier.imageCount
-        )
-          ? 'Price per image'
-          : 'Price per request',
+        id: `fixedPrice-${unit}`,
+        label: imageCount ? 'Price per image' : UNIT_PRICE_LABELS[unit].label,
         labelKind: 'i18n',
-        unit: tiers.some(
-          (tier) => !isTaskBreakdownTier(tier) && tier.imageCount
-        )
-          ? 'image'
-          : 'request',
+        unit: imageCount ? 'image' : unit,
         value: (tier) =>
-          !isTaskBreakdownTier(tier) && tier.billingUnit === 'request'
+          !isTaskBreakdownTier(tier) && tier.billingUnit === unit
             ? Number(tier.fixedPrice)
             : Number.NaN,
       })

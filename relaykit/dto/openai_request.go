@@ -86,6 +86,9 @@ type GeneralOpenAIRequest struct {
 	SearchParameters json.RawMessage `json:"search_parameters,omitempty"`
 	// OpenAI Chat web search.
 	WebSearchOptions *WebSearchOptions `json:"web_search_options,omitempty"`
+	// DeepSeek application capabilities; opaque settings preserve explicit false values.
+	SafetyCheck json.RawMessage `json:"safety_check,omitempty"`
+	Title       json.RawMessage `json:"title,omitempty"`
 	// OpenRouter Params
 	Usage     json.RawMessage `json:"usage,omitempty"`
 	Reasoning json.RawMessage `json:"reasoning,omitempty"`
@@ -417,8 +420,22 @@ type ToolCallRequest struct {
 	// Native is a complete vendor tool object sent instead of the fields
 	// above. Function has no omitempty, so a non-function tool would
 	// otherwise carry "function":{"name":""}, which vendor schemas with
-	// additionalProperties:false reject. Never read from client JSON.
+	// additionalProperties:false reject. Known DeepSeek server declarations
+	// also retain their original object when decoded; a JSON "Native" field is ignored.
 	Native json.RawMessage `json:"-"`
+}
+
+func (t *ToolCallRequest) UnmarshalJSON(data []byte) error {
+	type Alias ToolCallRequest
+	var value Alias
+	if err := kitutil.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*t = ToolCallRequest(value)
+	if t.Type == "deepseek_web_search" || t.Type == "deepseek_read_url" {
+		t.Native = append(json.RawMessage(nil), data...)
+	}
+	return nil
 }
 
 func (t ToolCallRequest) MarshalJSON() ([]byte, error) {
@@ -505,8 +522,11 @@ type Message struct {
 	Tools json.RawMessage `json:"tools,omitempty"`
 	// Annotations is an official Chat response field. Keeping it on the shared
 	// message type also preserves annotations when clients replay assistant output.
-	Annotations   json.RawMessage `json:"annotations,omitempty"`
-	parsedContent []MediaContent
+	Annotations json.RawMessage `json:"annotations,omitempty"`
+	// DeepSeek read-link signatures in server_tool_calls are required on replay.
+	ServerToolCalls json.RawMessage `json:"server_tool_calls,omitempty"`
+	Title           json.RawMessage `json:"title,omitempty"`
+	parsedContent   []MediaContent
 	//parsedStringContent *string
 }
 
@@ -1096,6 +1116,8 @@ type OpenAIResponsesRequest struct {
 	Text             json.RawMessage `json:"text,omitempty"`
 	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
 	Tools            json.RawMessage `json:"tools,omitempty"` // 需要处理的参数很少，MCP 参数太多不确定，所以用 map
+	SafetyCheck      json.RawMessage `json:"safety_check,omitempty"`
+	Title            json.RawMessage `json:"title,omitempty"`
 	TopP             *float64        `json:"top_p,omitempty"`
 	Truncation       json.RawMessage `json:"truncation,omitempty"`
 	User             json.RawMessage `json:"user,omitempty"`

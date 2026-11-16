@@ -3,9 +3,12 @@ package controller
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -44,6 +47,9 @@ func relayFileError(c *gin.Context, status int, code string, message string) {
 // and returns the upstream response with its body still open.
 func relayFileUpstream(c *gin.Context, method string, path string, body io.Reader, contentType string, contentLength int64) (*http.Response, error) {
 	baseURL := strings.TrimSuffix(common.GetContextKeyString(c, constant.ContextKeyChannelBaseUrl), "/")
+	if baseURL == "" && common.GetContextKeyInt(c, constant.ContextKeyChannelType) == constant.ChannelTypeDeepSeek {
+		baseURL = "https://api.deepseek.com"
+	}
 	if baseURL == "" {
 		return nil, fmt.Errorf("the selected channel has no base url")
 	}
@@ -89,6 +95,12 @@ func relayFileForwardJSON(c *gin.Context, resp *http.Response) ([]byte, bool) {
 
 // RelayFileUpload relays a file upload and records who owns the result.
 func RelayFileUpload(c *gin.Context) {
+	if value, ok := c.Get("deepseek_file_upload"); ok {
+		if upload, ok := value.(*service.DeepSeekFileUploadInfo); ok {
+			relayDeepSeekFileUpload(c, upload)
+			return
+		}
+	}
 	clientModel := c.GetString("original_model")
 	// The channel may serve this model under another name. Nothing else on this
 	// path applies that rename, because the file is otherwise copied verbatim.
@@ -145,28 +157,54 @@ func RelayFileUpload(c *gin.Context) {
 // every other tenant's uploads.
 func RelayFileList(c *gin.Context) {
 	limit := 20
-	if raw := c.Query("size"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
+	if raw := c.Query("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 1000 {
+			relayFileError(c, 400, "invalid_request_error", "limit must be between 1 and 1000")
+			return
+		}
+		limit = parsed
+	} else if raw := c.Query("size"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1000 {
 			limit = parsed
 		}
 	}
-	files, err := model.ListRelayFiles(c.GetInt("id"), c.Query("purpose"), limit)
+	order := c.DefaultQuery("order", "desc")
+	after, before := c.Query("after"), c.Query("before")
+	anthropic := strings.Contains(c.GetHeader("anthropic-beta"), "files-api-2025-04-14")
+	if anthropic {
+		after, before = c.Query("after_id"), c.Query("before_id")
+	}
+	files, more, err := model.ListRelayFilesPage(c.GetInt("id"), c.Query("purpose"), after, before, order, limit)
 	if err != nil {
-		relayFileError(c, http.StatusInternalServerError, "internal_error", err.Error())
+		relayFileError(c, 400, "invalid_request_error", "invalid file pagination")
 		return
 	}
 	data := make([]gin.H, 0, len(files))
 	for _, file := range files {
-		data = append(data, gin.H{
-			"id":         file.FileId,
-			"object":     "file",
-			"bytes":      file.Bytes,
-			"created_at": file.CreatedAt,
-			"filename":   file.Filename,
-			"purpose":    file.Purpose,
-		})
+		item := gin.H{"id": file.FileId, "object": "file", "bytes": file.Bytes, "created_at": file.CreatedAt, "filename": file.Filename, "purpose": file.Purpose}
+		if file.ExpiresAt > 0 {
+			item["expires_at"] = file.ExpiresAt
+		}
+		if anthropic {
+			delete(item, "object")
+			delete(item, "bytes")
+			item["type"] = "file"
+			item["size_bytes"] = file.Bytes
+			item["created_at"] = time.Unix(file.CreatedAt, 0).UTC().Format(time.RFC3339)
+			item["mime_type"] = mime.TypeByExtension(filepath.Ext(file.Filename))
+		}
+		data = append(data, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
+	first, last := "", ""
+	if len(files) > 0 {
+		first, last = files[0].FileId, files[len(files)-1].FileId
+	}
+	result := gin.H{"object": "list", "data": data, "first_id": first, "last_id": last, "has_more": more}
+	if anthropic {
+		delete(result, "object")
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 // RelayFileRetrieve relays a metadata read for a file the caller owns.
@@ -174,6 +212,10 @@ func RelayFileRetrieve(c *gin.Context) {
 	file := middleware.RelayFileRecord(c)
 	if file == nil {
 		relayFileError(c, http.StatusNotFound, "not_found", "no such file")
+		return
+	}
+	if file.Provider == "deepseek" {
+		relayDeepSeekFileMetadata(c, file, http.MethodGet)
 		return
 	}
 	resp, err := relayFileUpstream(c, http.MethodGet, "/v1/files/"+file.FileId, nil, "", 0)
@@ -189,6 +231,10 @@ func RelayFileDelete(c *gin.Context) {
 	file := middleware.RelayFileRecord(c)
 	if file == nil {
 		relayFileError(c, http.StatusNotFound, "not_found", "no such file")
+		return
+	}
+	if file.Provider == "deepseek" {
+		relayDeepSeekFileMetadata(c, file, http.MethodDelete)
 		return
 	}
 	resp, err := relayFileUpstream(c, http.MethodDelete, "/v1/files/"+file.FileId, nil, "", 0)
@@ -213,6 +259,10 @@ func RelayFileContent(c *gin.Context) {
 	file := middleware.RelayFileRecord(c)
 	if file == nil {
 		relayFileError(c, http.StatusNotFound, "not_found", "no such file")
+		return
+	}
+	if file.Provider == "deepseek" {
+		relayFileError(c, 404, "not_found", "file downloads are not supported by this provider")
 		return
 	}
 	resp, err := relayFileUpstream(c, http.MethodGet, "/v1/files/"+file.FileId+"/content", nil, "", 0)

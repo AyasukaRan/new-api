@@ -91,6 +91,7 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			t.Logf("database: %s", version)
 			runFixedPriceAccountingCases(t, db, logDB)
 			runUpstreamCostAccountingCases(t, db, logDB)
+			runMeteredAccountingCases(t, db, logDB)
 		})
 	}
 }
@@ -306,6 +307,137 @@ func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			assert.Equal(t, tc.want, token.UsedQuota)
 			if !tc.refund && !tc.insufficient {
 				assert.Equal(t, 1, user.RequestCount)
+			}
+		})
+	}
+}
+
+func runMeteredAccountingCases(t *testing.T, db, logDB *gorm.DB) {
+	t.Helper()
+	const startingQuota = 2_000_000
+	for index, tc := range []struct {
+		name, expression                   string
+		unit                               billingexpr.BillingUnit
+		estimate, actual, want             int
+		group, costRatio, wantBase         float64
+		refund, insufficient, missingUsage bool
+		fallback                           bool
+	}{
+		{name: "OCR pages refund maximum reservation with RMB group discount", expression: `tier("page", fixed(0.0015)) * document_pages`, unit: billingexpr.BillingUnitPage, estimate: 1000, actual: 3, group: 0.2, costRatio: 1, wantBase: 2250, want: 450},
+		{name: "ASR seconds settle without tokens", expression: `tier("second", fixed(0.0001)) * audio_seconds`, unit: billingexpr.BillingUnitSecond, estimate: 120, actual: 3, group: 2, costRatio: 1.1, wantBase: 150, want: 300},
+		{name: "TTS characters preserve explicit zero upstream cost", expression: `tier("character", fixed(0.00015)) * speech_characters`, unit: billingexpr.BillingUnitCharacter, estimate: 10000, actual: 7, group: 0.2, costRatio: 0, wantBase: 525, want: 105},
+		{name: "measured usage needs no token usage object", expression: `tier("page", fixed(0.0015)) * document_pages`, unit: billingexpr.BillingUnitPage, estimate: 1000, actual: 3, group: 0.2, costRatio: 1, wantBase: 2250, want: 450, missingUsage: true},
+		{name: "free group still records real upstream cost", expression: `tier("page", fixed(0.0015)) * document_pages`, unit: billingexpr.BillingUnitPage, estimate: 1000, actual: 3, group: 0, costRatio: 1, wantBase: 2250},
+		{name: "zero unit price stays free", expression: `tier("page", fixed(0)) * document_pages`, unit: billingexpr.BillingUnitPage, estimate: 1000, actual: 3, group: 0.2, costRatio: 1},
+		{name: "zero actual quantity releases entire reservation", expression: `tier("character", fixed(0.00015)) * speech_characters`, unit: billingexpr.BillingUnitCharacter, estimate: 10000, actual: 0, group: 0.2, costRatio: 1},
+		{name: "evaluation failure keeps reservation and used accounting", expression: `document_pages == 3 ? tier("error", param("missing") * p) : tier("page", fixed(0.0015)) * document_pages`, unit: billingexpr.BillingUnitPage, estimate: 1000, actual: 3, group: 0.2, costRatio: 1, want: 150000, fallback: true},
+		{name: "failed upload refunds once", expression: `tier("page", fixed(0.0015)) * document_pages`, unit: billingexpr.BillingUnitPage, estimate: 1000, group: 0.2, refund: true},
+		{name: "insufficient quota rejects before submission", expression: `tier("second", fixed(0.0001)) * audio_seconds`, unit: billingexpr.BillingUnitSecond, estimate: 120, group: 2, insufficient: true},
+	} {
+		t.Run("metered "+tc.name, func(t *testing.T) {
+			wallet := startingQuota
+			if tc.insufficient {
+				wallet = 1
+			}
+			user := model.User{Username: fmt.Sprintf("metered_billing_%d", index), Quota: wallet, Status: common.UserStatusEnabled}
+			require.NoError(t, db.Create(&user).Error)
+			token := model.Token{UserId: user.Id, Key: fmt.Sprintf("metered-billing-test-%d", index), Name: "metered-billing", RemainQuota: startingQuota, Status: common.TokenStatusEnabled}
+			require.NoError(t, db.Create(&token).Error)
+			channel := model.Channel{Name: "metered-billing", Key: "unused", Status: common.ChannelStatusEnabled}
+			require.NoError(t, db.Create(&channel).Error)
+			t.Cleanup(func() {
+				require.NoError(t, logDB.Where("user_id = ?", user.Id).Delete(&model.Log{}).Error)
+				require.NoError(t, db.Unscoped().Delete(&token).Error)
+				require.NoError(t, db.Unscoped().Delete(&user).Error)
+				require.NoError(t, db.Unscoped().Delete(&channel).Error)
+			})
+			request := &billingexpr.RequestInput{MeteredUsage: &billingexpr.MeteredUsage{Unit: tc.unit, Count: tc.estimate}}
+			cost, trace, err := billingexpr.RunExprWithRequest(tc.expression, billingexpr.TokenParams{}, *request)
+			require.NoError(t, err)
+			reservation, err := billingexpr.QuotaRoundStrict(cost / 1_000_000 * common.QuotaPerUnit * tc.group)
+			require.NoError(t, err)
+			snapshot := &billingexpr.BillingSnapshot{BillingMode: "tiered_expr", ExprString: tc.expression, ExprHash: billingexpr.ExprHashString(tc.expression), QuotaPerUnit: common.QuotaPerUnit, GroupRatio: tc.group, EstimatedTier: trace.MatchedTier, EstimatedBillingUnit: trace.BillingUnit, EstimatedFixedPrice: trace.FixedPrice, EstimatedMeteredUsage: trace.MeteredUsage, EstimatedQuotaAfterGroup: reservation}
+			info := &relaycommon.RelayInfo{UserId: user.Id, TokenId: token.Id, TokenKey: token.Key, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id}, OriginModelName: "metered-test", UsingGroup: "default", UserGroup: "default", UserSetting: dto.UserSetting{BillingPreference: "wallet_only"}, ForcePreConsume: true, StartTime: time.Now(), RelayFormat: types.RelayFormatOpenAI, PriceData: hosttypes.PriceData{GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: tc.group}}, TieredBillingSnapshot: snapshot, BillingRequestInput: request, UpstreamCostRatio: &tc.costRatio}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", "/v1/tools/ocr", nil)
+			apiErr := PreConsumeBilling(ctx, reservation, info)
+			if tc.insufficient {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, types.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+			} else {
+				require.Nil(t, apiErr)
+				require.NoError(t, db.First(&user, user.Id).Error)
+				require.NoError(t, db.First(&token, token.Id).Error)
+				assert.Equal(t, wallet-reservation, user.Quota)
+				assert.Equal(t, startingQuota-reservation, token.RemainQuota)
+				if tc.refund {
+					refunded := make(chan struct{}, 1)
+					const callback = "metered_billing_refund_observed"
+					require.NoError(t, db.Callback().Update().After("gorm:commit_or_rollback_transaction").Register(callback, func(tx *gorm.DB) {
+						if tx.Statement.Table == "tokens" && tx.Error == nil {
+							select {
+							case refunded <- struct{}{}:
+							default:
+							}
+						}
+					}))
+					t.Cleanup(func() { require.NoError(t, db.Callback().Update().Remove(callback)) })
+					info.Billing.Refund(ctx)
+					info.Billing.Refund(ctx)
+					select {
+					case <-refunded:
+					case <-time.After(5 * time.Second):
+						t.Fatal("metered refund did not finish")
+					}
+				} else {
+					info.BillingMeteredUsage = &billingexpr.MeteredUsage{Unit: tc.unit, Count: tc.actual}
+					usage := &dto.Usage{}
+					if tc.missingUsage {
+						usage = nil
+					}
+					PostTextConsumeQuota(ctx, info, usage, nil)
+					require.NoError(t, info.Billing.Settle(tc.want), "repeat settlement must not charge again")
+					assert.Equal(t, tc.estimate, request.MeteredUsage.Count, "settlement must not change the frozen request quantity")
+					assert.Equal(t, tc.estimate, snapshot.EstimatedMeteredUsage.Count)
+					var log model.Log
+					require.NoError(t, logDB.Where("user_id = ?", user.Id).Take(&log).Error)
+					assert.Equal(t, tc.want, log.Quota)
+					assert.Zero(t, log.PromptTokens)
+					assert.Zero(t, log.CompletionTokens)
+					assert.NotContains(t, log.Content, "nothing was charged")
+					var other map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+					assert.Equal(t, string(tc.unit), other["billing_unit"])
+					measured, ok := other["metered_usage"].(map[string]any)
+					require.True(t, ok)
+					assert.Equal(t, string(tc.unit), measured["unit"])
+					admin, _ := other["admin_info"].(map[string]any)
+					if tc.fallback {
+						assert.Equal(t, float64(tc.estimate), measured["count"])
+						assert.Equal(t, true, other["metered_usage_estimated"])
+						assert.NotContains(t, admin, "cost", "failed evaluation has no confirmed cost basis")
+					} else {
+						assert.Equal(t, float64(tc.actual), measured["count"])
+						upstreamCost, ok := admin["cost"].(map[string]any)
+						require.True(t, ok)
+						assert.InDelta(t, tc.wantBase, upstreamCost["base_quota"], 1e-8)
+						assert.InDelta(t, tc.wantBase*tc.costRatio, upstreamCost["cost_quota"], 1e-8)
+						assert.InDelta(t, float64(tc.want)-tc.wantBase*tc.costRatio, upstreamCost["profit_quota"], 1e-8)
+					}
+				}
+			}
+			require.NoError(t, db.First(&user, user.Id).Error)
+			require.NoError(t, db.First(&token, token.Id).Error)
+			require.NoError(t, db.First(&channel, channel.Id).Error)
+			assert.Equal(t, wallet-tc.want, user.Quota)
+			assert.Equal(t, startingQuota-tc.want, token.RemainQuota)
+			assert.Equal(t, tc.want, user.UsedQuota)
+			assert.Equal(t, tc.want, token.UsedQuota)
+			assert.Equal(t, tc.want, channel.UsedQuota)
+			if !tc.refund && !tc.insufficient {
+				assert.Equal(t, 1, user.RequestCount)
+			} else {
+				assert.Zero(t, user.RequestCount)
 			}
 		})
 	}

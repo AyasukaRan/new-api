@@ -275,3 +275,50 @@ describe('usage facts billing details', () => {
     expect(screen.getByText('Total Cost')).toBeInTheDocument()
   })
 })
+
+test('shows settled speech characters and the local billing basis', () => {
+  const queryClient = renderDetails({
+    billing_mode: 'tiered_expr',
+    expr_b64: btoa('tier("speech", fixed(0.0000225)) * speech_characters'),
+    billing_unit: 'character',
+    fixed_price: 0.0000225,
+    matched_tier: 'speech',
+    metered_usage: { unit: 'character', count: 8 },
+    metered_usage_basis: 'request_text',
+  })
+  expect(screen.getByText('character').parentElement).toHaveTextContent('8')
+  expect(
+    screen.getByText('Submitted text; not an upstream usage receipt')
+  ).toBeVisible()
+  expect(screen.getAllByText(/0\.0000225\/character/).length).toBeGreaterThan(0)
+  queryClient.clear()
+})
+
+test.each([false, true])(
+  'shows local pagination evidence and labels estimated=%s quantities honestly',
+  (estimated) => {
+    const queryClient = renderDetails({
+      billing_mode: 'tiered_expr',
+      expr_b64: btoa('tier("page", fixed(0.000225)) * document_pages'),
+      billing_unit: 'page',
+      fixed_price: 0.000225,
+      matched_tier: 'page',
+      metered_usage: { unit: 'page', count: estimated ? 1000 : 2 },
+      metered_usage_estimated: estimated,
+      metered_usage_basis: 'local_pagination',
+      metered_usage_engine: 'LibreOffice/25.8.1; qpdf/12.2.0',
+    })
+    expect(
+      screen.getByText(estimated ? 'Estimated usage' : 'Billable usage')
+    ).toBeVisible()
+    expect(
+      screen.queryByText(estimated ? 'Billable usage' : 'Estimated usage')
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('Locally counted document pages')).toBeVisible()
+    expect(rowValue('Pagination engine')).toBe(
+      'LibreOffice/25.8.1; qpdf/12.2.0'
+    )
+    expect(screen.getAllByText(/0\.000225\/page/).length).toBeGreaterThan(0)
+    queryClient.clear()
+  }
+)

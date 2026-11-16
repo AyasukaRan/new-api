@@ -407,6 +407,12 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		targetHeader.Set(key, value)
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+	if info.RelayMode == constant.RelayModeToolsTTS {
+		// Local browser credentials and cookies never reach the upstream socket.
+		targetHeader.Del("Sec-WebSocket-Protocol")
+		targetHeader.Del("Cookie")
+		targetHeader.Del("Origin")
+	}
 	dialer := *websocket.DefaultDialer
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
@@ -456,7 +462,8 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
-	keyFailover := !info.IsChannelTest && info.ChannelMeta != nil && info.ChannelIsMultiKey && service.HasChannelKeyFailover(c)
+	recognitionUpload := info.RelayMode == constant.RelayModeToolsOCR || info.RelayMode == constant.RelayModeToolsASR || info.RelayMode == constant.RelayModeToolsTTS
+	keyFailover := !recognitionUpload && !info.IsChannelTest && info.ChannelMeta != nil && info.ChannelIsMultiKey && service.HasChannelKeyFailover(c)
 	if (info.IsChannelTest || keyFailover) && c.Request != nil {
 		// Adaptors may build a background-context request. Health checks must
 		// carry their deadline, and failover must stop when its client disconnects.

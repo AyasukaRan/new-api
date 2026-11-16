@@ -45,9 +45,11 @@ import { useBillingTime } from '@/features/pricing/hooks/use-billing-time'
 import { formatBillingCondition } from '@/features/pricing/lib/billing-expression/condition-display'
 import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
 import { evaluateBillingExpression } from '@/features/pricing/lib/billing-expression/runtime'
-import type {
-  BillingSimulationContext,
-  DiagnosticCode,
+import {
+  METERED_VARIABLES,
+  isMeteredVariable,
+  type BillingSimulationContext,
+  type DiagnosticCode,
 } from '@/features/pricing/lib/billing-expression/types'
 import { taskPriceLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
@@ -77,6 +79,8 @@ export function RequestSimulation(props: RequestSimulationProps) {
   const headersId = useId()
   const timeId = useId()
   const imageCountId = useId()
+  const meteredCountId = useId()
+  const [meteredCount, setMeteredCount] = useState('1')
   const [imageCount, setImageCount] = useState('1')
   const compiled = useMemo(
     () => compileBillingExpression(props.expression),
@@ -84,6 +88,13 @@ export function RequestSimulation(props: RequestSimulationProps) {
   )
   const usesImageCount =
     compiled.status === 'ready' && compiled.variables.has('image_count')
+  const meteredVariable =
+    compiled.status === 'ready'
+      ? [...compiled.variables].find(isMeteredVariable)
+      : undefined
+  const metered = meteredVariable
+    ? METERED_VARIABLES[meteredVariable]
+    : undefined
   const booleanFields = Object.entries(props.usageSchema ?? {}).filter(
     ([, field]) => field.type === 'boolean'
   )
@@ -171,6 +182,9 @@ export function RequestSimulation(props: RequestSimulationProps) {
     }
     return evaluateBillingExpression(props.expression, {
       imageCount: Number(imageCount),
+      meteredUsage: metered
+        ? { unit: metered.unit, count: Number(meteredCount) }
+        : undefined,
       tokens: props.tokens,
       usage,
       now,
@@ -182,6 +196,8 @@ export function RequestSimulation(props: RequestSimulationProps) {
   }, [
     open,
     imageCount,
+    metered,
+    meteredCount,
     body,
     headers,
     timeMode,
@@ -221,6 +237,20 @@ export function RequestSimulation(props: RequestSimulationProps) {
         {t('Request simulation')}
       </CollapsibleTrigger>
       <CollapsibleContent className='mt-3 space-y-4'>
+        {metered && (
+          <Field>
+            <FieldLabel htmlFor={meteredCountId}>{t(metered.label)}</FieldLabel>
+            <Input
+              id={meteredCountId}
+              type='number'
+              min={0}
+              max={metered.limit}
+              step={1}
+              value={meteredCount}
+              onChange={(event) => setMeteredCount(event.target.value)}
+            />
+          </Field>
+        )}
         {usesImageCount && (
           <Field>
             <FieldLabel htmlFor={imageCountId}>

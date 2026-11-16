@@ -54,6 +54,10 @@ func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 		err = relay.AlphaSearchHelper(c, info)
 	case relayconstant.RelayModeToolsSearch, relayconstant.RelayModeToolsFetch:
 		err = relay.DeepSeekToolsHelper(c, info)
+	case relayconstant.RelayModeToolsTTS:
+		err = relay.DeepSeekTTSHelper(c, info)
+	case relayconstant.RelayModeToolsOCR, relayconstant.RelayModeToolsASR:
+		err = relay.DeepSeekUploadHelper(c, info)
 	default:
 		err = relay.TextHelper(c, info)
 	}
@@ -81,10 +85,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ws          *websocket.Conn
 	)
 
+	ttsWebSocket := relayFormat == types.RelayFormatDeepSeekTools && c.Request.Method == http.MethodGet && c.Request.URL.Path == "/v1/tools/tts"
+	if ttsWebSocket {
+		defer func() {
+			if ws != nil {
+				_ = ws.Close()
+			}
+		}()
+	}
+
 	// Registered before every other defer so it runs last, after the error
 	// response below has been written. Realtime is excluded: it hijacks the
 	// connection, so nothing of the exchange reaches the response writer.
-	if relayFormat != types.RelayFormatOpenAIRealtime {
+	if relayFormat != types.RelayFormatOpenAIRealtime && !ttsWebSocket {
 		if service.BeginRequestTrace(c, string(relayFormat)) != "" {
 			defer service.FinishRequestTrace(c)
 		}
@@ -105,7 +118,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			service.RecordRequestPolicyTermination(c, newAPIError)
 			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			if c.GetBool("deepseek_tts_upgrade_failed") {
+				return
+			}
 			upstreamURLs := common.UpstreamAddresses(c)
+			if ttsWebSocket && ws != nil {
+				_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				payload, _ := common.Marshal(gin.H{"event": "finish", "code": "service_error", "message": newAPIError.ToOpenAIError(upstreamURLs...).Message})
+				_ = ws.WriteMessage(websocket.TextMessage, payload)
+				return
+			}
+			if c.Request.URL.Path == "/v1/tools/tts" && c.Writer.Written() && strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "audio/") {
+				return // Audio has no in-band error envelope; the connection ends here.
+			}
 			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
 				strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
 				writeRelayStreamError(c, relayFormat, newAPIError)
@@ -175,6 +200,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	defer func() {
 		newAPIError = relay.RefundFailedRequestBilling(c, relayInfo, newAPIError)
 	}()
+
+	if ttsWebSocket {
+		// Authentication, request validation and quota reservation precede the upgrade.
+		// Gorilla's default Origin check allows same-host browsers and non-browser clients.
+		ttsUpgrader := websocket.Upgrader{Subprotocols: []string{"tts"}}
+		ws, err = ttsUpgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			c.Set("deepseek_tts_upgrade_failed", true)
+			newAPIError = types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			return
+		}
+		relayInfo.ClientWs = ws
+	}
 
 	retryParam := &service.RetryParam{
 		Ctx:         c,

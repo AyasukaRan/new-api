@@ -37,6 +37,11 @@ import {
 import { BILLING_VARS } from '@/features/pricing/lib/billing-expr'
 import { formatBillingCondition } from '@/features/pricing/lib/billing-expression/condition-display'
 import {
+  METERED_VARIABLES,
+  UNIT_PRICE_LABELS,
+  type MeteredUnit,
+} from '@/features/pricing/lib/billing-expression/types'
+import {
   visualConditionExpression,
   visualNodeId,
   createEmptyVisualCondition,
@@ -51,6 +56,7 @@ import { VisualConditionTree } from './visual-condition-tree'
 
 type PricingNodeProps = {
   imageCount?: boolean
+  meteredUnit?: MeteredUnit
   node: VisualPricingNode
   source: string
   currency: PricingCurrency
@@ -109,6 +115,7 @@ function PricingTierFields(
       </div>
       <TierPriceFields
         imageCount={props.imageCount}
+        meteredUnit={props.meteredUnit}
         currency={props.currency}
         billingUnit={node.billingUnit}
         fixedPrice={node.fixedPrice}
@@ -254,11 +261,19 @@ function PricingRuleCard(
                   <span>
                     {props.imageCount
                       ? t('Price per image')
-                      : t('Price per request')}
+                      : t(
+                          UNIT_PRICE_LABELS[props.meteredUnit ?? 'request']
+                            .label
+                        )}
                     :{' '}
                     {formatPricingAmount(tier.fixedPrice, props.currency) ||
                       '—'}
-                    /{props.imageCount ? t('image') : t('request')}
+                    /
+                    {t(
+                      props.imageCount
+                        ? 'image'
+                        : (props.meteredUnit ?? 'request')
+                    )}
                   </span>
                 ) : (
                   <>
@@ -396,6 +411,11 @@ export function VisualBillingDocumentEditor(props: {
       )}
       <PricingRuleList
         imageCount={props.document.imageCount}
+        meteredUnit={
+          props.document.meteredVariable
+            ? METERED_VARIABLES[props.document.meteredVariable].unit
+            : undefined
+        }
         node={props.document.root}
         prefix=''
         source={props.document.source}

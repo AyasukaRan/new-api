@@ -42,7 +42,13 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 	case types.RelayFormatOpenAIAlphaSearch:
 		request, err = GetAndValidateAlphaSearchRequest(c)
 	case types.RelayFormatDeepSeekTools:
-		request, err = GetAndValidateDeepSeekToolsRequest(c)
+		if relayMode == relayconstant.RelayModeToolsTTS {
+			request, err = GetAndValidateDeepSeekTTSRequest(c)
+		} else if relayMode == relayconstant.RelayModeToolsOCR || relayMode == relayconstant.RelayModeToolsASR {
+			request, err = GetAndValidateDeepSeekUploadRequest(c, relayMode)
+		} else {
+			request, err = GetAndValidateDeepSeekToolsRequest(c)
+		}
 
 	case types.RelayFormatOpenAIImage:
 		request, err = GetAndValidOpenAIImageRequest(c, relayMode)

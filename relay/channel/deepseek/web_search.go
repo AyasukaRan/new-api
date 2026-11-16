@@ -11,17 +11,21 @@ import (
 
 // DeepSeek reports successful queries and page reads in the final usage.
 // One search item can issue several queries or return no billable results.
-func responsesToolUsage(raw []byte) map[string]int {
+func serverToolUsage(raw []byte) map[string]int {
 	usage := ojson.GetBytes(raw, "usage.server_tool_use")
 	if !usage.Exists() {
 		usage = ojson.GetBytes(raw, "response.usage.server_tool_use")
 	}
+	if !usage.Exists() {
+		usage = ojson.GetBytes(raw, "message.usage.server_tool_use")
+	}
 	if !usage.IsObject() {
 		return nil
 	}
-	counts := make(map[string]int, 2)
+	counts := make(map[string]int, 3)
 	for _, key := range []struct{ field, price string }{
 		{"tool_search", SearchToolPriceKey}, {"tool_fetch", FetchToolPriceKey},
+		{"tool_image_search", ImageSearchToolPriceKey},
 	} {
 		value := usage.Get(key.field)
 		if value.Type != ojson.Number || strings.ContainsAny(value.Raw, ".eE") {

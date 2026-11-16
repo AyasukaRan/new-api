@@ -109,7 +109,7 @@ func RecordChannelEndpointRequest(c *gin.Context, target *url.URL) {
 // FailChannelEndpoint reports an attributed mirror failure and whether another
 // mirror can be tried. Mirror outages must not disable the shared credentials.
 func FailChannelEndpoint(c *gin.Context, channel *model.Channel, apiErr *types.NewAPIError) (failed, retry bool) {
-	if c == nil || apiErr == nil || c.Writer.Written() || c.Request.Context().Err() != nil {
+	if c == nil || apiErr == nil || types.IsSkipRetryError(apiErr) || c.Writer.Written() || c.Request.Context().Err() != nil {
 		return false, false
 	}
 	if apiErr.GetErrorCode() != types.ErrorCodeDoRequestFailed && apiErr.StatusCode != http.StatusBadGateway && apiErr.StatusCode != http.StatusServiceUnavailable && apiErr.StatusCode != http.StatusGatewayTimeout {

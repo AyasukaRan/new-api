@@ -140,7 +140,7 @@ func shouldSkipChannelTest(ctx context.Context, channel *model.Channel, name, en
 	if _, scheduled := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration); !scheduled {
 		return false
 	}
-	if constant.EndpointType(endpointType) == constant.EndpointTypeDeepSeekToolsSearch || constant.EndpointType(endpointType) == constant.EndpointTypeDeepSeekToolsFetch {
+	if slices.Contains([]constant.EndpointType{constant.EndpointTypeDeepSeekToolsSearch, constant.EndpointTypeDeepSeekToolsFetch, constant.EndpointTypeDeepSeekToolsOCR, constant.EndpointTypeDeepSeekToolsASR, constant.EndpointTypeDeepSeekToolsTTS, constant.EndpointTypeDeepSeekFiles}, constant.EndpointType(endpointType)) {
 		return true
 	}
 	names := []string{name}
@@ -150,7 +150,7 @@ func shouldSkipChannelTest(ctx context.Context, channel *model.Channel, name, en
 		}
 	}
 	return slices.ContainsFunc(names, func(candidate string) bool {
-		return candidate == constant.DeepSeekSearchModel || candidate == constant.DeepSeekFetchModel
+		return slices.Contains([]string{constant.DeepSeekSearchModel, constant.DeepSeekFetchModel, constant.DeepSeekOCRModel, constant.DeepSeekASRModel, constant.DeepSeekTTSModel, constant.DeepSeekFilesModel}, candidate)
 	})
 }
 

@@ -670,3 +670,59 @@ describe('visual billing document', () => {
     ).toBeNull()
   })
 })
+
+describe('metered tool billing', () => {
+  test.each([
+    ['document_pages', 'page', 0.000225, 3, 1000],
+    ['audio_seconds', 'second', 0.058 / 3600, 4, 120],
+    ['speech_characters', 'character', 0.0000225, 8, 10000],
+  ] as const)(
+    'simulates and preserves %s quantities separately from tokens',
+    (variable, unit, price, count, limit) => {
+      const expression = `tier("tool", fixed(${price})) * ${variable}`
+      const result = evaluateBillingExpression(expression, {
+        meteredUsage: { unit, count },
+      })
+      expect(result.status).toBe('success')
+      if (result.status !== 'success') return
+      expect(result.billingUnit).toBe(unit)
+      expect(result.cost).toBeCloseTo(price * count * 1_000_000)
+      expect(evaluateBillingExpression(expression).status).toBe(
+        'missing_context'
+      )
+      expect(
+        evaluateBillingExpression(expression, {
+          meteredUsage: { unit, count: limit + 1 },
+        }).status
+      ).toBe('invalid')
+      expect(
+        evaluateBillingExpression(expression, {
+          meteredUsage: { unit, count: 0.5 },
+        }).status
+      ).toBe('invalid')
+      const document = parseVisualBillingDocument(expression)
+      assert(document)
+      expect(document.meteredVariable).toBe(variable)
+      assert(document.root.kind === 'tier')
+      document.root.fixedPrice = '0.02'
+      const written = serializeVisualBillingDocument(document)
+      assert(written.ok)
+      expect(written.source).toBe(`tier("tool", fixed(0.02)) * ${variable}`)
+      const summary = getTieredBillingSummary({
+        billing_mode: 'tiered_expr',
+        billing_unit: unit,
+        fixed_price: price,
+        matched_tier: 'tool',
+        expr_b64: btoa(expression),
+        metered_usage: { unit, count },
+      })
+      expect(summary?.priceEntries[0]).toMatchObject({ unit, price })
+    }
+  )
+  test.each([
+    'tier("tool", fixed(1)) * document_pages * audio_seconds',
+    'tier("tool", document_pages * 10)',
+  ])('rejects invalid metering contract %s', (expression) => {
+    expect(compileBillingExpression(expression).status).toBe('invalid')
+  })
+})

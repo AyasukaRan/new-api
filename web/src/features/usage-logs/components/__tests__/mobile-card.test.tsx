@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
+  flexRender,
   getCoreRowModel,
   useReactTable,
   type VisibilityState,
@@ -57,6 +58,7 @@ const log = usageLogSchema.parse({
 
 function Fixture(props: {
   admin?: boolean
+  desktop?: boolean
   visibility?: VisibilityState
   logs?: UsageLog[]
   loading?: boolean
@@ -69,6 +71,14 @@ function Fixture(props: {
     getCoreRowModel: getCoreRowModel(),
     state: { columnVisibility: props.visibility ?? {} },
   })
+  if (props.desktop) {
+    const cell = table
+      .getRowModel()
+      .rows[0].getAllCells()
+      .find((item) => item.column.id === 'prompt_tokens')
+    if (!cell) throw new Error('The usage column is required for this fixture')
+    return <>{flexRender(cell.column.columnDef.cell, cell.getContext())}</>
+  }
   return (
     <>
       <button type='button' onClick={() => context.setSensitiveVisible(false)}>
@@ -356,4 +366,69 @@ it('shows cache hit-rate progress on mobile and hides it with the token column',
   expect(
     screen.queryByRole('progressbar', { name: 'Cache hit rate' })
   ).not.toBeInTheDocument()
+})
+
+it('shows metered page usage when the request has no tokens', () => {
+  renderLogs({
+    logs: [
+      {
+        ...log,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        other: JSON.stringify({ metered_usage: { unit: 'page', count: 2 } }),
+      },
+    ],
+  })
+  expect(screen.getByText('2 page')).toBeVisible()
+  expect(screen.getByText('Billable usage:')).toBeVisible()
+})
+
+it.each([false, true])(
+  'labels estimated metered usage in the desktop=%s list',
+  (desktop) => {
+    renderLogs({
+      desktop,
+      logs: [
+        {
+          ...log,
+          type: 5,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          other: JSON.stringify({
+            metered_usage: { unit: 'page', count: 1000 },
+            metered_usage_estimated: true,
+          }),
+        },
+      ],
+    })
+    expect(screen.getByText('1,000 page')).toBeVisible()
+    expect(
+      screen.getByText(desktop ? 'Estimated usage' : 'Estimated usage:')
+    ).toBeVisible()
+    expect(screen.queryByText('Billable usage:')).not.toBeInTheDocument()
+  }
+)
+
+it('opens the shared pagination evidence from a mobile log', async () => {
+  renderLogs({
+    logs: [
+      {
+        ...log,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        other: JSON.stringify({
+          metered_usage: { unit: 'page', count: 2 },
+          metered_usage_basis: 'local_pagination',
+          metered_usage_engine: 'qpdf/12.2.0',
+        }),
+      },
+    ],
+  })
+  await userEvent.setup().click(screen.getByTitle('Click to view full details'))
+  const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+  expect(
+    within(dialog).getByText('Locally counted document pages')
+  ).toBeVisible()
+  expect(within(dialog).getByText('Pagination engine')).toBeVisible()
+  expect(within(dialog).getByText('qpdf/12.2.0')).toBeVisible()
 })

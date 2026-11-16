@@ -463,7 +463,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 			tieredBillingApplied = true
 			tieredResult = tieredRes
 			summary.Quota = composeTieredTextQuota(relayInfo, summary, tieredQuota, tieredRes)
-			summary.FixedPriceBilling = isFixedPriceSettlement(relayInfo, tieredRes)
+			summary.FixedPriceBilling = isFixedPriceSettlement(relayInfo, tieredRes) ||
+				tieredRes != nil && tieredRes.MeteredUsage != nil ||
+				tieredRes == nil && snap.EstimatedMeteredUsage != nil
 			if summary.FixedPriceBilling {
 				summary.AudioInputPrice = 0
 			}
@@ -583,9 +585,22 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if tieredBillingApplied {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
 	}
+	if basis := ctx.GetString("deepseek_tts_usage_basis"); basis != "" {
+		other.SetPublic("metered_usage_basis", basis)
+	}
+	if basis := ctx.GetString("deepseek_file_usage_basis"); basis != "" {
+		other.SetPublic("metered_usage_basis", basis)
+	}
+	if engine := ctx.GetString("deepseek_file_pagination_engine"); engine != "" {
+		other.SetPublic("metered_usage_engine", engine)
+	}
+	if ctx.GetBool("deepseek_tts_cost_unconfirmed") || ctx.GetBool("deepseek_file_cost_unconfirmed") {
+		other.SetAdmin("cost_unconfirmed", true)
+		relayInfo.UpstreamCostRatio = nil
+	}
 	// Cost is explicitly an estimate, using the same usage basis as the charge
 	// even when a disconnected stream required local token estimation.
-	if settleErr == nil && originUsage != nil {
+	if settleErr == nil && (originUsage != nil || relayInfo.BillingMeteredUsage != nil) {
 		if snap == nil {
 			appendUpstreamCostInfo(relayInfo, other, summary.BaseQuota.InexactFloat64(), summary.Quota)
 		} else if tieredResult != nil {

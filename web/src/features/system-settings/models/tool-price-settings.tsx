@@ -61,6 +61,7 @@ const DEFAULT_PRICES: Record<string, number> = {
   x_search_posts: 5.0,
   x_search_profiles: 10.0,
   deepseek_search: 0.75,
+  deepseek_image_search: 0.75,
   deepseek_fetch: 0.75,
 }
 

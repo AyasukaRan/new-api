@@ -71,7 +71,7 @@ func SetRelayRouter(router *gin.Engine) {
 	playgroundRouter := router.Group("/pg")
 	playgroundRouter.Use(middleware.RouteTag("relay"))
 	playgroundRouter.Use(middleware.SystemPerformanceCheck())
-	playgroundRouter.Use(middleware.UserAuth(), middleware.Distribute())
+	playgroundRouter.Use(middleware.UserAuth(), middleware.PrepareDeepSeekFileReferences(), middleware.Distribute())
 	{
 		playgroundRouter.POST("/chat/completions", controller.Playground)
 	}
@@ -115,7 +115,7 @@ func SetRelayRouter(router *gin.Engine) {
 	{
 		//http router
 		httpRouter := relayV1Router.Group("")
-		httpRouter.Use(middleware.Distribute())
+		httpRouter.Use(middleware.PrepareDeepSeekFileReferences(), middleware.Distribute())
 
 		// claude related routes
 		// TODO: /messages/count_tokens is disabled. The current controller.CountClaudeTokens
@@ -147,6 +147,19 @@ func SetRelayRouter(router *gin.Engine) {
 			controller.Relay(c, types.RelayFormatDeepSeekTools)
 		})
 		httpRouter.POST("/tools/fetch", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatDeepSeekTools)
+		})
+		httpRouter.POST("/tools/ocr", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatDeepSeekTools)
+		})
+		httpRouter.POST("/tools/asr", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatDeepSeekTools)
+		})
+
+		httpRouter.POST("/tools/tts", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatDeepSeekTools)
+		})
+		httpRouter.GET("/tools/tts", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatDeepSeekTools)
 		})
 

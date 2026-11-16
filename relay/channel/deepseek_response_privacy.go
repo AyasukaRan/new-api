@@ -53,6 +53,8 @@ func protectDeepSeekResponse(c *gin.Context, info *relaycommon.RelayInfo, resp *
 		responseID = "resp_" + requestID
 	case info.RelayMode == relayconstant.RelayModeCompletions:
 		responseID = "cmpl-" + requestID
+	case info.RelayMode == relayconstant.RelayModeToolsOCR:
+		responseID = "ocr-" + requestID
 	}
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
@@ -61,6 +63,7 @@ func protectDeepSeekResponse(c *gin.Context, info *relaycommon.RelayInfo, resp *
 		stream: strings.HasPrefix(contentType, "text/event-stream") ||
 			(contentType == "" && info.IsStream && resp.StatusCode >= 200 && resp.StatusCode < 300),
 		compressed: encoding == "gzip", errorResponse: resp.StatusCode >= 300, limit: helper.DefaultMaxScannerBufferSize,
+		forwardWhitespace: info.RelayMode == relayconstant.RelayModeToolsOCR && resp.StatusCode == http.StatusOK,
 	}
 	if appconstant.StreamScannerMaxBufferMB > 0 {
 		body.limit = appconstant.StreamScannerMaxBufferMB << 20
@@ -95,6 +98,12 @@ func protectDeepSeekResponse(c *gin.Context, info *relaycommon.RelayInfo, resp *
 	if encoding != "" && encoding != "identity" && encoding != "gzip" {
 		return deepSeekResponseError(c, "unsupported DeepSeek response content encoding")
 	}
+	if info.RelayMode == relayconstant.RelayModeToolsTTS && resp.StatusCode == http.StatusOK && strings.HasPrefix(contentType, "audio/") {
+		if encoding != "" && encoding != "identity" {
+			return deepSeekResponseError(c, "unsupported audio response content encoding")
+		}
+		return nil
+	}
 	if resp.Body != nil {
 		resp.Body = body
 	}
@@ -102,20 +111,21 @@ func protectDeepSeekResponse(c *gin.Context, info *relaycommon.RelayInfo, resp *
 }
 
 type deepSeekPrivateResponse struct {
-	source        io.ReadCloser
-	context       *gin.Context
-	reader        *bufio.Reader
-	gzipReader    *gzip.Reader
-	requestID     string
-	responseID    string
-	originalIDs   []string
-	stream        bool
-	compressed    bool
-	errorResponse bool
-	limit         int
-	pending       []byte
-	terminal      error
-	closed        atomic.Bool
+	source            io.ReadCloser
+	context           *gin.Context
+	reader            *bufio.Reader
+	gzipReader        *gzip.Reader
+	requestID         string
+	responseID        string
+	originalIDs       []string
+	stream            bool
+	compressed        bool
+	errorResponse     bool
+	forwardWhitespace bool
+	limit             int
+	pending           []byte
+	terminal          error
+	closed            atomic.Bool
 }
 
 func (r *deepSeekPrivateResponse) rememberID(id string) error {
@@ -174,6 +184,21 @@ func (r *deepSeekPrivateResponse) Read(p []byte) (int, error) {
 		if r.stream {
 			r.pending, r.terminal = r.readEvent()
 		} else {
+			// OCR's leading newlines keep a potentially three-minute operation
+			// alive. Only whitespace can leave before JSON privacy validation.
+			if r.forwardWhitespace {
+				first, err := r.reader.ReadByte()
+				if err != nil {
+					r.terminal = err
+					continue
+				}
+				if first == ' ' || first == '\n' || first == '\r' || first == '\t' {
+					r.pending = []byte{first}
+					continue
+				}
+				_ = r.reader.UnreadByte()
+				r.forwardWhitespace = false
+			}
 			body, err := io.ReadAll(io.LimitReader(r.reader, int64(r.limit)+1))
 			if err != nil {
 				r.terminal = deepSeekResponseError(r.context, "failed to read DeepSeek response")

@@ -125,7 +125,8 @@ func RefreshPricingForSelectedChannel(ctx *gin.Context, info *relaycommon.RelayI
 	current := info.TieredBillingSnapshot
 	if previous != nil && current != nil && previous.ExprString == current.ExprString &&
 		previous.GroupRatio == current.GroupRatio && previous.EstimatedPromptTokens == current.EstimatedPromptTokens &&
-		previous.EstimatedCompletionTokens == current.EstimatedCompletionTokens {
+		previous.EstimatedCompletionTokens == current.EstimatedCompletionTokens &&
+		previous.EstimatedMeteredUsage == nil && current.EstimatedMeteredUsage == nil {
 		info.TieredBillingSnapshot = previous
 		info.PriceData.QuotaToPreConsume = previous.EstimatedQuotaAfterGroup
 	}
@@ -487,6 +488,19 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 			return hosttypes.PriceData{}, err
 		}
 	}
+	if request, ok := info.Request.(interface{ GetMeteredUsage() (string, int) }); ok {
+		unit, count := request.GetMeteredUsage()
+		usage := billingexpr.MeteredUsage{Unit: billingexpr.BillingUnit(unit), Count: count}
+		if err := usage.Validate(); err != nil {
+			return hosttypes.PriceData{}, err
+		}
+		requestInput.MeteredUsage = &usage
+	}
+	for _, variable := range []string{"document_pages", "audio_seconds", "speech_characters"} {
+		if usedVars[variable] && (requestInput.MeteredUsage == nil || requestInput.MeteredUsage.Variable() != variable) {
+			return hosttypes.PriceData{}, fmt.Errorf("model %s requires measured %s usage", billingModelName, variable)
+		}
+	}
 
 	rawCost, trace, err := billingexpr.RunExprByHashWithRequest(exprStr, exprHash, billingexpr.TokenParams{
 		P:   float64(promptTokens),
@@ -504,7 +518,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 	quotaBeforeGroup := rawCost / 1_000_000 * common.QuotaPerUnit
 	// Scale the reservation, preserving the expression's context-length tier
 	// and leaving actual settlement and fixed request prices unchanged.
-	if trace.BillingUnit != billingexpr.BillingUnitRequest {
+	if trace.BillingUnit == billingexpr.BillingUnitToken {
 		quotaBeforeGroup *= preConsumeMultiplier
 	}
 	preConsumedQuota, err := billingexpr.QuotaRoundStrict(quotaBeforeGroup * groupRatioInfo.GroupRatio)
@@ -521,6 +535,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 	}
 
 	snapshot := &billingexpr.BillingSnapshot{
+		EstimatedMeteredUsage:     trace.MeteredUsage,
 		EstimatedImageCount:       trace.ImageCount,
 		BillingMode:               billing_setting.BillingModeTieredExpr,
 		ModelName:                 billingModelName,

@@ -798,3 +798,29 @@ describe('shared plugin price summaries', () => {
     })
   })
 })
+
+test.each([
+  ['document_pages', 'page', 'Per page', 0.000225],
+  ['audio_seconds', 'second', 'Per second', 0.00001611],
+  ['speech_characters', 'character', 'Per character', 0.0000225],
+])(
+  'displays %s as a unit price without token scaling',
+  (variable, unit, shortLabel, price) => {
+    const model = pricingModel({
+      billing_mode: 'tiered_expr',
+      billing_expr: `tier("tool", fixed(${price})) * ${variable}`,
+    })
+    const thousand = getDynamicPricingSummary(model, { tokenUnit: 'K' })
+    const million = getDynamicPricingSummary(model, { tokenUnit: 'M' })
+    expect(thousand?.isSpecialExpression).toBe(false)
+    expect(thousand?.primaryEntries[0]).toMatchObject({
+      unit,
+      shortLabel,
+      value: price,
+    })
+    expect(thousand?.primaryEntries[0].formatted).toBe(`$${price}`)
+    expect(thousand?.primaryEntries[0].formatted).toBe(
+      million?.primaryEntries[0].formatted
+    )
+  }
+)

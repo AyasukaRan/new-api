@@ -125,37 +125,40 @@ var (
 
 // compileEnvPrototypeV1 is the v1 type-checking prototype used at compile time.
 var compileEnvPrototypeV1 = map[string]any{
-	"image_count": float64(1),
-	"p":           float64(0),
-	"c":           float64(0),
-	"len":         float64(0),
-	"cr":          float64(0),
-	"cc":          float64(0),
-	"cc1h":        float64(0),
-	"cc12h":       float64(0),
-	"img":         float64(0),
-	"img_cr":      float64(0),
-	"img_o":       float64(0),
-	"ai":          float64(0),
-	"ao":          float64(0),
-	"tier":        func(string, float64) float64 { return 0 },
-	"fixed":       func(float64) float64 { return 0 },
-	"_trace":      func(int, bool, float64) float64 { return 1 },
-	"_trace_int":  func(int, bool, int) int { return 1 },
-	"header":      func(string) string { return "" },
-	"param":       func(string) any { return nil },
-	"u":           func(string) any { return nil },
-	"has":         func(any, string) bool { return false },
-	"hour":        func(string) int { return 0 },
-	"minute":      func(string) int { return 0 },
-	"weekday":     func(string) int { return 0 },
-	"month":       func(string) int { return 0 },
-	"day":         func(string) int { return 0 },
-	"max":         math.Max,
-	"min":         math.Min,
-	"abs":         math.Abs,
-	"ceil":        math.Ceil,
-	"floor":       math.Floor,
+	"image_count":       float64(1),
+	"document_pages":    float64(0),
+	"audio_seconds":     float64(0),
+	"speech_characters": float64(0),
+	"p":                 float64(0),
+	"c":                 float64(0),
+	"len":               float64(0),
+	"cr":                float64(0),
+	"cc":                float64(0),
+	"cc1h":              float64(0),
+	"cc12h":             float64(0),
+	"img":               float64(0),
+	"img_cr":            float64(0),
+	"img_o":             float64(0),
+	"ai":                float64(0),
+	"ao":                float64(0),
+	"tier":              func(string, float64) float64 { return 0 },
+	"fixed":             func(float64) float64 { return 0 },
+	"_trace":            func(int, bool, float64) float64 { return 1 },
+	"_trace_int":        func(int, bool, int) int { return 1 },
+	"header":            func(string) string { return "" },
+	"param":             func(string) any { return nil },
+	"u":                 func(string) any { return nil },
+	"has":               func(any, string) bool { return false },
+	"hour":              func(string) int { return 0 },
+	"minute":            func(string) int { return 0 },
+	"weekday":           func(string) int { return 0 },
+	"month":             func(string) int { return 0 },
+	"day":               func(string) int { return 0 },
+	"max":               math.Max,
+	"min":               math.Min,
+	"abs":               math.Abs,
+	"ceil":              math.Ceil,
+	"floor":             math.Floor,
 }
 
 func getCompileEnv(version int) map[string]any {
@@ -186,6 +189,9 @@ func compileFromCacheByHash(exprStr, hash string) (*vm.Program, error) {
 }
 
 func compileEntryFromCacheByHash(exprStr, hash string) (*cachedEntry, error) {
+	if hash == "" {
+		hash = ExprHashString(exprStr)
+	}
 	cacheMu.RLock()
 	if entry, ok := cache[hash]; ok {
 		cacheMu.RUnlock()
@@ -204,6 +210,19 @@ func compileEntryFromCacheByHash(exprStr, hash string) (*cachedEntry, error) {
 		identifier, ok := node.(*ast.IdentifierNode)
 		return ok && identifier.Value == "fixed"
 	}) != nil
+	metered := map[string]bool{}
+	_ = ast.Find(tree.Node, func(node ast.Node) bool {
+		if identifier, ok := node.(*ast.IdentifierNode); ok {
+			switch identifier.Value {
+			case "document_pages", "audio_seconds", "speech_characters":
+				metered[identifier.Value] = true
+			}
+		}
+		return false
+	})
+	if len(metered) > 1 || len(metered) == 1 && !fixedPricing {
+		return nil, fmt.Errorf("metered pricing requires one quantity and a fixed unit price")
+	}
 	if fixedPricing {
 		if err := validateFixedPricingTree(tree.Node); err != nil {
 			return nil, fmt.Errorf("expr compile error: %w", err)

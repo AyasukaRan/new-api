@@ -92,6 +92,64 @@ def runtime_fingerprint(info):
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
+
+
+def prepare_relay_file_schema(database_container=None, database_name=None):
+    # Additive only: old and new processes may overlap while streams drain.
+    # Keep this separate from startup so a slave never serves a missing column.
+    sql = """BEGIN;
+SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='20s';
+ALTER TABLE relay_files
+ ADD COLUMN IF NOT EXISTS provider varchar(32),
+ ADD COLUMN IF NOT EXISTS upstream_file_id varchar(191),
+ ADD COLUMN IF NOT EXISTS key_identity varchar(64),
+ ADD COLUMN IF NOT EXISTS expires_at bigint;
+DO $migration$
+BEGIN
+ IF (SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='relay_files' AND
+    ((column_name='provider' AND data_type='character varying' AND character_maximum_length=32) OR
+     (column_name='upstream_file_id' AND data_type='character varying' AND character_maximum_length=191) OR
+     (column_name='key_identity' AND data_type='character varying' AND character_maximum_length=64) OR
+     (column_name='expires_at' AND data_type='bigint'))) <> 4
+ THEN RAISE EXCEPTION 'unexpected relay file schema'; END IF;
+END $migration$;
+COMMIT;
+"""
+    args = ['docker', 'exec', '-i']
+    if database_name is not None:
+        check(re.fullmatch(r'[a-zA-Z0-9_-]+', database_name), 'invalid_migration_database')
+        args += ['-e', 'PGDATABASE=' + database_name]
+    args += [database_container or DB, 'sh', '-ec',
+             'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${PGDATABASE:-$POSTGRES_DB}"']
+    command(*args, input=sql, timeout=40)
+
+
+def document_pages_mount(receipt):
+    config = receipt.get('document_pages')
+    if config is None:
+        return None
+    check(set(config) == {'container_name', 'image_id', 'volume_name'} and
+          config['container_name'] == 'new-api-document-pages' and
+          config['volume_name'] == 'new-api-document-pages-socket' and
+          re.fullmatch(r'sha256:[a-f0-9]{64}', config['image_id']), 'invalid_document_pages_receipt')
+    worker = inspect(config['container_name'])
+    host = worker['HostConfig']
+    check(worker['Image'] == config['image_id'] and worker['State'].get('Health', {}).get('Status') == 'healthy',
+          'document_pages_worker_unavailable')
+    check(host['NetworkMode'] == 'none' and host['ReadonlyRootfs'] and not host['Privileged'] and
+          'ALL' in host.get('CapDrop', []) and 'no-new-privileges:true' in host.get('SecurityOpt', []) and
+          worker['Config']['User'] == '65532:65532' and 0 < host['Memory'] <= 2 * 1024 ** 3,
+          'document_pages_isolation_changed')
+    mounts = worker['Mounts']
+    allowed = [m for m in mounts if m['Type'] == 'volume' and m.get('Name') == config['volume_name']
+               and m['Destination'] == '/run/document-pages']
+    check(len(allowed) == 1 and all(m in allowed or m['Type'] == 'tmpfs' and
+          m['Destination'] in ('/work', '/tmp') for m in mounts), 'document_pages_mounts_changed')
+    mount = copy.deepcopy(allowed[0])
+    mount.update(Mode='ro', RW=False)
+    return mount
+
+
 def dependencies():
     result = {}
     for name in (DB, CACHE, EDGE):
@@ -187,6 +245,7 @@ def verify_release(path):
 
 def preflight(release_path, backup_path):
     release = verify_release(release_path)
+    document_pages_mount(release)
     original = COMPOSE.read_bytes()
     compose, app, backup = json.loads(original), inspect(APP), read_json(backup_path)
     check(app['Image'] == release['runtime_base_id'] and app['Config']['Image'] == release['runtime_base'], 'base_image_mismatch')
@@ -266,6 +325,12 @@ class Rollout:
         values = environment(expected['Config']['Env'])
         if not old:
             values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
+            mount = document_pages_mount(self.release)
+            if mount is not None:
+                values['DEEPSEEK_DOCUMENT_PAGES_SOCKET'] = '/run/document-pages/pages.sock'
+                expected['HostConfig']['Binds'] = list(expected['HostConfig'].get('Binds') or []) + [
+                    'new-api-document-pages-socket:/run/document-pages:ro']
+                expected['Mounts'].append(mount)
         if name == BRIDGE:
             values.update(NODE_TYPE='slave', NODE_NAME=values['NODE_NAME'] + '-bridge')
             expected['HostConfig']['PortBindings'] = {}
@@ -387,6 +452,9 @@ class Rollout:
                 self.cleanup_bridge()
                 return phase
             if phase == 'prepared':
+                if self.release.get('relay_file_schema') and not self.state.get('relay_file_schema_prepared'):
+                    prepare_relay_file_schema()
+                    self.save(relay_file_schema_prepared=True)
                 item = inspect(BRIDGE, optional=True)
                 if item:
                     check(item['Config'].get('Labels', {}).get('io.new-api.rollout') == str(self.args.state), 'unowned_bridge')
@@ -472,6 +540,13 @@ def initialize(args):
     service = final['services']['new-api']
     values = environment(service['environment'])
     values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
+    if document_pages_mount(release) is not None:
+        check('DEEPSEEK_DOCUMENT_PAGES_SOCKET' not in values and not any(
+              '/run/document-pages' in str(v) for v in service.get('volumes', [])), 'document_pages_already_configured')
+        values['DEEPSEEK_DOCUMENT_PAGES_SOCKET'] = '/run/document-pages/pages.sock'
+        service.setdefault('volumes', []).append('new-api-document-pages-socket:/run/document-pages:ro')
+        final.setdefault('volumes', {})['new-api-document-pages-socket'] = {
+            'name': 'new-api-document-pages-socket', 'external': True}
     service.update(image=release['image'], environment=values)
     bridge = copy.deepcopy(final)
     service = bridge['services']['new-api']

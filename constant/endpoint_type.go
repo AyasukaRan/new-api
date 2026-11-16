@@ -13,6 +13,10 @@ const (
 	EndpointTypeOpenAIAlphaSearch     = types.EndpointTypeOpenAIAlphaSearch
 	EndpointTypeDeepSeekToolsSearch   = types.EndpointTypeDeepSeekToolsSearch
 	EndpointTypeDeepSeekToolsFetch    = types.EndpointTypeDeepSeekToolsFetch
+	EndpointTypeDeepSeekToolsOCR      = types.EndpointTypeDeepSeekToolsOCR
+	EndpointTypeDeepSeekToolsASR      = types.EndpointTypeDeepSeekToolsASR
+	EndpointTypeDeepSeekToolsTTS      = types.EndpointTypeDeepSeekToolsTTS
+	EndpointTypeDeepSeekFiles         = types.EndpointTypeDeepSeekFiles
 	EndpointTypeAnthropic             = types.EndpointTypeAnthropic
 	EndpointTypeGemini                = types.EndpointTypeGemini
 	EndpointTypeJinaRerank            = types.EndpointTypeJinaRerank
@@ -26,4 +30,8 @@ const (
 const (
 	DeepSeekSearchModel = "deepseek-search"
 	DeepSeekFetchModel  = "deepseek-fetch"
+	DeepSeekOCRModel    = "deepseek-ocr"
+	DeepSeekASRModel    = "deepseek-asr"
+	DeepSeekTTSModel    = "deepseek-tts"
+	DeepSeekFilesModel  = "deepseek-files"
 )

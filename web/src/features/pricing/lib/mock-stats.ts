@@ -505,6 +505,7 @@ export type SupportedParameter = {
     | 'object'
     | 'array'
     | 'enum'
+    | 'file'
   defaultValue?: string | number | boolean
   range?: string
   enumValues?: string[]
@@ -837,6 +838,63 @@ export function buildSupportedParameters(
         descriptionKey: 'HTTP or HTTPS page URL',
       },
     ]
+  }
+  const endpoints = model.supported_endpoint_types ?? []
+  if (endpoints.includes(ENDPOINT_TYPES.DEEPSEEK_TTS)) {
+    return [
+      {
+        name: 'text',
+        type: 'string',
+        required: true,
+        descriptionKey: 'Text to synthesize',
+      },
+      {
+        name: 'voice_id',
+        type: 'enum',
+        enumValues: ['stella', 'tide'],
+        descriptionKey: 'Voice',
+      },
+      {
+        name: 'format',
+        type: 'enum',
+        defaultValue: 'wav',
+        enumValues: ['wav', 'pcm'],
+        descriptionKey: 'Format',
+      },
+      {
+        name: 'filter_markdown',
+        type: 'boolean',
+        defaultValue: true,
+        descriptionKey: 'Remove Markdown formatting',
+      },
+    ]
+  }
+  if (
+    endpoints.some((type) =>
+      [
+        ENDPOINT_TYPES.DEEPSEEK_OCR,
+        ENDPOINT_TYPES.DEEPSEEK_ASR,
+        ENDPOINT_TYPES.DEEPSEEK_FILES,
+      ].some((upload) => upload === type)
+    )
+  ) {
+    const params: SupportedParameter[] = [
+      { name: 'file', type: 'file', required: true, descriptionKey: 'File' },
+    ]
+    if (!endpoints.includes(ENDPOINT_TYPES.DEEPSEEK_ASR)) {
+      const purposes = ['text_recognition', 'rich_layout_recognition']
+      if (endpoints.includes(ENDPOINT_TYPES.DEEPSEEK_FILES)) {
+        purposes.unshift('user_data')
+      }
+      params.push({
+        name: 'purpose',
+        type: 'enum',
+        required: true,
+        enumValues: purposes,
+        descriptionKey: 'Upload purpose',
+      })
+    }
+    return params
   }
   const cat = apiCategoryOf(model)
   if (cat === 'reasoning') return REASONING_PARAMS

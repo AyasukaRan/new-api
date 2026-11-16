@@ -10,6 +10,14 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 		return []constant.EndpointType{constant.EndpointTypeDeepSeekToolsSearch}
 	case constant.DeepSeekFetchModel:
 		return []constant.EndpointType{constant.EndpointTypeDeepSeekToolsFetch}
+	case constant.DeepSeekOCRModel:
+		return []constant.EndpointType{constant.EndpointTypeDeepSeekToolsOCR}
+	case constant.DeepSeekASRModel:
+		return []constant.EndpointType{constant.EndpointTypeDeepSeekToolsASR}
+	case constant.DeepSeekFilesModel:
+		return []constant.EndpointType{constant.EndpointTypeDeepSeekFiles}
+	case constant.DeepSeekTTSModel:
+		return []constant.EndpointType{constant.EndpointTypeDeepSeekToolsTTS}
 	}
 	var endpointTypes []constant.EndpointType
 	switch channelType {

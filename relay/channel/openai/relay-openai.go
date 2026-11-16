@@ -122,6 +122,8 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
+	var upstreamFailure *types.NewAPIError
+	var vendorUsage *dto.Usage
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
@@ -136,6 +138,26 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 
 			lastStreamData = data
+			info.ApplyVendorToolUsage(common.StringToByteSlice(data))
+			if info.VendorToolUsage != nil {
+				if measured := vendorBilledChatUsage(info, common.StringToByteSlice(data)); measured != nil {
+					vendorUsage = measured
+				}
+				var errorResponse struct {
+					Error any `json:"error"`
+				}
+				if common.UnmarshalJsonStr(data, &errorResponse) == nil {
+					if upstreamError := dto.GetOpenAIError(errorResponse.Error); upstreamError != nil && upstreamError.Type != "" {
+						upstreamFailure = types.WithOpenAIError(*upstreamError, http.StatusInternalServerError)
+						usage = vendorBilledChatUsage(info, common.StringToByteSlice(data))
+						if usage != nil {
+							applyUsagePostProcessing(info, usage, common.StringToByteSlice(data))
+						}
+						sr.Stop(upstreamFailure)
+						return
+					}
+				}
+			}
 			observeStreamChoices(info, data, seenStreamToolCalls, &streamFunctionCallNames)
 			if err := processTokenData(info, data, &responseTextBuilder, &toolCount); err != nil {
 				logger.LogError(c, common.LogText("error processing stream token data: %s", err.Error()))
@@ -145,6 +167,11 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	})
 
 	info.StreamStatus.RequireTerminal()
+	if upstreamFailure != nil {
+		// The controller emits the error once. Do not synthesize a successful
+		// terminal or estimate usage for a vendor failure without a bill.
+		return usage, upstreamFailure
+	}
 
 	// 处理最后的响应
 	shouldSendLastResp := true
@@ -174,6 +201,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 					usage.InputTokens, usage.OutputTokens)
 			}
 		}
+	}
+
+	if vendorUsage != nil {
+		usage, containStreamUsage = vendorUsage, true
 	}
 
 	if info.RelayFormat == types.RelayFormatOpenAI {
@@ -281,6 +312,18 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
+		if info.VendorToolUsage != nil {
+			upstreamFailure := types.WithOpenAIError(*oaiError, http.StatusInternalServerError)
+			info.ApplyVendorToolUsage(responseBody)
+			usage := vendorBilledChatUsage(info, responseBody)
+			if usage != nil {
+				applyUsagePostProcessing(info, usage, responseBody)
+				info.StreamStatus = relaycommon.NewStreamStatus()
+				info.StreamStatus.MarkFailed(string(upstreamFailure.GetErrorCode()), oaiError.Type, upstreamFailure.StatusCode)
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, upstreamFailure)
+			}
+			return usage, upstreamFailure
+		}
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
 
@@ -306,7 +349,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	usageModified := false
-	if simpleResponse.Usage.PromptTokens == 0 {
+	if simpleResponse.Usage.PromptTokens == 0 && (info.VendorToolUsage == nil || vendorBilledChatUsage(info, responseBody) == nil) {
 		completionTokens := simpleResponse.Usage.CompletionTokens
 		if completionTokens == 0 {
 			for _, choice := range simpleResponse.Choices {
@@ -370,4 +413,37 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	return &simpleResponse.Usage, nil
+}
+
+// vendorBilledChatUsage accepts an actual vendor failure bill, including a
+// tool-only bill. Missing/invalid usage must not turn an error into estimated
+// token consumption.
+func vendorBilledChatUsage(info *relaycommon.RelayInfo, body []byte) *dto.Usage {
+	raw := ojson.GetBytes(body, "usage")
+	if !raw.IsObject() {
+		return nil
+	}
+	var usage dto.Usage
+	if common.UnmarshalJsonStr(raw.Raw, &usage) != nil {
+		return nil
+	}
+	for _, value := range []int{usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
+		usage.PromptCacheHitTokens, usage.PromptTokensDetails.CachedTokens} {
+		if value < 0 || value > common.MaxQuota {
+			return nil
+		}
+	}
+	if usage.PromptTokens > common.MaxQuota-usage.CompletionTokens ||
+		usage.PromptCacheHitTokens > usage.PromptTokens || usage.PromptTokensDetails.CachedTokens > usage.PromptTokens {
+		return nil
+	}
+	if raw.Get("prompt_tokens").Type == ojson.Number && raw.Get("completion_tokens").Type == ojson.Number {
+		return &usage
+	}
+	for _, count := range info.VendorToolUsage(body) {
+		if count > 0 {
+			return &usage
+		}
+	}
+	return nil
 }

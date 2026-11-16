@@ -170,6 +170,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
 	if newApiErr != nil {
+		if billedUsage, ok := usage.(*dto.Usage); ok && billedUsage != nil && info.VendorToolUsage != nil {
+			// Generation failures may carry an authoritative bill. Settle it
+			// before the normal failure path, without replaying the paid work.
+			service.PostTextConsumeQuota(c, info, billedUsage, nil)
+			types.ErrOptionWithSkipRetry()(newApiErr)
+		}
 		// reset status code 重置状态码
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return newApiErr

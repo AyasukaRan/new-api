@@ -18,9 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { t } from 'i18next'
 import { expect, it, vi } from 'vitest'
 
+import { ENDPOINT_TEMPLATES } from '@/features/models/constants'
+
 import { ModelDetailsApi } from '../components/model-details-api'
+import { getEndpointTypeLabels } from '../constants'
 import type { PricingModel } from '../types'
 
 vi.mock('@/hooks/use-status', () => ({
@@ -38,12 +42,12 @@ vi.mock('@/components/ai-elements/code-block', () => ({
 it.each(['search', 'fetch'])(
   'gives working request examples and parameters for DeepSeek %s',
   async (tool) => {
-    const type = 'deepseek-tools-' + tool
-    const path = '/v1/tools/' + tool
+    const type = `deepseek-tools-${tool}`
+    const path = `/v1/tools/${tool}`
     const key = tool === 'search' ? 'query' : 'url'
     const model: PricingModel = {
       id: 1,
-      model_name: 'deepseek-' + tool,
+      model_name: `deepseek-${tool}`,
       model_ratio: 0,
       completion_ratio: 0,
       quota_type: 1,
@@ -60,11 +64,65 @@ it.each(['search', 'fetch'])(
     for (const lang of ['cURL', 'Python', 'TypeScript', 'JavaScript']) {
       await user.click(screen.getByRole('tab', { name: lang }))
       const example = screen.getByTestId('sample').textContent ?? ''
-      expect(example).toContain('https://gateway.example/new-api' + path)
-      expect(example).toContain('"' + key + '"')
+      expect(example).toContain(`https://gateway.example/new-api${path}`)
+      expect(example).toContain(`"${key}"`)
       expect(example).toContain('NEW_API_KEY')
       expect(example).not.toMatch(/chat\.completions|messages|temperature/)
     }
     expect(screen.getByText(key, { exact: true })).toBeInTheDocument()
+  }
+)
+
+it.each(['ocr', 'asr', 'tts', 'files'])(
+  'uses the standalone %s contract in every code example',
+  async (tool) => {
+    const type = tool === 'files' ? 'deepseek-files' : `deepseek-tools-${tool}`
+    const path = tool === 'files' ? '/v1/files' : `/v1/tools/${tool}`
+    const model: PricingModel = {
+      id: 1,
+      model_name: `deepseek-${tool}`,
+      model_ratio: 0,
+      completion_ratio: 0,
+      quota_type: 1,
+      enable_groups: ['default'],
+      supported_endpoint_types: [type],
+    }
+    render(
+      <ModelDetailsApi
+        model={model}
+        endpointMap={{ [type]: { path, method: 'POST' } }}
+      />
+    )
+    const user = userEvent.setup()
+    for (const lang of ['cURL', 'Python', 'TypeScript', 'JavaScript']) {
+      await user.click(screen.getByRole('tab', { name: lang }))
+      const example = screen.getByTestId('sample').textContent ?? ''
+      expect(example).toContain(`https://gateway.example/new-api${path}`)
+      expect(example).toContain('NEW_API_KEY')
+      expect(example).not.toMatch(/chat\.completions|messages|temperature/)
+      if (tool === 'tts') {
+        expect(example).toContain('speech.wav')
+        expect(example).toContain('voice_id')
+        expect(example).not.toContain('response.json()')
+      } else {
+        expect(example).toContain('file')
+        expect(example).not.toContain('application/json')
+        if (tool !== 'asr') expect(example).toContain('text_recognition')
+      }
+    }
+    expect(
+      screen.getByText(tool === 'tts' ? 'text' : 'file', {
+        exact: true,
+        selector: 'code',
+      })
+    ).toBeVisible()
+    expect(
+      screen.queryByText('temperature', { exact: true })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('Rate limits', { exact: true })
+    ).not.toBeInTheDocument()
+    expect(ENDPOINT_TEMPLATES[type]).toEqual({ path, method: 'POST' })
+    expect(getEndpointTypeLabels(t)).toHaveProperty(type)
   }
 )

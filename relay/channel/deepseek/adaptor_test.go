@@ -27,6 +27,125 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDeepSeekApplicationRequestsPreserveContinuation(t *testing.T) {
+	const call = `{"type":"web_search_call","id":"opaque_tool_id","status":"completed","kind":"read_link","action":{"type":"open_page","url":"https://example.com"},"page":{"title":null},"signature":"opaque+/signature=="}`
+	const serverCalls = `[{"index":0,"reasoning_content":"","calls":[{"id":"opaque_tool_id","type":"deepseek_read_url","kind":"read_link","signature":"opaque+/signature=="}]}]`
+	for _, protocol := range []string{"chat", "responses", "claude"} {
+		t.Run(protocol, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek, UpstreamModelName: "deepseek-flash"}}
+			adaptor := &deepseek.Adaptor{}
+			var converted any
+			var err error
+			var replayPath, replay string
+			switch protocol {
+			case "chat":
+				replayPath, replay = "messages.0.server_tool_calls", serverCalls
+				var request dto.GeneralOpenAIRequest
+				require.NoError(t, common.UnmarshalJsonStr(`{"model":"deepseek-flash","title":{"enabled":false},"safety_check":{"level":"high"},"tools":[{"type":"deepseek_read_url"}],"messages":[{"role":"assistant","content":"Read it","server_tool_calls":`+serverCalls+`},{"role":"user","content":"Summarize it"}]}`, &request))
+				converted, err = adaptor.ConvertOpenAIRequest(c, info, &request)
+			case "responses":
+				replayPath, replay = "input.0", call
+				var request dto.OpenAIResponsesRequest
+				require.NoError(t, common.UnmarshalJsonStr(`{"model":"deepseek-flash","title":{"enabled":false},"safety_check":{"level":"high"},"tools":[{"type":"deepseek_read_url"}],"input":[`+call+`,{"role":"user","content":"Summarize it"}]}`, &request))
+				converted, err = adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+			case "claude":
+				replayPath = "messages.0.content.0"
+				replay = `{"type":"web_fetch_tool_result","tool_use_id":"opaque_tool_id","content":{"type":"web_fetch_result","url":"https://example.com","content":{"type":"document","source":{"type":"text","data":""}}},"kind":"read_link","signature":"opaque+/signature=="}`
+				var request dto.ClaudeRequest
+				require.NoError(t, common.UnmarshalJsonStr(`{"model":"deepseek-flash","title":{"enabled":false},"safety_check":{"level":"high"},"tools":[{"type":"deepseek_read_url","name":"deepseek_read_url"}],"messages":[{"role":"assistant","content":[`+replay+`]},{"role":"user","content":"Summarize it"}]}`, &request))
+				converted, err = adaptor.ConvertClaudeRequest(c, info, &request)
+			}
+			require.NoError(t, err)
+			wire, err := common.Marshal(converted)
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"enabled":false}`, ojson.GetBytes(wire, "title").Raw)
+			assert.JSONEq(t, `{"level":"high"}`, ojson.GetBytes(wire, "safety_check").Raw)
+			assert.JSONEq(t, replay, ojson.GetBytes(wire, replayPath).Raw)
+			assert.False(t, ojson.GetBytes(wire, "tools.0.function").Exists())
+		})
+	}
+}
+
+func TestDeepSeekApplicationToolsCompatibility(t *testing.T) {
+	const standard = `[{"type":"web_search","external_web_access":true},{"type":"function","name":"shell","parameters":{"type":"object","properties":{}}}]`
+	const mapped = `[{"type":"deepseek_web_search"},{"type":"function","name":"shell","parameters":{"type":"object","properties":{}}}]`
+	for _, test := range []struct{ name, model, tools, want string }{
+		{"flash standard with function", "deepseek-flash", standard, mapped},
+		{"pro unchanged", "deepseek-v4-pro", standard, standard},
+		{"custom unchanged", "deepseek-flash", `[{"type":"web_search"},{"type":"custom","name":"apply_patch"}]`, ""},
+		{"namespace unchanged", "deepseek-flash", `[{"type":"web_search"},{"type":"namespace","name":"functions","tools":[]}]`, ""},
+		{"tool search unchanged", "deepseek-flash", `[{"type":"web_search"},{"type":"tool_search"}]`, ""},
+		{"domain restriction retained", "deepseek-flash", `[{"type":"web_search","filters":{"allowed_domains":["example.com"]}}]`, ""},
+		{"location retained", "deepseek-flash", `[{"type":"web_search","user_location":{"country":"CN"}}]`, ""},
+		{"offline restriction retained", "deepseek-flash", `[{"type":"web_search","external_web_access":false}]`, ""},
+		{"native declaration wins", "deepseek-flash", `[{"type":"web_search"},{"type":"deepseek_web_search"},{"type":"deepseek_read_url"}]`, `[{"type":"deepseek_web_search"},{"type":"deepseek_read_url"}]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := dto.OpenAIResponsesRequest{Model: test.model, Tools: json.RawMessage(test.tools)}
+			converted, err := (&deepseek.Adaptor{}).ConvertOpenAIResponsesRequest(nil, nil, request)
+			require.NoError(t, err)
+			wire, err := common.Marshal(converted)
+			require.NoError(t, err)
+			want := test.want
+			if want == "" {
+				want = test.tools
+			}
+			assert.JSONEq(t, want, ojson.GetBytes(wire, "tools").Raw)
+		})
+	}
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek, UpstreamModelName: "deepseek-flash"}}
+	var claudeRequest dto.ClaudeRequest
+	require.NoError(t, common.UnmarshalJsonStr(`{"model":"deepseek-flash","tools":[{"type":"web_search_20250305","name":"web_search"},{"type":"web_fetch_20250910","name":"web_fetch"},{"name":"shell","input_schema":{"type":"object"}}]}`, &claudeRequest))
+	converted, err := (&deepseek.Adaptor{}).ConvertClaudeRequest(c, info, &claudeRequest)
+	require.NoError(t, err)
+	wire, err := common.Marshal(converted)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[{"type":"deepseek_web_search","name":"deepseek_web_search"},{"type":"deepseek_read_url","name":"deepseek_read_url"},{"name":"shell","input_schema":{"type":"object"}}]`, ojson.GetBytes(wire, "tools").Raw)
+
+	chatRequest := &dto.GeneralOpenAIRequest{Model: "deepseek-flash", WebSearchOptions: &dto.WebSearchOptions{}, Tools: []dto.ToolCallRequest{{Type: "function", Function: dto.FunctionRequest{Name: "shell"}}}}
+	converted, err = (&deepseek.Adaptor{}).ConvertOpenAIRequest(c, info, chatRequest)
+	require.NoError(t, err)
+	wire, err = common.Marshal(converted)
+	require.NoError(t, err)
+	assert.False(t, ojson.GetBytes(wire, "web_search_options").Exists())
+	assert.Equal(t, "shell", ojson.GetBytes(wire, "tools.0.function.name").String())
+	assert.JSONEq(t, `{"type":"deepseek_web_search"}`, ojson.GetBytes(wire, "tools.1").Raw)
+}
+
+func TestDeepSeekApplicationResponseMetadataRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		response   any
+		paths      []string
+	}{
+		{"chat", `{"choices":[{"message":{"role":"assistant","content":"answer","server_tool_calls":[{"calls":[{"id":"opaque","signature":"sig==","kind":"read_link"}]}],"title":"Example","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com"}}]}}],"usage":{"server_tool_use":{"tool_search":0,"tool_image_search":2}}}`, &dto.OpenAITextResponse{}, []string{"choices.0.message.server_tool_calls", "choices.0.message.title", "choices.0.message.annotations", "usage.server_tool_use"}},
+		{"chat stream", `{"choices":[{"delta":{"server_tool_calls":[{"calls":[{"signature":"sig=="}]}],"title":"Example"},"server_tool_event":{"type":"call_completed","step":0,"call":{"id":"opaque","kind":"read_link","page":{"title":null}}}}]}`, &dto.ChatCompletionsStreamResponse{}, []string{"choices.0.delta.server_tool_calls", "choices.0.delta.title", "choices.0.server_tool_event"}},
+		{"chat error", `{"choices":[],"error":{"type":"api_error","message":"interrupted"},"usage":{"server_tool_use":{"tool_fetch":2}}}`, &dto.ChatCompletionsStreamResponse{}, []string{"error", "usage.server_tool_use"}},
+		{"responses", `{"title":"Example","output":[{"type":"web_search_call","id":"opaque","kind":"read_link","page":{"title":null},"signature":"sig==","error":{"code":"unavailable"}}]}`, &dto.OpenAIResponsesResponse{}, []string{"title", "output.0.id", "output.0.kind", "output.0.page", "output.0.signature", "output.0.error"}},
+		{"claude", `{"type":"message","title":"Example","content":[{"type":"web_fetch_tool_result","kind":"read_link","signature":"sig==","content":{"type":"web_fetch_result","published_at":null}}]}`, &dto.ClaudeResponse{}, []string{"title", "content.0.kind", "content.0.signature", "content.0.content"}},
+		{"claude stream", `{"type":"message_delta","delta":{"title":"Example","stop_reason":"end_turn"}}`, &dto.ClaudeResponse{}, []string{"delta.title", "delta.stop_reason"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, common.UnmarshalJsonStr(test.body, test.response))
+			wire, err := common.Marshal(test.response)
+			require.NoError(t, err)
+			for _, path := range test.paths {
+				assert.JSONEq(t, ojson.Get(test.body, path).Raw, ojson.GetBytes(wire, path).Raw, path)
+			}
+		})
+	}
+
+	usage := &dto.Usage{ServerToolUse: json.RawMessage(`{"tool_search":0,"tool_fetch":2}`)}
+	merged := dto.MergeUsageNonZero(nil, usage)
+	cloned := dto.CloneBillingUsage(&dto.BillingUsage{OpenAIUsage: usage})
+	usage.ServerToolUse[0] = ' '
+	assert.JSONEq(t, `{"tool_search":0,"tool_fetch":2}`, string(merged.ServerToolUse))
+	assert.JSONEq(t, `{"tool_search":0,"tool_fetch":2}`, string(cloned.OpenAIUsage.ServerToolUse))
+}
+
 func TestConvertOpenAIRequestCompletesDeepSeekThinkingToolHistory(t *testing.T) {
 	for _, test := range []struct {
 		name         string
@@ -447,7 +566,8 @@ func TestServerSideSearchBillingKeys(t *testing.T) {
 		(&deepseek.Adaptor{}).Init(info)
 		assert.Equal(t, deepseek.SearchToolPriceKey, info.WebSearchBillingKey, tc.format)
 		assert.Equal(t, deepseek.FetchToolPriceKey, info.WebFetchBillingKey, tc.format)
-		assert.Equal(t, tc.mode == relayconstant.RelayModeResponses, info.VendorToolUsage != nil, tc.format)
+		require.NotNil(t, info.VendorToolUsage, tc.format)
+		assert.True(t, info.WebSearchBilledByUsage, tc.format)
 	}
 
 	const usage = `"usage":{"server_tool_use":{"tool_search":3,"tool_fetch":2}}`
@@ -460,6 +580,10 @@ func TestServerSideSearchBillingKeys(t *testing.T) {
 		{"stream complete", `{"type":"response.completed","response":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
 		{"stream incomplete", `{"type":"response.incomplete","response":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
 		{"stream failed", `{"type":"response.failed","response":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
+		{"message start", `{"type":"message_start","message":{` + usage + `}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2}},
+		{"message delta ignores display counts", `{"type":"message_delta","usage":{"server_tool_use":{"web_search_requests":9,"web_fetch_requests":8,"tool_search":3,"tool_fetch":2,"tool_image_search":4}}}`, map[string]int{deepseek.SearchToolPriceKey: 3, deepseek.FetchToolPriceKey: 2, deepseek.ImageSearchToolPriceKey: 4}},
+		{"display counts are not billable", `{"usage":{"server_tool_use":{"web_search_requests":9,"web_fetch_requests":8}}}`, map[string]int{}},
+		{"zero billed count suppresses display count", `{"usage":{"server_tool_use":{"web_search_requests":9,"tool_search":0,"tool_image_search":0}}}`, map[string]int{deepseek.SearchToolPriceKey: 0, deepseek.ImageSearchToolPriceKey: 0}},
 		{"no successful operations", `{` + output + `,"usage":{"total_tokens":64}}`, map[string]int{}},
 		{"stream ended without usage", "", map[string]int{}},
 		{"zero search", `{"usage":{"server_tool_use":{"tool_search":0,"tool_fetch":2}}}`, map[string]int{deepseek.SearchToolPriceKey: 0, deepseek.FetchToolPriceKey: 2}},
@@ -747,6 +871,116 @@ func BenchmarkResponsesReasoningReplay(b *testing.B) {
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	for _, protocol := range []string{"chat", "claude"} {
+		for _, stream := range []bool{false, true} {
+			for _, tc := range []struct {
+				name, input, output, tools string
+				failure, missing, empty    bool
+				wantUsage                  bool
+				wantInput, wantOutput      int
+				wantSearch                 int
+			}{
+				{name: "actual cumulative counts", input: "20", output: "5", tools: `{"tool_search":2,"tool_fetch":1,"tool_image_search":3,"web_search_requests":99,"web_fetch_requests":99}`, wantUsage: true, wantInput: 20, wantOutput: 5, wantSearch: 2},
+				{name: "zero tokens tool-only bill", input: "0", output: "0", tools: `{"tool_search":2,"tool_fetch":0,"tool_image_search":0}`, wantUsage: true, wantSearch: 2},
+				{name: "explicit zero replaces earlier count", input: "0", output: "0", tools: `{"tool_search":0,"tool_fetch":0,"tool_image_search":0,"web_search_requests":99}`, wantUsage: true},
+				{name: "failure preserves actual bill", input: "20", output: "5", tools: `{"tool_search":2,"tool_fetch":1,"tool_image_search":3}`, failure: true, wantUsage: true, wantInput: 20, wantOutput: 5, wantSearch: 2},
+				{name: "failure preserves tool-only bill", input: "0", output: "0", tools: `{"tool_search":2}`, failure: true, wantUsage: true, wantSearch: 2},
+				{name: "failure without usage has no estimated bill", failure: true, missing: true},
+				{name: "failure with empty usage has no estimated bill", failure: true, empty: true},
+				{name: "negative usage is not a bill", input: "-1", output: "5", tools: `{}`, failure: true},
+				{name: "fractional usage is not a bill", input: "1.5", output: "5", tools: `{}`, failure: true},
+				{name: "overflow usage is not a bill", input: "2147483647", output: "1", tools: `{}`, failure: true},
+			} {
+				t.Run(fmt.Sprintf("%s/stream=%t/%s", protocol, stream, tc.name), func(t *testing.T) {
+					writer := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(writer)
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+					info := &relaycommon.RelayInfo{
+						OriginModelName: "deepseek-flash", RelayFormat: types.RelayFormatOpenAI,
+						RelayMode: relayconstant.RelayModeChatCompletions, IsStream: stream, DisablePing: true,
+						ShouldIncludeUsage: true,
+						ChannelMeta:        &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek, UpstreamModelName: "deepseek-flash"},
+					}
+					info.SetEstimatePromptTokens(1200)
+					inputField, outputField := "prompt_tokens", "completion_tokens"
+					if protocol == "claude" {
+						info.RelayFormat = types.RelayFormatClaude
+						c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+						inputField, outputField = "input_tokens", "output_tokens"
+					}
+					adaptor := &deepseek.Adaptor{}
+					adaptor.Init(info)
+					usage := fmt.Sprintf(`,"usage":{%q:%s,%q:%s,"server_tool_use":%s}`, inputField, tc.input, outputField, tc.output, tc.tools)
+					if tc.missing {
+						usage = ""
+					} else if tc.empty {
+						usage = `,"usage":{}`
+					}
+					body := `{"id":"chatcmpl_test","model":"deepseek-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]` + usage + `}`
+					if protocol == "claude" {
+						body = `{"id":"msg_test","type":"message","model":"deepseek-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"` + usage + `}`
+					}
+					if tc.failure {
+						body = `{"type":"error","error":{"type":"api_error","code":"server_error","message":"billing_failure_marker"}` + usage + `}`
+					}
+					contentType := "application/json"
+					if stream {
+						contentType = "text/event-stream"
+						if protocol == "claude" {
+							start := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\",\"model\":\"deepseek-flash\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1,\"server_tool_use\":{\"tool_search\":7}}}}\n\n"
+							if tc.failure {
+								body = start + "event: error\ndata: " + body + "\n\n"
+							} else {
+								body = start + `event: message_delta` + "\ndata: " + `{"type":"message_delta","delta":{"stop_reason":"end_turn"}` + usage + "}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+							}
+						} else {
+							start := "data: {\"id\":\"chatcmpl_test\",\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"server_tool_use\":{\"tool_search\":7}}}\n\n"
+							if !tc.failure {
+								body = `{"id":"chatcmpl_test","model":"deepseek-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]` + usage + `}`
+							}
+							body = start + "data: " + body + "\n\n"
+							if !tc.failure {
+								body += "data: [DONE]\n\n"
+							}
+						}
+					}
+					response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(body))}
+					result, apiErr := adaptor.DoResponse(c, response, info)
+					if tc.failure {
+						require.NotNil(t, apiErr)
+						assert.NotContains(t, writer.Body.String(), "billing_failure_marker", "the controller owns error emission")
+						assert.NotContains(t, writer.Body.String(), "[DONE]", "a failed stream must not become successful")
+					} else {
+						require.Nil(t, apiErr)
+					}
+					measured, _ := result.(*dto.Usage)
+					if !tc.wantUsage {
+						assert.Nil(t, measured, "missing or invalid final usage must not use the 1,200-token estimate or earlier usage")
+						return
+					}
+					require.NotNil(t, measured)
+					assert.Equal(t, tc.wantInput, measured.PromptTokens)
+					assert.Equal(t, tc.wantOutput, measured.CompletionTokens)
+					assert.False(t, common.GetContextKeyBool(c, constant.ContextKeyLocalCountTokens))
+					require.NotNil(t, info.ResponsesUsageInfo)
+					require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, deepseek.SearchToolPriceKey)
+					assert.Equal(t, tc.wantSearch, info.ResponsesUsageInfo.BuiltInTools[deepseek.SearchToolPriceKey].CallCount)
+					assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, "web_search")
+					if tc.failure {
+						require.NotNil(t, info.StreamStatus)
+						assert.True(t, info.StreamStatus.ResponseFailed())
+					}
+				})
+			}
 		}
 	}
 }

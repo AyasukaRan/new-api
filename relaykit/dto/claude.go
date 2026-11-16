@@ -27,6 +27,8 @@ type ClaudeMediaMessage struct {
 	Thinking     *string              `json:"thinking,omitempty"`
 	Data         string               `json:"data,omitempty"`
 	Signature    string               `json:"signature,omitempty"`
+	Kind         string               `json:"kind,omitempty"`
+	Title        json.RawMessage      `json:"title,omitempty"`
 	Delta        string               `json:"delta,omitempty"`
 	CacheControl json.RawMessage      `json:"cache_control,omitempty"`
 
@@ -242,6 +244,8 @@ type ClaudeRequest struct {
 	TopK              *int            `json:"top_k,omitempty"`
 	Stream            *bool           `json:"stream,omitempty"`
 	Tools             any             `json:"tools,omitempty"`
+	SafetyCheck       json.RawMessage `json:"safety_check,omitempty"`
+	Title             json.RawMessage `json:"title,omitempty"`
 	Safeguards        json.RawMessage `json:"safeguards,omitempty"`
 	ContextManagement json.RawMessage `json:"context_management,omitempty"`
 	OutputConfig      json.RawMessage `json:"output_config,omitempty"`
@@ -619,6 +623,7 @@ type ClaudeResponse struct {
 	Content      []ClaudeMediaMessage `json:"content,omitempty"`
 	Completion   string               `json:"completion,omitempty"`
 	StopReason   string               `json:"stop_reason,omitempty"`
+	Title        json.RawMessage      `json:"title,omitempty"`
 	Model        string               `json:"model,omitempty"`
 	Error        any                  `json:"error,omitempty"`
 	Usage        *ClaudeUsage         `json:"usage,omitempty"`

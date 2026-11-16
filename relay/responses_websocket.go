@@ -220,12 +220,34 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		s.clientWriteMu.Unlock()
 	}()
 	request := s.request.Clone(s.ctx)
-	request.Body = io.NopCloser(bytes.NewReader(message))
-	request.ContentLength = int64(len(message))
+	body := create.Body
+	if parseErr != nil {
+		body = message
+	}
+	// File authorization and request limits inspect the same HTTP-shaped body
+	// that will be forwarded, including a legacy wrapped response.create.
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
 	request.Header.Set("Content-Type", "application/json")
 	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
 		if parseErr != nil {
 			return newResponsesWSInvalidRequestError(parseErr)
+		}
+		storage, err := common.GetBodyStorage(c)
+		if err != nil {
+			return newResponsesWSInvalidRequestError(err)
+		}
+		authorized, err := storage.Bytes()
+		if err != nil {
+			return newResponsesWSInvalidRequestError(err)
+		}
+		if !bytes.Equal(authorized, create.Body) {
+			var updated dto.OpenAIResponsesRequest
+			if err := common.Unmarshal(authorized, &updated); err != nil {
+				return newResponsesWSInvalidRequestError(err)
+			}
+			updated.Stream, updated.StreamOptions = nil, nil
+			create.Request, create.Body = updated, authorized
 		}
 		c.Request.Body = io.NopCloser(bytes.NewReader(create.Body))
 		c.Request.ContentLength = int64(len(create.Body))
@@ -644,6 +666,9 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	}
 	if !keyEnabled {
 		return types.NewErrorWithStatusCode(errors.New("the upstream connection credential is no longer enabled"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	if identity := c.GetString("relay_file_key_identity"); identity != "" && identity != channel.KeyIdentity(s.lockedKey) {
+		return types.NewErrorWithStatusCode(errors.New("file belongs to another upstream connection credential; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
 	if !channel.HasRelayKeyBalance(s.lockedKeyIndex) {
 		return types.NewErrorWithStatusCode(errors.New("the upstream connection credential has insufficient balance; reconnect required"), appmodel.ErrorCodeChannelBalanceUnavailable, http.StatusForbidden, types.ErrOptionWithSkipRetry())

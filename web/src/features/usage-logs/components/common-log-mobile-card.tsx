@@ -27,9 +27,14 @@ import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge, type StatusVariant } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import { toIntlLocale } from '@/i18n/languages'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import dayjs from '@/lib/dayjs'
-import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
+import {
+  formatLogQuota,
+  formatTimestampToDate,
+  formatNumber,
+} from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
 import { formatModelName, logTokenName, parseLogOther } from '../lib/format'
@@ -64,7 +69,8 @@ export function CommonLogMobileCard<TData>(props: {
   log: UsageLog
   cells: Map<string, Cell<TData, unknown>>
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const context = useUsageLogsContext()
   const { isAdminView } = useLogsViewScope()
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
@@ -293,6 +299,22 @@ export function CommonLogMobileCard<TData>(props: {
             )}
         </div>
       )}
+      {displayable &&
+        props.cells.has('prompt_tokens') &&
+        other?.metered_usage && (
+          <div className='text-muted-foreground text-xs'>
+            {t(
+              other.metered_usage_estimated
+                ? 'Estimated usage'
+                : 'Billable usage'
+            )}
+            :{' '}
+            <span className='text-foreground tabular-nums'>
+              {formatNumber(other.metered_usage.count, locale)}{' '}
+              {t(other.metered_usage.unit)}
+            </span>
+          </div>
+        )}
       {showTokens && (
         <div className='text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs [overflow-wrap:anywhere]'>
           <span>

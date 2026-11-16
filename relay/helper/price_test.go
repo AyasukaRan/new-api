@@ -117,6 +117,62 @@ func TestFixedPricePreConsumeAndRealtimeRejection(t *testing.T) {
 	}
 }
 
+func TestMeteredPriceHelperFreezesQuantityAndGroupPricing(t *testing.T) {
+	previous := config.GlobalConfig.ExportAllConfigs()
+	t.Cleanup(func() { require.NoError(t, config.GlobalConfig.LoadFromDB(previous)) })
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode":    `{"metered-pages":"tiered_expr","metered-seconds":"tiered_expr","metered-characters":"tiered_expr"}`,
+		"billing_setting.billing_expr":    `{"metered-pages":"tier(\"page\", fixed(0.0015)) * document_pages","metered-seconds":"tier(\"second\", fixed(0.0001)) * audio_seconds","metered-characters":"tier(\"character\", fixed(0.00015)) * speech_characters"}`,
+		"group_ratio_setting.group_ratio": `{"default":0.2}`,
+	}))
+	operation_setting.GetQuotaSetting().PreConsumeMultiplier = 3
+	for _, tc := range []struct {
+		model              string
+		unit               billingexpr.BillingUnit
+		estimate, actual   int
+		reservation, final int
+	}{
+		{"metered-pages", billingexpr.BillingUnitPage, 1000, 3, 150000, 450},
+		{"metered-seconds", billingexpr.BillingUnitSecond, 120, 3, 1200, 30},
+		{"metered-characters", billingexpr.BillingUnitCharacter, 10000, 7, 150000, 105},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/tools/ocr", nil)
+			request := &dto.DeepSeekUploadRequest{Model: tc.model, Unit: string(tc.unit), EstimatedCount: tc.estimate}
+			info := &relaycommon.RelayInfo{OriginModelName: tc.model, UserGroup: "default", UsingGroup: "default", Request: request, BillingRequestInput: &billingexpr.RequestInput{}}
+			price, err := ModelPriceHelper(ctx, info, 999, &types.TokenCountMeta{MaxTokens: 999})
+			require.NoError(t, err)
+			assert.Equal(t, tc.reservation, price.QuotaToPreConsume, "token reservation multiplier must not multiply page/second/character pricing")
+			require.NotNil(t, info.TieredBillingSnapshot)
+			require.NotNil(t, info.BillingRequestInput.MeteredUsage)
+			assert.Equal(t, tc.unit, info.TieredBillingSnapshot.EstimatedBillingUnit)
+			assert.Equal(t, 0.2, info.TieredBillingSnapshot.GroupRatio)
+			request.EstimatedCount = 1
+			info.BillingMeteredUsage = &billingexpr.MeteredUsage{Unit: tc.unit, Count: tc.actual}
+			applies, quota, settled := service.TryTieredSettle(info, billingexpr.TokenParams{})
+			require.True(t, applies)
+			require.NotNil(t, settled)
+			assert.Equal(t, tc.final, quota)
+			assert.Equal(t, tc.estimate, info.TieredBillingSnapshot.EstimatedMeteredUsage.Count)
+			assert.Equal(t, tc.estimate, info.BillingRequestInput.MeteredUsage.Count)
+		})
+	}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/tools/ocr", nil)
+	for _, request := range []dto.Request{
+		&dto.GeneralOpenAIRequest{Model: "metered-pages"},
+		&dto.DeepSeekUploadRequest{Model: "metered-pages", Unit: "second", EstimatedCount: 10},
+		&dto.DeepSeekUploadRequest{Model: "metered-pages", Unit: "page", EstimatedCount: 1001},
+		&dto.DeepSeekUploadRequest{Model: "metered-pages", Unit: "page", EstimatedCount: -1},
+	} {
+		info := &relaycommon.RelayInfo{OriginModelName: "metered-pages", UserGroup: "default", UsingGroup: "default", Request: request, BillingRequestInput: &billingexpr.RequestInput{}}
+		_, err := ModelPriceHelper(ctx, info, 0, &types.TokenCountMeta{})
+		require.Error(t, err, "unmeasured or invalid quantity must fail before reservation")
+		assert.Nil(t, info.TieredBillingSnapshot)
+	}
+}
+
 func TestModelPriceHelperTieredInputPreConsumeMultiplier(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

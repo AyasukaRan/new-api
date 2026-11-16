@@ -6,6 +6,7 @@ var ModelList = []string{
 	"deepseek-flash", "deepseek-flash-none", "deepseek-flash-low", "deepseek-flash-max",
 	"deepseek-v4-pro", "deepseek-v4-pro-none", "deepseek-v4-pro-low", "deepseek-v4-pro-max",
 	constant.DeepSeekSearchModel, constant.DeepSeekFetchModel,
+	constant.DeepSeekOCRModel, constant.DeepSeekASRModel, constant.DeepSeekTTSModel, constant.DeepSeekFilesModel,
 }
 
 var ChannelName = "deepseek"
@@ -14,6 +15,7 @@ var ChannelName = "deepseek"
 // server-side searches and page fetches DeepSeek runs on its Anthropic and
 // Responses endpoints.
 const (
-	SearchToolPriceKey = "deepseek_search"
-	FetchToolPriceKey  = "deepseek_fetch"
+	SearchToolPriceKey      = "deepseek_search"
+	FetchToolPriceKey       = "deepseek_fetch"
+	ImageSearchToolPriceKey = "deepseek_image_search"
 )

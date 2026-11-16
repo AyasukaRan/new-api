@@ -666,3 +666,33 @@ func TestApplyWebSocketSubprotocolAuthorizationReadsRepeatedHeaders(t *testing.T
 	assert.True(t, applyWebSocketSubprotocolAuthorization(header))
 	assert.Equal(t, "Bearer sk-later-field", header.Get("Authorization"))
 }
+
+func TestTTSWebSocketAuthorization(t *testing.T) {
+	for _, test := range []struct {
+		name, protocols, auth, wantAuth string
+		wantError                       bool
+	}{
+		{name: "browser token", protocols: "tts, bearer.sk-local", wantAuth: "Bearer sk-local"},
+		{name: "header token", protocols: "tts", auth: "Bearer sk-header", wantAuth: "Bearer sk-header"},
+		{name: "matching credentials", protocols: "tts, bearer.sk-local", auth: "Bearer sk-local", wantAuth: "Bearer sk-local"},
+		{name: "conflicting credentials", protocols: "tts, bearer.sk-local", auth: "Bearer sk-other", wantError: true},
+		{name: "missing protocol", protocols: "bearer.sk-local", wantError: true},
+		{name: "duplicate credentials", protocols: "tts,bearer.sk-local,bearer.sk-other", wantError: true},
+		{name: "empty credential", protocols: "tts,bearer.", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			header := http.Header{}
+			header.Set("Sec-WebSocket-Protocol", test.protocols)
+			header.Set("Authorization", test.auth)
+			err := applyTTSWebSocketAuthorization(header)
+			assert.NotContains(t, header.Get("Sec-WebSocket-Protocol"), "bearer.", "local credentials must not be reflected or forwarded")
+			if test.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantAuth, header.Get("Authorization"))
+			assert.Equal(t, "tts", header.Get("Sec-WebSocket-Protocol"))
+		})
+	}
+}
