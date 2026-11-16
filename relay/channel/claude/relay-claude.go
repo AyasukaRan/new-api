@@ -95,7 +95,12 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	info.ApplyVendorToolUsage(common.StringToByteSlice(data))
-	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil &&
+		(claudeError.Type != "" || info.VendorToolUsage != nil && claudeError.Message != "") {
+		// DeepSeek can time out with only error.message in an unnamed SSE frame.
+		if claudeError.Type == "" {
+			claudeError.Type = "api_error"
+		}
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	if claudeResponse.Type == "message_delta" {
@@ -379,7 +384,11 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	info.ApplyVendorToolUsage(data)
-	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil &&
+		(claudeError.Type != "" || info.VendorToolUsage != nil && claudeError.Message != "") {
+		if claudeError.Type == "" {
+			claudeError.Type = "api_error"
+		}
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}
 	info.ObserveResponseModel(claudeResponse.Model)

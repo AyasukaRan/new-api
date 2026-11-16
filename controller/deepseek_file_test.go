@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,6 +80,7 @@ func TestDeepSeekFilesOwnershipAndMigration(t *testing.T) {
 						{UserId: 1, FileId: "file-ds-other-key", ChannelId: channel.Id, Provider: "deepseek", UpstreamFileId: "other-key", KeyIdentity: channel.KeyIdentity("fixture-first")},
 						{UserId: 1, FileId: "file-ds-other-channel", ChannelId: channel.Id + 1, Provider: "deepseek", UpstreamFileId: "other-channel", KeyIdentity: identity},
 						{UserId: 1, FileId: "file-ds-unbound", ChannelId: channel.Id, Provider: "deepseek", UpstreamFileId: "unbound"},
+						{UserId: 1, FileId: "file-other-provider", ChannelId: channel.Id, Provider: "openai", KeyIdentity: identity},
 					} {
 						require.NoError(t, extra.Insert())
 					}
@@ -153,6 +156,7 @@ func TestDeepSeekFilesOwnershipAndMigration(t *testing.T) {
 						})
 					}
 
+					imageBlock := `{"type":"input_image","file_id":"file-ds-owned"}`
 					for _, test := range []struct {
 						name, path, body string
 						owner            int
@@ -162,6 +166,12 @@ func TestDeepSeekFilesOwnershipAndMigration(t *testing.T) {
 						{"Chat file", "/v1/chat/completions", `{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-ds-owned"}}]}]}`, 1, true, true},
 						{"Messages document", "/v1/messages", `{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-ds-owned"}}]}]}`, 1, true, true},
 						{"Responses image", "/v1/responses", `{"input":[{"role":"user","content":[{"type":"input_image","file_id":"file-ds-owned"}]}]}`, 1, true, true},
+						{"600 image references", "/v1/responses", `{"input":[` + strings.Repeat(imageBlock+",", 599) + imageBlock + `]}`, 1, true, true},
+						{"600 images and 20 documents", "/v1/responses", `{"input":[` + strings.Repeat(imageBlock+",", 600) + strings.Repeat(`{"type":"input_file","file_id":"file-ds-owned"},`, 19) + `{"type":"input_file","file_id":"file-ds-owned"}]}`, 1, true, true},
+						{"over total reference bound", "/v1/responses", `{"input":[` + strings.Repeat(imageBlock+",", 620) + imageBlock + `]}`, 1, false, false},
+						{"large image batch foreign owner", "/v1/responses", `{"input":[` + strings.Repeat(imageBlock+",", 20) + imageBlock + `]}`, 3, false, false},
+						{"large image batch mixed accounts", "/v1/responses", `{"input":[` + strings.Repeat(imageBlock+",", 20) + `{"type":"input_image","file_id":"file-ds-other-key"}]}`, 1, false, false},
+						{"other provider reference bound", "/v1/responses", `{"input":[` + strings.Repeat(`{"type":"input_file","file_id":"file-other-provider"},`, 20) + `{"type":"input_file","file_id":"file-other-provider"}]}`, 1, false, false},
 						{"Responses function output image", "/v1/responses", `{"input":[{"type":"function_call_output","call_id":"tool-1","output":[{"type":"input_image","file_id":"file-ds-owned"}]}]}`, 1, true, true},
 						{"Responses custom output foreign image", "/v1/responses", `{"input":[{"type":"custom_tool_call_output","call_id":"tool-1","output":[{"type":"input_image","file_id":"provider-foreign-file"}]}]}`, 1, false, false},
 						{"Messages tool result image", "/v1/messages", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"image","source":{"type":"file","file_id":"file-ds-owned"}}]}]}]}`, 1, true, true},
@@ -386,6 +396,79 @@ func TestDeepSeekFilesAnthropicResponseShapes(t *testing.T) {
 	deleted, err := deepSeekFilePublicJSON(c, []byte(`{"id":"provider-id","object":"file","deleted":true,"request_id":"provider-request"}`), "local-file")
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id":"local-file","type":"file_deleted"}`, string(deleted))
+}
+
+func TestDeepSeekFileImageMeteringContract(t *testing.T) {
+	for _, test := range []struct {
+		name, response string
+		wantPages      int
+		status         int
+	}{
+		{"single image", `{"pages":1,"basis":"local_image_pages","engine":"Pillow test"}`, 1, 200},
+		{"multi-frame image", `{"pages":3,"basis":"local_image_pages","engine":"Pillow test"}`, 3, 200},
+		{"page boundary", `{"pages":1000,"basis":"local_image_pages","engine":"Pillow test"}`, 1000, 200},
+		{"zero pages", `{"pages":0,"basis":"local_image_pages","engine":"Pillow test"}`, 0, 200},
+		{"negative pages", `{"pages":-1,"basis":"local_image_pages","engine":"Pillow test"}`, 0, 200},
+		{"too many pages", `{"pages":1001,"basis":"local_image_pages","engine":"Pillow test"}`, 0, 200},
+		{"wrong basis", `{"pages":1,"basis":"local_pagination","engine":"Pillow test"}`, 0, 200},
+		{"missing engine", `{"pages":1,"basis":"local_image_pages"}`, 0, 200},
+		{"invalid decoder input", "", 0, 422},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Keep the Unix socket name below the macOS/Linux path limit.
+			directory, err := os.MkdirTemp("", "ds-pages-")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = os.RemoveAll(directory) })
+			socket := filepath.Join(directory, "pages.sock")
+			listener, err := net.Listen("unix", socket)
+			require.NoError(t, err)
+			payload := []byte("unchanged synthetic image bytes")
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/pages?format=image", r.URL.RequestURI())
+				assert.EqualValues(t, len(payload), r.ContentLength)
+				actual, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				assert.Equal(t, payload, actual)
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.response)
+			})}
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close() })
+			t.Setenv("DEEPSEEK_DOCUMENT_PAGES_SOCKET", socket)
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			require.NoError(t, form.WriteField("purpose", "text_recognition"))
+			part, err := form.CreateFormFile("file", "original-without-extension")
+			require.NoError(t, err)
+			_, err = part.Write(payload)
+			require.NoError(t, err)
+			require.NoError(t, form.Close())
+			original := bytes.Clone(body.Bytes())
+			c, _ := fileTestContext(t, http.MethodPost, "/v1/files", body.String(), 1)
+			c.Request.Header.Set("Content-Type", form.FormDataContentType())
+			upload, err := service.InspectDeepSeekFileUpload(c)
+			require.NoError(t, err)
+			basis, err := service.MeterDeepSeekFileUpload(c, upload)
+			if test.wantPages == 0 {
+				require.Error(t, err)
+				assert.Zero(t, upload.Pages, "invalid counts must not become a bill")
+				assert.Empty(t, basis)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, test.wantPages, upload.Pages)
+				assert.Equal(t, "local_image_pages", basis)
+				assert.Equal(t, "Pillow test", c.GetString("deepseek_file_pagination_engine"))
+			}
+			storage, err := common.GetBodyStorage(c)
+			require.NoError(t, err)
+			reread, err := storage.NewReader()
+			require.NoError(t, err)
+			defer reread.Close()
+			unchanged, err := io.ReadAll(reread)
+			require.NoError(t, err)
+			assert.Equal(t, original, unchanged, "pagination must leave the original upstream upload intact")
+		})
+	}
 }
 
 func TestDeepSeekFilesResponsesWebSocketAuthorization(t *testing.T) {

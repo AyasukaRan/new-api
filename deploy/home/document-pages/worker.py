@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Count local Office pagination only; never export or return document content."""
+"""Count local document/image pages; never export or return uploaded content."""
 import argparse
 import contextlib
 import http.server
@@ -16,12 +16,16 @@ import threading
 import time
 import urllib.parse
 import uuid
+import warnings
 import zipfile
 
 MAX_BYTES = 100 << 20
+MAX_IMAGE_BYTES = 64 << 20
 MAX_PAGES = 1000
+MAX_IMAGE_PIXELS = 40_000_000
+MAX_TOTAL_IMAGE_PIXELS = 200_000_000
 JOB_SECONDS = 60
-FORMATS = {'doc', 'docx', 'ppt', 'pptx'}
+FORMATS = {'doc', 'docx', 'ppt', 'pptx', 'image'}
 SOCKET = '/run/document-pages/pages.sock'
 
 
@@ -110,7 +114,42 @@ def count_office(path, kind):
             office.kill()
 
 
+def count_image(path):
+    # Decode only in an expendable, networkless job, never in the HTTP process.
+    resource.setrlimit(resource.RLIMIT_CPU, (45, 45))
+    resource.setrlimit(resource.RLIMIT_AS, (512 << 20, 512 << 20))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+    from PIL import Image, ImageFile
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    ImageFile.LOAD_TRUNCATED_IMAGES = False
+    warnings.simplefilter('error', Image.DecompressionBombWarning)
+    formats = ['PNG', 'JPEG', 'WEBP', 'GIF', 'BMP', 'TIFF']
+    with Image.open(path, formats=formats) as image:
+        image.verify()
+    pages, pixels = 0, 0
+    with Image.open(path, formats=formats) as image:
+        for index in range(MAX_PAGES + 1):
+            try:
+                image.seek(index)
+            except EOFError:
+                break
+            if index == MAX_PAGES:
+                raise ValueError('Image has too many pages')
+            frame_pixels = image.width * image.height
+            pixels += frame_pixels
+            if not 0 < frame_pixels <= MAX_IMAGE_PIXELS or pixels > MAX_TOTAL_IMAGE_PIXELS:
+                raise ValueError('Decoded image exceeds processing limits')
+            image.load()
+            pages += 1
+    if pages == 0:
+        raise ValueError('Image has no pages')
+    return pages
+
+
 def validate_format(path, kind):
+    if kind == 'image':
+        return  # Image recognition and validation stay inside the limited job.
     with path.open('rb') as source:
         header = source.read(8)
     if kind in ('doc', 'ppt'):
@@ -170,10 +209,10 @@ class PageHandler(http.server.BaseHTTPRequestHandler):
             self.answer(411)
             return
         size = int(lengths[0])
-        if size < 1 or size > MAX_BYTES:
+        kind = params['format'][0]
+        if size < 1 or size > (MAX_IMAGE_BYTES if kind == 'image' else MAX_BYTES):
             self.answer(413)
             return
-        kind = params['format'][0]
         if not self.server.document_slot.acquire(blocking=False):
             self.answer(503)
             return
@@ -232,6 +271,8 @@ class PageHandler(http.server.BaseHTTPRequestHandler):
             pages = int(result)
             if not 1 <= pages <= MAX_PAGES:
                 return 422, None
+            if kind == 'image':
+                return 200, {'pages': pages, 'engine': self.server.image_engine, 'basis': 'local_image_pages'}
             return 200, {'pages': pages, 'engine': self.server.engine, 'basis': 'local_pagination'}
 
 
@@ -276,7 +317,8 @@ def main():
     args = parser.parse_args()
     if args.job:
         try:
-            print(count_office(args.job, args.format), flush=True)
+            pages = count_image(args.job) if args.format == 'image' else count_office(args.job, args.format)
+            print(pages, flush=True)
         except Exception:
             sys.exit(1)
         return
@@ -284,12 +326,14 @@ def main():
                              timeout=10, check=True).stdout.strip()
     if not version.startswith('LibreOffice ') or len(version) > 128:
         raise RuntimeError('Unsupported Office runtime')
+    from PIL import __version__ as pillow_version
     socket_path = Path(args.socket)
     with contextlib.suppress(FileNotFoundError):
         socket_path.unlink()
     with PageServer(str(socket_path), PageHandler) as server:
         os.chmod(socket_path, 0o660)
         server.engine = version
+        server.image_engine = 'Pillow ' + pillow_version
         server.serve_forever()
 
 

@@ -16,6 +16,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	kitreasoning "github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/model_setting"
@@ -32,36 +33,36 @@ func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dt
 }
 
 func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayInfo, req *dto.ClaudeRequest) (any, error) {
-	adaptor := claude.Adaptor{}
 	// A model modifier is rendered into DeepSeek's own thinking and effort
 	// fields below; Anthropic's model rules (budgets, adaptive thinking,
 	// max_tokens and sampling changes) must not see it.
 	state := info.ReasoningConversion
 	info.ReasoningConversion = nil
-	convertedRequest, err := adaptor.ConvertClaudeRequest(c, info, req)
+	// DeepSeek chooses its own default when max_tokens is omitted; read
+	// native reasoning metadata without applying Anthropic's token default.
+	err := relayconvert.ApplyClaudeThinkingModel(req, info)
 	info.ReasoningConversion = state
 	if err != nil {
 		return nil, err
 	}
-	claudeRequest, ok := convertedRequest.(*dto.ClaudeRequest)
-	if !ok {
-		return convertedRequest, nil
+	if info.UpstreamModelName == "" {
+		info.UpstreamModelName = req.Model
 	}
-	if err := applyDeepSeekV4ClaudeThinkingSuffix(info, claudeRequest); err != nil {
+	if err := applyDeepSeekV4ClaudeThinkingSuffix(info, req); err != nil {
 		return nil, err
 	}
-	if claudeRequest.Model == "deepseek-flash" && claudeRequest.Tools != nil {
-		tools, err := common.Marshal(claudeRequest.Tools)
+	if req.Model == "deepseek-flash" && req.Tools != nil {
+		tools, err := common.Marshal(req.Tools)
 		if err != nil {
 			return nil, err
 		}
-		tools, err = normalizeWebTools(claudeRequest.Model, tools, true)
+		tools, err = normalizeWebTools(req.Model, tools, true)
 		if err != nil {
 			return nil, err
 		}
-		claudeRequest.Tools = common.RawMessage(tools)
+		req.Tools = common.RawMessage(tools)
 	}
-	return claudeRequest, nil
+	return req, nil
 }
 
 func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.AudioRequest) (io.Reader, error) {
@@ -125,6 +126,20 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			}
 			return endpoint, nil
 		default:
+			useBeta := strings.HasSuffix(info.ChannelBaseUrl, "/beta")
+			if request, ok := info.Request.(*dto.GeneralOpenAIRequest); ok {
+				for _, message := range request.Messages {
+					useBeta = useBeta || message.Prefix != nil && *message.Prefix
+				}
+				for _, tool := range request.Tools {
+					useBeta = useBeta || tool.Function.Strict != nil && *tool.Function.Strict
+				}
+			}
+			// Prefix completion and strict function schemas use the provider's
+			// Beta route without requiring a separate channel or client base URL.
+			if useBeta {
+				return fmt.Sprintf("%s/chat/completions", fimBaseUrl), nil
+			}
 			return fmt.Sprintf("%s/v1/chat/completions", info.ChannelBaseUrl), nil
 		}
 	}
@@ -132,6 +147,13 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *relaycommon.RelayInfo) error {
 	channel.SetupApiRequestHeader(info, c, req)
+	if info.RelayFormat == types.RelayFormatClaude {
+		// File-backed images require this beta even though most other
+		// Anthropic headers are ignored by DeepSeek.
+		if beta := strings.Join(c.Request.Header.Values("anthropic-beta"), ","); beta != "" {
+			req.Set("anthropic-beta", beta)
+		}
+	}
 	req.Set("Authorization", "Bearer "+info.ApiKey)
 	return nil
 }

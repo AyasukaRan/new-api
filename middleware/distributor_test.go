@@ -10,10 +10,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -197,6 +199,88 @@ func TestTokenModelLimitAllowsLegacyAliasAndModifierVariant(t *testing.T) {
 
 	wildcard := map[string]bool{"gemini-2.5-flash-thinking-*": true}
 	assert.True(t, TokenModelLimitAllows(wildcard, "gemini-2.5-flash-thinking-8192"))
+}
+
+func TestDistributePinnedFileEnforcesTokenModelLimit(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	database := setupDistributorChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.RelayFile{}))
+	channel := &model.Channel{
+		Type: constant.ChannelTypeDeepSeek, Name: "file-access-fixture", Key: "fixture-file-key",
+		Group: "default", Models: "deepseek-flash", Status: common.ChannelStatusEnabled,
+	}
+	require.NoError(t, database.Create(channel).Error)
+	file := &model.RelayFile{
+		UserId: 1, FileId: "file-ds-model-access", Provider: "deepseek", UpstreamFileId: "fixture-upstream-file",
+		ChannelId: channel.Id, KeyIdentity: channel.KeyIdentity(channel.Key), Model: "deepseek-flash",
+	}
+	require.NoError(t, file.Insert())
+	const chat = `{"model":"deepseek-flash","messages":[{"role":"user","content":[{"type":"file","file_id":"file-ds-model-access"}]}]}`
+	const responses = `{"model":"deepseek-flash","input":[{"role":"user","content":[{"type":"input_file","file_id":"file-ds-model-access"}]}]}`
+	const messages = `{"model":"deepseek-flash","messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-ds-model-access"}}]}]}`
+	allowed := map[string]bool{"deepseek-flash": true}
+	denied := map[string]bool{"deepseek-v4-pro": true}
+	for _, tc := range []struct {
+		name, path, body string
+		limits           any
+		unrestricted     bool
+		adminPin         bool
+		want             int
+	}{
+		{name: "chat allowed", path: "/v1/chat/completions", body: chat, limits: allowed, want: http.StatusNoContent},
+		{name: "chat denied", path: "/v1/chat/completions", body: chat, limits: denied, want: http.StatusForbidden},
+		{name: "responses allowed", path: "/v1/responses", body: responses, limits: allowed, want: http.StatusNoContent},
+		{name: "responses denied", path: "/v1/responses", body: responses, limits: denied, want: http.StatusForbidden},
+		{name: "messages allowed", path: "/v1/messages", body: messages, limits: allowed, want: http.StatusNoContent},
+		{name: "messages denied", path: "/v1/messages", body: messages, limits: denied, want: http.StatusForbidden},
+		{name: "metadata allowed", path: "/v1/files/:id", limits: allowed, want: http.StatusNoContent},
+		{name: "metadata denied", path: "/v1/files/:id", limits: denied, want: http.StatusForbidden},
+		{name: "missing model limits", path: "/v1/chat/completions", body: chat, want: http.StatusForbidden},
+		{name: "empty model limits", path: "/v1/chat/completions", body: chat, limits: map[string]bool{}, want: http.StatusForbidden},
+		{name: "malformed model limits", path: "/v1/chat/completions", body: chat, limits: "deepseek-flash", want: http.StatusForbidden},
+		{name: "unrestricted token", path: "/v1/chat/completions", body: chat, unrestricted: true, want: http.StatusNoContent},
+		{name: "restricted admin pin", path: "/v1/chat/completions", body: chat, limits: denied, adminPin: true, want: http.StatusForbidden},
+		{name: "unrestricted admin pin", path: "/v1/chat/completions", body: chat, unrestricted: true, adminPin: true, want: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			method, requestPath := http.MethodPost, tc.path
+			prepare := PrepareDeepSeekFileReferences()
+			if tc.path == "/v1/files/:id" {
+				method, requestPath = http.MethodGet, "/v1/files/"+file.FileId
+				prepare = PrepareRelayFile()
+			}
+			reached := false
+			router := gin.New()
+			router.Handle(method, tc.path, BodyStorageCleanup(), func(c *gin.Context) {
+				c.Set("id", file.UserId)
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+				common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, !tc.unrestricted)
+				if tc.limits != nil {
+					common.SetContextKey(c, constant.ContextKeyTokenModelLimit, tc.limits)
+				}
+				if tc.adminPin {
+					service.GetChannelConstraints(c).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken, Rank: appdto.PinRankToken})
+				}
+			}, prepare, Distribute(), func(c *gin.Context) {
+				reached = true
+				assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+				assert.Equal(t, file.KeyIdentity, c.GetString("relay_file_key_identity"))
+				c.Status(http.StatusNoContent)
+			})
+			request := httptest.NewRequest(method, requestPath, strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Accept-Language", "en")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			assert.Equal(t, tc.want, recorder.Code, recorder.Body.String())
+			assert.Equal(t, tc.want == http.StatusNoContent, reached)
+			if tc.want == http.StatusForbidden {
+				assert.Contains(t, recorder.Body.String(), "model")
+				assert.NotContains(t, recorder.Body.String(), channel.Key)
+				assert.NotContains(t, recorder.Body.String(), file.UpstreamFileId)
+			}
+		})
+	}
 }
 
 // /v1/tools/search and /v1/tools/fetch always route and bill by the DeepSeek

@@ -2,6 +2,8 @@
 # 中文（简体）翻译文件
 
 # Errors returned to AI clients
+file.reference_limit: "最多允许引用 {{.Max}} 个文件"
+file.image_size_limit: "图片文件不能超过 {{.Max}} MiB"
 common.database_error: "数据库出错，请联系管理员"
 auth.user_banned: "用户已被封禁"
 token.get_info_failed: "获取令牌信息失败，请稍后重试"

@@ -150,7 +150,12 @@ func GetAndValidateResponsesRequest(c *gin.Context) (*dto.OpenAIResponsesRequest
 		return nil, errors.New("model is required")
 	}
 	if request.Input == nil {
-		return nil, errors.New("input is required")
+		// Responses accepts an instructions-only turn. Keep the original
+		// instructions on the wire instead of inventing an empty user input.
+		var instructions string
+		if common.Unmarshal(request.Instructions, &instructions) != nil || strings.TrimSpace(instructions) == "" {
+			return nil, errors.New("input is required")
+		}
 	}
 	if ExceedsMaxTokensLimit(request.MaxOutputTokens) {
 		return nil, errors.New("max_output_tokens is invalid")

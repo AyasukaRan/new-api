@@ -27,6 +27,117 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDeepSeekClaudeNativeRequestAndHeaders(t *testing.T) {
+	const fields = `,"thinking":{"type":"adaptive","budget_tokens":0},"output_config":{"effort":"low"},"temperature":0,"top_p":0,"metadata":{"user_id":"synthetic-user"},"title":{"enabled":false},"safety_check":{"level":"high"},"tools":[{"name":"lookup","input_schema":{"type":"object"}},{"type":"deepseek_read_url","name":"deepseek_read_url"}],"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"prior reasoning","signature":"opaque-thinking"},{"type":"tool_use","id":"call_1","name":"lookup","input":{}},{"type":"web_fetch_tool_result","tool_use_id":"opaque-read-link","content":{"type":"web_fetch_result","url":"https://example.com","content":{"type":"document","source":{"type":"text","data":""}}},"kind":"read_link","signature":"opaque+/page=="}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"image","source":{"type":"file","file_id":"file-ds-synthetic"}}]},{"type":"text","text":"Continue"}]}]`
+	for _, test := range []struct {
+		name, model, maxTokens string
+	}{
+		{"omitted", "deepseek-flash", ""},
+		{"explicit zero", "deepseek-flash", `,"max_tokens":0`},
+		{"explicit value", "deepseek-flash", `,"max_tokens":64`},
+		{"modifier keeps omission", "deepseek-flash-max", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"model":"` + test.model + `"` + test.maxTokens + fields + `}`
+			var request dto.ClaudeRequest
+			require.NoError(t, common.UnmarshalJsonStr(body, &request))
+			info := &relaycommon.RelayInfo{OriginModelName: test.model, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: test.model}}
+			converted, err := (&deepseek.Adaptor{}).ConvertClaudeRequest(nil, info, &request)
+			require.NoError(t, err)
+			wire, err := common.Marshal(converted)
+			require.NoError(t, err)
+			assert.Equal(t, ojson.Get(body, "max_tokens").Raw, ojson.GetBytes(wire, "max_tokens").Raw)
+			for _, path := range []string{"messages", "tools", "metadata", "title", "safety_check", "temperature", "top_p"} {
+				assert.JSONEq(t, ojson.Get(body, path).Raw, ojson.GetBytes(wire, path).Raw, path)
+			}
+			if test.model == "deepseek-flash-max" {
+				assert.Equal(t, "deepseek-flash", ojson.GetBytes(wire, "model").String())
+				assert.JSONEq(t, `{"type":"enabled"}`, ojson.GetBytes(wire, "thinking").Raw)
+				assert.JSONEq(t, `{"effort":"max"}`, ojson.GetBytes(wire, "output_config").Raw)
+				assert.Equal(t, "max", info.ReasoningEffort)
+			} else {
+				assert.JSONEq(t, ojson.Get(body, "thinking").Raw, ojson.GetBytes(wire, "thinking").Raw)
+				assert.JSONEq(t, ojson.Get(body, "output_config").Raw, ojson.GetBytes(wire, "output_config").Raw)
+				assert.Equal(t, "low", info.ReasoningEffort)
+			}
+		})
+	}
+	for _, format := range []types.RelayFormat{types.RelayFormatClaude, types.RelayFormatOpenAI} {
+		t.Run(string(format)+" headers", func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			c.Request.Header.Add("anthropic-beta", "files-api-2025-04-14")
+			c.Request.Header.Add("anthropic-beta", "synthetic-beta")
+			c.Request.Header.Set("Authorization", "Bearer client-token")
+			c.Request.Header.Set("x-api-key", "client-token")
+			c.Request.Header.Set("Cookie", "session=client-session")
+			info := &relaycommon.RelayInfo{RelayFormat: format, ChannelMeta: &relaycommon.ChannelMeta{ApiKey: "synthetic-upstream-key"}}
+			header := http.Header{}
+			require.NoError(t, (&deepseek.Adaptor{}).SetupRequestHeader(c, &header, info))
+			if format == types.RelayFormatClaude {
+				assert.Equal(t, "files-api-2025-04-14,synthetic-beta", header.Get("anthropic-beta"))
+			} else {
+				assert.Empty(t, header.Get("anthropic-beta"))
+			}
+			assert.Equal(t, "Bearer synthetic-upstream-key", header.Get("Authorization"))
+			assert.Empty(t, header.Get("x-api-key"))
+			assert.Empty(t, header.Get("Cookie"))
+		})
+	}
+}
+
+func TestDeepSeekClaudeUntypedErrors(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	for _, stream := range []bool{false, true} {
+		for _, test := range []struct {
+			name, usage string
+			billable    bool
+		}{
+			{"without usage", "", false},
+			{"empty usage", `,"usage":{}`, false},
+			{"measured usage", `,"usage":{"input_tokens":12,"output_tokens":3,"server_tool_use":{"tool_search":2}}`, true},
+		} {
+			t.Run(fmt.Sprintf("stream=%t/%s", stream, test.name), func(t *testing.T) {
+				writer := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(writer)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+				info := &relaycommon.RelayInfo{
+					RelayFormat: types.RelayFormatClaude, OriginModelName: "deepseek-flash", IsStream: stream, DisablePing: true,
+					ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek, UpstreamModelName: "deepseek-flash"},
+				}
+				info.SetEstimatePromptTokens(1200)
+				adaptor := &deepseek.Adaptor{}
+				adaptor.Init(info)
+				body := `{"error":{"message":"synthetic upstream timeout"}` + test.usage + `}`
+				contentType := "application/json"
+				if stream {
+					contentType = "text/event-stream"
+					body = "data: " + body + "\n\n"
+				}
+				response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(body))}
+				result, apiErr := adaptor.DoResponse(c, response, info)
+				require.NotNil(t, apiErr)
+				assert.Equal(t, "api_error", apiErr.ToClaudeError().Type)
+				assert.Contains(t, apiErr.Error(), "synthetic upstream timeout")
+				assert.Empty(t, writer.Body.String(), "the controller must emit the sanitized error")
+				usage, _ := result.(*dto.Usage)
+				if !test.billable {
+					assert.Nil(t, usage, "an upstream error must not fabricate a 1,200-token bill")
+					return
+				}
+				require.NotNil(t, usage)
+				assert.Equal(t, 12, usage.PromptTokens)
+				assert.Equal(t, 3, usage.CompletionTokens)
+				require.NotNil(t, info.ResponsesUsageInfo)
+				require.Contains(t, info.ResponsesUsageInfo.BuiltInTools, deepseek.SearchToolPriceKey)
+				assert.Equal(t, 2, info.ResponsesUsageInfo.BuiltInTools[deepseek.SearchToolPriceKey].CallCount)
+			})
+		}
+	}
+}
+
 func TestDeepSeekApplicationRequestsPreserveContinuation(t *testing.T) {
 	const call = `{"type":"web_search_call","id":"opaque_tool_id","status":"completed","kind":"read_link","action":{"type":"open_page","url":"https://example.com"},"page":{"title":null},"signature":"opaque+/signature=="}`
 	const serverCalls = `[{"index":0,"reasoning_content":"","calls":[{"id":"opaque_tool_id","type":"deepseek_read_url","kind":"read_link","signature":"opaque+/signature=="}]}]`
@@ -880,11 +991,12 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 	previousTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 30
 	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
-	for _, protocol := range []string{"chat", "claude"} {
+	for _, protocol := range []string{"chat", "claude", "responses"} {
 		for _, stream := range []bool{false, true} {
 			for _, tc := range []struct {
 				name, input, output, tools string
 				failure, missing, empty    bool
+				incomplete                 bool
 				wantUsage                  bool
 				wantInput, wantOutput      int
 				wantSearch                 int
@@ -894,12 +1006,17 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 				{name: "explicit zero replaces earlier count", input: "0", output: "0", tools: `{"tool_search":0,"tool_fetch":0,"tool_image_search":0,"web_search_requests":99}`, wantUsage: true},
 				{name: "failure preserves actual bill", input: "20", output: "5", tools: `{"tool_search":2,"tool_fetch":1,"tool_image_search":3}`, failure: true, wantUsage: true, wantInput: 20, wantOutput: 5, wantSearch: 2},
 				{name: "failure preserves tool-only bill", input: "0", output: "0", tools: `{"tool_search":2}`, failure: true, wantUsage: true, wantSearch: 2},
+				{name: "failure with explicit zero usage", input: "0", output: "0", tools: `{"tool_search":0}`, failure: true, wantUsage: true},
+				{name: "incomplete preserves actual bill", input: "20", output: "5", tools: `{"tool_search":2}`, incomplete: true, wantUsage: true, wantInput: 20, wantOutput: 5, wantSearch: 2},
 				{name: "failure without usage has no estimated bill", failure: true, missing: true},
 				{name: "failure with empty usage has no estimated bill", failure: true, empty: true},
 				{name: "negative usage is not a bill", input: "-1", output: "5", tools: `{}`, failure: true},
 				{name: "fractional usage is not a bill", input: "1.5", output: "5", tools: `{}`, failure: true},
 				{name: "overflow usage is not a bill", input: "2147483647", output: "1", tools: `{}`, failure: true},
 			} {
+				if tc.incomplete && protocol != "responses" {
+					continue
+				}
 				t.Run(fmt.Sprintf("%s/stream=%t/%s", protocol, stream, tc.name), func(t *testing.T) {
 					writer := httptest.NewRecorder()
 					c, _ := gin.CreateTestContext(writer)
@@ -917,6 +1034,12 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 						c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 						inputField, outputField = "input_tokens", "output_tokens"
 					}
+					if protocol == "responses" {
+						info.RelayFormat = types.RelayFormatOpenAIResponses
+						info.RelayMode = relayconstant.RelayModeResponses
+						c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+						inputField, outputField = "input_tokens", "output_tokens"
+					}
 					adaptor := &deepseek.Adaptor{}
 					adaptor.Init(info)
 					usage := fmt.Sprintf(`,"usage":{%q:%s,%q:%s,"server_tool_use":%s}`, inputField, tc.input, outputField, tc.output, tc.tools)
@@ -932,6 +1055,19 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 					if tc.failure {
 						body = `{"type":"error","error":{"type":"api_error","code":"server_error","message":"billing_failure_marker"}` + usage + `}`
 					}
+					responseEvent := "response.completed"
+					if protocol == "responses" {
+						status, failure := "completed", ""
+						if tc.failure {
+							status, responseEvent = "failed", "response.failed"
+							failure = `,"error":{"code":"server_error","message":"billing_failure_marker"}`
+						} else if tc.incomplete {
+							status, responseEvent = "incomplete", "response.incomplete"
+							failure = `,"incomplete_details":{"reason":"max_output_tokens"}`
+						}
+						body = `{"id":"resp_test","object":"response","status":"` + status + `","model":"deepseek-flash","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]` + failure + usage + `}`
+					}
+					finalBody := body
 					contentType := "application/json"
 					if stream {
 						contentType = "text/event-stream"
@@ -942,6 +1078,9 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 							} else {
 								body = start + `event: message_delta` + "\ndata: " + `{"type":"message_delta","delta":{"stop_reason":"end_turn"}` + usage + "}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 							}
+						} else if protocol == "responses" {
+							start := "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+							body = start + "event: " + responseEvent + "\ndata: {\"type\":\"" + responseEvent + "\",\"sequence_number\":2,\"response\":" + body + "}\n\n"
 						} else {
 							start := "data: {\"id\":\"chatcmpl_test\",\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"server_tool_use\":{\"tool_search\":7}}}\n\n"
 							if !tc.failure {
@@ -955,7 +1094,26 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 					}
 					response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(body))}
 					result, apiErr := adaptor.DoResponse(c, response, info)
-					if tc.failure {
+					if protocol == "responses" {
+						require.Nil(t, apiErr, "the official Responses envelope is already sent; do not append a second error")
+						assert.Equal(t, http.StatusOK, writer.Code)
+						if stream {
+							assert.Contains(t, writer.Body.String(), `"sequence_number":2,"response":`+finalBody)
+							assert.Contains(t, writer.Body.String(), "event: "+responseEvent)
+							assert.NotContains(t, writer.Body.String(), "[DONE]")
+						} else {
+							assert.JSONEq(t, finalBody, writer.Body.String())
+						}
+						if tc.failure {
+							require.NotNil(t, info.StreamStatus)
+							assert.True(t, info.StreamStatus.ResponseFailed())
+						}
+						if tc.incomplete {
+							require.NotNil(t, info.StreamStatus)
+							assert.Equal(t, "incomplete", info.StreamStatus.ResponseOutcome())
+							assert.Equal(t, "max_output_tokens", info.StreamStatus.OutcomeSnapshot().IncompleteReason)
+						}
+					} else if tc.failure {
 						require.NotNil(t, apiErr)
 						assert.NotContains(t, writer.Body.String(), "billing_failure_marker", "the controller owns error emission")
 						assert.NotContains(t, writer.Body.String(), "[DONE]", "a failed stream must not become successful")
@@ -981,6 +1139,75 @@ func TestDeepSeekWebToolsHandlerUsageAndGenerationFailures(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestDeepSeekChatBetaRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, body, path string
+		mode                   int
+	}{
+		{name: "ordinary chat", body: `{"messages":[{"role":"user","content":"hi"}]}`, path: "/v1/chat/completions"},
+		{name: "assistant prefix", body: `{"messages":[{"role":"assistant","content":"prefix","prefix":true}]}`, path: "/beta/chat/completions"},
+		{name: "explicit false", body: `{"messages":[{"role":"assistant","content":"prefix","prefix":false}]}`, path: "/v1/chat/completions"},
+		{name: "strict function", body: `{"tools":[{"type":"function","function":{"name":"lookup","strict":true,"parameters":{"type":"object"}}}]}`, path: "/beta/chat/completions"},
+		{name: "non-strict function", body: `{"tools":[{"type":"function","function":{"name":"lookup","strict":false}}]}`, path: "/v1/chat/completions"},
+		{name: "configured beta", base: "/beta", body: `{}`, path: "/beta/chat/completions"},
+		{name: "FIM", body: `{"prompt":"def f(","suffix":"):"}`, path: "/beta/completions", mode: relayconstant.RelayModeCompletions},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var request dto.GeneralOpenAIRequest
+			require.NoError(t, common.UnmarshalJsonStr(tc.body, &request))
+			mode := tc.mode
+			if mode == 0 {
+				mode = relayconstant.RelayModeChatCompletions
+			}
+			info := &relaycommon.RelayInfo{RelayMode: mode, Request: &request, ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://api.deepseek.com" + tc.base}}
+			endpoint, err := (&deepseek.Adaptor{}).GetRequestURL(info)
+			require.NoError(t, err)
+			assert.Equal(t, "https://api.deepseek.com"+tc.path, endpoint)
+		})
+	}
+}
+
+func TestDeepSeekChatSafetyMetadataSurvivesFormatting(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	for _, stream := range []bool{false, true} {
+		for _, safetyTokens := range []int{0, 2} {
+			t.Run(fmt.Sprintf("stream=%t/safety=%d", stream, safetyTokens), func(t *testing.T) {
+				writer := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(writer)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+				info := &relaycommon.RelayInfo{
+					RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions,
+					OriginModelName: "deepseek-flash", IsStream: stream, DisablePing: true, ShouldIncludeUsage: true,
+					ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek, UpstreamModelName: "deepseek-flash"},
+				}
+				info.ChannelSetting.ForceFormat = true
+				adaptor := &deepseek.Adaptor{}
+				adaptor.Init(info)
+				messageField, contentType := "message", "application/json"
+				if stream {
+					messageField, contentType = "delta", "text/event-stream"
+				}
+				body := fmt.Sprintf(`{"id":"test","model":"deepseek-flash","choices":[{"index":0,%q:{"role":"assistant","content":"","refusal":"image blocked"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12,"completion_tokens_details":{"safety_tokens":%d}}}`, messageField, safetyTokens)
+				if stream {
+					body = "data: " + body + "\n\ndata: [DONE]\n\n"
+				}
+				response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(body))}
+				usage, apiErr := adaptor.DoResponse(c, response, info)
+				require.Nil(t, apiErr)
+				measured, ok := usage.(*dto.Usage)
+				require.True(t, ok)
+				require.NotNil(t, measured)
+				assert.Equal(t, 5, measured.CompletionTokens, "safety tokens are included, never charged twice")
+				assert.Contains(t, writer.Body.String(), `"refusal":"image blocked"`)
+				assert.Contains(t, writer.Body.String(), fmt.Sprintf(`"safety_tokens":%d`, safetyTokens))
+				assert.Contains(t, writer.Body.String(), `"content_filter"`)
+			})
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -47,11 +48,14 @@ func PrepareDeepSeekFileReferences() gin.HandlerFunc {
 			return
 		}
 		paths := fileReferencePaths(body)
-		if len(paths) > 20 {
-			abortWithOpenAiMessage(c, http.StatusBadRequest, "at most 20 file references are allowed")
+		// DeepSeek accepts up to 600 images and 20 documents. The provider
+		// classifies their actual content; filenames cannot establish that limit.
+		if len(paths) > 620 {
+			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgFileReferenceLimit, map[string]any{"Max": 620}))
 			return
 		}
 		var selected *model.RelayFile
+		authorized := make(map[string]*model.RelayFile)
 		for _, path := range paths {
 			reference := ojson.GetBytes(body, path)
 			if reference.Type != ojson.String || reference.String() == "" {
@@ -59,9 +63,17 @@ func PrepareDeepSeekFileReferences() gin.HandlerFunc {
 				return
 			}
 			id := reference.String()
-			file, err := model.GetRelayFile(c.GetInt("id"), id)
-			if err != nil {
-				abortWithOpenAiMessage(c, http.StatusNotFound, "file not found")
+			file := authorized[id]
+			if file == nil {
+				file, err = model.GetRelayFile(c.GetInt("id"), id)
+				if err != nil {
+					abortWithOpenAiMessage(c, http.StatusNotFound, "file not found")
+					return
+				}
+				authorized[id] = file
+			}
+			if file.Provider != "deepseek" && len(paths) > 20 {
+				abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgFileReferenceLimit, map[string]any{"Max": 20}))
 				return
 			}
 			if selected != nil && (selected.ChannelId != file.ChannelId || selected.KeyIdentity != file.KeyIdentity) {

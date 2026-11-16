@@ -5,12 +5,14 @@ import io
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 
 import worker
 
@@ -30,6 +32,7 @@ class OfficePaginationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import uno
+        from PIL import __version__ as pillow_version
         cls.directory = tempfile.TemporaryDirectory(prefix='synthetic-office-test-', dir='/work')
         cls.root = Path(cls.directory.name)
         profile = cls.root / 'generator'
@@ -86,6 +89,7 @@ class OfficePaginationTest(unittest.TestCase):
         cls.socket_path = cls.root / 'pages.sock'
         cls.server = worker.PageServer(str(cls.socket_path), worker.PageHandler)
         cls.server.engine = subprocess.check_output(['/usr/bin/soffice', '--version'], text=True).strip()
+        cls.server.image_engine = 'Pillow ' + pillow_version
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
 
@@ -130,6 +134,55 @@ class OfficePaginationTest(unittest.TestCase):
                 self.assertEqual(body, b'')
         status, body = self.request('POST', '/pages?format=txt', b'text')
         self.assertEqual((status, body), (415, b''))
+
+    def test_real_image_frames_and_original_bytes(self):
+        import json
+        from PIL import Image
+        for kind, pages in [('PNG', 1), ('JPEG', 1), ('WEBP', 1), ('GIF', 1), ('BMP', 1), ('TIFF', 1),
+                            ('TIFF', 3), ('GIF', 3), ('WEBP', 3), ('PNG', 3), ('TIFF', 1000)]:
+            with self.subTest(format=kind, pages=pages):
+                output = io.BytesIO()
+                frame = Image.new('RGB', (8, 8), 'red')
+                options = {}
+                if pages > 1:
+                    options = {'save_all': True, 'append_images': [Image.new('RGB', (8, 8),
+                               'blue' if index % 2 == 0 else 'green') for index in range(pages - 1)]}
+                frame.save(output, format=kind, **options)
+                data = output.getvalue()
+                before = hashlib.sha256(data).hexdigest()
+                # No extension is sent to the image decoder; magic bytes decide.
+                status, body = self.request('POST', '/pages?format=image', data)
+                self.assertEqual(status, 200, body)
+                result = json.loads(body)
+                self.assertEqual(result['pages'], pages)
+                self.assertEqual(result['basis'], 'local_image_pages')
+                self.assertTrue(result['engine'].startswith('Pillow '))
+                self.assertEqual(set(result), {'pages', 'basis', 'engine'})
+                self.assertEqual(hashlib.sha256(data).hexdigest(), before)
+        self.assertFalse(list(Path('/work').glob('document-pages-*')))
+
+    def test_invalid_and_oversized_images_do_not_return_estimates(self):
+        from PIL import Image
+        valid = io.BytesIO()
+        Image.new('RGB', (8, 8), 'red').save(valid, format='PNG')
+        data = valid.getvalue()
+        # Valid PNG header/checksum with an unsafe advertised pixel count.
+        ihdr = struct.pack('>II', 100_000, 100_000) + data[24:29]
+        bomb = data[:16] + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)) + data[33:]
+        oversized = io.BytesIO()
+        Image.new('RGB', (1, 1), 'red').save(oversized, format='TIFF', save_all=True,
+            append_images=[Image.new('RGB', (1, 1), 'blue') for _ in range(worker.MAX_PAGES)])
+        unsupported = io.BytesIO()
+        Image.new('RGB', (32, 32), 'red').save(unsupported, format='ICO')
+        for name, payload in [('not image', b'not an image'), ('truncated PNG', data[:40]),
+                              ('pixel bomb', bomb), ('too many frames', oversized.getvalue()),
+                              ('unsupported format', unsupported.getvalue())]:
+            with self.subTest(name=name):
+                self.assertEqual(self.request('POST', '/pages?format=image', payload), (422, b''))
+                self.assertEqual(self.request('GET', '/health'), (200, b''))
+        self.assertEqual(self.request('POST', '/pages?format=image', b'',
+                         {'Content-Length': str(worker.MAX_IMAGE_BYTES + 1)}), (413, b''))
+        self.assertFalse(list(Path('/work').glob('document-pages-*')))
 
     def test_busy_rejects_immediately_but_health_stays_available(self):
         self.server.document_slot.acquire()

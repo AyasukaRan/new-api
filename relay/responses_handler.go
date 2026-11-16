@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -79,6 +80,22 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 
 	usageDto := usage.(*dto.Usage)
+	if info.GetChannelType() == constant.ChannelTypeDeepSeek && info.StreamStatus != nil && info.StreamStatus.ResponseFailed() {
+		outcome := info.StreamStatus.OutcomeSnapshot()
+		// The failure envelope is already sent. Log it without returning an
+		// error that would append a second envelope or retry billed work.
+		// AutoBan stays false: the controller owns Key health transitions.
+		service.ProcessChannelError(c, types.ChannelError{ChannelId: info.ChannelId, ChannelType: info.GetChannelType()}, types.WithOpenAIError(types.OpenAIError{
+			Code: outcome.ErrorCode, Type: outcome.ErrorType, Message: "Request failed",
+		}, http.StatusOK, types.ErrOptionWithSkipRetry()), info)
+		if usageDto == nil {
+			// No valid final bill means refund, never estimated consumption.
+			if info.Billing != nil {
+				info.Billing.Refund(c)
+			}
+			return nil
+		}
+	}
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		originModelName := info.OriginModelName
 		originPriceData := info.PriceData

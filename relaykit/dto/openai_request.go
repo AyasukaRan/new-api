@@ -526,6 +526,7 @@ type Message struct {
 	// DeepSeek read-link signatures in server_tool_calls are required on replay.
 	ServerToolCalls json.RawMessage `json:"server_tool_calls,omitempty"`
 	Title           json.RawMessage `json:"title,omitempty"`
+	Refusal         *string         `json:"refusal,omitempty"`
 	parsedContent   []MediaContent
 	//parsedStringContent *string
 }

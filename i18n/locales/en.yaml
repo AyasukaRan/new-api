@@ -1,6 +1,8 @@
 # English translations
 
 # Errors returned to AI clients
+file.reference_limit: "At most {{.Max}} file references are allowed"
+file.image_size_limit: "Image file must not exceed {{.Max}} MiB"
 common.database_error: "Database error, please contact the administrator"
 auth.user_banned: "User has been banned"
 token.get_info_failed: "Failed to get token info, please try again later"

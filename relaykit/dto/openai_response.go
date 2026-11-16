@@ -100,6 +100,7 @@ type ChatCompletionsStreamResponseChoiceDelta struct {
 	Annotations     json.RawMessage `json:"annotations,omitempty"`
 	ServerToolCalls json.RawMessage `json:"server_tool_calls,omitempty"`
 	Title           json.RawMessage `json:"title,omitempty"`
+	Refusal         *string         `json:"refusal,omitempty"`
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) SetContentString(s string) {
@@ -420,6 +421,8 @@ type OutputTokenDetails struct {
 	AudioTokens     int `json:"audio_tokens"`
 	ImageTokens     int `json:"image_tokens"`
 	ReasoningTokens int `json:"reasoning_tokens"`
+	// Safety review tokens are already included in output/completion tokens.
+	SafetyTokens *int `json:"safety_tokens,omitempty"`
 }
 
 type OpenAIResponsesResponse struct {

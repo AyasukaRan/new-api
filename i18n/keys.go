@@ -23,6 +23,8 @@ const (
 	MsgRateLimitTotalReached = "rate_limit.total_reached"
 
 	MsgDistributorInvalidRequest               = "distributor.invalid_request"
+	MsgFileReferenceLimit                      = "file.reference_limit"
+	MsgFileImageSizeLimit                      = "file.image_size_limit"
 	MsgDistributorInvalidChannelId             = "distributor.invalid_channel_id"
 	MsgDistributorChannelDisabled              = "distributor.channel_disabled"
 	MsgDistributorTokenNoModelAccess           = "distributor.token_no_model_access"

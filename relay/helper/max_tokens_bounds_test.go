@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,6 +71,37 @@ func TestMaxTokensBounds(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "max_output_tokens is invalid")
 	})
+}
+
+func TestResponsesInstructionsOnlyRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, wantError string
+	}{
+		{name: "instructions only", fields: `"instructions":"Say hello"`},
+		{name: "instructions with zero output limit", fields: `"instructions":"Say hello","max_output_tokens":0`},
+		{name: "instructions with excessive output limit", fields: `"instructions":"Say hello","max_output_tokens":18446744073686646784`, wantError: "max_output_tokens is invalid"},
+		{name: "missing input and instructions", fields: `"stream":false`, wantError: "input is required"},
+		{name: "null instructions", fields: `"instructions":null`, wantError: "input is required"},
+		{name: "blank instructions", fields: `"instructions":"  "`, wantError: "input is required"},
+		{name: "non-string instructions", fields: `"instructions":{"text":"Say hello"}`, wantError: "input is required"},
+		{name: "ordinary input", fields: `"input":"Hello"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"deepseek-flash",`+tc.fields+`}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			t.Cleanup(func() { common.CleanupBodyStorage(c) })
+			request, err := GetAndValidateResponsesRequest(c)
+			if tc.wantError != "" {
+				require.EqualError(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			wire, err := common.Marshal(request)
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"model":"deepseek-flash",`+tc.fields+`}`, string(wire))
+		})
+	}
 }
 
 func TestSGLangMinTokensBounds(t *testing.T) {

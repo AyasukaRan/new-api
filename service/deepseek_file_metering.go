@@ -16,13 +16,14 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 )
 
 // MeterDeepSeekFileUpload counts the original file without changing its bytes.
-// Office documents are paginated in the isolated local office worker.
+// Office documents and images are parsed in the isolated local worker.
 func MeterDeepSeekFileUpload(c *gin.Context, upload *DeepSeekFileUploadInfo) (string, error) {
 	storage, err := common.GetBodyStorage(c)
 	if err != nil {
@@ -56,10 +57,15 @@ func MeterDeepSeekFileUpload(c *gin.Context, upload *DeepSeekFileUploadInfo) (st
 			return "document_pages", err
 		}
 		format := strings.TrimPrefix(strings.ToLower(filepath.Ext(part.FileName())), ".")
+		basis := "local_pagination"
 		switch format {
 		case "doc", "docx", "ppt", "pptx":
 		default:
-			return "", errors.New("page counting currently requires PDF, Word or PowerPoint; use user_data for image input")
+			// The isolated decoder detects image format from bytes, not the name.
+			format, basis = "image", "local_image_pages"
+			if upload.Bytes > 64<<20 {
+				return "", errors.New(i18n.T(c, i18n.MsgFileImageSizeLimit, map[string]any{"Max": 64}))
+			}
 		}
 		socket := strings.TrimSpace(os.Getenv("DEEPSEEK_DOCUMENT_PAGES_SOCKET"))
 		if socket == "" {
@@ -101,7 +107,7 @@ func MeterDeepSeekFileUpload(c *gin.Context, upload *DeepSeekFileUploadInfo) (st
 			Engine string `json:"engine"`
 			Basis  string `json:"basis"`
 		}
-		if common.Unmarshal(data, &result) != nil || result.Basis != "local_pagination" || result.Engine == "" || len(result.Engine) > 100 {
+		if common.Unmarshal(data, &result) != nil || result.Basis != basis || result.Engine == "" || len(result.Engine) > 100 {
 			return "", errors.New("invalid pagination response")
 		}
 		usage := billingexpr.MeteredUsage{Unit: billingexpr.BillingUnitPage, Count: result.Pages}
@@ -110,6 +116,6 @@ func MeterDeepSeekFileUpload(c *gin.Context, upload *DeepSeekFileUploadInfo) (st
 		}
 		upload.Pages = result.Pages
 		c.Set("deepseek_file_pagination_engine", result.Engine)
-		return "local_pagination", nil
+		return basis, nil
 	}
 }
