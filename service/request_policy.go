@@ -117,7 +117,7 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 	}
 	state.AddEvent(event)
 	event.Decision, event.Health = decision, "unchanged"
-	if source != "local" && c.GetBool("auto_ban") && ShouldDisableChannel(err) {
+	if source != "local" && decision.Reason != "same_key_transient_retry" && c.GetBool("auto_ban") && ShouldDisableChannel(err) {
 		event.Health = "channel_disable_requested"
 		if common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
 			event.Health = "key_disable_requested"

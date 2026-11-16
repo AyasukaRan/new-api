@@ -70,6 +70,8 @@ import {
   logTokenName,
   renderAuditContent,
   renderLogContent,
+  getRetryDecisionReason,
+  isFailedStreamResponse,
 } from '../../lib/format'
 import {
   isDisplayableLogType,
@@ -921,7 +923,29 @@ export function useCommonLogsColumns(
           let detailPreview = (
             <span className='text-muted-foreground/40'>—</span>
           )
-          if (primary) {
+          const failedRequest =
+            log.type === LOG_TYPE_ENUM.ERROR ||
+            isFailedStreamResponse(other?.stream_status)
+          const retryReason = getRetryDecisionReason(other?.retry_decision, t)
+          if (failedRequest) {
+            const failureReason =
+              other?.stream_status?.end_error ||
+              renderLogContent(other, t) ||
+              log.content ||
+              t('Request failed')
+            detailPreview = (
+              <span className='flex min-w-0 flex-col gap-0.5 leading-snug'>
+                <span className='text-destructive truncate'>
+                  {failureReason}
+                </span>
+                {retryReason && (
+                  <span className='text-muted-foreground truncate'>
+                    {retryReason}
+                  </span>
+                )}
+              </span>
+            )
+          } else if (primary) {
             detailPreview = (
               <span
                 className={cn(

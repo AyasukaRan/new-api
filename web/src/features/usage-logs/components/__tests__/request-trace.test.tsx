@@ -33,7 +33,7 @@ import {
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
-import type { RequestTraceLeg } from '../../types'
+import type { LogOtherData, RequestTraceLeg } from '../../types'
 import { RequestTraceSection } from '../dialogs/request-trace-section'
 
 const getRequestTrace = vi.hoisted(() => vi.fn())
@@ -84,14 +84,18 @@ async function openExchanges() {
 describe('request trace viewer', () => {
   const queryClients: QueryClient[] = []
 
-  function renderSection(enabled = true) {
+  function renderSection(enabled = true, metadata?: LogOtherData) {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     })
     queryClients.push(queryClient)
     return render(
       <QueryClientProvider client={queryClient}>
-        <RequestTraceSection traceId='trace-1' enabled={enabled} />
+        <RequestTraceSection
+          traceId='trace-1'
+          enabled={enabled}
+          metadata={metadata}
+        />
       </QueryClientProvider>
     )
   }
@@ -147,6 +151,30 @@ describe('request trace viewer', () => {
       'true'
     )
     expect(getRequestTrace).toHaveBeenCalledWith('trace-1')
+  })
+
+  test('keeps the recorded first response and stop reason visible with a failed stream', async () => {
+    getRequestTrace.mockResolvedValue([makeLeg({ body: requestBody }), reply])
+    renderSection(true, {
+      frt: 437,
+      stream_status: {
+        status: 'error',
+        end_reason: 'upstream_error',
+        end_error: 'Upstream temporarily unavailable',
+      },
+      retry_decision: { action: 'stop', reason: 'response_already_started' },
+    })
+    await openTrace()
+    expect(
+      await screen.findByText('Upstream temporarily unavailable')
+    ).toBeVisible()
+    expect(screen.getByText('437ms')).toBeVisible()
+    expect(screen.getByText('Why retry stopped')).toBeVisible()
+    expect(
+      screen.getByText(
+        'Response content has already been sent; retrying could duplicate output'
+      )
+    ).toBeVisible()
   })
 
   test('keeps both client legs reachable while switching between upstream retries', async () => {

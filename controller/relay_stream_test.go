@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +37,19 @@ import (
 )
 
 func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			testRelayMultiKeyFailoverResponseHeaderTimeout(t, dialect.kind, os.Getenv(dialect.env))
+		})
+	}
+}
+
+func testRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T, kind, dsn string) {
 	require.NoError(t, i18n.Init())
-	db := modelManagementDB(t, "sqlite", "")
+	db := modelManagementDB(t, kind, dsn)
 	require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}, &model.ChannelBalanceSample{}, &model.Log{}))
 	previousConfig := config.GlobalConfig.ExportAllConfigs()
 	t.Cleanup(func() {
@@ -57,7 +69,7 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 	common.AutomaticDisableChannelEnabled = false
 	common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout, common.RelayTimeout = 0, 1, 0
 	constant.StreamingTimeout = 30
-	constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = false, false, false, false
+	constant.CountToken, common.LogConsumeEnabled, common.RequestTraceEnabled, constant.ErrorLogEnabled = false, false, false, true
 	t.Cleanup(func() {
 		common.RetryTimes, common.AutomaticDisableChannelEnabled = previousRetries, previousDisable
 		common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout, common.RelayTimeout = previousHeader, previousFailover, previousTimeout
@@ -76,15 +88,28 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 	require.NoError(t, db.Create(user).Error)
 
 	for _, test := range []struct {
-		name            string
-		retries         int
-		cancel, written bool
-		wantKeys        []string
-		wantStatus      int
-		responseStatus  int
+		name                              string
+		retries                           int
+		cancel, written                   bool
+		once, ping, thinking, streamError bool
+		change                            string
+		wantKeys                          []string
+		wantStatus                        int
+		responseStatus                    int
 	}{
+		{name: "global_header_timeout_does_not_retry_same_key", retries: 3, wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
 		{name: "timeout_uses_next_ordered_key", retries: 3, wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
-		{name: "upstream_unavailable_uses_next_ordered_key", retries: 3, responseStatus: 503, wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "upstream_unavailable_uses_next_ordered_key", retries: 3, responseStatus: 503, wantKeys: []string{"header-primary", "header-primary", "header-backup"}, wantStatus: 200},
+		{name: "temporary_failure_retries_same_key_once", retries: 3, responseStatus: 503, once: true, wantKeys: []string{"header-primary", "header-primary"}, wantStatus: 200},
+		{name: "ping_only_keeps_same_key_replayable", retries: 3, responseStatus: 503, once: true, ping: true, wantKeys: []string{"header-primary", "header-primary"}, wantStatus: 200},
+		{name: "error_only_frame_is_not_first_token", retries: 3, streamError: true, once: true, wantKeys: []string{"header-primary", "header-primary"}, wantStatus: 200},
+		{name: "same_key_retry_consumes_global_budget", retries: 1, responseStatus: 503, wantKeys: []string{"header-primary", "header-primary"}, wantStatus: 503},
+		{name: "invalid_credential_skips_same_key_retry", retries: 3, responseStatus: 401, wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "probe_failure_before_retry_is_skipped", retries: 3, responseStatus: 503, change: "probe", wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "key_disabled_before_retry_is_skipped", retries: 3, responseStatus: 503, change: "disable", wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "key_group_revoked_before_retry_is_skipped", retries: 3, responseStatus: 503, change: "group", wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "key_removed_before_retry_is_skipped", retries: 3, responseStatus: 503, change: "remove", wantKeys: []string{"header-primary", "header-backup"}, wantStatus: 200},
+		{name: "thinking_failure_preserves_first_token_and_reason", retries: 3, written: true, thinking: true, wantKeys: []string{"header-primary"}, wantStatus: 200},
 		{name: "client_validation_rejection_not_quarantined", retries: 3, responseStatus: 400, wantKeys: []string{"header-primary"}, wantStatus: 400},
 		{name: "timeout_respects_retry_budget", retries: 0, wantKeys: []string{"header-primary"}, wantStatus: 500},
 		{name: "client_cancel_stops_upstream_and_retry", retries: 3, cancel: true, wantKeys: []string{"header-primary"}, wantStatus: 500},
@@ -92,7 +117,17 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			common.RetryTimes = test.retries
-			affinity.Enabled = test.name == "timeout_uses_next_ordered_key"
+			if test.name == "global_header_timeout_does_not_retry_same_key" {
+				common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout = 1, 120
+				service.ResetProxyClientCache()
+				service.InitHttpClient()
+				defer func() {
+					common.RelayResponseHeaderTimeout, common.MultiKeyFailoverResponseHeaderTimeout = 0, 1
+					service.ResetProxyClientCache()
+					service.InitHttpClient()
+				}()
+			}
+			affinity.Enabled = test.name == "timeout_uses_next_ordered_key" || test.once
 			affinity.Rules = []operation_setting.ChannelAffinityRule{{
 				Name: "header-failover-affinity", ModelRegex: []string{"^claude-header-fixture$"},
 				SessionMode: "prefer", TTLSeconds: 3600, IncludeModelName: true, IncludeUsingGroup: true, IncludeRuleName: true,
@@ -102,14 +137,45 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 			defer cancel()
 			var mutex sync.Mutex
 			var used []string
+			var ch *model.Channel
 			upstreamCanceled := make(chan struct{}, 1)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
 				key := r.Header.Get("X-Api-Key")
 				mutex.Lock()
 				used = append(used, key)
+				attempt := len(used)
 				mutex.Unlock()
-				if key == "header-primary" && test.responseStatus > 0 {
+				if key == "header-primary" && attempt == 1 && test.change != "" {
+					changed, loadErr := model.GetChannelById(ch.Id, true)
+					if loadErr != nil {
+						t.Error(loadErr)
+						w.WriteHeader(500)
+						return
+					}
+					switch test.change {
+					case "probe":
+						if healthErr := model.RecordChannelKeyRoutingFailure(changed, ch.Models, key, time.Now().UnixMilli(), 503, "concurrent probe failure"); healthErr != nil {
+							t.Error(healthErr)
+						}
+					case "disable":
+						changed.ChannelInfo.MultiKeyStatusList = map[int]int{1: common.ChannelStatusManuallyDisabled}
+					case "group":
+						changed.ChannelInfo.KeyGroups = map[string][]string{changed.KeyIdentity(key): {"other"}}
+					case "remove":
+						changed.Key = "header-backup\nheader-last"
+						changed.ChannelInfo.MultiKeySize = 2
+					}
+					if updateErr := db.Model(changed).Updates(map[string]any{"key": changed.Key, "channel_info": changed.ChannelInfo}).Error; updateErr != nil {
+						t.Error(updateErr)
+					}
+				}
+				if key == "header-primary" && test.streamError && attempt == 1 {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"temporary fixture failure\"}}\n\n")
+					return
+				}
+				if key == "header-primary" && test.responseStatus > 0 && (!test.once || attempt == 1) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(test.responseStatus)
 					errorType := "api_error"
@@ -119,7 +185,7 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 					_, _ = io.WriteString(w, `{"type":"error","error":{"type":"`+errorType+`","message":"fixture rejection"}}`)
 					return
 				}
-				if key == "header-primary" && !test.written {
+				if key == "header-primary" && !test.written && test.responseStatus == 0 && !test.streamError {
 					if test.cancel {
 						cancel()
 					}
@@ -138,15 +204,20 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set(common.RequestIdKey, "private-upstream-id")
 				_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-header-fixture\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+				if test.thinking || test.once {
+					_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"checking fixture\"}}\n\n")
+				}
 				if test.written {
-					_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"fixture failed after output\"}}\n\n")
+					w.Header().Set("X-Request-Id", "private-upstream-id")
+					_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"fixture failed after output header-primary private-upstream-id\"}}\n\n")
 					return
 				}
 				_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 			}))
 			defer upstream.Close()
-			ch := &model.Channel{Name: test.name, Type: constant.ChannelTypeAnthropic, Key: "header-backup\nheader-primary\nheader-last", Models: "claude-header-fixture", Group: "default", Status: common.ChannelStatusEnabled, BaseURL: common.GetPointer(upstream.URL), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModeFailover}}
+			ch = &model.Channel{Name: test.name, Type: constant.ChannelTypeAnthropic, Key: "header-backup\nheader-primary\nheader-last", Models: "claude-header-fixture", Group: "default", Status: common.ChannelStatusEnabled, BaseURL: common.GetPointer(upstream.URL), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModeFailover}}
 			require.NoError(t, ch.Insert())
 			t.Cleanup(func() { require.NoError(t, ch.Delete()) })
 			ch.ChannelInfo.KeyOrder = []string{ch.KeyIdentity("header-primary"), ch.KeyIdentity("header-backup"), ch.KeyIdentity("header-last")}
@@ -161,7 +232,36 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 			require.Nil(t, selectErr)
 			require.NotNil(t, selected)
 			require.Nil(t, middleware.SetupContextForSelectedChannel(c, selected, ch.Models))
+			common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now().Add(-500*time.Millisecond))
+			c.Set(common.RequestIdKey, "local-fixture-request")
+			c.Set(common.UpstreamRequestIdKey, "private-upstream-id")
+			if test.ping {
+				helper.SetEventStreamHeaders(c)
+				require.NoError(t, helper.PingData(c))
+			}
 			Relay(c, types.RelayFormatClaude)
+			var logs []model.Log
+			require.NoError(t, db.Where("channel_id = ? AND type = ?", ch.Id, model.LogTypeError).Order("id").Find(&logs).Error)
+			require.NotEmpty(t, logs)
+			var firstOther map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &firstOther))
+			if test.thinking {
+				assert.GreaterOrEqual(t, firstOther["frt"].(float64), float64(500))
+				assert.Equal(t, map[string]any{"action": "stop", "reason": "response_already_started"}, firstOther["retry_decision"])
+				assert.Contains(t, logs[0].Other, "fixture failed after output")
+				assert.NotContains(t, logs[0].Content, "header-primary")
+				assert.NotContains(t, logs[0].Content, "private-upstream-id")
+				streamJSON, marshalErr := common.Marshal(firstOther["stream_status"])
+				require.NoError(t, marshalErr)
+				assert.NotContains(t, string(streamJSON), "header-primary")
+				assert.NotContains(t, string(streamJSON), "private-upstream-id")
+				assert.Contains(t, string(streamJSON), "local-fixture-request")
+			} else {
+				assert.NotContains(t, firstOther, "frt")
+			}
+			if test.once {
+				assert.Equal(t, map[string]any{"action": "retry_same_key", "reason": "same_key_transient_retry"}, firstOther["retry_decision"])
+			}
 			mutex.Lock()
 			assert.Equal(t, test.wantKeys, used)
 			mutex.Unlock()
@@ -171,14 +271,14 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 			} else {
 				assert.NoError(t, ctx.Err(), "a transport header timeout must not cancel the inbound request")
 			}
-			if !test.written && test.responseStatus == 0 {
+			if !test.written && test.responseStatus == 0 && !test.streamError {
 				select {
 				case <-upstreamCanceled:
 				case <-time.After(time.Second):
 					t.Fatal("the failed upstream HTTP request was not canceled")
 				}
 			}
-			if len(test.wantKeys) > 1 {
+			if len(test.wantKeys) > 1 && test.wantStatus == 200 {
 				assert.Contains(t, recorder.Body.String(), "event: message_stop")
 				assert.NotContains(t, recorder.Body.String(), "event: error")
 			} else if test.written {
@@ -196,6 +296,14 @@ func TestRelayMultiKeyFailoverResponseHeaderTimeout(t *testing.T) {
 				require.NotNil(t, selected)
 				require.Nil(t, middleware.SetupContextForSelectedChannel(next, selected, ch.Models))
 				return common.GetContextKeyString(next, constant.ContextKeyChannelKey)
+			}
+			if test.change != "" {
+				return
+			}
+			if test.once {
+				assert.Nil(t, ch.RelayCredentialProbeError(ch.Models, "header-primary"))
+				assert.Equal(t, "header-primary", nextKey("fresh-session"))
+				return
 			}
 			if test.cancel || test.responseStatus == http.StatusBadRequest {
 				assert.Nil(t, ch.RelayCredentialProbeError(ch.Models, "header-primary"), "a client cancellation must not quarantine a healthy credential")
@@ -617,4 +725,108 @@ func TestStreamKeepAliveCancellation(t *testing.T) {
 	_, err := c.Writer.WriteString("data: done\n\n")
 	require.NoError(t, err)
 	require.True(t, strings.HasSuffix(recorder.Body.String(), "data: done\n\n"))
+}
+
+// These are real scanner callbacks, including native Baidu/Dify bodies and
+// OpenAI's one-frame buffering pattern. Metadata/errors must stay unknown.
+func TestRelayMeaningfulFirstResponse(t *testing.T) {
+	previousTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = previousTimeout })
+	for _, tc := range []struct {
+		name, data string
+		want       bool
+	}{
+		{"claude_metadata", `{"type":"message_start","message":{"role":"assistant"}}`, false},
+		{"claude_error", `{"type":"error","error":{"message":"unavailable"}}`, false},
+		{"claude_thinking", `{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"work"}}`, true},
+		{"chat_role", `{"choices":[{"delta":{"role":"assistant"}}]}`, false},
+		{"chat_text_buffered", `{"choices":[{"delta":{"content":"hello"}}]}`, true},
+		{"responses_metadata", `{"type":"response.created","response":{"status":"in_progress"}}`, false},
+		{"responses_text", `{"type":"response.output_text.delta","delta":"hello"}`, true},
+		{"baidu_text", `{"result":"hello","is_end":false}`, true},
+		{"baidu_error", `{"error_code":3,"error_msg":"unavailable"}`, false},
+		{"dify_message", `{"event":"message","answer":"hello"}`, true},
+		{"gemini_text", `{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			info := &relaycommon.RelayInfo{StartTime: time.Now().Add(-500 * time.Millisecond), IsStream: true}
+			info.ResetFirstResponseTime()
+			info.SetFirstResponseTime()
+			info.ResetFirstResponseTime() // a previous attempt must not supply this attempt's FRT
+			helper.SetEventStreamHeaders(c)
+			response := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("data: " + tc.data + "\n\ndata: [DONE]\n\n"))}
+			helper.StreamScannerHandler(c, response, info, func(data string, sr *helper.StreamResult) {
+				if tc.name != "chat_text_buffered" {
+					require.NoError(t, helper.StringData(c, data))
+				}
+			})
+			assert.Equal(t, tc.want, info.HasSendResponse())
+			if tc.want {
+				assert.GreaterOrEqual(t, info.FirstResponseTime.Sub(info.StartTime).Milliseconds(), int64(500))
+			}
+		})
+	}
+}
+
+func TestRelayKeyHeaderBudgetEndsBeforeResponseBody(t *testing.T) {
+	previous := common.MultiKeyFailoverResponseHeaderTimeout
+	common.MultiKeyFailoverResponseHeaderTimeout = 1
+	service.ResetProxyClientCache()
+	t.Cleanup(func() { common.MultiKeyFailoverResponseHeaderTimeout = previous; service.ResetProxyClientCache() })
+	for _, winner := range []string{"headers", "deadline"} {
+		t.Run(winner, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+			ch := &model.Channel{Id: 919, Key: "primary\nbackup", Group: "default", ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModeFailover}}
+			service.MarkGroupKeyAttempt(c, ch, "primary")
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeAnthropic, ChannelIsMultiKey: true}, KeyResponseDeadline: time.Now().Add(50 * time.Millisecond)}
+			policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
+			policy.ResponseHeaderTimeoutSeconds = 1
+			client, err := service.GetHttpClientWithProxyPolicy("", policy)
+			require.NoError(t, err)
+			original := client.Transport
+			t.Cleanup(func() { client.Transport = original })
+			var requestContext context.Context
+			client.Transport = channelProbeTestTransport(func(req *http.Request) (*http.Response, error) {
+				requestContext = req.Context()
+				if winner == "deadline" {
+					<-req.Context().Done()
+				}
+				// Even a transport returning headers after cancellation must not leak a
+				// response body whose context is already canceled to the stream handler.
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("long response")), Request: req}, nil
+			})
+			req := httptest.NewRequest(http.MethodPost, "http://fixture.invalid/v1/messages", strings.NewReader("{}"))
+			req.RequestURI = ""
+			response, requestErr := channel.DoRequest(c, req, info)
+			if winner == "deadline" {
+				require.Error(t, requestErr)
+				assert.Nil(t, response)
+				assert.True(t, info.UpstreamRequestTimedOut)
+				return
+			}
+			require.NoError(t, requestErr)
+			require.NotNil(t, response)
+			timer := time.NewTimer(time.Until(info.KeyResponseDeadline.Add(time.Millisecond)))
+			defer timer.Stop()
+			<-timer.C
+			assert.NoError(t, requestContext.Err(), "the original header deadline must not cancel an established body")
+			body, readErr := io.ReadAll(response.Body)
+			require.NoError(t, readErr)
+			assert.Equal(t, "long response", string(body))
+			require.NoError(t, response.Body.Close())
+			assert.ErrorIs(t, requestContext.Err(), context.Canceled)
+		})
+	}
+}
+
+func TestRelayHeadersWithoutKeepaliveAreNotReplayable(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	helper.SetEventStreamHeaders(c)
+	c.Writer.WriteHeaderNow()
+	assert.False(t, helper.RelayResponseReplayable(c), "headers committed outside our keepalive path do not prove replay is safe")
 }

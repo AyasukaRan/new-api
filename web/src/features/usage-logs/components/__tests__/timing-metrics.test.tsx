@@ -75,37 +75,43 @@ test('does not show first-token timing for non-stream requests', () => {
   expect(screen.queryByText('First token')).not.toBeInTheDocument()
 })
 
-test('uses the same millisecond first-token precision in log details', async () => {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
-  const updatedAt = Date.now() + 60_000
-  client.setQueryData(['status'], {}, { updatedAt })
-  client.setQueryData(['pricing'], { data: [], vendors: [] }, { updatedAt })
-  try {
-    render(
-      <QueryClientProvider client={client}>
-        <DetailsDialog
-          open
-          isAdmin={false}
-          isRoot={false}
-          onOpenChange={() => undefined}
-          log={usageLogSchema.parse({
-            id: 1,
-            user_id: 1,
-            created_at: 1,
-            type: 2,
-            content: '',
-            model_name: 'deepseek-flash',
-            use_time: 14,
-            is_stream: true,
-            other: JSON.stringify({ frt: 437 }),
-          })}
-        />
-      </QueryClientProvider>
-    )
-    expect(await screen.findByText('(FRT: 437ms)')).toBeVisible()
-  } finally {
-    client.clear()
+test.each([
+  [2, 14],
+  [5, 0],
+])(
+  'keeps a recorded first-token time in type %i log details even when duration is %is',
+  async (type, useTime) => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    const updatedAt = Date.now() + 60_000
+    client.setQueryData(['status'], {}, { updatedAt })
+    client.setQueryData(['pricing'], { data: [], vendors: [] }, { updatedAt })
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <DetailsDialog
+            open
+            isAdmin={false}
+            isRoot={false}
+            onOpenChange={() => undefined}
+            log={usageLogSchema.parse({
+              id: 1,
+              user_id: 1,
+              created_at: 1,
+              type,
+              content: '',
+              model_name: 'deepseek-flash',
+              use_time: useTime,
+              is_stream: true,
+              other: JSON.stringify({ frt: 437 }),
+            })}
+          />
+        </QueryClientProvider>
+      )
+      expect(await screen.findByText('(FRT: 437ms)')).toBeVisible()
+    } finally {
+      client.clear()
+    }
   }
-})
+)

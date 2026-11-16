@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/bytedance/gopkg/util/gopool"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 )
 
@@ -99,15 +101,27 @@ func (b *StreamWriteBudget) Deadline(now time.Time, n int) time.Time {
 // recorders) are silently ignored.
 type streamResponseWriter struct {
 	gin.ResponseWriter
-	budget StreamWriteBudget
+	budget           StreamWriteBudget
+	protocolStarted  atomic.Bool
+	keepaliveWritten atomic.Bool
 }
 
 func (w *streamResponseWriter) Write(p []byte) (int, error) {
+	if string(p) == ": PING\n\n" {
+		w.keepaliveWritten.Store(true)
+	} else if len(p) > 0 {
+		w.protocolStarted.Store(true)
+	}
 	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(w.budget.Deadline(time.Now(), len(p)))
 	return w.ResponseWriter.Write(p)
 }
 
 func (w *streamResponseWriter) WriteString(s string) (int, error) {
+	if s == ": PING\n\n" {
+		w.keepaliveWritten.Store(true)
+	} else if s != "" {
+		w.protocolStarted.Store(true)
+	}
 	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(w.budget.Deadline(time.Now(), len(s)))
 	return w.ResponseWriter.WriteString(s)
 }
@@ -115,6 +129,80 @@ func (w *streamResponseWriter) WriteString(s string) (int, error) {
 // Unwrap lets http.ResponseController reach the connection.
 func (w *streamResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// RelayResponseReplayable permits only our own SSE keepalive comments after
+// headers have been sent. Even protocol metadata cannot be replayed safely.
+func RelayResponseReplayable(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.Context().Err() != nil {
+		return false
+	}
+	if !c.Writer.Written() {
+		return true
+	}
+	var writer http.ResponseWriter = c.Writer
+	for writer != nil {
+		if stream, ok := writer.(*streamResponseWriter); ok {
+			return stream.keepaliveWritten.Load() && !stream.protocolStarted.Load()
+		}
+		wrapped, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		writer = wrapped.Unwrap()
+	}
+	return false
+}
+
+// Meaningful stream output excludes errors, usage, keepalives and protocol
+// setup. Inspect only until the first output, so long streams pay this cost once.
+func streamDataHasContent(data string) bool {
+	value := ojson.Parse(data)
+	if value.Get("error").Exists() || value.Get("error_code").Int() != 0 || value.Get("event").String() == "error" {
+		return false
+	}
+	switch value.Get("type").String() {
+	case "content_block_delta":
+		for _, field := range []string{"delta.text", "delta.thinking", "delta.partial_json"} {
+			if value.Get(field).String() != "" {
+				return true
+			}
+		}
+	case "content_block_start":
+		kind := value.Get("content_block.type").String()
+		return kind == "tool_use" || kind == "server_tool_use" || value.Get("content_block.text").String() != "" || value.Get("content_block.thinking").String() != ""
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.audio.delta", "response.audio_transcript.delta", "transcript.text.delta":
+		return value.Get("delta").String() != ""
+	case "speech.audio.delta":
+		return value.Get("audio").String() != ""
+	case "image_generation.partial_image", "image_generation.completed", "image_edit.partial_image", "image_edit.completed":
+		return value.Get("b64_json").String() != "" || value.Get("partial_image_b64").String() != "" || value.Get("url").String() != ""
+	case "response.output_item.added":
+		kind := value.Get("item.type").String()
+		return kind == "function_call" || kind == "web_search_call" || kind == "file_search_call"
+	}
+	// The other native SSE users of this scanner are Baidu and Dify.
+	if value.Get("result").String() != "" || value.Get("answer").String() != "" {
+		return true
+	}
+	for _, choice := range value.Get("choices").Array() {
+		for _, field := range []string{"text", "delta.content", "delta.reasoning_content", "delta.reasoning", "delta.function_call.name", "delta.function_call.arguments"} {
+			if choice.Get(field).String() != "" {
+				return true
+			}
+		}
+		if len(choice.Get("delta.tool_calls").Array()) > 0 {
+			return true
+		}
+	}
+	for _, candidate := range value.Get("candidates").Array() {
+		for _, part := range candidate.Get("content.parts").Array() {
+			if part.Get("text").String() != "" || part.Get("functionCall").Exists() || part.Get("inlineData").Exists() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
@@ -263,6 +351,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				writeMutex.Lock()
 				defer writeMutex.Unlock()
 				dataHandler(data, sr)
+				if !info.HasSendResponse() && !sr.status.ResponseFailed() && streamDataHasContent(data) {
+					info.SetFirstResponseTime()
+				}
 			}()
 			if sr.IsStopped() {
 				return
@@ -307,7 +398,6 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				continue
 			}
 			if data != "[DONE]" {
-				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
 
 				select {

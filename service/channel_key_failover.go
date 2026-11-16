@@ -6,7 +6,34 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
+	"slices"
 )
+
+// SelectSameChannelKeyRetry revalidates the original credential against live
+// configuration and probe state without advancing the shared polling cursor.
+func SelectSameChannelKeyRetry(c *gin.Context, previous *model.Channel, modelName, key string) *model.Channel {
+	if previous == nil || key == "" || !HasChannelKeyFailover(c) {
+		return nil
+	}
+	channel, err := model.GetChannelById(previous.Id, true)
+	if err != nil || channel.Status != common.ChannelStatusEnabled || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+		return nil
+	}
+	group := GetSelectedRequestGroup(c)
+	if !slices.Contains(channel.GetGroups(), group) || !slices.Contains(channel.GetModelsForGroup(group), modelName) {
+		return nil
+	}
+	constraints := GetChannelConstraints(c)
+	if ok, _ := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+		return nil
+	}
+	channel.RelayKeyIdentity = previous.KeyIdentity(key)
+	selected, selectErr := channel.SelectRelayKeyForModel(modelName, constraints.HasFilter(dto.FilterBatchCapable), group)
+	if selectErr != nil || selected.Key != key {
+		return nil
+	}
+	return selected.Channel
+}
 
 const channelKeyFailoverContext = "channel_key_failover"
 const channelKeyRetryOffset = "channel_key_retry_offset"

@@ -247,6 +247,10 @@ export interface LogOtherData {
   audio_ratio?: number
   audio_completion_ratio?: number
   frt?: number
+  retry_decision?: {
+    action: 'retry_same_key' | 'retry_other_key' | 'stop'
+    reason: string
+  }
   // Tiered (expression-based) billing fields, set by backend when
   // billing_mode === 'tiered_expr'. expr_b64 is the base64-encoded billing
   // expression; the matched tier and request-rule traces come from the actual
@@ -291,6 +295,7 @@ export interface LogOtherData {
   group?: string
   stream_status?: {
     status?: string
+    response_status?: string
     end_reason?: string
     error_count?: number
     end_error?: string

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -14,6 +15,18 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 )
+
+// Relay diagnostics are visible to the request owner. Keep useful upstream
+// messages, but never repeat the selected secret or the provider's request ID.
+func relayLogErrorText(c *gin.Context, info *relaycommon.RelayInfo, text string) string {
+	if info != nil && info.ApiKey != "" {
+		text = strings.ReplaceAll(text, info.ApiKey, "[redacted]")
+	}
+	if upstreamID := c.GetString(common.UpstreamRequestIdKey); upstreamID != "" {
+		text = strings.ReplaceAll(text, upstreamID, c.GetString(common.RequestIdKey))
+	}
+	return common.MaskSensitiveInfo(text, common.UpstreamAddresses(c)...)
+}
 
 // DecideRelayRetry is the single retry decision for relay attempts. The reason
 // is recorded in the request policy decision events of the log details.
@@ -65,9 +78,10 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		return
 	}
 	upstreamURLs := common.UpstreamAddresses(c)
-	logger.LogError(c, common.LogText("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode(upstreamURLs...))))
+	message := relayLogErrorText(c, relayInfo, err.MaskSensitiveErrorWithStatusCode(upstreamURLs...))
+	logger.LogError(c, common.LogText("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(message)))
 	if ShouldDisableChannel(err) && channelError.AutoBan {
-		reason := err.MaskSensitiveErrorWithStatusCode(upstreamURLs...)
+		reason := message
 		gopool.Go(func() {
 			DisableChannel(channelError, reason)
 		})
@@ -89,6 +103,23 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		other.SetPublic("error_type", err.GetErrorType())
 		other.SetPublic("error_code", err.GetErrorCode())
 		other.SetPublic("status_code", err.StatusCode)
+		if relayInfo != nil && relayInfo.HasSendResponse() {
+			other.SetPublic("frt", float64(relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()))
+		}
+		appendStreamStatus(c, relayInfo, other)
+		for _, event := range RequestPolicy(c).Events() {
+			if event.Decision.Action != "retry" && event.Decision.Action != "stop" {
+				continue
+			}
+			action := event.Decision.Action
+			if action == "retry" {
+				action = "retry_other_key"
+				if event.Decision.Reason == "same_key_transient_retry" {
+					action = "retry_same_key"
+				}
+			}
+			other.SetPublic("retry_decision", map[string]string{"action": action, "reason": event.Decision.Reason})
+		}
 		AppendRequestMetadata(c, relayInfo, other)
 		AppendRelayLogAdminInfo(c, relayInfo, other)
 		AppendResponseModelLogInfo(relayInfo, other)
@@ -98,6 +129,6 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			startTime = time.Now()
 		}
 		useTimeSeconds := int(time.Since(startTime).Seconds())
-		model.RecordErrorLog(c, userId, channelError.ChannelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(upstreamURLs...), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+		model.RecordErrorLog(c, userId, channelError.ChannelId, modelName, tokenName, message, tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}
 }

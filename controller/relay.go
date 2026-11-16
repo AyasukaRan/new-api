@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -225,10 +226,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.LastError = nil
 	var observation *bool
 	var sameChannelRetry *model.Channel
+	sameKeyRetried := make(map[string]bool)
+	keyDeadlines := make(map[string]time.Time)
 	initialChannelKeys := make(map[int]map[string]bool)
 	rejectedChannelKeys := make(map[int]map[string]bool)
 
 	for retryParam.GetRetry() <= common.RetryTimes {
+		relayInfo.ResetFirstResponseTime()
+		relayInfo.UpstreamRequestTimedOut = false
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
@@ -249,6 +254,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 		}
 		usingKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		keyIdentity := channel.KeyIdentity(usingKey)
+
 		if channel.ChannelInfo.IsMultiKey {
 			if initialChannelKeys[channel.Id] == nil {
 				initialChannelKeys[channel.Id] = make(map[string]bool)
@@ -284,6 +291,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		service.MarkGroupKeyAttempt(c, channel, usingKey)
+		if service.HasChannelKeyFailover(c) && common.MultiKeyFailoverResponseHeaderTimeout > 0 {
+			if keyDeadlines[keyIdentity].IsZero() {
+				keyDeadlines[keyIdentity] = time.Now().Add(time.Duration(common.MultiKeyFailoverResponseHeaderTimeout) * time.Second)
+			}
+			relayInfo.KeyResponseDeadline = keyDeadlines[keyIdentity]
+		} else {
+			relayInfo.KeyResponseDeadline = time.Time{}
+		}
 		relayInfo.ChannelAttemptStartTime = time.Now()
 		finishActivity := perfmetrics.BeginChannelRequest(c.Request.Context(), relayInfo, channel.Id)
 		service.ResetRequestToolObservation(c)
@@ -325,6 +340,32 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		invalidCredential := isInvalidDeepSeekCredential(c, channel, newAPIError)
 		endpointFailed := false
 		crossChannelCredentialRetry := false
+		retryingSameKey := false
+		var timeoutError interface{ Timeout() bool }
+		isTimeout := relayInfo.UpstreamRequestTimedOut || errors.Is(newAPIError, context.DeadlineExceeded) || (errors.As(newAPIError, &timeoutError) && timeoutError.Timeout()) || newAPIError.StatusCode == http.StatusRequestTimeout || newAPIError.StatusCode == http.StatusGatewayTimeout || newAPIError.StatusCode == 524
+		conversation := relayFormat == types.RelayFormatClaude
+		switch relayInfo.RelayMode {
+		case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeCompletions, relayconstant.RelayModeGemini, relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact:
+			conversation = true
+		}
+		upstreamFailure := newAPIError.GetErrorType() != types.ErrorTypeNewAPIError || newAPIError.GetErrorCode() == types.ErrorCodeDoRequestFailed
+		switch newAPIError.ToOpenAIError().Type {
+		case "authentication_error", "permission_error", "invalid_api_key":
+			upstreamFailure = false
+		}
+		if !invalidCredential && !isTimeout && decision.Action == "retry" && retryParam.GetRetry() < common.RetryTimes &&
+			conversation && upstreamFailure && !isImageChannelTest(channel, relayInfo.OriginModelName, "") &&
+			newAPIError.StatusCode >= 500 && newAPIError.StatusCode <= 599 && !types.IsSkipRetryError(newAPIError) &&
+			!sameKeyRetried[keyIdentity] && helper.RelayResponseReplayable(c) && relayInfo.TaskRelayInfo == nil &&
+			!relayInfo.KeyResponseDeadline.IsZero() && time.Now().Before(relayInfo.KeyResponseDeadline) {
+			sameChannelRetry = service.SelectSameChannelKeyRetry(c, channel, relayInfo.OriginModelName, usingKey)
+			if sameChannelRetry != nil {
+				// Keep this first transient failure request-local until its one
+				// retry finishes. Concurrent disables and probes still apply.
+				sameKeyRetried[keyIdentity], retryingSameKey = true, true
+				decision = service.PolicyDecision{Action: "retry", Reason: "same_key_transient_retry", Source: "channel"}
+			}
+		}
 		if invalidCredential {
 			if rejectedChannelKeys[channel.Id] == nil {
 				rejectedChannelKeys[channel.Id] = make(map[string]bool)
@@ -334,7 +375,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if quarantineErr != nil {
 				logger.LogError(c, common.LogText("failed to quarantine invalid channel credential: channel_id=%d", channel.Id))
 			}
-			if !service.HasGroupKeyRouting(c) && updated != nil && updated.Status == common.ChannelStatusEnabled && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
+			if !service.HasGroupKeyRouting(c) && updated != nil && updated.Status == common.ChannelStatusEnabled && helper.RelayResponseReplayable(c) && !service.GetChannelConstraints(c).SuppressesRetry() {
 				for index, key := range updated.GetKeys() {
 					status, configured := updated.ChannelInfo.MultiKeyStatusList[index]
 					if initialChannelKeys[channel.Id][key] && !rejectedChannelKeys[channel.Id][key] && (!configured || status == common.ChannelStatusEnabled) && updated.KeyAllowedForGroup(key, service.GetSelectedRequestGroup(c)) {
@@ -343,7 +384,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 					}
 				}
 			}
-			if service.HasGroupKeyRouting(c) && !c.Writer.Written() && c.Request.Context().Err() == nil && !service.GetChannelConstraints(c).SuppressesRetry() {
+			if service.HasGroupKeyRouting(c) && helper.RelayResponseReplayable(c) && !service.GetChannelConstraints(c).SuppressesRetry() {
 				sameChannelRetry, _ = service.SelectGroupKeyRetry(c, relayInfo.OriginModelName)
 				if sameChannelRetry != nil && sameChannelRetry.Id != channel.Id {
 					if decision.Action == "retry" && retryParam.GetRetry() < common.RetryTimes {
@@ -358,7 +399,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			} else if decision.Action != "retry" {
 				decision = service.PolicyDecision{Action: "stop", Reason: "channel_credentials_exhausted", Source: "channel"}
 			}
-		} else if relayInfo.TaskRelayInfo == nil && !service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
+		} else if !retryingSameKey && relayInfo.TaskRelayInfo == nil && !service.GetChannelConstraints(c).HasFilter(taskdto.FilterBatchCapable) {
 			var retryEndpoint bool
 			endpointFailed, retryEndpoint = service.FailChannelEndpoint(c, channel, newAPIError)
 			if retryEndpoint {
@@ -376,14 +417,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if !invalidCredential && sameChannelRetry == nil {
 			recordChannelKeyFailoverFailure(c, channel, relayInfo, newAPIError, observation)
 		}
-		if c.Writer.Written() || c.Request.Context().Err() != nil {
+		if !helper.RelayResponseReplayable(c) {
 			sameChannelRetry = nil
-			decision = service.PolicyDecision{Action: "stop", Reason: "request_no_longer_replayable", Source: "system"}
+			reason := "response_already_started"
+			if c.Request.Context().Err() != nil {
+				reason = "client_canceled"
+			}
+			decision = service.PolicyDecision{Action: "stop", Reason: reason, Source: "system"}
 		}
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, usingKey, channel.GetAutoBan() && !invalidCredential && !endpointFailed), newAPIError, relayInfo)
+		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, usingKey, channel.GetAutoBan() && !invalidCredential && !endpointFailed && !retryingSameKey), newAPIError, relayInfo)
 		if sameChannelRetry != nil {
-			if crossChannelCredentialRetry {
+			if crossChannelCredentialRetry || retryingSameKey {
 				retryParam.IncreaseRetry()
 			}
 			continue

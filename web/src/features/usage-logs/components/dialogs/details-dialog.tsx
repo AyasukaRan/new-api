@@ -123,6 +123,7 @@ import {
 } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
+import { RequestFailureSummary } from '../request-failure-summary'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { DetailRow, DetailSection } from './log-detail-layout'
 import { RequestTraceSection } from './request-trace-section'
@@ -971,42 +972,49 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           )}
 
-          {showTiming && props.log.use_time > 0 && (
-            <DetailRow
-              label={t('Response Time')}
-              value={
-                <span
-                  className={cn(
-                    'font-medium',
-                    timingTextColorClass(
-                      getResponseTimeColor(
-                        props.log.use_time,
-                        props.log.completion_tokens
+          {showTiming &&
+            (props.log.use_time > 0 ||
+              (props.log.is_stream && (other?.frt ?? 0) > 0)) && (
+              <DetailRow
+                label={t('Response Time')}
+                value={
+                  <span
+                    className={cn(
+                      'font-medium',
+                      timingTextColorClass(
+                        getResponseTimeColor(
+                          props.log.use_time,
+                          props.log.completion_tokens
+                        )
                       )
-                    )
-                  )}
-                >
-                  {formatUseTime(props.log.use_time)}
-                  {props.log.is_stream &&
-                    other?.frt != null &&
-                    other.frt > 0 && (
-                      <span
-                        className={cn(
-                          'font-normal',
-                          timingTextColorClass(
-                            getFirstResponseTimeColor(other.frt / 1000)
-                          )
-                        )}
-                      >
-                        {' '}
-                        (FRT: {formatFirstResponseTime(other.frt)})
-                      </span>
                     )}
-                </span>
-              }
-            />
-          )}
+                  >
+                    {formatUseTime(props.log.use_time)}
+                    {props.log.is_stream &&
+                      other?.frt != null &&
+                      other.frt > 0 && (
+                        <span
+                          className={cn(
+                            'font-normal',
+                            timingTextColorClass(
+                              getFirstResponseTimeColor(other.frt / 1000)
+                            )
+                          )}
+                        >
+                          {' '}
+                          (FRT: {formatFirstResponseTime(other.frt)})
+                        </span>
+                      )}
+                  </span>
+                }
+              />
+            )}
         </div>
+
+        <RequestFailureSummary
+          metadata={other}
+          error={props.log.type === 5 ? details : undefined}
+        />
 
         {/* Request conversion (admin only, not for refund) */}
         {showConversion && (
@@ -1535,12 +1543,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 value={String(other.stream_status.error_count)}
               />
             )}
-            {other.stream_status.end_error && (
-              <DetailRow
-                label={t('End Error')}
-                value={other.stream_status.end_error}
-              />
-            )}
             {Array.isArray(other.stream_status.errors) &&
               other.stream_status.errors.length > 0 && (
                 <pre className='bg-background/60 mt-1 max-h-32 overflow-y-auto rounded border p-2 font-mono text-[11px] leading-relaxed wrap-break-word whitespace-pre-wrap'>
@@ -1635,7 +1637,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
         )}
 
         {/* Content */}
-        {details && (
+        {details && props.log.type !== 5 && (
           <div className='space-y-1.5'>
             <Label className='text-xs font-semibold'>{t('Content')}</Label>
             <div className='bg-muted/30 relative min-w-0 overflow-hidden rounded-md border p-2.5'>

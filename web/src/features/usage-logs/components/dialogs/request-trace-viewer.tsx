@@ -32,6 +32,7 @@ import { useAuthStore } from '@/stores/auth-store'
 
 import { getRequestTrace } from '../../api'
 import type { LogOtherData } from '../../types'
+import { RequestFailureSummary } from '../request-failure-summary'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { RequestTraceConversationLoader } from './request-trace-conversation-loader'
 import { RequestTraceExchange } from './request-trace-exchange'
@@ -141,8 +142,9 @@ export default function RequestTraceViewer(props: {
           {traceIdentity}
         </div>
       </div>
-      <div className='shrink-0 pt-2'>
+      <div className='shrink-0 space-y-2 pt-2'>
         <RequestMetadataTags isAdmin={isAdmin} metadata={props.metadata} />
+        <RequestFailureSummary metadata={props.metadata} showFirstResponse />
       </div>
       <TabsContent
         value='conversation'

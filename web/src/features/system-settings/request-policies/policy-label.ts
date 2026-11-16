@@ -1,9 +1,11 @@
-import type { TFunction } from 'i18next'
-
 // Labels for the decision events recorded by the backend request policy state
 // (reasons, sources and health), the session behaviors, and the auto-disable
 // sources reported by the channel operations summary.
-export function policyLabel(t: TFunction, value: string): string {
+export function policyLabel(
+  t: (key: string) => string,
+  value: string,
+  unknownLabel = value
+): string {
   switch (value) {
     case 'upstream_failure':
       return t('Upstream request failed')
@@ -11,6 +13,23 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Request failed')
     case 'task_failed':
       return t('Task failed')
+    case 'same_key_transient_retry':
+      return t('Retry the same key once after a temporary upstream error')
+    case 'response_already_started':
+      return t(
+        'Response content has already been sent; retrying could duplicate output'
+      )
+    case 'client_canceled':
+      return t('The client disconnected; retrying would no longer help')
+    case 'skip_retry_flag':
+      return t('Retry is disabled for this error')
+    case 'invalid_channel_credential':
+      return t('The current credential was rejected; try another key')
+    case 'channel_credentials_exhausted':
+      return t('No usable credentials remain for this request')
+    case 'channel_endpoint_unavailable':
+      return t('The current endpoint is unavailable; try another address')
+    case 'strict_affinity_rule':
     case 'strict_session':
       return t('Session behavior prevents switching channels')
     case 'attempt_budget_exhausted':
@@ -21,6 +40,7 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Unrecognized status code')
     case 'task_accepted':
       return t('The task was accepted; submission cannot be replayed')
+    case 'pinned_channel_constraint':
     case 'pinned_channel':
       return t('Fixed channel constraint')
     case 'local_rejection':
@@ -74,6 +94,6 @@ export function policyLabel(t: TFunction, value: string): string {
     case 'strict':
       return t('Require the original channel')
     default:
-      return value
+      return unknownLabel
   }
 }

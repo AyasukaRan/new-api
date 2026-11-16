@@ -91,6 +91,10 @@ type RelayInfo struct {
 	StartTime         time.Time
 	FirstResponseTime time.Time
 	isFirstResponse   bool
+	// KeyResponseDeadline is shared by retries of one credential. It only
+	// bounds waiting for response headers, never an established response body.
+	KeyResponseDeadline     time.Time
+	UpstreamRequestTimedOut bool
 	//SendLastReasoningResponse bool
 	IsStream               bool
 	IsGeminiBatchEmbedding bool
@@ -1017,6 +1021,11 @@ func (info *RelayInfo) SetFirstResponseTime() {
 		info.FirstResponseTime = time.Now()
 		info.isFirstResponse = false
 	}
+}
+
+func (info *RelayInfo) ResetFirstResponseTime() {
+	info.FirstResponseTime = info.StartTime.Add(-time.Second)
+	info.isFirstResponse = true
 }
 
 func (info *RelayInfo) HasSendResponse() bool {

@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
@@ -461,6 +463,16 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
+type headerDeadlineBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (body *headerDeadlineBody) Close() error {
+	body.cancel()
+	return body.ReadCloser.Close()
+}
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	recognitionUpload := info.RelayMode == constant.RelayModeToolsOCR || info.RelayMode == constant.RelayModeToolsASR || info.RelayMode == constant.RelayModeToolsTTS
 	keyFailover := !recognitionUpload && !info.IsChannelTest && info.ChannelMeta != nil && info.ChannelIsMultiKey && service.HasChannelKeyFailover(c)
@@ -519,8 +531,47 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
 	service.RecordChannelEndpointRequest(c, req.URL)
+	var cancelHeaderWait context.CancelFunc
+	var headerTimer *time.Timer
+	var headerWaitFinished atomic.Bool
+	if keyFailover && !info.KeyResponseDeadline.IsZero() {
+		if !time.Now().Before(info.KeyResponseDeadline) {
+			info.UpstreamRequestTimedOut = true
+			return nil, types.NewError(context.DeadlineExceeded, types.ErrorCodeDoRequestFailed)
+		}
+		var requestContext context.Context
+		requestContext, cancelHeaderWait = context.WithCancel(req.Context())
+		req = req.WithContext(requestContext)
+		headerTimer = time.AfterFunc(time.Until(info.KeyResponseDeadline), func() {
+			if headerWaitFinished.CompareAndSwap(false, true) {
+				cancelHeaderWait()
+			}
+		})
+	}
 	resp, err := relayClient.Do(req)
+	if headerTimer != nil {
+		// Exactly one side owns the transition. A timer that has already won
+		// cannot hand a live body to the caller, and a late callback cannot
+		// cancel a body whose headers have already won.
+		if !headerWaitFinished.CompareAndSwap(false, true) {
+			cancelHeaderWait()
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			resp, err = nil, context.DeadlineExceeded
+		}
+		headerTimer.Stop()
+		if err != nil || resp == nil {
+			cancelHeaderWait()
+		} else {
+			// Once headers arrive, long replies retain their ordinary stream
+			// timeout. Cancel the child context only when its body is closed.
+			resp.Body = &headerDeadlineBody{ReadCloser: resp.Body, cancel: cancelHeaderWait}
+		}
+	}
 	if err != nil {
+		var timeoutError interface{ Timeout() bool }
+		info.UpstreamRequestTimedOut = errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeoutError) && timeoutError.Timeout())
 		logger.LogError(c, common2.LogText("do request failed: %s", err.Error()))
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}

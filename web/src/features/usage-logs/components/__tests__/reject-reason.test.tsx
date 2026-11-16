@@ -23,6 +23,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import type { UsageLog } from '../../data/schema'
 import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
+import { RequestFailureSummary } from '../request-failure-summary'
 
 const queryClients: QueryClient[] = []
 
@@ -52,7 +53,7 @@ function makeLog(other: LogOtherData): UsageLog {
   }
 }
 
-function renderDetails(isAdmin: boolean): void {
+function renderDetails(isAdmin: boolean, extraOther: LogOtherData = {}): void {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -67,6 +68,7 @@ function renderDetails(isAdmin: boolean): void {
           admin_info: {
             reject_reason: 'blocked by channel policy',
           },
+          ...extraOther,
         })}
         isAdmin={isAdmin}
         isRoot={false}
@@ -98,4 +100,82 @@ describe('usage log reject reason', () => {
     expect(screen.queryByText('Reject Reason')).toBeNull()
     expect(screen.queryByText('blocked by channel policy')).toBeNull()
   })
+})
+
+test.each([false, true])(
+  'shows a safe failed-stream reason and why retry stopped for admin=%s',
+  (isAdmin) => {
+    renderDetails(isAdmin, {
+      stream_status: {
+        status: 'error',
+        end_reason: 'upstream_error',
+        end_error: 'Upstream temporarily unavailable',
+      },
+      retry_decision: { action: 'stop', reason: 'response_already_started' },
+    })
+    expect(screen.getByText('Failure reason')).toBeVisible()
+    expect(screen.getByText('Upstream temporarily unavailable')).toBeVisible()
+    expect(screen.getByText('Why retry stopped')).toBeVisible()
+    expect(
+      screen.getByText(
+        'Response content has already been sent; retrying could duplicate output'
+      )
+    ).toBeVisible()
+  }
+)
+
+test('shows a planned same-key retry separately from its upstream failure', () => {
+  renderDetails(false, {
+    retry_decision: {
+      action: 'retry_same_key',
+      reason: 'same_key_transient_retry',
+    },
+  })
+  expect(screen.getByText('Retry decision')).toBeVisible()
+  expect(
+    screen.getByText('Retry the same key once after a temporary upstream error')
+  ).toBeVisible()
+  expect(screen.queryByText('Why retry stopped')).not.toBeInTheDocument()
+})
+
+test('unknown retry reasons are not exposed as raw diagnostic strings', () => {
+  renderDetails(false, {
+    retry_decision: {
+      action: 'stop',
+      reason: 'unrecognized-upstream-secret-identifier',
+    },
+  })
+  expect(screen.getByText('Retry decision unavailable')).toBeVisible()
+  expect(
+    screen.queryByText('unrecognized-upstream-secret-identifier')
+  ).not.toBeInTheDocument()
+})
+
+test('a successfully completed response with soft diagnostics is not presented as a failed request', () => {
+  render(
+    <RequestFailureSummary
+      metadata={{
+        stream_status: {
+          status: 'error',
+          response_status: 'completed',
+          end_reason: 'done',
+          errors: ['A recoverable diagnostic'],
+          error_count: 1,
+        },
+      }}
+    />
+  )
+  expect(screen.queryByText('Request failed')).not.toBeInTheDocument()
+})
+
+test('legacy failures without retry or timing metadata show no invented retry reason or first-token value', () => {
+  render(
+    <RequestFailureSummary
+      error='Upstream temporarily unavailable'
+      showFirstResponse
+    />
+  )
+  expect(screen.getByText('Not recorded')).toBeVisible()
+  expect(screen.queryByText('First token')).not.toBeInTheDocument()
+  expect(screen.queryByText('Why retry stopped')).not.toBeInTheDocument()
 })

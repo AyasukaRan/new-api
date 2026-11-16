@@ -161,7 +161,7 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	appendFinalRequestFormat(relayInfo, other)
 	appendBillingInfo(relayInfo, other)
 	appendParamOverrideInfo(relayInfo, other)
-	appendStreamStatus(relayInfo, other)
+	appendStreamStatus(ctx, relayInfo, other)
 	return other
 }
 
@@ -185,7 +185,7 @@ func appendParamOverrideInfo(relayInfo *relaycommon.RelayInfo, other *model.LogO
 	other.SetPublic("po", relayInfo.ParamOverrideAudit)
 }
 
-func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
+func appendStreamStatus(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
 	if relayInfo == nil || other == nil || !relayInfo.IsStream || relayInfo.StreamStatus == nil {
 		return
 	}
@@ -202,13 +202,13 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 		streamInfo["response_status"] = outcome
 	}
 	if ss.EndError != nil {
-		streamInfo["end_error"] = ss.EndError.Error()
+		streamInfo["end_error"] = relayLogErrorText(ctx, relayInfo, ss.EndError.Error())
 	}
 	if ss.ErrorCount > 0 {
 		streamInfo["error_count"] = ss.ErrorCount
 		messages := make([]string, 0, len(ss.Errors))
 		for _, e := range ss.Errors {
-			messages = append(messages, e.Message)
+			messages = append(messages, relayLogErrorText(ctx, relayInfo, e.Message))
 		}
 		streamInfo["errors"] = messages
 	}

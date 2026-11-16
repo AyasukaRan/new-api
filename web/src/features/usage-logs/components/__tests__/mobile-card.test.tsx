@@ -432,3 +432,36 @@ it('opens the shared pagination evidence from a mobile log', async () => {
   expect(within(dialog).getByText('Pagination engine')).toBeVisible()
   expect(within(dialog).getByText('qpdf/12.2.0')).toBeVisible()
 })
+
+it('keeps first-token timing and retry-stop explanation on a failed stream card', () => {
+  renderLogs({
+    admin: false,
+    logs: [
+      {
+        ...log,
+        type: 5,
+        use_time: 0,
+        is_stream: true,
+        other: JSON.stringify({
+          frt: 437,
+          stream_status: {
+            status: 'error',
+            end_reason: 'upstream_error',
+            end_error: 'Upstream temporarily unavailable',
+          },
+          retry_decision: {
+            action: 'stop',
+            reason: 'response_already_started',
+          },
+        }),
+      },
+    ],
+  })
+  expect(screen.getByText('437ms')).toBeVisible()
+  expect(screen.getByText('Upstream temporarily unavailable')).toBeVisible()
+  expect(
+    screen.getByText(
+      'Response content has already been sent; retrying could duplicate output'
+    )
+  ).toBeVisible()
+})

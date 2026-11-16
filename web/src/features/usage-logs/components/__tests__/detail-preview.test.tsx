@@ -939,3 +939,34 @@ describe('request content disclosure in log details', () => {
     }
   )
 })
+
+test('failed request previews retain the safe error and the retry stop reason', () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DetailPreview
+          isAdmin={false}
+          type={5}
+          other={{
+            content_parts: [{ key: 'Upstream temporarily unavailable' }],
+            retry_decision: {
+              action: 'stop',
+              reason: 'response_already_started',
+            },
+          }}
+        />
+      </QueryClientProvider>
+    )
+    expect(screen.getByText('Upstream temporarily unavailable')).toBeVisible()
+    expect(
+      screen.getByText(
+        'Response content has already been sent; retrying could duplicate output'
+      )
+    ).toBeVisible()
+  } finally {
+    queryClient.clear()
+  }
+})
