@@ -20,6 +20,13 @@ type ChannelKeyBalance struct {
 	LastKnownBalance *float64 `json:"last_known_balance,omitempty"`
 }
 
+// ChannelKeyAccount is the current display metadata, never a persisted reading.
+type ChannelKeyAccount struct {
+	Index  int      `json:"index"`
+	Groups []string `json:"groups"`
+	Status int      `json:"status"`
+}
+
 type ChannelBalanceMonitor struct {
 	CheckedAt            int64               `json:"checked_at"`
 	Balance              *float64            `json:"balance"`
@@ -29,6 +36,28 @@ type ChannelBalanceMonitor struct {
 	Success              bool                `json:"success"`
 	ConfigurationChanged bool                `json:"configuration_changed"`
 	KeyBalances          []ChannelKeyBalance `json:"key_balances"`
+	KeyAccounts          []ChannelKeyAccount `json:"key_accounts"`
+}
+
+func (channel *Channel) BalanceKeyAccounts() []ChannelKeyAccount {
+	keys := channel.relayKeys()
+	channelGroups := channel.GetGroups()
+	accounts := make([]ChannelKeyAccount, 0, len(keys))
+	for _, index := range channel.OrderedKeyIndices() {
+		configuredGroups := channel.ChannelInfo.KeyGroups[channel.KeyIdentity(keys[index])]
+		groups := make([]string, 0, len(channelGroups))
+		for _, group := range channelGroups {
+			if len(configuredGroups) == 0 || slices.Contains(configuredGroups, group) {
+				groups = append(groups, group)
+			}
+		}
+		status := common.ChannelStatusEnabled
+		if configured, exists := channel.ChannelInfo.MultiKeyStatusList[index]; exists {
+			status = configured
+		}
+		accounts = append(accounts, ChannelKeyAccount{Index: index, Groups: groups, Status: status})
+	}
+	return accounts
 }
 
 // ChannelBalanceSample is a monitoring observation, independent of channel
@@ -349,16 +378,18 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 		}
 	}
 	var configurations []*Channel
-	if err := DB.Select("id", "key", "type", "base_url", "setting", "settings", "header_override", "channel_info").Where("id IN ?", ids).Find(&configurations).Error; err != nil {
+	if err := DB.Select("id", "key", "group", "type", "base_url", "setting", "settings", "header_override", "channel_info").Where("id IN ?", ids).Find(&configurations).Error; err != nil {
 		return err
 	}
 	configurationHashes := make(map[int]string, len(configurations))
+	keyAccounts := make(map[int][]ChannelKeyAccount, len(configurations))
 	for _, channel := range configurations {
 		configurationHash, err := channelBalanceConfigurationHash(channel)
 		if err != nil {
 			return err
 		}
 		configurationHashes[channel.Id] = configurationHash
+		keyAccounts[channel.Id] = channel.BalanceKeyAccounts()
 	}
 	var samples []ChannelBalanceSample
 	latestIDs := DB.Model(&ChannelBalanceSample{}).Select("MAX(id)").Where("channel_id IN ?", ids).Group("channel_id")
@@ -385,6 +416,10 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 	}
 	for _, channel := range channels {
 		if channel != nil {
+			accounts := keyAccounts[channel.Id]
+			if accounts == nil {
+				accounts = []ChannelKeyAccount{}
+			}
 			// Full-key callers render indexed credentials from this snapshot.
 			// A concurrent replacement must not attach newer indexed balances
 			// to those older keys. List callers intentionally omit credentials.
@@ -394,7 +429,7 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 					return err
 				}
 				if configurationHash != configurationHashes[channel.Id] {
-					channel.BalanceMonitor = &ChannelBalanceMonitor{ConfigurationChanged: true, KeyBalances: []ChannelKeyBalance{}}
+					channel.BalanceMonitor = &ChannelBalanceMonitor{ConfigurationChanged: true, KeyBalances: []ChannelKeyBalance{}, KeyAccounts: accounts}
 					continue
 				}
 			}
@@ -407,6 +442,10 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 					Success: true, KeyBalances: []ChannelKeyBalance{},
 				}
 			}
+			if channel.BalanceMonitor == nil {
+				channel.BalanceMonitor = &ChannelBalanceMonitor{KeyBalances: []ChannelKeyBalance{}}
+			}
+			channel.BalanceMonitor.KeyAccounts = accounts
 		}
 	}
 	return nil

@@ -88,6 +88,7 @@ import {
 } from '../lib'
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
+import { ChannelKeyBalanceList } from './channel-balance-summary'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { TaskPluginChannelBadge } from './channel-type-badge'
 import { useChannels } from './channels-provider'
@@ -334,8 +335,6 @@ function TagWeightCell({ channel }: { channel: TagRow }) {
  */
 const MAX_INLINE_BALANCE_CHARS = 8
 const SENSITIVE_MASK = '••••'
-/** Per-key balances listed in the tooltip before it collapses into a "+N more" line. */
-const MAX_TOOLTIP_KEY_BALANCES = 20
 
 /**
  * Balance cell component with click to update
@@ -444,6 +443,12 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const variant = getBalanceVariant(balance)
   const isInferenceChannel =
     channel.type === CHANNEL_TYPE_VLLM || channel.type === CHANNEL_TYPE_SGLANG
+  const showKeyBalances =
+    (isMultiKeyChannel(channel) ||
+      (monitor?.key_accounts?.length ?? monitor?.key_balances.length ?? 0) >
+        1) &&
+    channel.type !== 57 &&
+    !isInferenceChannel
   const inferenceStatusLabel =
     channel.type === CHANNEL_TYPE_SGLANG ? t('SGLang status') : t('vLLM status')
 
@@ -484,20 +489,20 @@ export function BalanceCell({ channel }: { channel: Channel }) {
       })
       if (response.partial) {
         toast.warning(
-          t(
-            'Some accounts could not be queried. The total retains the last complete balance.'
-          )
+          showKeyBalances
+            ? t(
+                'Some key balances could not be queried. Check each key for its latest result.'
+              )
+            : t(
+                'Some accounts could not be queried. The total retains the last complete balance.'
+              )
         )
-      } else if (response.success && response.balance != null) {
-        toast.success(
-          t('Balance updated: {{balance}}', {
-            balance: formatCurrencyFromUSD(response.balance, {
-              digitsLarge: 2,
-              digitsSmall: 4,
-              abbreviate: false,
-            }),
-          })
-        )
+      } else if (
+        response.success &&
+        response.raw_response === undefined &&
+        (response.balance_monitor?.success || response.balance != null)
+      ) {
+        toast.success(t('Balance updated successfully'))
         void queryClient.invalidateQueries({
           queryKey: channelsQueryKeys.lists(),
         })
@@ -520,6 +525,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     }
   }
   let remainingBadgeLabel = sensitiveVisible ? remainingDisplay : SENSITIVE_MASK
+  if (showKeyBalances) remainingBadgeLabel = t('Key balances')
   if (sensitiveVisible && isUpdating) {
     remainingBadgeLabel = t('Updating...')
   } else if (sensitiveVisible && channel.type === 57) {
@@ -527,7 +533,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   } else if (sensitiveVisible && isInferenceChannel) {
     remainingBadgeLabel = inferenceStatusLabel
   }
-  let remainingTooltipLabel = remainingLabel
+  let remainingTooltipLabel = showKeyBalances
+    ? t('Key balances')
+    : remainingLabel
   if (!sensitiveVisible) {
     remainingTooltipLabel = maskedRemainingLabel
   } else if (channel.type === 57) {
@@ -535,7 +543,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   } else if (isInferenceChannel) {
     remainingTooltipLabel = inferenceStatusLabel
   }
-  let remainingBadgeVariant: StatusBadgeProps['variant'] = variant
+  let remainingBadgeVariant: StatusBadgeProps['variant'] = showKeyBalances
+    ? 'neutral'
+    : variant
   if (channel.type === 57 || isInferenceChannel) {
     remainingBadgeVariant = 'info'
   } else if (isUpdating) {
@@ -553,33 +563,21 @@ export function BalanceCell({ channel }: { channel: Channel }) {
     />
   )
 
-  const keyBalanceRows =
-    isMultiKeyChannel(channel) && !monitor?.configuration_changed
-      ? (monitor?.key_balances ?? []).map((key) => {
-          let label = SENSITIVE_MASK
-          if (sensitiveVisible) {
-            label =
-              key.balance == null
-                ? t('Query failed')
-                : withSuffix(
-                    formatCurrencyFromUSD(key.balance, balanceFormatOptions)
-                  )
-          }
-          return { index: key.index, label }
-        })
-      : []
   let balanceStatus: string | null = null
   if (monitor?.configuration_changed) {
     balanceStatus = t(
       'Channel accounts changed. Refresh balances to see the current accounts.'
     )
-  } else if (monitor?.partial) balanceStatus = t('Partial result')
-  else if (monitor && !monitor.success) balanceStatus = t('Query failed')
+  } else if (monitor?.partial) {
+    balanceStatus = t('Partial result')
+  } else if (monitor && !monitor.success && monitor.checked_at > 0) {
+    balanceStatus = t('Query failed')
+  }
   if (balanceStatus && channel.type !== 57) remainingBadgeVariant = 'warning'
 
   return (
     <TooltipProvider>
-      <div className='-ml-1.5 flex flex-wrap items-center gap-1'>
+      <div className='-ml-1.5 flex min-w-0 flex-wrap items-center gap-1'>
         <Tooltip>
           <TooltipTrigger
             render={
@@ -650,46 +648,9 @@ export function BalanceCell({ channel }: { channel: Channel }) {
             }
           />
           <TooltipContent className='max-w-xs'>
-            {/* Stacked in one flex child: TooltipContent lays its children out
-                in a row, which would put the per-key list beside the total. */}
             <div className='space-y-1'>
               <p>{remainingTooltipLabel}</p>
               {balanceStatus && <p>{balanceStatus}</p>}
-              {monitor?.partial && sensitiveVisible && (
-                <p>
-                  {t('Queried subtotal: {{balance}}', {
-                    balance: formatCurrencyFromUSD(
-                      monitor.known_balance,
-                      balanceFormatOptions
-                    ),
-                  })}
-                </p>
-              )}
-              {keyBalanceRows.length > 0 && (
-                <div
-                  className='space-y-0.5 border-t border-current/20 pt-1'
-                  data-testid='multi-key-balances'
-                >
-                  {keyBalanceRows
-                    .slice(0, MAX_TOOLTIP_KEY_BALANCES)
-                    .map((row) => (
-                      <div
-                        key={row.index}
-                        className='flex items-center justify-between gap-3'
-                      >
-                        <span>{`#${row.index + 1}`}</span>
-                        <span>{row.label}</span>
-                      </div>
-                    ))}
-                  {keyBalanceRows.length > MAX_TOOLTIP_KEY_BALANCES && (
-                    <div>
-                      {t('+{{count}} more', {
-                        count: keyBalanceRows.length - MAX_TOOLTIP_KEY_BALANCES,
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
               {balanceQueryDisabled && (
                 <p>
                   {t(
@@ -703,6 +664,16 @@ export function BalanceCell({ channel }: { channel: Channel }) {
             </div>
           </TooltipContent>
         </Tooltip>
+        {showKeyBalances && (
+          <ChannelKeyBalanceList
+            monitor={monitor}
+            sensitiveVisible={sensitiveVisible}
+            onViewAll={() => {
+              setCurrentRow(channel)
+              setOpen('balance-query')
+            }}
+          />
+        )}
         {balanceQueryDisabled && (
           <span className='text-muted-foreground basis-full pl-1.5 text-[10px]'>
             {t('Balance queries disabled')}

@@ -326,7 +326,16 @@ func TestMultiKeyStatusReturnsMatchingBalancesAndMaskedCredentials(t *testing.T)
 		return result.Data
 	}
 	initial := queryStatus(MultiKeyManageRequest{})
-	assert.Nil(t, initial.BalanceMonitor, "never queried must remain unknown, not zero")
+	require.NotNil(t, initial.BalanceMonitor)
+	assert.Nil(t, initial.BalanceMonitor.Balance, "never queried must remain unknown, not zero")
+	assert.Zero(t, initial.BalanceMonitor.CheckedAt)
+	assert.Empty(t, initial.BalanceMonitor.KeyBalances)
+	assert.Equal(t, []model.ChannelKeyAccount{
+		{Index: 0, Groups: []string{"default"}, Status: common.ChannelStatusEnabled},
+		{Index: 1, Groups: []string{"default"}, Status: common.ChannelStatusManuallyDisabled},
+		{Index: 2, Groups: []string{"default"}, Status: common.ChannelStatusAutoDisabled},
+		{Index: 3, Groups: []string{"default"}, Status: common.ChannelStatusEnabled},
+	}, initial.BalanceMonitor.KeyAccounts)
 	assert.False(t, initial.BalanceQueryDisabled)
 	require.Len(t, initial.Keys, 4)
 	assert.Equal(t, "********", initial.Keys[0].KeyPreview)

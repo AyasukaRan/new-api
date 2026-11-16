@@ -50,6 +50,15 @@ export const channelBalanceMonitorSchema = z.object({
   success: z.boolean(),
   configuration_changed: z.boolean(),
   key_balances: z.array(channelKeyBalanceSchema),
+  key_accounts: z
+    .array(
+      z.object({
+        index: z.number(),
+        groups: z.array(z.string()),
+        status: z.number(),
+      })
+    )
+    .optional(),
 })
 export type ChannelBalanceMonitor = z.infer<typeof channelBalanceMonitorSchema>
 export type ChannelKeyBalance = z.infer<typeof channelKeyBalanceSchema>

@@ -27,13 +27,18 @@ import {
   CodeBlockCopyButton,
 } from '@/components/ai-elements/code-block'
 import { Dialog } from '@/components/dialog'
+import { EmptyState } from '@/components/empty-state'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getCodexUsage, updateChannelBalance } from '../../api'
-import { channelsQueryKeys, parseChannelSettings } from '../../lib'
+import {
+  channelsQueryKeys,
+  isMultiKeyChannel,
+  parseChannelSettings,
+} from '../../lib'
 import { ChannelBalanceSummary } from '../channel-balance-summary'
 import { useChannels } from '../channels-provider'
 import {
@@ -49,7 +54,7 @@ type BalanceQueryDialogProps = {
 
 export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
   const { t } = useTranslation()
-  const { currentRow, setCurrentRow } = useChannels()
+  const { currentRow, setCurrentRow, sensitiveVisible } = useChannels()
   const queryClient = useQueryClient()
   const [isQuerying, setIsQuerying] = useState(false)
   const [rawResponse, setRawResponse] = useState<string | null>(
@@ -101,7 +106,7 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
   if (!currentRow) return null
 
   const handleQueryBalance = async () => {
-    if (!props.open || balanceQueryDisabled) return
+    if (!props.open || balanceQueryDisabled || !sensitiveVisible) return
     const generation = ++requestGeneration.current
     setIsQuerying(true)
     try {
@@ -123,13 +128,25 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
       }
       if (response.partial) {
         toast.warning(
-          t(
-            'Some accounts could not be queried. The total retains the last complete balance.'
-          )
+          isMultiKeyChannel(currentRow) ||
+            (response.balance_monitor?.key_accounts?.length ?? 0) > 1
+            ? t(
+                'Some key balances could not be queried. Check each key for its latest result.'
+              )
+            : t(
+                'Some accounts could not be queried. The total retains the last complete balance.'
+              )
         )
         setRawResponse(null)
-      } else if (response.success && response.balance != null) {
-        const newBalance = response.balance
+      } else if (
+        response.success &&
+        response.raw_response === undefined &&
+        (response.balance_monitor?.success || response.balance != null)
+      ) {
+        const newBalance =
+          response.balance ??
+          response.balance_monitor?.balance ??
+          currentRow.balance
         const now =
           response.balance_monitor?.balance_updated_time ??
           currentRow.balance_updated_time
@@ -196,7 +213,7 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
       description={
         <>
           {t('Update balance for:')}
-          <strong>{currentRow.name}</strong>
+          <strong>{sensitiveVisible ? currentRow.name : '••••'}</strong>
         </>
       }
       contentHeight='auto'
@@ -208,51 +225,56 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
       }
     >
       <div className='space-y-4 py-4'>
-        {rawResponse !== null ? (
-          <>
-            <Alert>
-              <AlertTitle>{t('Balance response not recognized')}</AlertTitle>
-              <AlertDescription>
-                {t(
-                  'The upstream response is valid JSON, but it does not match the OpenAI credit_summary format. The channel balance was not updated.'
-                )}
-              </AlertDescription>
-            </Alert>
-            <CodeBlock
-              code={rawResponse}
-              language='json'
-              maxExpandedLines={24}
-              showLineNumbers
-              title={t('Upstream JSON response')}
-            >
-              <CodeBlockCopyButton />
-            </CodeBlock>
-          </>
-        ) : (
-          <ChannelBalanceSummary
-            queryDisabled={balanceQueryDisabled}
-            monitor={
-              currentRow.balance_monitor ?? {
-                balance: currentRow.balance_updated_time
-                  ? currentRow.balance
-                  : null,
-                balance_updated_time: currentRow.balance_updated_time,
-                checked_at: currentRow.balance_updated_time,
-                known_balance: currentRow.balance,
-                partial: false,
-                success: true,
-                configuration_changed: false,
-                key_balances: [],
-              }
-            }
-          />
+        {!sensitiveVisible && (
+          <EmptyState title={t('Sensitive information is hidden')} />
         )}
+        {sensitiveVisible &&
+          (rawResponse !== null ? (
+            <>
+              <Alert>
+                <AlertTitle>{t('Balance response not recognized')}</AlertTitle>
+                <AlertDescription>
+                  {t(
+                    'The upstream response is valid JSON, but it does not match the OpenAI credit_summary format. The channel balance was not updated.'
+                  )}
+                </AlertDescription>
+              </Alert>
+              <CodeBlock
+                code={rawResponse}
+                language='json'
+                maxExpandedLines={24}
+                showLineNumbers
+                title={t('Upstream JSON response')}
+              >
+                <CodeBlockCopyButton />
+              </CodeBlock>
+            </>
+          ) : (
+            <ChannelBalanceSummary
+              queryDisabled={balanceQueryDisabled}
+              multiKey={isMultiKeyChannel(currentRow)}
+              monitor={
+                currentRow.balance_monitor ?? {
+                  balance: currentRow.balance_updated_time
+                    ? currentRow.balance
+                    : null,
+                  balance_updated_time: currentRow.balance_updated_time,
+                  checked_at: currentRow.balance_updated_time,
+                  known_balance: currentRow.balance,
+                  partial: false,
+                  success: true,
+                  configuration_changed: false,
+                  key_balances: [],
+                }
+              }
+            />
+          ))}
 
         {/* Balance Update Button */}
         <Button
           className='w-full'
           onClick={handleQueryBalance}
-          disabled={isQuerying || balanceQueryDisabled}
+          disabled={isQuerying || balanceQueryDisabled || !sensitiveVisible}
         >
           {isQuerying && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
           {!isQuerying && <RefreshCw className='mr-2 h-4 w-4' />}

@@ -675,6 +675,7 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 		CheckedAt: sample.CheckedAt, Balance: sample.Balance,
 		BalanceUpdatedTime: sample.BalanceUpdatedTime, KnownBalance: sample.KnownBalance,
 		Partial: sample.Partial, Success: sample.Success, KeyBalances: sample.KeyBalances,
+		KeyAccounts: channel.BalanceKeyAccounts(),
 	}
 	if succeeded == 0 && result.RawResponse == "" {
 		return result, errors.New("balance query failed for all keys")

@@ -655,6 +655,96 @@ func TestMultiKeyBalanceInvalidatesReorderedAndReplacedKeys(t *testing.T) {
 	assert.Len(t, samples, 1)
 }
 
+func TestChannelBalanceKeyAccounts(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, db.AutoMigrate(&model.ChannelBalanceSample{}))
+			server := billingServerForKeys(t, map[string]float64{"private-account-a": 3, "private-account-b": 4, "private-account-c": 5})
+			channel := &model.Channel{
+				Type: constant.ChannelTypeOpenAI, Name: "key accounts", Group: "discount,max",
+				Key: "private-account-a\nprivate-account-b\nprivate-account-c", BaseURL: &server.URL,
+				ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3},
+			}
+			require.NoError(t, db.Create(channel).Error)
+			a, b, c := channel.KeyIdentity("private-account-a"), channel.KeyIdentity("private-account-b"), channel.KeyIdentity("private-account-c")
+			channel.ChannelInfo.KeyOrder = []string{c, b, a}
+			channel.ChannelInfo.KeyGroups = map[string][]string{a: {"discount"}, c: {"removed-group"}}
+			channel.ChannelInfo.MultiKeyStatusList = map[int]int{2: common.ChannelStatusManuallyDisabled}
+			require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+			expected := []model.ChannelKeyAccount{
+				{Index: 2, Groups: []string{}, Status: common.ChannelStatusManuallyDisabled},
+				{Index: 1, Groups: []string{"discount", "max"}, Status: common.ChannelStatusEnabled},
+				{Index: 0, Groups: []string{"discount"}, Status: common.ChannelStatusEnabled},
+			}
+			// List responses omit keys; the batched private read still supplies
+			// current accounts without turning a missing sample into a failure.
+			listed := &model.Channel{Id: channel.Id}
+			require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{listed}))
+			require.NotNil(t, listed.BalanceMonitor)
+			assert.Equal(t, expected, listed.BalanceMonitor.KeyAccounts)
+			assert.Zero(t, listed.BalanceMonitor.CheckedAt)
+			assert.Empty(t, listed.BalanceMonitor.KeyBalances)
+			assert.Nil(t, listed.BalanceMonitor.Balance)
+			assert.False(t, listed.BalanceMonitor.ConfigurationChanged)
+			assert.False(t, listed.BalanceMonitor.Partial)
+
+			result, err := updateChannelBalance(channel)
+			require.NoError(t, err)
+			assert.Equal(t, expected, result.Monitor.KeyAccounts)
+			require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{listed}))
+			assert.Equal(t, result.Monitor, listed.BalanceMonitor)
+
+			// Reordering, status, and group edits change display metadata while
+			// retaining readings for the same physical account indexes.
+			channel.Group = "max,new-group"
+			channel.ChannelInfo.KeyOrder = []string{a, c, b}
+			channel.ChannelInfo.KeyGroups[a] = []string{"max", "removed-group"}
+			channel.ChannelInfo.MultiKeyStatusList = map[int]int{1: common.ChannelStatusAutoDisabled}
+			require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+			require.NoError(t, db.Model(channel).Update("group", channel.Group).Error)
+			expected = []model.ChannelKeyAccount{
+				{Index: 0, Groups: []string{"max"}, Status: common.ChannelStatusEnabled},
+				{Index: 2, Groups: []string{}, Status: common.ChannelStatusEnabled},
+				{Index: 1, Groups: []string{"max", "new-group"}, Status: common.ChannelStatusAutoDisabled},
+			}
+			require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{listed}))
+			assert.Equal(t, expected, listed.BalanceMonitor.KeyAccounts)
+			assert.Equal(t, result.KeyBalances, listed.BalanceMonitor.KeyBalances)
+			assert.False(t, listed.BalanceMonitor.ConfigurationChanged)
+			encoded, err := common.Marshal(listed.BalanceMonitor)
+			require.NoError(t, err)
+			for _, secret := range []string{"private-account-a", "private-account-b", "private-account-c", a, b, c, "key_identity", "key_preview", "upstream_cost_ratio"} {
+				assert.NotContains(t, string(encoded), secret)
+			}
+
+			require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", channel.Id).Update("key", "replacement-account\nprivate-account-b\nprivate-account-c").Error)
+			expected = []model.ChannelKeyAccount{
+				{Index: 2, Groups: []string{}, Status: common.ChannelStatusEnabled},
+				{Index: 1, Groups: []string{"max", "new-group"}, Status: common.ChannelStatusAutoDisabled},
+				{Index: 0, Groups: []string{"max", "new-group"}, Status: common.ChannelStatusEnabled},
+			}
+			for _, snapshot := range []*model.Channel{listed, channel} {
+				require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{snapshot}))
+				assert.Equal(t, expected, snapshot.BalanceMonitor.KeyAccounts)
+				assert.True(t, snapshot.BalanceMonitor.ConfigurationChanged)
+				assert.Empty(t, snapshot.BalanceMonitor.KeyBalances)
+				assert.Nil(t, snapshot.BalanceMonitor.Balance)
+			}
+			history, err := model.ListChannelBalanceSamples(channel.Id, 0, 0, 10)
+			require.NoError(t, err)
+			require.Len(t, history, 1)
+			assert.Equal(t, result.KeyBalances, history[0].KeyBalances)
+			require.NoError(t, db.Delete(&model.Channel{}, channel.Id).Error)
+			require.NoError(t, model.PopulateChannelBalanceMonitors([]*model.Channel{listed}))
+			assert.Equal(t, []model.ChannelKeyAccount{}, listed.BalanceMonitor.KeyAccounts, "a channel deleted during a list read must still return an array")
+		})
+	}
+}
+
 func TestChannelBalanceHistoryAndNewerCheckProtection(t *testing.T) {
 	channel := multiKeyChannelForBalance(t, "https://example.invalid", "key-a")
 	channel.UsedQuota = 1234

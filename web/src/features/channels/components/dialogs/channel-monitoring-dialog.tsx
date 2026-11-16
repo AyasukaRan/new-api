@@ -36,17 +36,29 @@ import { formatCurrencyFromUSD, formatQuotaWithCurrency } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 
 import { getChannelMonitoring } from '../../api'
-import { parseChannelSettings } from '../../lib'
+import { isMultiKeyChannel, parseChannelSettings } from '../../lib'
 import type { ChannelMonitoring } from '../../types'
-import { ChannelBalanceSummary } from '../channel-balance-summary'
+import {
+  ChannelBalanceSummary,
+  ChannelKeyBalanceValue,
+} from '../channel-balance-summary'
 import { useChannels } from '../channels-provider'
 
 export function ChannelMonitoringContent(props: {
   data: ChannelMonitoring
   balanceQueryDisabled?: boolean
+  multiKey?: boolean
 }) {
   const { t } = useTranslation()
   const data = props.data
+  const multiKey =
+    props.multiKey ||
+    (data.balance?.key_accounts?.length ??
+      data.balance?.key_balances.length ??
+      0) > 1
+  const multiKeyHistory =
+    multiKey ||
+    data.balance_history.some((sample) => sample.key_balances.length > 1)
   const usage = data.usage
   const stats = [
     {
@@ -103,6 +115,7 @@ export function ChannelMonitoringContent(props: {
       </p>
       <ChannelBalanceSummary
         monitor={data.balance}
+        multiKey={multiKey}
         queryDisabled={props.balanceQueryDisabled}
       />
       {data.balance_history.length === 0 ? (
@@ -122,39 +135,50 @@ export function ChannelMonitoringContent(props: {
       ) : (
         <section className='space-y-3' aria-label={t('Balance history')}>
           <h3 className='text-sm font-medium'>{t('Balance history')}</h3>
-          <ChartContainer
-            className='h-44 w-full'
-            config={{
-              balance: { label: t('Balance'), color: 'var(--chart-1)' },
-            }}
-          >
-            <LineChart accessibilityLayer data={chartData}>
-              <CartesianGrid vertical={false} />
-              <XAxis dataKey='time' hide />
-              <YAxis
-                width={70}
-                tickFormatter={(value: number) =>
-                  formatCurrencyFromUSD(value, { compact: true })
-                }
-              />
-              <ChartTooltip
-                content={
-                  <ChartTooltipContent
-                    formatter={(value) => formatCurrencyFromUSD(Number(value))}
-                  />
-                }
-              />
-              <Line
-                type='linear'
-                dataKey='balance'
-                stroke='var(--color-balance)'
-                strokeWidth={2}
-                dot={{ r: 3 }}
-                connectNulls={false}
-                isAnimationActive={false}
-              />
-            </LineChart>
-          </ChartContainer>
+          {multiKeyHistory ? (
+            <p className='text-muted-foreground text-xs'>
+              {t('Key numbers reflect the configuration at query time.')}
+            </p>
+          ) : (
+            <ChartContainer
+              className='h-44 w-full'
+              config={{
+                balance: {
+                  label: t('Balance'),
+                  color: 'var(--chart-1)',
+                },
+              }}
+            >
+              <LineChart accessibilityLayer data={chartData}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey='time' hide />
+                <YAxis
+                  width={70}
+                  tickFormatter={(value: number) =>
+                    formatCurrencyFromUSD(value, { compact: true })
+                  }
+                />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent
+                      formatter={(value) =>
+                        formatCurrencyFromUSD(Number(value))
+                      }
+                    />
+                  }
+                />
+                <Line
+                  type='linear'
+                  dataKey='balance'
+                  stroke='var(--color-balance)'
+                  strokeWidth={2}
+                  dot={{ r: 3 }}
+                  connectNulls={false}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ChartContainer>
+          )}
           <StaticDataTable
             data={[...data.balance_history].reverse()}
             getRowKey={(sample) => sample.id}
@@ -166,11 +190,32 @@ export function ChannelMonitoringContent(props: {
               },
               {
                 id: 'balance',
-                header: t('Queried balance'),
-                cell: (sample) =>
-                  sample.success || sample.partial
-                    ? formatCurrencyFromUSD(sample.known_balance)
-                    : '—',
+                header: multiKeyHistory
+                  ? t('Key balances')
+                  : t('Queried balance'),
+                cell: (sample) => {
+                  if (!multiKeyHistory) {
+                    return sample.success || sample.partial
+                      ? formatCurrencyFromUSD(sample.known_balance)
+                      : '—'
+                  }
+                  if (!sample.key_balances.length) return t('Not queried')
+                  return (
+                    <div className='space-y-1'>
+                      {sample.key_balances.map((row) => (
+                        <div
+                          key={row.index}
+                          className='flex flex-wrap items-center gap-2'
+                        >
+                          <span className='text-muted-foreground text-xs'>
+                            {t('Key #{{index}}', { index: row.index + 1 })}
+                          </span>
+                          <ChannelKeyBalanceValue row={row} />
+                        </div>
+                      ))}
+                    </div>
+                  )
+                },
               },
               {
                 id: 'usage',
@@ -219,6 +264,7 @@ export function ChannelMonitoringDialog(props: {
     content = (
       <ChannelMonitoringContent
         data={query.data}
+        multiKey={isMultiKeyChannel(currentRow)}
         balanceQueryDisabled={
           parseChannelSettings(currentRow.setting)?.balance_query_disabled ===
           true

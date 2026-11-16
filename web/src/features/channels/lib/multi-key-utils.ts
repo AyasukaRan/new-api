@@ -20,7 +20,11 @@ import {
   MULTI_KEY_STATUS_CONFIG,
   MULTI_KEY_CONFIRM_MESSAGES,
 } from '../constants'
-import type { MultiKeyConfirmAction } from '../types'
+import type {
+  ChannelBalanceMonitor,
+  ChannelKeyBalance,
+  MultiKeyConfirmAction,
+} from '../types'
 
 /**
  * Get status badge configuration for multi-key status
@@ -72,4 +76,30 @@ export function isDestructiveAction(
     action.type === 'delete-disabled' ||
     action.type === 'disable-all'
   )
+}
+
+export type ChannelKeyBalanceRow = ChannelKeyBalance & {
+  groups?: string[]
+  status?: number
+}
+
+// Current accounts define order and membership. Query results may be incomplete
+// or belong to a previous configuration; never attach those old amounts again.
+export function getChannelKeyBalanceRows(
+  monitor: ChannelBalanceMonitor | null | undefined
+): ChannelKeyBalanceRow[] {
+  if (!monitor) return []
+  if (!monitor.key_accounts) {
+    return monitor.configuration_changed ? [] : monitor.key_balances
+  }
+  const balances = new Map(monitor.key_balances.map((row) => [row.index, row]))
+  return monitor.key_accounts.map((account) => ({
+    ...(!monitor.configuration_changed
+      ? balances.get(account.index)
+      : undefined),
+    balance: !monitor.configuration_changed
+      ? (balances.get(account.index)?.balance ?? null)
+      : null,
+    ...account,
+  }))
 }
