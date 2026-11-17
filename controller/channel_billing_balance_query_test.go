@@ -362,6 +362,84 @@ func TestValidateSettingsRejectsAnUnknownBalanceQuery(t *testing.T) {
 
 }
 
+func TestNewAPIBalanceOverrideUsesAvailableUserQuota(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		channelType   int
+		queryType     string
+		overrideURL   bool
+		userQuota     bool
+		wantBalance   float64
+		wantUnlimited bool
+	}{
+		{"legacy remains unchanged", constant.ChannelTypeOpenAI, "", false, true, 99999990.746602, false},
+		{"native New API", constant.ChannelTypeNewAPI, "", false, true, 90.746602, false},
+		{"OpenAI relay with New API balance", constant.ChannelTypeOpenAI, "newapi", false, true, 90.746602, false},
+		{"independent balance address", constant.ChannelTypeOpenAI, "newapi", true, true, 90.746602, false},
+		{"unlimited key without user quota", constant.ChannelTypeOpenAI, "newapi", true, false, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requestPaths := make(chan string, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestPaths <- r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/api/status") {
+					assert.Empty(t, r.Header.Get("Authorization"))
+					fmt.Fprint(w, `{"data":{"quota_per_unit":500000}}`)
+					return
+				}
+				assert.Equal(t, "Bearer fixture-key", r.Header.Get("Authorization"))
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/api/usage/token/"):
+					if tc.userQuota {
+						fmt.Fprint(w, `{"code":true,"data":{"unlimited_quota":true,"total_available":100000000,"user_quota":{"total_available":45373301}}}`)
+					} else {
+						fmt.Fprint(w, `{"code":true,"data":{"unlimited_quota":true,"total_available":100000000}}`)
+					}
+				case strings.HasSuffix(r.URL.Path, "/subscription"):
+					fmt.Fprint(w, `{"hard_limit_usd":100000000}`)
+				case strings.HasSuffix(r.URL.Path, "/usage"):
+					fmt.Fprint(w, `{"total_usage":925.3398}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			baseURL := server.URL + "/relay"
+			channel := &model.Channel{Type: tc.channelType, Key: "fixture-key", BaseURL: &baseURL}
+			setting := dto.ChannelSettings{BalanceQueryType: tc.queryType, BalanceRechargeMultiplier: common.GetPointer(10.0)}
+			pathPrefix := "/relay"
+			if tc.overrideURL {
+				setting.BalanceQueryBaseURL = server.URL + "/billing/"
+				pathPrefix = "/billing"
+			}
+			channel.SetSetting(setting)
+			require.NoError(t, channel.ValidateSettings())
+			balance, err := updateStandardChannelBalance(context.Background(), channel)
+			paths := make([]string, 0, len(requestPaths))
+			for len(requestPaths) > 0 {
+				paths = append(paths, <-requestPaths)
+			}
+			if tc.wantUnlimited {
+				require.ErrorContains(t, err, "Allow querying user quota")
+				assert.Zero(t, balance)
+				assert.Equal(t, []string{pathPrefix + "/api/usage/token/"}, paths)
+			} else {
+				require.NoError(t, err)
+				assert.InDelta(t, tc.wantBalance, balance, 0.00000001, "return raw balance; the recharge multiplier only applies when displaying it")
+				if tc.queryType == "newapi" || tc.channelType == constant.ChannelTypeNewAPI {
+					assert.Equal(t, []string{pathPrefix + "/api/usage/token/", pathPrefix + "/api/status"}, paths)
+				} else {
+					assert.Equal(t, []string{pathPrefix + "/v1/dashboard/billing/subscription", pathPrefix + "/v1/dashboard/billing/usage"}, paths)
+				}
+			}
+			assert.Equal(t, tc.channelType, channel.Type)
+			assert.Equal(t, server.URL+"/relay", channel.GetBaseURL())
+			assert.Equal(t, "fixture-key", channel.Key)
+		})
+	}
+}
+
 // billingServerForKeys serves the OpenAI billing endpoints, giving each key the
 // hard limit registered for it and rejecting any key that has none.
 func billingServerForKeys(t *testing.T, hardLimits map[string]float64) *httptest.Server {

@@ -455,6 +455,9 @@ func updateChannelSub2APIBalance(ctx context.Context, channel *model.Channel) (f
 // key can still spend. Quota converts to USD with the upstream's quota_per_unit.
 func updateChannelNewAPIBalance(ctx context.Context, channel *model.Channel) (float64, error) {
 	baseURL := strings.TrimRight(channel.GetBaseURL(), "/")
+	if _, overrideBaseURL := resolveBalanceQuery(channel); overrideBaseURL != "" {
+		baseURL = overrideBaseURL
+	}
 	if baseURL == "" {
 		return 0, errors.New("New API channel is missing base_url")
 	}

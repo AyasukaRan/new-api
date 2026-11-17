@@ -599,6 +599,7 @@ export const BALANCE_QUERY_DEFAULT = '__channel_type__'
 
 export const BALANCE_QUERY_TYPES = [
   { value: 'openai', label: 'OpenAI' },
+  { value: 'newapi', label: 'New API' },
   { value: 'custom', label: 'Custom' },
   { value: 'aiproxy', label: 'AIProxy' },
   { value: 'api2gpt', label: 'API2GPT' },

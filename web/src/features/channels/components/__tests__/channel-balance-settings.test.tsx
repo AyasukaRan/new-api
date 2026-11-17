@@ -44,6 +44,7 @@ import { ChannelBalanceSettings } from '../channel-balance-settings'
 function BalanceSettingsFixture(props: {
   setting?: string
   onSave: (setting: Record<string, unknown>) => void
+  onSaveValues?: (values: ChannelFormValues) => void
 }) {
   const form = useForm<ChannelFormValues>({
     resolver: zodResolver(channelFormSchema),
@@ -67,9 +68,10 @@ function BalanceSettingsFixture(props: {
     <Form {...form}>
       <form
         noValidate
-        onSubmit={form.handleSubmit((values) =>
+        onSubmit={form.handleSubmit((values) => {
           props.onSave(JSON.parse(buildSettingJSON(values)))
-        )}
+          props.onSaveValues?.(values)
+        })}
       >
         <ChannelBalanceSettings control={form.control} />
         <Button type='submit'>Save</Button>
@@ -78,12 +80,19 @@ function BalanceSettingsFixture(props: {
   )
 }
 
-async function renderSettings(setting?: string) {
+async function renderSettings(
+  setting?: string,
+  onSaveValues?: (values: ChannelFormValues) => void
+) {
   const onSave = vi.fn()
   const router = createRouter({
     routeTree: createRootRoute({
       component: () => (
-        <BalanceSettingsFixture setting={setting} onSave={onSave} />
+        <BalanceSettingsFixture
+          setting={setting}
+          onSave={onSave}
+          onSaveValues={onSaveValues}
+        />
       ),
     }),
     history: createMemoryHistory({ initialEntries: ['/'] }),
@@ -95,6 +104,33 @@ async function renderSettings(setting?: string) {
 afterEach(() => useAuthStore.setState(useAuthStore.getInitialState(), true))
 
 describe('channel balance query settings', () => {
+  test('an OpenAI channel can query New API balances without changing its relay type or recharge multiplier', async () => {
+    const user = userEvent.setup()
+    const onSaveValues = vi.fn()
+    const onSave = await renderSettings(
+      JSON.stringify({
+        balance_query_type: 'openai',
+        balance_recharge_multiplier: 10,
+      }),
+      onSaveValues
+    )
+    const provider = await screen.findByRole('combobox', {
+      name: 'Balance Query API',
+    })
+    expect(provider).toHaveTextContent('OpenAI')
+    await user.click(provider)
+    await user.click(screen.getByRole('option', { name: 'New API' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      balance_query_type: 'newapi',
+      balance_recharge_multiplier: 10,
+    })
+    expect(onSaveValues).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 1, balance_recharge_multiplier: 10 })
+    )
+  })
+
   test('the display multiplier can be saved while queries are disabled and reset to its default', async () => {
     const user = userEvent.setup()
     const onSave = await renderSettings(

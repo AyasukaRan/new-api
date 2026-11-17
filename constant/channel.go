@@ -264,6 +264,7 @@ var ChannelSpecialBases = map[string]ChannelSpecialBase{
 // Only the types that have a balance implementation are listed.
 var BalanceQueryTypes = map[string]int{
 	"openai":      ChannelTypeOpenAI,
+	"newapi":      ChannelTypeNewAPI,
 	"custom":      ChannelTypeCustom,
 	"aiproxy":     ChannelTypeAIProxy,
 	"api2gpt":     ChannelTypeAPI2GPT,
