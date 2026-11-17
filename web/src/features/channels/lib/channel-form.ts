@@ -47,6 +47,11 @@ import {
   validateAdvancedCustomConfig,
 } from './advanced-custom'
 import { readTaskExtendPluginKeys } from './channel-plugin-extensions'
+import {
+  MAX_BALANCE_RECHARGE_MULTIPLIER,
+  MIN_BALANCE_RECHARGE_MULTIPLIER,
+  normalizeBalanceRechargeMultiplier,
+} from './channel-utils'
 import { supportsResponsesWebSocket } from './responses-websocket'
 
 // ============================================================================
@@ -317,6 +322,20 @@ export const channelFormSchema = z
     http_protocol: z.enum(['auto', 'http1']).optional(),
     http2_connection_shards: z.number().int().optional(),
     balance_query_disabled: z.boolean().optional(),
+    balance_recharge_multiplier: z
+      .number({
+        error:
+          'Enter a finite recharge multiplier between 0.000001 and 1000000.',
+      })
+      .min(
+        MIN_BALANCE_RECHARGE_MULTIPLIER,
+        'Enter a finite recharge multiplier between 0.000001 and 1000000.'
+      )
+      .max(
+        MAX_BALANCE_RECHARGE_MULTIPLIER,
+        'Enter a finite recharge multiplier between 0.000001 and 1000000.'
+      )
+      .nullish(),
     balance_email_enabled: z.boolean().optional(),
     balance_email_threshold: z
       .number({ error: 'Enter a finite balance threshold of zero or more.' })
@@ -609,6 +628,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   http_protocol: HTTP_PROTOCOL_AUTO,
   http2_connection_shards: 1,
   balance_query_disabled: false,
+  balance_recharge_multiplier: 1,
   balance_email_enabled: false,
   balance_email_threshold: null,
   balance_query_type: '',
@@ -669,6 +689,7 @@ export function transformChannelToFormDefaults(
     http_protocol: HTTP_PROTOCOL_AUTO as 'auto' | 'http1',
     http2_connection_shards: 1,
     balance_query_disabled: false,
+    balance_recharge_multiplier: 1,
     balance_email_enabled: false,
     balance_email_threshold: null as number | null,
     balance_query_type: '',
@@ -711,6 +732,9 @@ export function transformChannelToFormDefaults(
         http_protocol: protocol,
         http2_connection_shards: protocol === HTTP_PROTOCOL_HTTP1 ? 1 : shards,
         balance_query_disabled: parsed.balance_query_disabled === true,
+        balance_recharge_multiplier: normalizeBalanceRechargeMultiplier(
+          parsed.balance_recharge_multiplier
+        ),
         balance_email_enabled: parsed.balance_email_enabled === true,
         balance_email_threshold: parsed.balance_email_threshold ?? null,
         balance_query_type: parsed.balance_query_type || '',
@@ -911,6 +935,13 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   // keeps the JSON it had.
   if (formData.balance_query_disabled) {
     settingObj.balance_query_disabled = true
+  }
+  if (
+    formData.balance_recharge_multiplier != null &&
+    formData.balance_recharge_multiplier !== 1
+  ) {
+    settingObj.balance_recharge_multiplier =
+      formData.balance_recharge_multiplier
   }
   if (
     formData.balance_email_enabled &&

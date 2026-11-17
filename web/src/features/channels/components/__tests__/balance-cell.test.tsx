@@ -128,16 +128,21 @@ function renderBalance(
   multi = true,
   disabled = false,
   layout: 'table' | 'card' = 'table',
-  mode: 'random' | 'polling' | 'failover' = 'failover'
+  mode: 'random' | 'polling' | 'failover' = 'failover',
+  balanceRechargeMultiplier?: number,
+  usedQuota = 0
 ) {
   const channel = {
     id: 1,
     type: 1,
     name: 'multi-key',
-    setting: JSON.stringify({ balance_query_disabled: disabled }),
+    setting: JSON.stringify({
+      balance_query_disabled: disabled,
+      balance_recharge_multiplier: balanceRechargeMultiplier,
+    }),
     balance: 7,
     balance_updated_time: 1789300000,
-    used_quota: 0,
+    used_quota: usedQuota,
     balance_monitor: monitor,
     channel_info: {
       is_multi_key: multi,
@@ -164,6 +169,29 @@ function renderBalance(
 }
 
 describe('channel balance monitoring', () => {
+  test.each(['table', 'card'] as const)(
+    'the %s total and every key use the same display divisor',
+    async (layout) => {
+      renderBalance(complete, true, false, layout, 'failover', 2, 500000)
+      expect(
+        screen.getByRole('button', { name: 'Channel monitoring' })
+      ).toHaveTextContent('1')
+      expect(
+        screen.getByRole('button', { name: 'Update balance' })
+      ).toHaveTextContent('3.5')
+      await userEvent.click(
+        screen.getByRole('button', { name: 'View all 2 keys' })
+      )
+      const dialog = within(screen.getByRole('dialog'))
+      expect(dialog.getByText('$3.5')).toBeVisible()
+      const keys = within(dialog.getByRole('table'))
+      expect(keys.getByText('$1.5')).toBeVisible()
+      expect(keys.getByText('$2')).toBeVisible()
+      expect(complete.balance).toBe(7)
+      expect(complete.key_balances[0].balance).toBe(3)
+    }
+  )
+
   test.each([
     ['polling', 400],
     ['random', 400],
@@ -610,9 +638,13 @@ describe('channel balance monitoring', () => {
     ).toBeVisible()
   })
 
-  test.each([false, true])(
-    'monitoring preserves usage and shows only per-key historical balances when present: %s',
-    (withHistory) => {
+  test.each([
+    [false, 1],
+    [true, 1],
+    [true, 2],
+  ] as const)(
+    'monitoring preserves usage with history %s and display multiplier %s',
+    (withHistory, multiplier) => {
       const data: ChannelMonitoring = {
         used_quota: 10000,
         balance: withHistory ? complete : null,
@@ -653,19 +685,24 @@ describe('channel balance monitoring', () => {
           series: [],
         },
       }
-      render(<ChannelMonitoringContent data={data} />)
+      render(
+        <ChannelMonitoringContent
+          data={data}
+          balanceRechargeMultiplier={multiplier}
+        />
+      )
       expect(screen.getByText('8')).toBeVisible()
       expect(screen.getByText('75.0%')).toBeVisible()
       if (withHistory) {
         const history = screen.getByRole('region', { name: 'Balance history' })
         expect(within(history).getByText('Key #1')).toBeVisible()
-        expect(within(history).getByText('$3')).toBeVisible()
+        expect(within(history).getByText(`$${3 / multiplier}`)).toBeVisible()
         expect(
-          within(history).getByText('Last known balance: $4')
+          within(history).getByText(`Last known balance: $${4 / multiplier}`)
         ).toBeVisible()
         expect(within(history).queryByText('Premium')).not.toBeInTheDocument()
         expect(history.querySelector('svg')).toBeNull()
-        expect(screen.getByText('$7')).toBeVisible()
+        expect(screen.getByText(`$${7 / multiplier}`)).toBeVisible()
         expect(
           screen.getByText(
             'Key numbers reflect the configuration at query time.'

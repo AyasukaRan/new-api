@@ -45,6 +45,10 @@ import { useAuthStore } from '@/stores/auth-store'
 
 import { BALANCE_QUERY_DEFAULT, BALANCE_QUERY_TYPES } from '../constants'
 import type { ChannelFormValues } from '../lib/channel-form'
+import {
+  MAX_BALANCE_RECHARGE_MULTIPLIER,
+  MIN_BALANCE_RECHARGE_MULTIPLIER,
+} from '../lib/channel-utils'
 
 export function ChannelBalanceSettings(props: {
   control: Control<ChannelFormValues>
@@ -107,6 +111,39 @@ export function ChannelBalanceSettings(props: {
                 }}
               />
             </FormControl>
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={props.control}
+        name='balance_recharge_multiplier'
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>{t('Balance recharge multiplier')}</FormLabel>
+            <FormControl>
+              <Input
+                {...field}
+                type='number'
+                min={MIN_BALANCE_RECHARGE_MULTIPLIER}
+                max={MAX_BALANCE_RECHARGE_MULTIPLIER}
+                step='any'
+                placeholder='1'
+                value={field.value ?? ''}
+                onChange={(event) =>
+                  field.onChange(
+                    event.target.value === ''
+                      ? null
+                      : event.target.valueAsNumber
+                  )
+                }
+              />
+            </FormControl>
+            <FormDescription>
+              {t(
+                'Displayed balance = upstream balance ÷ recharge multiplier. Leave empty for 1. Billing and upstream costs are unchanged.'
+              )}
+            </FormDescription>
+            <FormMessage />
           </FormItem>
         )}
       />
@@ -229,6 +266,9 @@ export function ChannelBalanceSettings(props: {
                 <FormDescription>
                   {t(
                     'Enter an amount in the upstream balance unit. Only one alert is sent until the balance returns to the threshold or higher.'
+                  )}{' '}
+                  {t(
+                    'Alert thresholds and email balances use the original upstream amount, without this display conversion.'
                   )}
                 </FormDescription>
                 <FormMessage />

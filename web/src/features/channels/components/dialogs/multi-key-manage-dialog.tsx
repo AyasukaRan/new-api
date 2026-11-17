@@ -81,6 +81,8 @@ import {
   refreshChannelStatusQueries,
   formatTimestamp,
   getMultiKeyStatusConfig,
+  getChannelDisplayBalance,
+  parseChannelSettings,
   getMultiKeyConfirmMessage,
   isDestructiveAction,
 } from '../../lib'
@@ -200,14 +202,20 @@ function MultiKeyManageContent({
       ? []
       : (monitor?.key_balances ?? []).map((balance) => [balance.index, balance])
   )
-  const formatBalance = (value: number) =>
-    sensitiveVisible
-      ? formatCurrencyFromUSD(value, {
+  const rechargeMultiplier = parseChannelSettings(
+    channel.setting
+  )?.balance_recharge_multiplier
+  const formatBalance = (value: number) => {
+    if (!sensitiveVisible) return '••••'
+    const balance = getChannelDisplayBalance(value, rechargeMultiplier)
+    return balance == null
+      ? t('Not queried')
+      : formatCurrencyFromUSD(balance, {
           digitsLarge: 2,
           digitsSmall: 4,
           abbreviate: false,
         })
-      : '••••'
+  }
 
   const performAction = async () => {
     if (!confirmAction || actionsUnavailable) return

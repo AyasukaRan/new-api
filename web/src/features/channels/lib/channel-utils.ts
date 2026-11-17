@@ -326,6 +326,28 @@ export function validateChannelSettings(settings: string): boolean {
 // Balance Formatting
 // ============================================================================
 
+export const MIN_BALANCE_RECHARGE_MULTIPLIER = 0.000001
+export const MAX_BALANCE_RECHARGE_MULTIPLIER = 1000000
+
+export function normalizeBalanceRechargeMultiplier(value: unknown): number {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= MIN_BALANCE_RECHARGE_MULTIPLIER &&
+    value <= MAX_BALANCE_RECHARGE_MULTIPLIER
+    ? value
+    : 1
+}
+
+/** Display-only conversion; stored balances, billing and aggregation stay raw. */
+export function getChannelDisplayBalance(
+  balance: number | null | undefined,
+  multiplier?: unknown
+): number | null {
+  if (typeof balance !== 'number' || !Number.isFinite(balance)) return null
+  const displayed = balance / normalizeBalanceRechargeMultiplier(multiplier)
+  return Number.isFinite(displayed) ? displayed : null
+}
+
 /**
  * Format balance with currency symbol
  */

@@ -72,6 +72,7 @@ import {
   formatRelativeTime,
   formatResponseTime,
   getBalanceVariant,
+  getChannelDisplayBalance,
   getChannelTypeIcon,
   getChannelTypeLabel,
   getResponseTimeConfig,
@@ -344,14 +345,19 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const layout = useContext(ChannelRowActionsLayoutContext)
   const { sensitiveVisible, setCurrentRow, setOpen } = useChannels()
   const isTagRow = isTagAggregateRow(channel)
+  const settings = parseChannelSettings(channel.setting)
   const balanceQueryDisabled =
-    channel.type !== 57 &&
-    parseChannelSettings(channel.setting)?.balance_query_disabled === true
+    channel.type !== 57 && settings?.balance_query_disabled === true
   const monitor = channel.balance_monitor
-  const balance = monitor ? (monitor.balance ?? 0) : channel.balance || 0
-  const balanceUnknown = monitor
-    ? monitor.configuration_changed || monitor.balance == null
-    : !channel.balance_updated_time
+  const balance = getChannelDisplayBalance(
+    monitor ? monitor.balance : channel.balance,
+    settings?.balance_recharge_multiplier
+  )
+  const balanceUnknown =
+    balance == null ||
+    (monitor
+      ? monitor.configuration_changed || monitor.balance == null
+      : !channel.balance_updated_time)
   const usedQuota = channel.used_quota || 0
   const [isUpdating, setIsUpdating] = useState(false)
   const [rawBalanceResponse, setRawBalanceResponse] = useState<string | null>(
@@ -383,7 +389,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   )
   const remainingFull = balanceUnknown
     ? t('Not queried')
-    : withSuffix(formatCurrencyFromUSD(balance, balanceFormatOptions))
+    : withSuffix(formatCurrencyFromUSD(balance ?? 0, balanceFormatOptions))
   const usedDisplay =
     usedFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
@@ -397,7 +403,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   const remainingDisplay =
     !balanceUnknown && remainingFull.length > MAX_INLINE_BALANCE_CHARS
       ? withSuffix(
-          formatCurrencyFromUSD(balance, {
+          formatCurrencyFromUSD(balance ?? 0, {
             compact: true,
             locale,
             showSymbol: layout !== 'card',
@@ -439,7 +445,7 @@ export function BalanceCell({ channel }: { channel: Channel }) {
   }
 
   // Regular channel row: show used and remaining with click to update
-  const variant = getBalanceVariant(balance)
+  const variant = getBalanceVariant(balance ?? 0)
   const isInferenceChannel =
     channel.type === CHANNEL_TYPE_VLLM || channel.type === CHANNEL_TYPE_SGLANG
   const keyCount =

@@ -157,6 +157,8 @@ export interface ChannelSettings {
   http2_connection_shards?: number
   /** Opt out of balance queries while retaining recorded balances. */
   balance_query_disabled?: boolean
+  /** Display upstream balances divided by this multiplier; defaults to 1. */
+  balance_recharge_multiplier?: number
   balance_email_enabled?: boolean
   balance_email_threshold?: number | null
   /** Which provider's billing API to query; empty uses the channel's type. */

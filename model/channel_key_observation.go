@@ -83,6 +83,7 @@ func channelKeyObservationID(channel *Channel, modelName, key string, legacy boo
 		}
 	}
 	setting.BalanceQueryDisabled = false
+	setting.BalanceRechargeMultiplier = nil
 	setting.BalanceEmailEnabled = false
 	setting.BalanceEmailThreshold = nil
 	other := dto.ChannelOtherSettings{}

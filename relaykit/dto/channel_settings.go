@@ -45,6 +45,9 @@ type ChannelSettings struct {
 	// BalanceQueryDisabled stops manual and scheduled balance checks while
 	// preserving the last recorded balance. Existing configurations allow checks.
 	BalanceQueryDisabled bool `json:"balance_query_disabled,omitempty"`
+	// BalanceRechargeMultiplier divides displayed balances only. Nil means 1;
+	// upstream readings, alert thresholds and usage accounting stay unchanged.
+	BalanceRechargeMultiplier *float64 `json:"balance_recharge_multiplier,omitempty"`
 	// A threshold is required when email reminders are enabled; zero is valid.
 	BalanceEmailEnabled   bool     `json:"balance_email_enabled,omitempty"`
 	BalanceEmailThreshold *float64 `json:"balance_email_threshold,omitempty"`
@@ -159,6 +162,10 @@ func (s *ChannelSettings) BatchCredentials(baseURL string, key string) (string, 
 func (s *ChannelSettings) ValidateBalanceQuery() error {
 	if s == nil {
 		return nil
+	}
+	if multiplier := s.BalanceRechargeMultiplier; multiplier != nil &&
+		(math.IsNaN(*multiplier) || math.IsInf(*multiplier, 0) || *multiplier < 0.000001 || *multiplier > 1000000) {
+		return fmt.Errorf("Enter a finite recharge multiplier between 0.000001 and 1000000.")
 	}
 	limit := s.BalanceEmailThreshold
 	if (s.BalanceEmailEnabled && limit == nil) || (limit != nil && (math.IsNaN(*limit) || math.IsInf(*limit, 0) || *limit < 0)) {

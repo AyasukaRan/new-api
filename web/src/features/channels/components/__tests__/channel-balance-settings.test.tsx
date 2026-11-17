@@ -95,6 +95,69 @@ async function renderSettings(setting?: string) {
 afterEach(() => useAuthStore.setState(useAuthStore.getInitialState(), true))
 
 describe('channel balance query settings', () => {
+  test('the display multiplier can be saved while queries are disabled and reset to its default', async () => {
+    const user = userEvent.setup()
+    const onSave = await renderSettings(
+      JSON.stringify({
+        balance_query_disabled: true,
+        balance_recharge_multiplier: 3,
+        upstream_cost_ratio: 0.3,
+      })
+    )
+    const multiplier = await screen.findByRole('spinbutton', {
+      name: 'Balance recharge multiplier',
+    })
+    expect(multiplier).toBeEnabled()
+    expect(multiplier).toHaveValue(3)
+    await user.clear(multiplier)
+    await user.type(multiplier, '2')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      balance_query_disabled: true,
+      balance_recharge_multiplier: 2,
+      upstream_cost_ratio: 0.3,
+    })
+    await user.clear(multiplier)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2))
+    expect(onSave.mock.calls[1][0]).not.toHaveProperty(
+      'balance_recharge_multiplier'
+    )
+    expect(onSave.mock.calls[1][0].upstream_cost_ratio).toBe(0.3)
+  })
+
+  test('a zero recharge multiplier prevents saving and raw email thresholds remain explicit', async () => {
+    const user = userEvent.setup()
+    const onSave = await renderSettings(
+      JSON.stringify({
+        balance_email_enabled: true,
+        balance_email_threshold: 10,
+      })
+    )
+    const multiplier = await screen.findByRole('spinbutton', {
+      name: 'Balance recharge multiplier',
+    })
+    await user.clear(multiplier)
+    await user.type(multiplier, '0')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(
+      await screen.findByText(
+        'Enter a finite recharge multiplier between 0.000001 and 1000000.'
+      )
+    ).toBeVisible()
+    expect(multiplier).toHaveAttribute('aria-invalid', 'true')
+    expect(
+      screen.getByRole('spinbutton', { name: 'Low balance threshold' })
+    ).toHaveValue(10)
+    expect(
+      screen.getByText(
+        /Alert thresholds and email balances use the original upstream amount/
+      )
+    ).toBeVisible()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
   test('an existing channel defaults to enabled and can disable queries without losing provider configuration', async () => {
     const user = userEvent.setup()
     const onSave = await renderSettings(
@@ -161,7 +224,9 @@ describe('channel balance query settings', () => {
       name: 'Balance email notifications',
     })
     expect(email).not.toBeChecked()
-    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('spinbutton', { name: 'Low balance threshold' })
+    ).not.toBeInTheDocument()
     email.focus()
     await user.keyboard(' ')
     const threshold = screen.getByRole('spinbutton', {

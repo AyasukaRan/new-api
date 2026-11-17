@@ -36,7 +36,11 @@ import { formatCurrencyFromUSD, formatQuotaWithCurrency } from '@/lib/currency'
 import { formatTimestampToDate } from '@/lib/format'
 
 import { getChannelMonitoring } from '../../api'
-import { isMultiKeyChannel, parseChannelSettings } from '../../lib'
+import {
+  getChannelDisplayBalance,
+  isMultiKeyChannel,
+  parseChannelSettings,
+} from '../../lib'
 import type { ChannelMonitoring } from '../../types'
 import {
   ChannelBalanceSummary,
@@ -48,6 +52,7 @@ export function ChannelMonitoringContent(props: {
   data: ChannelMonitoring
   balanceQueryDisabled?: boolean
   multiKey?: boolean
+  balanceRechargeMultiplier?: number
 }) {
   const { t } = useTranslation()
   const data = props.data
@@ -94,7 +99,13 @@ export function ChannelMonitoringContent(props: {
   ]
   const chartData = data.balance_history.map((sample) => ({
     time: formatTimestampToDate(sample.checked_at),
-    balance: sample.success && !sample.partial ? sample.balance : null,
+    balance:
+      sample.success && !sample.partial
+        ? getChannelDisplayBalance(
+            sample.balance,
+            props.balanceRechargeMultiplier
+          )
+        : null,
   }))
   return (
     <div className='space-y-5'>
@@ -114,6 +125,7 @@ export function ChannelMonitoringContent(props: {
         )}
       </p>
       <ChannelBalanceSummary
+        balanceRechargeMultiplier={props.balanceRechargeMultiplier}
         monitor={data.balance}
         queryDisabled={props.balanceQueryDisabled}
       />
@@ -194,9 +206,14 @@ export function ChannelMonitoringContent(props: {
                   : t('Queried balance'),
                 cell: (sample) => {
                   if (!multiKeyHistory) {
-                    return sample.success || sample.partial
-                      ? formatCurrencyFromUSD(sample.known_balance)
-                      : '—'
+                    if (!sample.success && !sample.partial) return '—'
+                    const balance = getChannelDisplayBalance(
+                      sample.known_balance,
+                      props.balanceRechargeMultiplier
+                    )
+                    return balance == null
+                      ? t('Not queried')
+                      : formatCurrencyFromUSD(balance)
                   }
                   if (!sample.key_balances.length) return t('Not queried')
                   return (
@@ -209,7 +226,12 @@ export function ChannelMonitoringContent(props: {
                           <span className='text-muted-foreground text-xs'>
                             {t('Key #{{index}}', { index: row.index + 1 })}
                           </span>
-                          <ChannelKeyBalanceValue row={row} />
+                          <ChannelKeyBalanceValue
+                            row={row}
+                            balanceRechargeMultiplier={
+                              props.balanceRechargeMultiplier
+                            }
+                          />
                         </div>
                       ))}
                     </div>
@@ -262,6 +284,9 @@ export function ChannelMonitoringDialog(props: {
   } else if (query.data) {
     content = (
       <ChannelMonitoringContent
+        balanceRechargeMultiplier={
+          parseChannelSettings(currentRow.setting)?.balance_recharge_multiplier
+        }
         data={query.data}
         multiKey={isMultiKeyChannel(currentRow)}
         balanceQueryDisabled={

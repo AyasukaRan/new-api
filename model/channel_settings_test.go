@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,127 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestChannelBalanceRechargeMultiplier(t *testing.T) {
+	const invalidMultiplier = "Enter a finite recharge multiplier between 0.000001 and 1000000."
+	for _, tc := range []struct {
+		name, setting string
+		valid         bool
+		want          *float64
+	}{
+		{"legacy default", `{}`, true, nil},
+		{"null default", `{"balance_recharge_multiplier":null}`, true, nil},
+		{"one", `{"balance_recharge_multiplier":1}`, true, common.GetPointer(1.0)},
+		{"fraction", `{"balance_recharge_multiplier":0.3}`, true, common.GetPointer(0.3)},
+		{"lower boundary", `{"balance_recharge_multiplier":0.000001}`, true, common.GetPointer(0.000001)},
+		{"upper boundary", `{"balance_recharge_multiplier":1000000}`, true, common.GetPointer(1000000.0)},
+		{"zero", `{"balance_recharge_multiplier":0}`, false, nil},
+		{"negative", `{"balance_recharge_multiplier":-1}`, false, nil},
+		{"below range", `{"balance_recharge_multiplier":0.0000001}`, false, nil},
+		{"above range", `{"balance_recharge_multiplier":1000001}`, false, nil},
+		{"overflow", `{"balance_recharge_multiplier":1e999}`, false, nil},
+		{"string", `{"balance_recharge_multiplier":"2"}`, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := &Channel{Type: constant.ChannelTypeOpenAI, Setting: &tc.setting}
+			err := channel.ValidateSettings()
+			if tc.valid {
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, channel.GetSetting().BalanceRechargeMultiplier)
+			} else {
+				require.Error(t, err)
+			}
+			assert.Equal(t, tc.setting, *channel.Setting, "validation must not rewrite stored JSON")
+		})
+	}
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			setting := dto.ChannelSettings{BalanceRechargeMultiplier: &value}
+			require.EqualError(t, setting.ValidateBalanceQuery(), invalidMultiplier)
+		})
+	}
+	t.Run("display setting preserves balances and probe identity", func(t *testing.T) {
+		channel := &Channel{Id: 123, Type: constant.ChannelTypeOpenAI, Key: "fixture-a\nfixture-b\nfixture-c", ChannelInfo: ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModeFailover}}
+		originalHash, err := channelBalanceConfigurationHash(channel)
+		require.NoError(t, err)
+		observation, err := ChannelKeyObservationID(channel, "fixture-model", "fixture-a")
+		require.NoError(t, err)
+		legacyObservation, err := LegacyChannelKeyObservationID(channel, "fixture-model", "fixture-a")
+		require.NoError(t, err)
+		channel.SetSetting(dto.ChannelSettings{BalanceRechargeMultiplier: common.GetPointer(10.0)})
+		require.NoError(t, channel.ValidateSettings())
+		actualHash, err := channelBalanceConfigurationHash(channel)
+		require.NoError(t, err)
+		assert.Equal(t, originalHash, actualHash, "existing raw balance snapshots remain usable")
+		actualObservation, err := ChannelKeyObservationID(channel, "fixture-model", "fixture-a")
+		require.NoError(t, err)
+		assert.Equal(t, observation, actualObservation, "display edits must not invalidate key health")
+		actualLegacyObservation, err := LegacyChannelKeyObservationID(channel, "fixture-model", "fixture-a")
+		require.NoError(t, err)
+		assert.Equal(t, legacyObservation, actualLegacyObservation)
+		keys := []ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(100.0)}, {Index: 1, Balance: common.GetPointer(100.0)}, {Index: 2, Balance: common.GetPointer(200.0)}}
+		for _, tc := range []struct {
+			mode constant.MultiKeyMode
+			want float64
+		}{{constant.MultiKeyModeFailover, 300}, {constant.MultiKeyModePolling, 400}, {constant.MultiKeyModeRandom, 400}} {
+			channel.ChannelInfo.MultiKeyMode = tc.mode
+			balance, err := channel.AggregateKeyBalances(keys)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, balance, "stored balances retain original aggregation units")
+		}
+	})
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(filepath.Join(t.TempDir(), "balance-recharge.db"))
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN is not configured")
+				}
+				driver = postgres.Open(dsn)
+			}
+			db, err := gorm.Open(driver, &gorm.Config{})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+			table := db.Table("balance_recharge_channels")
+			require.NoError(t, table.AutoMigrate(&Channel{}))
+			t.Cleanup(func() { require.NoError(t, db.Migrator().DropTable("balance_recharge_channels")) })
+			var version string
+			versionQuery := "select version()"
+			if dialect == "sqlite" {
+				versionQuery = "select sqlite_version()"
+			}
+			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+			const original = `{"system_prompt":"preserved","balance_email_enabled":true,"balance_email_threshold":100,"future":{"number":9007199254740993}}`
+			channel := &Channel{Type: constant.ChannelTypeOpenAI, Name: "recharge fixture", Key: "fixture", Setting: common.GetPointer(original), Balance: 400, UsedQuota: 1234}
+			require.NoError(t, channel.ValidateSettings())
+			require.NoError(t, table.Create(channel).Error)
+			const updated = `{"system_prompt":"preserved","balance_email_enabled":true,"balance_email_threshold":100,"future":{"number":9007199254740993},"balance_recharge_multiplier":10}`
+			channel.Setting = common.GetPointer(updated)
+			require.NoError(t, channel.ValidateSettings())
+			require.NoError(t, table.Where("id = ?", channel.Id).Update("setting", channel.Setting).Error)
+			var loaded Channel
+			require.NoError(t, table.First(&loaded, channel.Id).Error)
+			assert.Equal(t, updated, *loaded.Setting, "save preserves unrelated and future JSON fields")
+			assert.Equal(t, common.GetPointer(10.0), loaded.GetSetting().BalanceRechargeMultiplier)
+			assert.Equal(t, common.GetPointer(100.0), loaded.GetSetting().BalanceEmailThreshold)
+			assert.Equal(t, float64(400), loaded.Balance)
+			assert.Equal(t, int64(1234), loaded.UsedQuota)
+		})
+	}
+}
 
 func TestChannelValidateSettingsRejectsInvalidHTTPTransport(t *testing.T) {
 	tests := []struct {

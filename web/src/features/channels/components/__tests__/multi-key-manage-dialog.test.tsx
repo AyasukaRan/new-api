@@ -108,7 +108,7 @@ function statusResponse(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function Fixture() {
+function Fixture(props: { balanceRechargeMultiplier?: number }) {
   const { open, setOpen, setCurrentRow } = useChannels()
   return (
     <>
@@ -116,7 +116,14 @@ function Fixture() {
         <Button
           key={id}
           onClick={() => {
-            setCurrentRow({ id, name: `Channel ${id}`, type: 1 } as Channel)
+            setCurrentRow({
+              id,
+              name: `Channel ${id}`,
+              type: 1,
+              setting: JSON.stringify({
+                balance_recharge_multiplier: props.balanceRechargeMultiplier,
+              }),
+            } as Channel)
             setOpen('multi-key-manage')
           }}
         >
@@ -131,7 +138,7 @@ function Fixture() {
   )
 }
 
-function setup(language?: i18n) {
+function setup(language?: i18n, balanceRechargeMultiplier?: number) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -140,7 +147,7 @@ function setup(language?: i18n) {
     <I18nextProvider i18n={language ?? i18next}>
       <QueryClientProvider client={client}>
         <ChannelsProvider>
-          <Fixture />
+          <Fixture balanceRechargeMultiplier={balanceRechargeMultiplier} />
         </ChannelsProvider>
       </QueryClientProvider>
     </I18nextProvider>
@@ -154,17 +161,22 @@ function keyRow(index: number) {
   return within(row)
 }
 
-test('shows masked keys and distinguishes zero, negative and last known balances', async () => {
-  vi.spyOn(api, 'post').mockResolvedValue(statusResponse())
-  const { user } = setup()
-  await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
-  expect(await screen.findByText('sk-a**********0001')).toBeVisible()
-  expect(keyRow(1).getByText('$0')).toBeVisible()
-  expect(keyRow(2).getByText('-$2')).toBeVisible()
-  expect(keyRow(3).getByText('Query failed')).toBeVisible()
-  expect(keyRow(3).getByText('Last known balance: $5')).toBeVisible()
-  expect(keyRow(1).getByText(/Last queried:/)).toBeVisible()
-})
+test.each([1, 2])(
+  'key management converts balances with multiplier %s while retaining zero and failed states',
+  async (multiplier) => {
+    vi.spyOn(api, 'post').mockResolvedValue(statusResponse())
+    const { user } = setup(undefined, multiplier)
+    await user.click(screen.getByRole('button', { name: 'Open channel 1' }))
+    expect(await screen.findByText('sk-a**********0001')).toBeVisible()
+    expect(keyRow(1).getByText('$0')).toBeVisible()
+    expect(keyRow(2).getByText(`-$${2 / multiplier}`)).toBeVisible()
+    expect(keyRow(3).getByText('Query failed')).toBeVisible()
+    expect(
+      keyRow(3).getByText(`Last known balance: $${5 / multiplier}`)
+    ).toBeVisible()
+    expect(keyRow(1).getByText(/Last queried:/)).toBeVisible()
+  }
+)
 
 test('a fixed invalid credential reason follows the interface language', async () => {
   const response = statusResponse()

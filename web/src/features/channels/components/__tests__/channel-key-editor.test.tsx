@@ -56,7 +56,10 @@ const keys: ChannelKeyDraft[] = [
     status: 1,
   },
 ]
-function Harness(props: { saved?: boolean }) {
+function Harness(props: {
+  saved?: boolean
+  balanceRechargeMultiplier?: number
+}) {
   const [value, setValue] = useState(keys)
   const [mode, setMode] = useState<'random' | 'polling' | 'failover'>(
     'failover'
@@ -75,6 +78,16 @@ function Harness(props: { saved?: boolean }) {
         response_time: 0,
         balance_updated_time: 0,
         models: 'test-model',
+        balance_monitor: {
+          checked_at: 1,
+          balance: 300,
+          balance_updated_time: 1,
+          known_balance: 300,
+          success: true,
+          partial: false,
+          configuration_changed: false,
+          key_balances: [{ index: 0, balance: 300 }],
+        },
       })
     : undefined
   return (
@@ -87,6 +100,7 @@ function Harness(props: { saved?: boolean }) {
         channelGroups={['default', 'premium']}
         channelCost={channelCost}
         channel={channel}
+        balanceRechargeMultiplier={props.balanceRechargeMultiplier}
         pendingKeys={pendingKeys}
         onPendingKeysChange={setPendingKeys}
       />
@@ -125,6 +139,19 @@ test('new failover keys follow effective cost, preserve small ratios and place u
   )
   expect(orderedKeys()).toEqual(['masked-c', 'masked-a', 'masked-b'])
   expect(row('c').getByText('Effective cost: 0×')).toBeVisible()
+})
+
+test('key balance preview follows the unsaved recharge multiplier without changing key cost', () => {
+  const { rerender } = render(<Harness saved balanceRechargeMultiplier={3} />)
+  expect(row('a').getByText('Balance: $100')).toBeVisible()
+  expect(
+    row('a').getByRole('spinbutton', { name: 'Upstream cost multiplier' })
+  ).toHaveValue(1.1)
+  rerender(<Harness saved balanceRechargeMultiplier={2} />)
+  expect(row('a').getByText('Balance: $150')).toBeVisible()
+  expect(
+    row('a').getByRole('spinbutton', { name: 'Upstream cost multiplier' })
+  ).toHaveValue(1.1)
 })
 
 test('saved order and keyboard reordering stay manual until sorting by cost is explicitly requested', async () => {

@@ -45,7 +45,11 @@ import { toIntlLocale } from '@/i18n/languages'
 import { formatCurrencyFromUSD } from '@/lib/currency'
 import { formatNumber } from '@/lib/format'
 
-import { getMultiKeyStatusConfig } from '../lib'
+import {
+  getChannelDisplayBalance,
+  getMultiKeyStatusConfig,
+  parseChannelSettings,
+} from '../lib'
 import type { ChannelKeyDraft } from '../lib/channel-form'
 import type { Channel, ChannelTestKey } from '../types'
 import { ChannelTestDialog } from './dialogs/channel-test-dialog'
@@ -57,6 +61,7 @@ type ChannelKeyEditorProps = {
   onModeChange: (mode: 'random' | 'polling' | 'failover') => void
   channelGroups: string[]
   channelCost: number | null
+  balanceRechargeMultiplier?: number
   channel?: Channel
   disabled?: boolean
   sensitiveVisible?: boolean
@@ -81,6 +86,9 @@ function sortChannelKeysByCost(
 export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
   const { t, i18n } = useTranslation()
   const { disabled, value, channelCost, onChange } = props
+  const balanceRechargeMultiplier =
+    props.balanceRechargeMultiplier ??
+    parseChannelSettings(props.channel?.setting)?.balance_recharge_multiplier
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const ratioFormatter = new Intl.NumberFormat(locale, {
     maximumSignificantDigits: 12,
@@ -225,13 +233,19 @@ export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
               )
             : undefined
           const effectiveCost = key.upstream_cost_ratio ?? props.channelCost
+          const displayBalance = getChannelDisplayBalance(
+            balance?.balance,
+            balanceRechargeMultiplier
+          )
           let balanceLabel = t('Query failed')
-          if (balance?.balance !== null && balance?.balance !== undefined) {
-            balanceLabel = formatCurrencyFromUSD(balance.balance, {
+          if (displayBalance != null) {
+            balanceLabel = formatCurrencyFromUSD(displayBalance, {
               digitsLarge: 2,
               digitsSmall: 4,
               abbreviate: false,
             })
+          } else if (balance?.balance != null) {
+            balanceLabel = t('Not queried')
           }
           if (props.sensitiveVisible === false) {
             balanceLabel = '••••'

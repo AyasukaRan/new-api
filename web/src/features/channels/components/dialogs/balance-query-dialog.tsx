@@ -242,6 +242,10 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
             </>
           ) : (
             <ChannelBalanceSummary
+              balanceRechargeMultiplier={
+                parseChannelSettings(currentRow.setting)
+                  ?.balance_recharge_multiplier
+              }
               queryDisabled={balanceQueryDisabled}
               monitor={
                 currentRow.balance_monitor ?? {

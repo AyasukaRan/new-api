@@ -27,6 +27,7 @@ import { formatTimestampToDate } from '@/lib/format'
 
 import {
   getBalanceVariant,
+  getChannelDisplayBalance,
   getChannelKeyBalanceRows,
   getMultiKeyStatusConfig,
   type ChannelKeyBalanceRow,
@@ -36,21 +37,31 @@ import type { ChannelBalanceMonitor } from '../types'
 export function ChannelKeyBalanceValue({
   row,
   sensitiveVisible = true,
+  balanceRechargeMultiplier,
 }: {
   row: ChannelKeyBalanceRow
   sensitiveVisible?: boolean
+  balanceRechargeMultiplier?: number
 }) {
   const { t } = useTranslation()
   if (!sensitiveVisible) return <span>••••</span>
-  if (row.balance != null) {
+  const balance = getChannelDisplayBalance(
+    row.balance,
+    balanceRechargeMultiplier
+  )
+  const lastKnownBalance = getChannelDisplayBalance(
+    row.last_known_balance,
+    balanceRechargeMultiplier
+  )
+  if (balance != null) {
     return (
       <StatusBadge
-        label={formatCurrencyFromUSD(row.balance, {
+        label={formatCurrencyFromUSD(balance, {
           digitsLarge: 2,
           digitsSmall: 4,
           abbreviate: false,
         })}
-        variant={getBalanceVariant(row.balance)}
+        variant={getBalanceVariant(balance)}
         size='sm'
         copyable={false}
         showDot={false}
@@ -62,10 +73,10 @@ export function ChannelKeyBalanceValue({
       <span className='text-muted-foreground text-xs'>
         {row.error ? t('Query failed') : t('Not queried')}
       </span>
-      {row.last_known_balance != null && (
+      {lastKnownBalance != null && (
         <p className='text-muted-foreground text-[10px] leading-snug'>
           {t('Last known balance: {{balance}}', {
-            balance: formatCurrencyFromUSD(row.last_known_balance, {
+            balance: formatCurrencyFromUSD(lastKnownBalance, {
               digitsLarge: 2,
               digitsSmall: 4,
               abbreviate: false,
@@ -105,19 +116,25 @@ function KeyBalanceGroups(props: { groups?: string[] }) {
 export function ChannelBalanceSummary(props: {
   monitor: ChannelBalanceMonitor | null | undefined
   queryDisabled?: boolean
+  balanceRechargeMultiplier?: number
 }) {
   const { t } = useTranslation()
   const monitor = props.monitor
   const rows = getChannelKeyBalanceRows(monitor)
   const updatedAt = monitor?.balance_updated_time
-  const formatBalance = (value: number | null | undefined) =>
-    value == null
+  const formatBalance = (value: number | null | undefined) => {
+    const balance = getChannelDisplayBalance(
+      value,
+      props.balanceRechargeMultiplier
+    )
+    return balance == null
       ? t('Not queried')
-      : formatCurrencyFromUSD(value, {
+      : formatCurrencyFromUSD(balance, {
           digitsLarge: 2,
           digitsSmall: 4,
           abbreviate: false,
         })
+  }
   let notice: string | null = null
   if (props.queryDisabled) {
     notice = t(
@@ -174,7 +191,12 @@ export function ChannelBalanceSummary(props: {
             {
               id: 'balance',
               header: t('Balance'),
-              cell: (row) => <ChannelKeyBalanceValue row={row} />,
+              cell: (row) => (
+                <ChannelKeyBalanceValue
+                  row={row}
+                  balanceRechargeMultiplier={props.balanceRechargeMultiplier}
+                />
+              ),
             },
             {
               id: 'status',
