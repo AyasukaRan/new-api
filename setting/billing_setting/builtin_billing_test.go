@@ -1,6 +1,7 @@
 package billing_setting_test
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"testing"
 
@@ -110,6 +111,103 @@ func TestGPT6AstraBuiltinBilling(t *testing.T) {
 			actual, ok := billing_setting.GetBillingExpr("gpt-6-astra")
 			assert.Equal(t, tc.expr, actual)
 			assert.Equal(t, tc.expr != "", ok)
+		})
+	}
+}
+
+func TestGPT62BuiltinBilling(t *testing.T) {
+	settings := config.GlobalConfig.Get("billing_setting").(*billing_setting.BillingSetting)
+	saved := *settings
+	savedRatios, savedPrices := ratio_setting.ModelRatio2JSONString(), ratio_setting.ModelPrice2JSONString()
+	savedChannels := ratio_setting.ChannelModelPricing2JSONString()
+	t.Cleanup(func() {
+		*settings = saved
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
+		require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(savedChannels))
+	})
+
+	for modelIndex, name := range []string{"gpt-6.2-astra", "gpt-6.2-sol"} {
+		t.Run(name, func(t *testing.T) {
+			*settings = billing_setting.BillingSetting{BillingMode: map[string]string{}, BillingExpr: map[string]string{}, DeletedModels: map[string]bool{}}
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))
+			require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{}`))
+			require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(`{}`))
+			assert.Equal(t, billing_setting.BillingModeTieredExpr, billing_setting.GetBillingMode(name))
+			expression, ok := billing_setting.GetBillingExpr(name)
+			require.True(t, ok)
+
+			for _, tc := range []struct {
+				name                                       string
+				input, output, cached, written, written12h int
+				groupRatio                                 float64
+				tier                                       string
+				quotas                                     [2]int
+			}{
+				{"standard", 1000, 100, 0, 0, 0, 1, "standard", [2]int{6000, 1500}},
+				{"group multiplier", 1000, 100, 0, 0, 0, 1.5, "standard", [2]int{9000, 2250}},
+				{"cache read only", 1000, 0, 1000, 0, 0, 1, "standard", [2]int{200, 50}},
+				{"30m cache write only", 1000, 0, 0, 1000, 0, 1, "standard", [2]int{5000, 1250}},
+				{"12h cache write only", 1000, 0, 0, 1000, 1000, 1, "standard", [2]int{10000, 2500}},
+				{"cache at context boundary", 272000, 1000, 200000, 20000, 0, 1, "standard", [2]int{368000, 92000}},
+				{"whole request above boundary", 272001, 1000, 200000, 20000, 0, 1, "long_context", [2]int{726008, 181502}},
+				{"mixed cache writes above boundary", 300000, 0, 200000, 20000, 10000, 1, "long_context", [2]int{1020000, 255000}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					usage := &dto.Usage{
+						PromptTokens: tc.input, CompletionTokens: tc.output,
+						PromptTokensDetails: dto.InputTokenDetails{CachedTokens: tc.cached, CacheWriteTokens: tc.written,
+							CacheWriteTokensDetails: &dto.CacheWriteTokenDetails{TTL30mTokens: tc.written - tc.written12h, TTL12hTokens: tc.written12h}},
+					}
+					result, err := billingexpr.ComputeTieredQuota(&billingexpr.BillingSnapshot{
+						ExprString: expression, GroupRatio: tc.groupRatio, QuotaPerUnit: 500000,
+					}, service.BuildTieredTokenParams(usage, false, billingexpr.UsedVars(expression)))
+					require.NoError(t, err)
+					assert.Equal(t, tc.tier, result.MatchedTier)
+					assert.Equal(t, tc.quotas[modelIndex], result.ActualQuotaAfterGroup)
+				})
+			}
+
+			t.Run("new channels inherit and existing overrides win", func(t *testing.T) {
+				require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(fmt.Sprintf(`{%q:{
+					"8":{"billing_mode":"tiered_expr","billing_expr":"tier(\"custom\", p * 7)"},
+					"12":{"billing_mode":"per_token","model_ratio":0},
+					"13":{"billing_mode":"per_request","model_price":0}
+				}}`, name)))
+				for _, tc := range []struct {
+					channel    int
+					mode, expr string
+				}{
+					{8, "tiered_expr", `tier("custom", p * 7)`},
+					{12, "per_token", ""},
+					{13, "per_request", ""},
+					{14, "tiered_expr", expression},
+				} {
+					assert.Equal(t, tc.mode, billing_setting.GetChannelBillingMode(name, tc.channel))
+					actual, configured := billing_setting.GetChannelBillingExpr(name, tc.channel)
+					assert.Equal(t, tc.expr, actual)
+					assert.Equal(t, tc.expr != "", configured)
+				}
+			})
+
+			t.Run("explicit global prices and removal override defaults", func(t *testing.T) {
+				free := fmt.Sprintf(`{%q:0}`, name)
+				for _, update := range []func(string) error{ratio_setting.UpdateModelRatioByJSONString, ratio_setting.UpdateModelPriceByJSONString} {
+					require.NoError(t, update(free))
+					assert.Equal(t, billing_setting.BillingModeRatio, billing_setting.GetBillingMode(name))
+					_, configured := billing_setting.GetBillingExpr(name)
+					assert.False(t, configured)
+					require.NoError(t, update(`{}`))
+				}
+				settings.BillingMode[name] = billing_setting.BillingModeTieredExpr
+				settings.BillingExpr[name] = `tier("custom", p * 3)`
+				actual, configured := billing_setting.GetBillingExpr(name)
+				require.True(t, configured)
+				assert.Equal(t, settings.BillingExpr[name], actual)
+				settings.DeletedModels[name] = true
+				_, configured = billing_setting.GetBillingExpr(name)
+				assert.False(t, configured)
+			})
 		})
 	}
 }

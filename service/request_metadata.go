@@ -621,6 +621,9 @@ func identifyClientTool(header http.Header) string {
 	if source := requestSourceLanguages[language]; source != "" {
 		return source
 	}
+	if genericJavaScriptUserAgent.MatchString(userAgent) {
+		return "JavaScript client"
+	}
 	if desktopChromiumUserAgent.MatchString(userAgent) {
 		return "Chromium browser"
 	}
@@ -646,6 +649,9 @@ var sub2APIInsightUserAgent = regexp.MustCompile(`^sub2api-insight-groupavailabi
 
 // These provider package suffixes are emitted by Vercel AI SDK, not an app name.
 var aiSDKUserAgentProduct = regexp.MustCompile(`^ai-sdk/(openai-compatible|provider-utils)/[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?$`)
+
+// P may be a minified constructor name; it identifies neither the SDK vendor nor the app.
+var genericJavaScriptUserAgent = regexp.MustCompile(`^p/js (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 // These names describe an explicitly declared product, not a guess from request
 // content. Applications which hide behind an SDK can opt in with X-Client-Name.
