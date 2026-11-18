@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -103,6 +104,10 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 	if _, updatesChannelPricing := values["ChannelModelPricing"]; updatesChannelPricing {
 		modelPricingMutationMu.Lock()
 		defer modelPricingMutationMu.Unlock()
+	}
+	if _, updatesSourceRules := values[operation_setting.RequestSourceRulesOptionKey]; updatesSourceRules {
+		requestSourceRulesMutationMu.Lock()
+		defer requestSourceRulesMutationMu.Unlock()
 	}
 	values = maps.Clone(values)
 	for key, value := range values {

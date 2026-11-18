@@ -6,6 +6,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -25,6 +26,8 @@ type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
 	Value string `json:"value"`
 }
+
+var requestSourceRulesMutationMu sync.Mutex
 
 func AllOption() ([]*Option, error) {
 	var options []*Option
@@ -55,6 +58,7 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
 	common.OptionMap["LogRequestBodyEnabled"] = strconv.FormatBool(common.LogRequestBodyEnabled)
+	common.OptionMap[operation_setting.RequestSourceRulesOptionKey] = operation_setting.RequestSourceRulesJSONString()
 	common.OptionMap["RequestTraceEnabled"] = strconv.FormatBool(common.RequestTraceEnabled)
 	common.OptionMap["RequestTraceRetentionDays"] = strconv.Itoa(common.RequestTraceRetentionDays)
 	common.OptionMap["RequestTraceMaxBytes"] = strconv.Itoa(common.RequestTraceMaxBytes)
@@ -219,6 +223,8 @@ func loadOptionsFromDatabase() {
 	defer passkeyOptionMutex.Unlock()
 	modelPricingMutationMu.Lock()
 	defer modelPricingMutationMu.Unlock()
+	requestSourceRulesMutationMu.Lock()
+	defer requestSourceRulesMutationMu.Unlock()
 	options, _ := AllOption()
 	passkeyOptions := make(map[string]string)
 	for _, option := range options {
@@ -243,6 +249,9 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == operation_setting.RequestSourceRulesOptionKey {
+		return operation_setting.ValidateRequestSourceRulesJSON(value)
+	}
 	if key == billing_setting.DeletedModelsOption {
 		return fmt.Errorf("unsupported pricing field: %s", key)
 	}
@@ -310,7 +319,7 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
-	if key == "ChannelModelPricing" {
+	if key == "ChannelModelPricing" || key == operation_setting.RequestSourceRulesOptionKey {
 		return UpdateOptionsBulk(map[string]string{key: value})
 	}
 	if IsRequestPolicyOption(key) {
@@ -386,6 +395,11 @@ func UpdateOptionsBulk(values map[string]string) error {
 		modelPricingMutationMu.Lock()
 		defer modelPricingMutationMu.Unlock()
 	}
+	// Keep database publication and periodic reload ordered for the same rules.
+	if _, updatesSourceRules := values[operation_setting.RequestSourceRulesOptionKey]; updatesSourceRules {
+		requestSourceRulesMutationMu.Lock()
+		defer requestSourceRulesMutationMu.Unlock()
+	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {
 			if k == "ChannelModelPricing" {
@@ -428,6 +442,13 @@ func updateOptionMap(key string, value string) (err error) {
 	}
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
+	if key == operation_setting.RequestSourceRulesOptionKey {
+		if err := operation_setting.LoadRequestSourceRulesJSON(value); err != nil {
+			return err
+		}
+		common.OptionMap[key] = operation_setting.RequestSourceRulesJSONString()
+		return nil
+	}
 	common.OptionMap[key] = value
 
 	// 检查是否是模型配置 - 使用更规范的方式处理

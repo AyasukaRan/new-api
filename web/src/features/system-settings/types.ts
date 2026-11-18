@@ -364,6 +364,7 @@ export type BillingSettings = {
 }
 
 export type OperationsSettings = {
+  RequestSourceRules: string
   DefaultCollapseSidebar: boolean
   DemoSiteEnabled: boolean
   SelfUseModeEnabled: boolean

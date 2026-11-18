@@ -22,6 +22,7 @@ import { MonitoringSettingsSection } from '../integrations/monitoring-settings-s
 import { WorkerSettingsSection } from '../integrations/worker-settings-section'
 import { LogSettingsSection } from '../maintenance/log-settings-section'
 import { PerformanceSection } from '../maintenance/performance-section'
+import { RequestSourceRulesSection } from '../maintenance/request-source-rules-section'
 import type { OperationsSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
 
@@ -114,6 +115,13 @@ const OPERATIONS_SECTIONS = [
             settings['log_setting.max_range_days'] ?? 365,
         }}
       />
+    ),
+  },
+  {
+    id: 'request-sources',
+    titleKey: 'Request source recognition',
+    build: (settings: OperationsSettings) => (
+      <RequestSourceRulesSection value={settings.RequestSourceRules} />
     ),
   },
   {

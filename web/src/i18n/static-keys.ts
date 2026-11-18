@@ -19,6 +19,20 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Request source recognition',
+  'Exact header value',
+  'Header value prefix',
+  'Regular expression (RE2)',
+  'Request source rules must be a JSON array',
+  'Request source rules exceed the {{limit}} byte limit',
+  'Request source rules support at most {{limit}} rules',
+  'Request source rule {{rule}} has invalid fields or field types',
+  'Request source rule {{rule}} has an invalid display name',
+  'Request source rule {{rule}} must have 1 to {{limit}} conditions',
+  'Request source rule {{rule}}, condition {{condition}} has an invalid or sensitive header name',
+  'Request source rule {{rule}}, condition {{condition}} has an unsupported match type',
+  'Request source rule {{rule}}, condition {{condition}} must have a non-empty pattern of at most {{limit}} bytes',
+  'Request source rule {{rule}}, condition {{condition}} has an invalid regular expression',
   'page',
   'character',
   'Billable pages',

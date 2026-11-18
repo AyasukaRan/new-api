@@ -5,13 +5,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -432,6 +435,181 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestRequestSourceRulesPrecedenceAndOriginalHeaders(t *testing.T) {
+	original := operation_setting.RequestSourceRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(original)) })
+	const rules = `[
+		{"enabled":false,"name":"Disabled","conditions":[{"header":"User-Agent","match":"prefix","value":"codex"}]},
+		{"enabled":true,"name":"  Custom client  ","conditions":[
+			{"header":"user-agent","match":"regex","value":"^codex_cli_rs/[0-9.]+$"},
+			{"header":"X-Title","match":"contains","value":"TEAM"},
+			{"header":"Originator","match":"exact","value":"CLI","case_sensitive":true},
+			{"header":"Editor-Version","match":"prefix","value":"EDITOR/"}]},
+		{"enabled":true,"name":"Later rule","conditions":[{"header":"User-Agent","match":"prefix","value":"codex"}]}
+	]`
+	require.NoError(t, operation_setting.ValidateRequestSourceRulesJSON(rules))
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(rules))
+	header := http.Header{"User-Agent": {"codex_cli_rs/1.2.3"}, "X-Title": {"my-team-runner"}, "Originator": {"CLI"}, "Editor-Version": {"editor/1"}}
+	assert.Equal(t, "Custom client", identifyClientTool(header), "the first enabled custom rule precedes built-ins")
+	header.Set("Originator", "cli")
+	assert.Equal(t, "Later rule", identifyClientTool(header), "all conditions must match, including case sensitivity")
+	header.Set("Originator", "CLI")
+	var saved []operation_setting.RequestSourceRule
+	require.NoError(t, common.UnmarshalJsonStr(operation_setting.RequestSourceRulesJSONString(), &saved))
+	require.Len(t, saved, 3)
+	assert.False(t, saved[0].Enabled)
+	assert.Equal(t, "Custom client", saved[1].Name)
+	assert.Equal(t, "User-Agent", saved[1].Conditions[0].Header)
+	assert.True(t, saved[1].Conditions[2].CaseSensitive)
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(operation_setting.RequestSourceRulesJSONString()))
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header = header.Clone()
+	info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIResponses, RelayMode: relayconstant.RelayModeResponses}
+	defer BeginRequestMetadata(c, info)()
+	assert.Equal(t, header, c.Request.Header, "source identification must not alter incoming headers")
+	c.Request.Header.Set("User-Agent", "upstream-only/1.0")
+	other := model.NewLogOther()
+	AppendRequestMetadata(c, info, other)
+	assert.Equal(t, map[string]any{"client_tool": "Custom client"}, other.Snapshot(), "only the fixed label captured from original headers is retained")
+
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON("[]"))
+	assert.Equal(t, "[]", operation_setting.RequestSourceRulesJSONString())
+	assert.Equal(t, "Codex CLI", identifyClientTool(header), "clearing rules restores built-in recognition")
+	assert.Equal(t, "Normal HTTP", identifyClientTool(nil))
+}
+
+func TestRequestSourceRulesMatchModesAndHeaderBounds(t *testing.T) {
+	original := operation_setting.RequestSourceRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(original)) })
+	for _, test := range []struct {
+		name    string
+		mode    string
+		pattern string
+		exact   bool
+		header  http.Header
+		want    string
+	}{
+		{name: "exact ignores case by default", mode: "exact", pattern: "client", header: http.Header{"X-Source": {"CLIENT"}}, want: "Configured"},
+		{name: "exact does not trim values", mode: "exact", pattern: "client", header: http.Header{"X-Source": {" client"}}},
+		{name: "exact sensitive", mode: "exact", pattern: "client", exact: true, header: http.Header{"X-Source": {"CLIENT"}}},
+		{name: "prefix sensitive", mode: "prefix", pattern: "Client/", exact: true, header: http.Header{"X-Source": {"Client/1"}}, want: "Configured"},
+		{name: "contains ignores case", mode: "contains", pattern: "CLIENT", header: http.Header{"X-Source": {"my-client/1"}}, want: "Configured"},
+		{name: "regex syntax retains case", mode: "regex", pattern: `^\p{Lu}{2}/[0-9]+$`, exact: true, header: http.Header{"X-Source": {"AB/1"}}, want: "Configured"},
+		{name: "regex sensitive", mode: "regex", pattern: "^Client/[0-9]+$", exact: true, header: http.Header{"X-Source": {"client/1"}}},
+		{name: "regex ignores case", mode: "regex", pattern: "^Client/[0-9]+$", header: http.Header{"X-Source": {"client/1"}}, want: "Configured"},
+		{name: "any whole header value", mode: "exact", pattern: "client", header: http.Header{"X-Source": {"other", "client"}}, want: "Configured"},
+		{name: "case variants are one header", mode: "exact", pattern: "client", header: http.Header{"x-source": {"other"}, "X-SOURCE": {"client"}}, want: "Configured"},
+		{name: "values are never joined", mode: "exact", pattern: "client,other", header: http.Header{"X-Source": {"client", "other"}}},
+		{name: "missing header cannot match empty regex", mode: "regex", pattern: "^$"},
+		{name: "one oversized value rejects entire header", mode: "prefix", pattern: "client", header: http.Header{"X-Source": {"client", strings.Repeat("x", 8193)}}},
+		{name: "combined bytes are bounded", mode: "prefix", pattern: "client", header: http.Header{"X-Source": {"client", strings.Repeat("x", 4096), strings.Repeat("x", 4096)}}},
+		{name: "case variants share byte bound", mode: "prefix", pattern: "client", header: http.Header{"X-Source": {"client"}, "x-source": {strings.Repeat("x", 8192)}}},
+		{name: "exact byte boundary accepted", mode: "prefix", pattern: "client", header: http.Header{"X-Source": {"client" + strings.Repeat("x", 8186)}}, want: "Configured"},
+		{name: "value count is bounded", mode: "prefix", pattern: "client", header: http.Header{"X-Source": append([]string{"client"}, make([]string, 32)...)}},
+		{name: "exact value count accepted", mode: "prefix", pattern: "client", header: http.Header{"X-Source": append([]string{"client"}, make([]string, 31)...)}, want: "Configured"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := common.Marshal([]operation_setting.RequestSourceRule{{Enabled: true, Name: "Configured", Conditions: []operation_setting.RequestSourceCondition{{Header: "X-Source", Match: test.mode, Value: test.pattern, CaseSensitive: test.exact}}}})
+			require.NoError(t, err)
+			require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(string(encoded)))
+			assert.Equal(t, test.want, operation_setting.IdentifyConfiguredRequestSource(test.header))
+		})
+	}
+}
+
+func TestRequestSourceRulesInvalidLoadsPreserveLastSnapshot(t *testing.T) {
+	original := operation_setting.RequestSourceRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(original)) })
+	const validRule = `{"enabled":true,"name":"Configured","conditions":[{"header":"User-Agent","match":"prefix","value":"client"}]}`
+	const good = `[` + validRule + `]`
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(good))
+	saved := operation_setting.RequestSourceRulesJSONString()
+	largeRule := strings.Replace(validRule, `"value":"client"`, `"value":"`+strings.Repeat("<", 512)+`"`, 1)
+	oversizedCanonical := "[" + strings.Repeat(largeRule+",", 99) + largeRule + "]"
+	require.Less(t, len(oversizedCanonical), 128*1024, "normalizing JSON escapes must not create a setting that cannot be loaded again")
+	for _, raw := range []string{
+		"", "null", "{}", "[1]", "[null]", "[{}]", "[] trailing", "[",
+		strings.Repeat(" ", 128*1024) + "[]",
+		oversizedCanonical,
+		"[" + strings.Repeat(validRule+",", 100) + validRule + "]",
+		strings.Replace(good, `"enabled":true`, `"enabled":"true"`, 1),
+		strings.Replace(good, `"enabled":true`, `"enabled":null`, 1),
+		strings.Replace(good, `"enabled":true`, `"enabled":true,"typo":true`, 1),
+		strings.Replace(good, `"name":"Configured"`, `"name":123`, 1),
+		strings.Replace(good, `"name":"Configured"`, `"name":null`, 1),
+		strings.Replace(good, `"Configured"`, `"sk-never-retained"`, 1),
+		strings.Replace(good, `"Configured"`, `"{{User-Agent}}"`, 1),
+		strings.Replace(good, `"Configured"`, `"`+strings.Repeat("x", 65)+`"`, 1),
+		strings.Replace(good, `"Configured"`, `"Runner\n"`, 1),
+		strings.Replace(good, `[{"header":"User-Agent","match":"prefix","value":"client"}]`, `[]`, 1),
+		strings.Replace(good, `[{"header":"User-Agent","match":"prefix","value":"client"}]`, `null`, 1),
+		strings.Replace(good, `"conditions":[`, `"conditions":[null,`, 1),
+		strings.Replace(good, `"conditions":[`, `"conditions":[`+strings.Repeat(`{"header":"User-Agent","match":"exact","value":"x"},`, 8), 1),
+		strings.Replace(good, `"value":"client"`, `"value":"client","case_sensitive":null`, 1),
+		strings.Replace(good, `"value":"client"`, `"value":"client","case_sensitive":"false"`, 1),
+		strings.Replace(good, `"value":"client"`, `"value":"client","extra":true`, 1),
+		strings.Replace(good, `"value":"client"`, `"value":null`, 1),
+		strings.Replace(good, `"value":"client"`, `"value":""`, 1),
+		strings.Replace(good, `"value":"client"`, `"value":"`+strings.Repeat("x", 513)+`"`, 1),
+		strings.Replace(good, `"match":"prefix"`, `"match":"glob"`, 1),
+		strings.Replace(good, `"match":"prefix","value":"client"`, `"match":"regex","value":"("`, 1),
+		strings.Replace(strings.Replace(good, `"enabled":true`, `"enabled":false`, 1), `"match":"prefix","value":"client"`, `"match":"regex","value":"(?=unsupported)"`, 1),
+	} {
+		err := operation_setting.ValidateRequestSourceRulesJSON(raw)
+		require.Error(t, err)
+		var message *common.Message
+		require.ErrorAs(t, err, &message)
+		assert.NotContains(t, message.Error(), "sk-never-retained")
+		require.Error(t, operation_setting.LoadRequestSourceRulesJSON(raw))
+		assert.Equal(t, saved, operation_setting.RequestSourceRulesJSONString())
+		assert.Equal(t, "Configured", identifyClientTool(http.Header{"User-Agent": {"client/1"}}))
+	}
+	for _, name := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "api_key", "X-APIKEY", "X-Access-Key-Id", "X-Authentication", "X-Password", "Client-Secret", "X-Credential", "X-Access-Token", "X-CSRF-Token", "Bad Header", " User-Agent", "User-Agent\r\n", "来源"} {
+		encoded, err := common.Marshal([]operation_setting.RequestSourceRule{{Enabled: true, Name: "Configured", Conditions: []operation_setting.RequestSourceCondition{{Header: name, Match: "exact", Value: "private-value"}}}})
+		require.NoError(t, err)
+		err = operation_setting.LoadRequestSourceRulesJSON(string(encoded))
+		require.Error(t, err, name)
+		assert.NotContains(t, err.Error(), "private-value")
+		assert.Equal(t, saved, operation_setting.RequestSourceRulesJSONString())
+	}
+	assert.NoError(t, operation_setting.ValidateRequestSourceRulesJSON(strings.Replace(good, "User-Agent", "X-Token-Count", 1)))
+	assert.NoError(t, operation_setting.ValidateRequestSourceRulesJSON(strings.Replace(good, `"enabled":true,`, "", 1)), "missing enabled defaults to disabled")
+	assert.Equal(t, saved, operation_setting.RequestSourceRulesJSONString(), "validation alone never activates rules")
+}
+
+func TestRequestSourceRulesConcurrentSnapshots(t *testing.T) {
+	original := operation_setting.RequestSourceRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(original)) })
+	const first = `[{"enabled":true,"name":"First","conditions":[{"header":"User-Agent","match":"exact","value":"client"}]}]`
+	second := strings.Replace(first, "First", "Second", 1)
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(first))
+	header := http.Header{"User-Agent": {"client"}}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for _, rules := range []string{first, second} {
+		workers.Go(func() {
+			<-start
+			for range 32 {
+				assert.NoError(t, operation_setting.LoadRequestSourceRulesJSON(rules))
+			}
+		})
+	}
+	workers.Go(func() {
+		<-start
+		for range 64 {
+			assert.Contains(t, []string{"First", "Second"}, identifyClientTool(header))
+			var rules []operation_setting.RequestSourceRule
+			if assert.NoError(t, common.UnmarshalJsonStr(operation_setting.RequestSourceRulesJSONString(), &rules)) && assert.Len(t, rules, 1) {
+				assert.Contains(t, []string{"First", "Second"}, rules[0].Name)
+			}
+		}
+	})
+	close(start)
+	workers.Wait()
 }
 
 func TestRequestMetadataReasoningLabelsDoNotChangeRelayParameters(t *testing.T) {

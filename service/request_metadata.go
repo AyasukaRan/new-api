@@ -16,6 +16,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -483,6 +484,9 @@ func requestReasoningLabel(info *relaycommon.RelayInfo) string {
 func identifyClientTool(header http.Header) string {
 	// Inspect original request headers only. Adaptors can inject a different
 	// User-Agent/originator upstream, which does not identify the caller.
+	if source := operation_setting.IdentifyConfiguredRequestSource(header); source != "" {
+		return source
+	}
 	rawUserAgent := header.Get("User-Agent")
 	userAgent := strings.ToLower(rawUserAgent)
 	if version, ok := strings.CutPrefix(userAgent, "codex desktop/"); ok && len(version) > 0 && version[0] >= '0' && version[0] <= '9' {
@@ -531,7 +535,7 @@ func identifyClientTool(header http.Header) string {
 	if title == "aider" && referer == "https://aider.chat" {
 		return "Aider"
 	}
-	if name := requestClientName(header.Get("X-Client-Name")); name != "" {
+	if name := operation_setting.NormalizeRequestSourceName(header.Get("X-Client-Name")); name != "" {
 		return name
 	}
 
@@ -750,32 +754,4 @@ var requestSourceLanguages = map[string]string{
 	"c#":     ".NET",
 	"dotnet": ".NET",
 	"rust":   "Rust",
-}
-
-// X-Client-Name is a public, caller-declared display name, never an identity or
-// authorization signal. Do not retain arbitrary header values as log labels.
-func requestClientName(value string) string {
-	if len(value) > 64 || !utf8.ValidString(value) {
-		return ""
-	}
-	for _, character := range value {
-		if !unicode.IsLetter(character) && !unicode.IsDigit(character) && !strings.ContainsRune(" ._-", character) {
-			return ""
-		}
-	}
-	name := strings.TrimSpace(value)
-	if name == "" {
-		return ""
-	}
-	for word := range strings.FieldsSeq(strings.ToLower(name)) {
-		if word == "bearer" || word == "basic" {
-			return ""
-		}
-		for _, prefix := range []string{"sk-", "sk_", "ak-", "ak_", "ghp_", "github_pat_", "xoxb-", "xoxp-", "gsk_", "aiza", "eyj"} {
-			if strings.HasPrefix(word, prefix) {
-				return ""
-			}
-		}
-	}
-	return name
 }
