@@ -500,6 +500,8 @@ func identifyClientTool(header http.Header) string {
 			return "Codex VS Code"
 		case product == "claude-cli":
 			return "Claude Code"
+		case product == "kimi-code-cli":
+			return "Kimi Code"
 		case product == "geminicli", strings.HasPrefix(product, "geminicli-"):
 			return "Gemini CLI"
 		case product == "opencode":
@@ -538,6 +540,9 @@ func identifyClientTool(header http.Header) string {
 	if rawUserAgent == "Sub2-authorized-native-search-test" {
 		return "Sub2-authorized-native-search-test"
 	}
+	if sub2APIInsightUserAgent.MatchString(userAgent) {
+		return "Sub2API Insight"
+	}
 	application, sdk, httpClient, runtime := "", "", "", ""
 	hasClaude, hasElectron := false, false
 	for field := range strings.FieldsSeq(userAgent) {
@@ -560,6 +565,9 @@ func identifyClientTool(header http.Header) string {
 		}
 		if sdk == "" {
 			sdk = requestSourceSDKs[token]
+			if sdk == "" && aiSDKUserAgentProduct.MatchString(token) {
+				sdk = "Vercel AI SDK"
+			}
 			// The .NET SDK uses the assembly version rather than a language
 			// suffix, accompanied by its framework in the platform comment.
 			if product == "openai" && version[0] >= '0' && version[0] <= '9' && strings.Contains(userAgent, "(.net ") {
@@ -632,6 +640,13 @@ func identifyClientTool(header http.Header) string {
 // browsers using the same user agent. Extra products (e.g. Edg or OPR) do not match.
 var desktopChromiumUserAgent = regexp.MustCompile(`^mozilla/5\.0 \((windows nt [0-9.]+(; (win64|wow64|x64|x86|arm64))*|macintosh; intel mac os x [0-9_.]+|x11; (linux|cros) [a-z0-9_ .-]+)\) applewebkit/[0-9]+\.[0-9]+ \(khtml, like gecko\) chrome/[0-9]+(\.[0-9]+){3} safari/[0-9]+\.[0-9]+$`)
 
+// Insight declares a complete run-specific user agent, not a versioned product.
+// Match the UUID shape but never retain its per-run identifier in the label.
+var sub2APIInsightUserAgent = regexp.MustCompile(`^sub2api-insight-groupavailability-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// These provider package suffixes are emitted by Vercel AI SDK, not an app name.
+var aiSDKUserAgentProduct = regexp.MustCompile(`^ai-sdk/(openai-compatible|provider-utils)/[0-9]+\.[0-9]+\.[0-9]+(-[0-9a-z.-]+)?(\+[0-9a-z.-]+)?$`)
+
 // These names describe an explicitly declared product, not a guess from request
 // content. Applications which hide behind an SDK can opt in with X-Client-Name.
 var requestSourceApplications = map[string]string{
@@ -645,6 +660,12 @@ var requestSourceApplications = map[string]string{
 	"grok-shell":         "grok-shell",
 	"zcode":              "ZCode",
 	"sub2-api":           "Sub2-API",
+	"sub2api":            "Sub2-API",
+	"magpie":             "magpie",
+	"rikkahub-android":   "RikkaHub-Android",
+	"paperradar":         "PaperRadar",
+	"astrbot":            "AstrBot",
+	"tavo":               "Tavo",
 	"n8n":                "n8n",
 	"dify":               "Dify",
 	"flowise":            "Flowise",
@@ -652,6 +673,9 @@ var requestSourceApplications = map[string]string{
 	"langchain-js":       "LangChain",
 	"langchain-python":   "LangChain",
 	"langchain-azure-ai": "LangChain",
+
+	"all-groups-quality-verification": "All-Groups-Quality-Verification",
+	"chanshui-audit":                  "chanshui-audit",
 }
 
 var requestSourceSDKs = map[string]string{
