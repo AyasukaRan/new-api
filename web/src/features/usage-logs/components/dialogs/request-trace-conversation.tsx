@@ -459,16 +459,21 @@ function TraceSourceHeader(props: { source: TraceConversationSource }) {
   )
 }
 
-function TraceSourceFallback(props: { source: TraceConversationSource }) {
+function TraceSourceFallback(props: {
+  source: TraceConversationSource
+  inlineTurn?: boolean
+}) {
   const { t } = useTranslation()
   if (!props.source.rawFallback) return null
   return (
     <div className='space-y-2'>
       {props.source.messages.length === 0 && (
         <p className='text-muted-foreground text-sm'>
-          {t(
-            'This payload cannot be shown as a conversation. Inspect its raw content in Exchange details.'
-          )}
+          {props.inlineTurn
+            ? t('No conversation was captured.')
+            : t(
+                'This payload cannot be shown as a conversation. Inspect its raw content in Exchange details.'
+              )}
         </p>
       )}
       {props.source.leg.body &&
@@ -494,6 +499,7 @@ type ConversationRow =
 
 function WindowedTraceConversation(props: {
   sources: TraceConversationSourceEntries[]
+  inlineTurn?: boolean
 }) {
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -545,26 +551,33 @@ function WindowedTraceConversation(props: {
   )
 
   return (
-    <div className='mx-auto flex h-full min-h-0 w-full max-w-4xl flex-col gap-3'>
-      <div className='flex shrink-0 items-center justify-between gap-3'>
-        <p className='text-muted-foreground text-xs leading-relaxed'>
-          {t(
-            'Conversation history sent with this request and its final response.'
+    <div
+      className={cn(
+        'mx-auto flex h-full min-h-0 w-full max-w-4xl flex-col gap-3',
+        props.inlineTurn && 'h-[min(65dvh,44rem)] min-h-52'
+      )}
+    >
+      {!props.inlineTurn && (
+        <div className='flex shrink-0 items-center justify-between gap-3'>
+          <p className='text-muted-foreground text-xs leading-relaxed'>
+            {t(
+              'Conversation history sent with this request and its final response.'
+            )}
+          </p>
+          {finalIndex >= 0 && (
+            <Button
+              size='sm'
+              variant='ghost'
+              onClick={() => {
+                anchorRef.current = { key: rows[finalIndex].id, offset: 0 }
+                virtualizer.scrollToIndex(finalIndex, { align: 'start' })
+              }}
+            >
+              {t('Back to final response')}
+            </Button>
           )}
-        </p>
-        {finalIndex >= 0 && (
-          <Button
-            size='sm'
-            variant='ghost'
-            onClick={() => {
-              anchorRef.current = { key: rows[finalIndex].id, offset: 0 }
-              virtualizer.scrollToIndex(finalIndex, { align: 'start' })
-            }}
-          >
-            {t('Back to final response')}
-          </Button>
-        )}
-      </div>
+        </div>
+      )}
       <div
         ref={scrollRef}
         role='log'
@@ -608,7 +621,10 @@ function WindowedTraceConversation(props: {
                   <TraceSourceHeader source={row.source} />
                 ) : null}
                 {row.type === 'fallback' ? (
-                  <TraceSourceFallback source={row.source} />
+                  <TraceSourceFallback
+                    source={row.source}
+                    inlineTurn={props.inlineTurn}
+                  />
                 ) : null}
               </div>
             )
@@ -622,6 +638,7 @@ function WindowedTraceConversation(props: {
 export function RequestTraceConversation(props: {
   legs: RequestTraceLeg[]
   sources?: TraceConversationSource[]
+  inlineTurn?: boolean
 }) {
   const { t } = useTranslation()
   const sources = useMemo(
@@ -692,19 +709,26 @@ export function RequestTraceConversation(props: {
   }
 
   if (
-    props.sources ||
+    (props.sources && !props.inlineTurn) ||
     sources.reduce((count, source) => count + source.entries.length, 0) > 60
   ) {
-    return <WindowedTraceConversation sources={sources} />
+    return (
+      <WindowedTraceConversation
+        sources={sources}
+        inlineTurn={props.inlineTurn}
+      />
+    )
   }
 
   return (
     <div className='mx-auto w-full max-w-4xl space-y-6'>
-      <p className='text-muted-foreground text-xs leading-relaxed'>
-        {t(
-          'Conversation history sent with this request and its final response.'
-        )}
-      </p>
+      {!props.inlineTurn && (
+        <p className='text-muted-foreground text-xs leading-relaxed'>
+          {t(
+            'Conversation history sent with this request and its final response.'
+          )}
+        </p>
+      )}
       {sources.map((source) => (
         <section
           key={source.leg.seq}
@@ -717,7 +741,7 @@ export function RequestTraceConversation(props: {
               <TraceMessage key={entry.id} entry={entry} />
             ))}
           </div>
-          <TraceSourceFallback source={source} />
+          <TraceSourceFallback source={source} inlineTurn={props.inlineTurn} />
         </section>
       ))}
     </div>

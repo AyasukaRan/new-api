@@ -37,6 +37,7 @@ import { Search } from '../search'
 
 const adminEntries = [
   'Audit Logs',
+  'Conversation Records',
   'Channels',
   'Models',
   'Users',

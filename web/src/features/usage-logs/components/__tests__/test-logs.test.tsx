@@ -31,6 +31,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import { Route as LogsRoute } from '@/routes/_authenticated/usage-logs/$section'
 import { Route as AuditRoute } from '@/routes/_authenticated/usage-logs/audit'
+import { Route as ConversationsRoute } from '@/routes/_authenticated/usage-logs/conversations'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema } from '../../data/schema'
@@ -89,13 +90,23 @@ async function renderLogs(section: string, role = 100) {
     component: AuditRoute.options.component,
     beforeLoad: (context) => AuditRoute.options.beforeLoad?.(context as never),
   })
+  const conversations = createRoute({
+    getParentRoute: () => auth,
+    path: '/usage-logs/conversations',
+    component: ConversationsRoute.options.component,
+    beforeLoad: (context) =>
+      ConversationsRoute.options.beforeLoad?.(context as never),
+  })
   const forbidden = createRoute({
     getParentRoute: () => root,
     path: '/403',
     component: () => <h1>Forbidden</h1>,
   })
   const router = createRouter({
-    routeTree: root.addChildren([auth.addChildren([logs, audit]), forbidden]),
+    routeTree: root.addChildren([
+      auth.addChildren([logs, audit, conversations]),
+      forbidden,
+    ]),
     history: createMemoryHistory({
       initialEntries: [`/usage-logs/${section}`],
     }),
@@ -108,10 +119,13 @@ async function renderLogs(section: string, role = 100) {
   const titles: Record<string, string> = {
     test: 'Test Logs',
     audit: 'Audit Logs',
+    conversations: 'Conversation Records',
     common: 'Common Logs',
   }
   let heading = titles[section]
-  if (role < 10 && ['test', 'audit'].includes(section)) heading = 'Forbidden'
+  if (role < 10 && ['test', 'audit', 'conversations'].includes(section)) {
+    heading = 'Forbidden'
+  }
   await screen.findByRole('heading', { name: heading })
   return router
 }
@@ -240,7 +254,7 @@ it.each([2, 8])(
   }
 )
 
-it.each(['test', 'audit'])(
+it.each(['test', 'audit', 'conversations'])(
   'denies direct %s page access to regular users before any log API request',
   async (section) => {
     const get = vi.spyOn(api, 'get')
@@ -252,25 +266,33 @@ it.each(['test', 'audit'])(
   }
 )
 
-it('closes an open audit page immediately when the account loses its administrator role', async () => {
-  const get = vi.spyOn(api, 'get').mockResolvedValue({
-    data: { success: true, data: { items: [], total: 0 } },
-  })
-  const router = await renderLogs('audit', 10)
-  await waitFor(() =>
-    expect(get).toHaveBeenCalledWith('/api/audit/self', expect.anything())
-  )
-  await act(() =>
-    useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
-  )
-  expect(
-    await screen.findByRole('heading', { name: 'Forbidden' })
-  ).toBeVisible()
-  expect(router.state.location.pathname).toBe('/403')
-  expect(
-    screen.queryByRole('heading', { name: 'Audit Logs' })
-  ).not.toBeInTheDocument()
-})
+it.each([
+  ['audit', 'Audit Logs', '/api/audit/self'],
+  ['conversations', 'Conversation Records', '/api/log/conversations'],
+])(
+  'closes the open %s page when the account loses administrator access',
+  async (section, title, apiPath) => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: { items: [], total: 0 } },
+    })
+    const router = await renderLogs(section, 10)
+    await waitFor(() =>
+      expect(get).toHaveBeenCalledWith(apiPath, expect.anything())
+    )
+    await act(() =>
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 1, username: 'alice', role: 1 })
+    )
+    expect(
+      await screen.findByRole('heading', { name: 'Forbidden' })
+    ).toBeVisible()
+    expect(router.state.location.pathname).toBe('/403')
+    expect(
+      screen.queryByRole('heading', { name: title })
+    ).not.toBeInTheDocument()
+  }
+)
 
 it('discarding the administrator role also discards cached personal log rows', async () => {
   let resolve: ((value: { data: unknown }) => void) | undefined

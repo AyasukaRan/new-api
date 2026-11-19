@@ -114,7 +114,7 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 								require.NoError(t, logDB.AutoMigrate(&releasedRequestTrace{}))
 							}
 							require.False(t, logDB.Migrator().HasColumn(&model.RequestTrace{}, "body_encoding"))
-							require.NoError(t, logDB.Omit("BodyEncoding").Create(&oldTrace).Error)
+							require.NoError(t, logDB.Omit("BodyEncoding", "ConversationKey", "ConversationUserId", "ConversationModel", "ConversationTitle", "ConversationParentKey", "ConversationAgent", "ConversationTurnKey", "ConversationParentTurnKey").Create(&oldTrace).Error)
 						}
 						for range 2 {
 							require.NoError(t, model.MigrateRequestTraces())
@@ -141,7 +141,7 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 							assert.Equal(t, oldLog, loadedLog)
 						}
 
-						payload := `{"text":"` + strings.Repeat("中文🙂", 140000) + `"}`
+						payload := `{"model":"capture-model","messages":[{"role":"user","content":"capture title"}],"text":"` + strings.Repeat("中文🙂", 140000) + `"}`
 						storage, err := common.CreateBodyStorage([]byte(payload))
 						require.NoError(t, err)
 						t.Cleanup(func() { require.NoError(t, storage.Close()) })
@@ -149,6 +149,7 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 						ctx, _ := gin.CreateTestContext(recorder)
 						ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
 						ctx.Request.Header.Set("Content-Type", "application/json")
+						ctx.Request.Header.Set("X-DeepSeek-Harness-Session-Id", "harness-test-session")
 						ctx.Set(common.RequestIdKey, "large-unicode-trace")
 						ctx.Set("id", 41)
 						ctx.Set(common.KeyBodyStorage, storage)
@@ -210,7 +211,17 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 						assert.Equal(t, "nosniff", bodyResponse.Header().Get("X-Content-Type-Options"))
 						assert.Contains(t, bodyResponse.Header().Get("Cache-Control"), "no-store")
 						assert.True(t, bodyResponse.Flushed)
+						var captured model.RequestTrace
+						require.NoError(t, logDB.Select("conversation_key, conversation_user_id, conversation_model, conversation_title").
+							Where("trace_id = ? AND direction = ?", traceID, model.TraceDirectionClientRequest).First(&captured).Error)
+						meta := service.TraceConversationMetadata(41, ctx.Request.Header, "")
+						assert.Equal(t, meta.Key, captured.ConversationKey)
+						assert.Equal(t, 41, captured.ConversationUserId)
+						assert.Equal(t, "capture-model", captured.ConversationModel)
+						assert.Equal(t, "capture title", captured.ConversationTitle)
 						verifyRequestTraceChunkStorage(t)
+						verifyTraceConversationTree(t)
+						verifyTraceConversationList(t)
 					})
 				}
 			}
@@ -486,6 +497,8 @@ func TestRequestTraceReadAccessAndStreaming(t *testing.T) {
 
 	router := gin.New()
 	router.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPathsRegexs([]string{`^/api/log/trace/body$`})))
+	router.GET("/api/log/conversations", middleware.DisableCache(), middleware.AdminAuth(), GetTraceConversations)
+	router.GET("/api/log/conversations/turns", middleware.DisableCache(), middleware.AdminAuth(), GetTraceConversationTurns)
 	router.GET("/api/log/trace", middleware.DisableCache(), middleware.AdminAuth(), GetRequestTrace)
 	router.GET("/api/log/trace/body", middleware.DisableCache(), middleware.AdminAuth(), GetRequestTraceBody)
 	for _, test := range []struct {
@@ -501,6 +514,8 @@ func TestRequestTraceReadAccessAndStreaming(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, path := range []string{
+				"/api/log/conversations",
+				"/api/log/conversations/turns?conversation_id=restricted-trace",
 				"/api/log/trace?trace_id=restricted-trace&metadata_only=true",
 				"/api/log/trace/body?trace_id=restricted-trace&seq=1",
 				"/api/log/trace/body?trace_id=restricted-trace&seq=1&view=rendered",
@@ -590,4 +605,132 @@ func TestRequestTraceReadAccessAndStreaming(t *testing.T) {
 	_, err = model.GetRequestTraceLegContext(readContext, response.TraceId, response.Seq)
 	require.NoError(t, model.LOG_DB.Callback().Query().Remove("cancel_trace_body_read"))
 	assert.ErrorIs(t, err, context.Canceled, "canceling a body request also cancels its chunk queries")
+}
+
+func verifyTraceConversationTree(t *testing.T) {
+	t.Helper()
+	traces := []*model.RequestTrace{
+		{TraceId: "tree-1", ConversationKey: "c_root", ConversationParentKey: "c_leaf", CreatedAt: 61},
+		{TraceId: "tree-2", ConversationKey: "c_child", ConversationParentKey: "c_root", ConversationAgent: "reviewer", CreatedAt: 62},
+		{TraceId: "tree-3", ConversationKey: "c_leaf", ConversationParentKey: "c_child", CreatedAt: 62},
+		{TraceId: "tree-4", ConversationKey: "c_root", CreatedAt: 63},
+		{TraceId: "tree-next", ConversationKey: "c_late", ConversationParentKey: "c_root", CreatedAt: 65},
+		{TraceId: "tree-other-user", ConversationUserId: 51, ConversationKey: "c_other", ConversationParentKey: "c_root", CreatedAt: 62},
+		{TraceId: "tree-orphan", ConversationKey: "c_orphan", ConversationParentKey: "c_missing", CreatedAt: 61},
+	}
+	for _, trace := range traces {
+		trace.Direction = model.TraceDirectionClientRequest
+		trace.Format = "openai_responses"
+		if trace.ConversationUserId == 0 {
+			trace.ConversationUserId = 50
+		}
+	}
+	require.NoError(t, model.SaveRequestTraces(traces))
+
+	cursor := model.TraceConversationCursor{Snapshot: 64}
+	turns, err := model.ListTraceConversationTreeTurns(t.Context(), "c_root", cursor, 2)
+	require.NoError(t, err)
+	require.Len(t, turns, 2)
+	assert.Equal(t, "tree-4", turns[0].TraceID)
+	assert.Equal(t, "tree-3", turns[1].TraceID)
+	assert.Equal(t, "c_child", turns[1].ParentID)
+	cursor.Time, cursor.ID = turns[1].CreatedAt, turns[1].TraceID
+	turns, err = model.ListTraceConversationTreeTurns(t.Context(), "c_root", cursor, 4)
+	require.NoError(t, err)
+	require.Len(t, turns, 2, "exclude another user's claimed parent and post-snapshot requests")
+	assert.Equal(t, "tree-2", turns[0].TraceID)
+	assert.Equal(t, "reviewer", turns[0].AgentName)
+	assert.Equal(t, "tree-1", turns[1].TraceID)
+	assert.Empty(t, turns[1].ParentID, "a cycle must not turn the selected root into its own descendant")
+
+	turns, err = model.ListTraceConversationTreeTurns(t.Context(), "c_orphan", model.TraceConversationCursor{Snapshot: 64}, 4)
+	require.NoError(t, err)
+	require.Len(t, turns, 1)
+	assert.Equal(t, "tree-orphan", turns[0].TraceID)
+	assert.Equal(t, "c_missing", turns[0].ParentID, "retain the recorded relationship when its parent has expired")
+
+	// More siblings than fit in one query: even a one-item page must return
+	// the latest turn across every batch, including a grandchild in the last one.
+	var wide []*model.RequestTrace
+	for i := range 257 {
+		traceID := fmt.Sprintf("wide-%03d", i)
+		wide = append(wide, &model.RequestTrace{
+			TraceId: traceID, ConversationKey: "c_" + traceID, ConversationParentKey: "c_orphan",
+			ConversationUserId: 50, Direction: model.TraceDirectionClientRequest, CreatedAt: 70,
+		})
+	}
+	wide = append(wide, &model.RequestTrace{
+		TraceId: "wide-latest", ConversationKey: "c_deep", ConversationParentKey: "c_wide-256",
+		ConversationUserId: 50, Direction: model.TraceDirectionClientRequest, CreatedAt: 71,
+	})
+	require.NoError(t, model.SaveRequestTraces(wide))
+	turns, err = model.ListTraceConversationTreeTurns(t.Context(), "c_orphan", model.TraceConversationCursor{Snapshot: 72}, 1)
+	require.NoError(t, err)
+	require.Len(t, turns, 1)
+	assert.Equal(t, "wide-latest", turns[0].TraceID)
+}
+
+func TestTraceConversationIdentity(t *testing.T) {
+	header := http.Header{}
+	header.Set("Thread-Id", "child-thread")
+	header.Set("Session-Id", "shared-parent-session")
+	header.Set("X-Codex-Parent-Thread-Id", "root-thread")
+	header.Set("X-Codex-Turn-Metadata", `{"agent_name":" /root/agent ","parent_turn_id":"assigned-turn","turn_id":"own-turn","secret":"other private metadata"}`)
+	child := service.TraceConversationMetadata(10, header,
+		`{"model":"gpt","input":[{"role":"developer","content":"private instructions"},{"role":"user","content":[{"type":"input_text","text":" hello\n world " }]}]}`)
+	assert.NotEmpty(t, child.Key)
+	assert.Equal(t, "hello world", child.Title)
+	assert.Equal(t, "gpt", child.Model)
+	assert.Equal(t, "/root/agent", child.Agent)
+	root := service.TraceConversationMetadata(10, nil, `{"client_metadata":{"thread_id":"root-thread","turn_id":"assigned-turn"}}`)
+	assert.Equal(t, root.Key, child.ParentKey)
+	assert.NotEmpty(t, root.TurnKey)
+	assert.Equal(t, root.TurnKey, child.ParentTurnKey)
+	assert.NotEqual(t, child.TurnKey, child.ParentTurnKey)
+	other := service.TraceConversationMetadata(11, header, "")
+	assert.NotEqual(t, child.Key, other.Key)
+	assert.NotEqual(t, child.ParentKey, other.ParentKey)
+	assert.NotEqual(t, child.ParentTurnKey, other.ParentTurnKey)
+	header.Set("Thread-Id", "root-thread")
+	self := service.TraceConversationMetadata(10, header, "")
+	assert.Equal(t, root.Key, self.Key)
+	assert.Empty(t, self.ParentKey)
+	assert.Empty(t, self.ParentTurnKey)
+	header.Del("Thread-Id")
+	header.Del("Session-Id")
+	header.Set("X-Codex-Turn-Metadata", `{"installation_id":"same-device","thread_id":"[REDACTED]","turn_id":"one-turn"}`)
+	unknown := service.TraceConversationMetadata(10, header,
+		`{"metadata":{"user_id":"account-name"},"prompt_cache_key":"shared-cache","client_metadata":{"owner":11}}`)
+	assert.Empty(t, unknown.Key)
+	assert.Empty(t, unknown.ParentKey)
+	assert.Empty(t, unknown.TurnKey)
+	header.Set("Thread-Id", "child-thread")
+	unowned := service.TraceConversationMetadata(0, header, "")
+	assert.Empty(t, unowned.Key)
+}
+
+func verifyTraceConversationList(t *testing.T) {
+	t.Helper()
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{
+		{TraceId: "legacy-chat", CreatedAt: 60, Direction: model.TraceDirectionClientRequest, Format: "openai", Url: "/v1/chat/completions?x=1", Body: "private request"},
+		{TraceId: "legacy-embed", CreatedAt: 60, Direction: model.TraceDirectionClientRequest, Format: "gemini", Url: "/v1beta/models/a:embedContent"},
+		{TraceId: "child-response-only", CreatedAt: 60, Direction: model.TraceDirectionClientResponse, Format: "openai_responses"},
+	}))
+	cursor := model.TraceConversationCursor{Snapshot: 64}
+	first, err := model.ListTraceConversations(t.Context(), cursor, 1)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	assert.Equal(t, "c_child", first[0].ConversationID, "one stable root for the retained cycle")
+	assert.Equal(t, 4, first[0].TurnCount)
+	cursor.Time, cursor.ID = first[0].UpdatedAt, first[0].ConversationID
+	rest, err := model.ListTraceConversations(t.Context(), cursor, 10)
+	require.NoError(t, err)
+	require.Len(t, rest, 3)
+	assert.Equal(t, "c_other", rest[0].ConversationID)
+	assert.Equal(t, "c_orphan", rest[1].ConversationID)
+	assert.Equal(t, "legacy-chat", rest[2].ConversationID)
+	turns, err := model.ListTraceConversationTreeTurns(t.Context(), "legacy-chat", model.TraceConversationCursor{Snapshot: 64}, 10)
+	require.NoError(t, err)
+	require.Len(t, turns, 1)
+	assert.Equal(t, "legacy-chat", turns[0].TraceID)
 }

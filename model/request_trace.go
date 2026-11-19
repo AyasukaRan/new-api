@@ -30,8 +30,8 @@ type RequestTrace struct {
 	// inserts every row with id 0.
 	Seq       int    `json:"seq" gorm:"index:idx_request_traces_trace,priority:2"`
 	Attempt   int    `json:"attempt"`
-	Direction string `json:"direction" gorm:"type:varchar(24)"`
-	CreatedAt int64  `json:"created_at" gorm:"type:bigint;index"`
+	Direction string `json:"direction" gorm:"type:varchar(24);index:idx_trace_conversations,priority:1"`
+	CreatedAt int64  `json:"created_at" gorm:"type:bigint;index;index:idx_trace_conversations,priority:3"`
 	RequestId string `json:"request_id" gorm:"type:varchar(64);index"`
 	ChannelId int    `json:"channel_id"`
 	// Format names the wire dialect of this leg (openai, claude, gemini,
@@ -56,6 +56,16 @@ type RequestTrace struct {
 	// generated image. Empty when the body is inline or was not retained.
 	ObjectKey   string `json:"object_key" gorm:"type:varchar(255)"`
 	ContentType string `json:"content_type" gorm:"type:varchar(128)"`
+
+	// Only the client request leg indexes a conversation turn.
+	ConversationKey           string `json:"-" gorm:"type:varchar(64);index:idx_trace_conversations,priority:2"`
+	ConversationParentKey     string `json:"-" gorm:"type:varchar(64);index"`
+	ConversationTurnKey       string `json:"-" gorm:"type:varchar(64)"`
+	ConversationParentTurnKey string `json:"-" gorm:"type:varchar(64)"`
+	ConversationAgent         string `json:"-" gorm:"type:varchar(96)"`
+	ConversationUserId        int    `json:"-"`
+	ConversationTitle         string `json:"-" gorm:"type:varchar(128)"`
+	ConversationModel         string `json:"-" gorm:"type:varchar(192)"`
 }
 
 // MySQL TEXT holds only 64 KiB, below even the default 1 MiB payload cap.
@@ -83,7 +93,9 @@ func MigrateRequestTraces() error {
 		created_at Int64, request_id String, channel_id Int32, format String,
 		method String, url String, status Int32,
 		headers String, body String, body_size Int64, truncated UInt8,
-		object_key String, content_type String, body_encoding String
+		object_key String, content_type String, body_encoding String,
+		conversation_key String, conversation_user_id Int64, conversation_title String, conversation_model String,
+		conversation_parent_key String, conversation_agent String, conversation_turn_key String, conversation_parent_turn_key String
 	) ENGINE = MergeTree()
 	PARTITION BY toYYYYMM(toDateTime(created_at))
 	ORDER BY (created_at, trace_id)`).Error; err != nil {
@@ -92,7 +104,9 @@ func MigrateRequestTraces() error {
 	// CREATE TABLE IF NOT EXISTS is a no-op on an install that already has the
 	// table, so a column added after the first release needs its own statement
 	// or every insert naming it would fail. ClickHouse has no AutoMigrate.
-	for _, column := range []string{"object_key String", "content_type String", "body_encoding String"} {
+	for _, column := range []string{"object_key String", "content_type String", "body_encoding String",
+		"conversation_key String", "conversation_user_id Int64", "conversation_title String", "conversation_model String",
+		"conversation_parent_key String", "conversation_agent String", "conversation_turn_key String", "conversation_parent_turn_key String"} {
 		if err := LOG_DB.Exec("ALTER TABLE request_traces ADD COLUMN IF NOT EXISTS " + column).Error; err != nil {
 			return err
 		}

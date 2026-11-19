@@ -596,11 +596,16 @@ func (job *traceWriteJob) persist() {
 	records := make([]*model.RequestTrace, 0, len(job.legs))
 	redactor := requestTraceCollector{secrets: job.secrets}
 	for _, leg := range job.legs {
+		var conversationBody string
+		conversation := leg.record.Direction == model.TraceDirectionClientRequest && model.IsConversationTrace(leg.record.Format, leg.record.Url)
 		if b := leg.buffer; b != nil {
 			leg.record.BodySize = b.preview.total
 			body, complete := b.CompletePayload()
 			if complete {
 				body = redactor.scrub(body)
+				if conversation {
+					conversationBody = body
+				}
 				if err := model.StoreRequestTraceBody(leg.record, body, job.userID); err != nil {
 					common.SysError("failed to store complete request trace payload: " + err.Error())
 					complete = false
@@ -618,6 +623,25 @@ func (job *traceWriteJob) persist() {
 			leg.record.ContentType = leg.objectContentType
 			uploadTraceObject(context.Background(), leg)
 			leg.object.Close()
+		}
+		if conversation {
+			headers := http.Header{}
+			if leg.record.Headers != "" {
+				_ = common.UnmarshalJsonStr(leg.record.Headers, &headers)
+			}
+			meta := TraceConversationMetadata(job.userID, headers, conversationBody)
+			leg.record.ConversationKey, leg.record.ConversationParentKey = meta.Key, meta.ParentKey
+			// Parsing JSON can decode an escaped credential that wasn't literal in the wire payload.
+			leg.record.ConversationTitle = traceConversationLabel(redactor.scrub(meta.Title), 96)
+			leg.record.ConversationAgent = traceConversationLabel(redactor.scrub(meta.Agent), 96)
+			leg.record.ConversationTurnKey, leg.record.ConversationParentTurnKey = meta.TurnKey, meta.ParentTurnKey
+			if meta.Model != "" {
+				leg.record.ConversationModel = traceConversationLabel(redactor.scrub(meta.Model), 192)
+			}
+			if leg.record.ConversationKey == "" {
+				leg.record.ConversationKey = leg.record.TraceId
+			}
+			leg.record.ConversationUserId = job.userID
 		}
 		records = append(records, leg.record)
 	}
@@ -789,6 +813,9 @@ func (t *requestTraceCollector) clientRequestLeg(c *gin.Context) *traceLeg {
 	}
 	if c.Request.URL != nil {
 		record.Url = t.scrub(relaycommon.SanitizeURLForLog(c.Request.URL.String()))
+	}
+	if model.IsConversationTrace(record.Format, record.Url) {
+		record.ConversationModel = traceConversationLabel(t.scrub(common.GetContextKeyString(c, constant.ContextKeyOriginalModel)), 192)
 	}
 	record.Headers = t.encodeHeaders(c.Request.Header, nil)
 	leg := &traceLeg{record: record}
