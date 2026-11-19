@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2 } from 'lucide-react'
 import { Reorder } from 'motion/react'
 import { useEffect, useMemo } from 'react'
@@ -56,18 +57,13 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import {
+  SOURCE_MATCH_LABELS,
   parseRequestSourceRules,
   requestSourceRulesSchema,
   type RequestSourceRule,
   type RequestSourceRulesValues,
 } from './request-source-rules'
-
-const MATCH_LABELS = {
-  exact: 'Exact header value',
-  prefix: 'Header value prefix',
-  contains: 'Contains',
-  regex: 'Regular expression (RE2)',
-} as const
+import { SourceRecognitionTabs } from './request-source-tabs'
 
 function SourceRuleFields(props: { index: number }) {
   const { t } = useTranslation()
@@ -139,10 +135,12 @@ function SourceRuleFields(props: { index: number }) {
                   onValueChange={(value) =>
                     value !== null && field.onChange(value)
                   }
-                  items={Object.entries(MATCH_LABELS).map(([value, label]) => ({
-                    value,
-                    label: t(label),
-                  }))}
+                  items={Object.entries(SOURCE_MATCH_LABELS).map(
+                    ([value, label]) => ({
+                      value,
+                      label: t(label),
+                    })
+                  )}
                 >
                   <FormControl>
                     <SelectTrigger className='w-full'>
@@ -150,11 +148,13 @@ function SourceRuleFields(props: { index: number }) {
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
-                    {Object.entries(MATCH_LABELS).map(([value, label]) => (
-                      <SelectItem key={value} value={value}>
-                        {t(label)}
-                      </SelectItem>
-                    ))}
+                    {Object.entries(SOURCE_MATCH_LABELS).map(
+                      ([value, label]) => (
+                        <SelectItem key={value} value={value}>
+                          {t(label)}
+                        </SelectItem>
+                      )
+                    )}
                   </SelectContent>
                 </Select>
                 <FormMessage />
@@ -228,6 +228,7 @@ function SourceRuleFields(props: { index: number }) {
 function SourceRulesEditor(props: { rules: RequestSourceRule[] }) {
   const { t, i18n } = useTranslation()
   const updateOption = useUpdateOption()
+  const queryClient = useQueryClient()
   const defaults = useMemo(() => ({ rules: props.rules }), [props.rules])
   const schema = useMemo(() => requestSourceRulesSchema(t), [t])
   const form = useForm<RequestSourceRulesValues>({
@@ -249,12 +250,16 @@ function SourceRulesEditor(props: { rules: RequestSourceRule[] }) {
           value: JSON.stringify(values.rules),
         })
         form.reset(values)
+        queryClient.removeQueries({
+          type: 'inactive',
+          queryKey: ['request-source-rules', 'unidentified'],
+        })
       })()
       .catch(() => {
         /* The option mutation displays the server error; keep the draft. */
       })
   }
-  return (
+  const editor = (
     <Form {...form}>
       <SettingsForm
         onSubmit={(event) => {
@@ -353,6 +358,22 @@ function SourceRulesEditor(props: { rules: RequestSourceRule[] }) {
       </SettingsForm>
     </Form>
   )
+  return (
+    <SourceRecognitionTabs
+      onCreate={
+        rules.fields.length >= 100 || updateOption.isPending
+          ? undefined
+          : (conditions) => {
+              rules.append(
+                { enabled: true, name: '', conditions },
+                { focusName: `rules.${rules.fields.length}.name` }
+              )
+            }
+      }
+    >
+      {editor}
+    </SourceRecognitionTabs>
+  )
 }
 
 export function RequestSourceRulesSection(props: { value: string }) {
@@ -363,18 +384,8 @@ export function RequestSourceRulesSection(props: { value: string }) {
   )
   return (
     <SettingsSection title={t('Request source recognition')}>
-      <p className='text-muted-foreground text-sm'>
-        {t(
-          'The first matching enabled rule wins. All conditions in a rule must match. If none match, built-in recognition applies. Changes affect new requests only; other nodes refresh within 60 seconds.'
-        )}
-      </p>
-      <p className='text-muted-foreground text-sm'>
-        {t(
-          'Names are fixed display labels, not values extracted from headers. Sensitive headers cannot be used. Regular expressions are validated by the server using RE2.'
-        )}
-      </p>
       {rules === null ? (
-        <>
+        <SourceRecognitionTabs>
           <SettingsPageFormActions onSave={() => {}} isSaveDisabled />
           <Alert variant='destructive'>
             <AlertDescription>
@@ -383,7 +394,7 @@ export function RequestSourceRulesSection(props: { value: string }) {
               )}
             </AlertDescription>
           </Alert>
-        </>
+        </SourceRecognitionTabs>
       ) : (
         <SourceRulesEditor rules={rules} />
       )}

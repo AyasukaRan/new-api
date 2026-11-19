@@ -581,6 +581,37 @@ func TestRequestSourceRulesInvalidLoadsPreserveLastSnapshot(t *testing.T) {
 	assert.Equal(t, saved, operation_setting.RequestSourceRulesJSONString(), "validation alone never activates rules")
 }
 
+func TestBuiltinRequestSourceCatalogRemainsAvailableWithOverrides(t *testing.T) {
+	original := operation_setting.RequestSourceRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(original)) })
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(`[{"enabled":true,"name":"Custom CLI","conditions":[{"header":"User-Agent","match":"prefix","value":"codex-cli/"}]}]`))
+	header := http.Header{"User-Agent": {"codex-cli/1.0"}}
+	assert.Equal(t, "Custom CLI", IdentifyRequestClient(header))
+
+	catalog := map[string][]map[string]string{}
+	for _, rule := range BuiltinRequestSourceRules() {
+		catalog[rule.Name] = rule.Examples
+	}
+	assert.Contains(t, catalog["Codex CLI"], map[string]string{"User-Agent": "codex-cli/1.0"})
+	assert.NotContains(t, catalog, "Custom CLI")
+	assert.Contains(t, catalog["Normal HTTP"], map[string]string{})
+	assert.Contains(t, catalog["X-Client-Name"], map[string]string{"X-Client-Name": "Example client"})
+	assert.Contains(t, catalog["Cline"], map[string]string{"X-Title": "Cline", "HTTP-Referer": "https://cline.bot"})
+	assert.Contains(t, catalog["Sub2-API"], map[string]string{"User-Agent": "sub2api/1.0"})
+	key := operation_setting.BuiltinRequestSourceOptionPrefix + "Codex CLI"
+	setting, err := common.Marshal(operation_setting.BuiltinRequestSourceSettingFor("Codex CLI"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadBuiltinRequestSourceOption(key, string(setting))) })
+	require.NoError(t, operation_setting.LoadBuiltinRequestSourceOption(key, `{"enabled":false}`))
+	assert.Equal(t, "", IdentifyRequestClient(http.Header{"Originator": {"codex_cli_rs"}}))
+	assert.Equal(t, "Custom CLI", IdentifyRequestClient(header))
+	require.NoError(t, operation_setting.LoadBuiltinRequestSourceOption(key, `{"enabled":true,"display_name":"Codex terminal"}`))
+	assert.Equal(t, "Codex terminal", IdentifyRequestClient(http.Header{"Originator": {"codex_cli_rs"}}))
+	// A self-declared name is controlled by its own recognizer even if it
+	// happens to spell another recognizer's name.
+	assert.Equal(t, "Codex CLI", IdentifyRequestClient(http.Header{"X-Client-Name": {"Codex CLI"}}))
+}
+
 func TestRequestSourceRulesConcurrentSnapshots(t *testing.T) {
 	original := operation_setting.RequestSourceRulesJSONString()
 	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(original)) })

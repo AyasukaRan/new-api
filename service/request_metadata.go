@@ -488,6 +488,24 @@ func IdentifyRequestClient(header http.Header) string {
 	if source := operation_setting.IdentifyConfiguredRequestSource(header); source != "" {
 		return source
 	}
+	source := identifyBuiltinRequestClient(header)
+	if source == "" {
+		return ""
+	}
+	setting := operation_setting.BuiltinRequestSourceSettingFor(source)
+	if !setting.Enabled {
+		return ""
+	}
+	if setting.DisplayName != "" {
+		return setting.DisplayName
+	}
+	if source == "X-Client-Name" {
+		return operation_setting.NormalizeRequestSourceName(header.Get("X-Client-Name"))
+	}
+	return source
+}
+
+func identifyBuiltinRequestClient(header http.Header) string {
 	rawUserAgent := header.Get("User-Agent")
 	userAgent := strings.ToLower(rawUserAgent)
 	if version, ok := strings.CutPrefix(userAgent, "codex desktop/"); ok && len(version) > 0 && version[0] >= '0' && version[0] <= '9' {
@@ -498,32 +516,15 @@ func IdentifyRequestClient(header http.Header) string {
 		if !ok || version == "" {
 			continue
 		}
-		switch {
-		case product == "codex_cli_rs", product == "codex-cli", product == "codex-tui", product == "codex_exec":
-			return "Codex CLI"
-		case product == "codex_vscode":
-			return "Codex VS Code"
-		case product == "claude-cli":
-			return "Claude Code"
-		case product == "kimi-code-cli":
-			return "Kimi Code"
-		case product == "geminicli", strings.HasPrefix(product, "geminicli-"):
+		if name := requestSourceCLIProducts[product]; name != "" {
+			return name
+		}
+		if strings.HasPrefix(product, "geminicli-") {
 			return "Gemini CLI"
-		case product == "opencode":
-			return "OpenCode"
-		case product == "deepseek-harness":
-			return "DeepSeek Harness"
-		case product == "cline":
-			return "Cline"
 		}
 	}
-	switch strings.ToLower(strings.TrimSpace(header.Get("originator"))) {
-	case "codex_cli_rs", "codex-tui":
-		return "Codex CLI"
-	case "codex_vscode":
-		return "Codex VS Code"
-	case "cline":
-		return "Cline"
+	if name := requestSourceOriginators[strings.ToLower(strings.TrimSpace(header.Get("originator")))]; name != "" {
+		return name
 	}
 	if editor := strings.ToLower(header.Get("Editor-Version")); strings.HasPrefix(editor, "aider/") && len(editor) > len("aider/") {
 		return "Aider"
@@ -536,8 +537,8 @@ func IdentifyRequestClient(header http.Header) string {
 	if title == "aider" && referer == "https://aider.chat" {
 		return "Aider"
 	}
-	if name := operation_setting.NormalizeRequestSourceName(header.Get("X-Client-Name")); name != "" {
-		return name
+	if operation_setting.NormalizeRequestSourceName(header.Get("X-Client-Name")) != "" {
+		return "X-Client-Name"
 	}
 
 	// Product names are allowlisted: a generic HTTP client cannot identify the
@@ -660,6 +661,16 @@ var genericJavaScriptUserAgent = regexp.MustCompile(`^p/js (0|[1-9][0-9]*)\.(0|[
 
 // These names describe an explicitly declared product, not a guess from request
 // content. Applications which hide behind an SDK can opt in with X-Client-Name.
+var requestSourceCLIProducts = map[string]string{
+	"codex_cli_rs": "Codex CLI", "codex-cli": "Codex CLI", "codex-tui": "Codex CLI", "codex_exec": "Codex CLI",
+	"codex_vscode": "Codex VS Code", "claude-cli": "Claude Code", "kimi-code-cli": "Kimi Code",
+	"geminicli": "Gemini CLI", "opencode": "OpenCode", "deepseek-harness": "DeepSeek Harness", "cline": "Cline",
+}
+
+var requestSourceOriginators = map[string]string{
+	"codex_cli_rs": "Codex CLI", "codex-tui": "Codex CLI", "codex_vscode": "Codex VS Code", "cline": "Cline",
+}
+
 var requestSourceApplications = map[string]string{
 	"codewhale":          "CodeWhale",
 	"dsprobe":            "dsprobe",

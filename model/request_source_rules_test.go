@@ -81,6 +81,20 @@ func TestRequestSourceRulesOptionDatabaseRoundTrip(t *testing.T) {
 			})
 			require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(`[]`))
 			const key = operation_setting.RequestSourceRulesOptionKey
+			const builtinKey = operation_setting.BuiltinRequestSourceOptionPrefix + "Codex CLI"
+			originalBuiltin, err := common.Marshal(operation_setting.BuiltinRequestSourceSettingFor("Codex CLI"))
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				require.NoError(t, operation_setting.LoadBuiltinRequestSourceOption(builtinKey, string(originalBuiltin)))
+			})
+			require.NoError(t, UpdateOption(builtinKey, `{"enabled":false,"display_name":"CLI"}`))
+			require.NoError(t, operation_setting.LoadBuiltinRequestSourceOption(builtinKey, `{"enabled":true}`))
+			loadOptionsFromDatabase()
+			assert.Equal(t, operation_setting.BuiltinRequestSourceSetting{Enabled: false, DisplayName: "CLI"}, operation_setting.BuiltinRequestSourceSettingFor("Codex CLI"))
+			require.Error(t, UpdateOption(builtinKey, `{"enabled":true,"display_name":"Bearer token"}`))
+			assert.False(t, operation_setting.BuiltinRequestSourceSettingFor("Codex CLI").Enabled)
+			require.NoError(t, UpdateOption(builtinKey, `{"enabled":true,"display_name":"Codex CLI"}`))
+			assert.Equal(t, operation_setting.BuiltinRequestSourceSetting{Enabled: true}, operation_setting.BuiltinRequestSourceSettingFor("Codex CLI"))
 			const first = `[{"enabled":true,"name":"测试客户端","conditions":[{"header":"User-Agent","match":"prefix","value":"source-test/","case_sensitive":false}]}]`
 			header := http.Header{"User-Agent": []string{"source-test/1.0"}}
 			require.NoError(t, UpdateOption("request_source_unrelated", "preserved"))

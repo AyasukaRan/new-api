@@ -331,3 +331,298 @@ test('enforces UTF-8 limits, list bounds, and forbidden headers without compilin
     ).toBeNull()
   }
 })
+
+const sampleSignature = {
+  header: 'User-Agent',
+  match: 'prefix',
+  value: 'ExampleDesk/',
+  case_sensitive: false,
+} as const
+const sampleGroup = {
+  kind: 'signature',
+  conditions: [sampleSignature],
+  count: 5,
+  last_seen: 1795093000,
+  current_source: '',
+}
+const samples = {
+  days: 7,
+  sample_limit: 500,
+  truncated: false,
+  next_cursor: '',
+  reviewed: 10,
+  groups: [
+    sampleGroup,
+    { ...sampleGroup, count: 3, conditions: [], kind: 'no_capture' },
+    { ...sampleGroup, count: 1, conditions: [], kind: 'no_signature' },
+    { ...sampleGroup, count: 1, current_source: 'Previously matched' },
+  ],
+}
+const ok = <T,>(data: T) => ({ data: { success: true, data } })
+
+test('opens the unknown sample on demand and turns its conditions into a draft without losing unsaved changes', async () => {
+  const user = userEvent.setup()
+  const get = vi.spyOn(api, 'get').mockResolvedValue(ok(samples))
+  renderRules(JSON.stringify([rule('Original')]))
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Source display name' }),
+    { target: { value: 'Edited' } }
+  )
+  expect(get).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('tab', { name: 'Unidentified requests' }))
+  expect(await screen.findByText('ExampleDesk/')).toBeVisible()
+  expect(get).toHaveBeenCalledWith(
+    '/api/option/request_source_rules/unidentified',
+    expect.objectContaining({ params: { days: 7 } })
+  )
+  expect(
+    screen.getByRole('switch', {
+      name: 'Only show still-unidentified requests',
+    })
+  ).toBeChecked()
+  expect(screen.queryByText('Previously matched')).not.toBeInTheDocument()
+  expect(screen.getByText('No captured request headers')).toBeVisible()
+  expect(screen.getByText('No distinctive client headers')).toBeVisible()
+  expect(screen.getAllByRole('button', { name: 'Create rule' })).toHaveLength(1)
+  await user.click(screen.getByRole('button', { name: 'Create rule' }))
+  expect(screen.getByRole('tab', { name: 'Custom rules' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
+  const names = screen.getAllByRole('textbox', { name: 'Source display name' })
+  expect(names[0]).toHaveValue('Edited')
+  expect(names[1]).toHaveValue('')
+  expect(
+    screen.getAllByRole('textbox', { name: 'Header match value' })[1]
+  ).toHaveValue('ExampleDesk/')
+  expect(api.put).not.toHaveBeenCalled()
+  await user.type(names[1], 'Desktop example')
+  await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.put).toHaveBeenCalledTimes(1))
+  const saved = JSON.parse(
+    String((vi.mocked(api.put).mock.calls[0][1] as UpdateOptionRequest).value)
+  )
+  expect(saved).toEqual([
+    rule('Edited'),
+    { name: 'Desktop example', enabled: true, conditions: [sampleSignature] },
+  ])
+  await user.click(screen.getByRole('tab', { name: 'Unidentified requests' }))
+  await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+})
+
+test('distinguishes a resolved sample from an empty time window and can retry a failed read', async () => {
+  const user = userEvent.setup()
+  const get = vi
+    .spyOn(api, 'get')
+    .mockRejectedValueOnce(new Error('Sample unavailable'))
+    .mockResolvedValueOnce(
+      ok({
+        ...samples,
+        reviewed: 500,
+        truncated: true,
+        next_cursor: 'older-sample',
+        groups: [{ ...sampleGroup, current_source: 'Now matched', count: 500 }],
+      })
+    )
+    .mockResolvedValueOnce(ok({ ...samples, days: 1, reviewed: 0, groups: [] }))
+  renderRules('[]')
+  await user.click(screen.getByRole('tab', { name: 'Unidentified requests' }))
+  expect(await screen.findByText('Sample unavailable')).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(
+    await screen.findByText('All reviewed requests now match a source.')
+  ).toBeVisible()
+  expect(screen.getByText(/Showing the latest 500/)).toBeVisible()
+  expect(
+    screen.getByRole('button', { name: 'Review older requests' })
+  ).toBeVisible()
+  await user.click(
+    screen.getByRole('switch', {
+      name: 'Only show still-unidentified requests',
+    })
+  )
+  expect(await screen.findByText('Now matched')).toBeVisible()
+  await user.selectOptions(
+    screen.getByRole('combobox', { name: 'Time range' }),
+    '1'
+  )
+  expect(
+    await screen.findByText('No unidentified requests in this period')
+  ).toBeVisible()
+  expect(get).toHaveBeenLastCalledWith(
+    '/api/option/request_source_rules/unidentified',
+    expect.objectContaining({ params: { days: 1 } })
+  )
+})
+
+test('searches built-in recognition by header and displays independent header examples', async () => {
+  const user = userEvent.setup()
+  vi.spyOn(api, 'get').mockResolvedValue(
+    ok([
+      {
+        name: 'Codex CLI',
+        enabled: true,
+        display_name: 'Codex CLI',
+        examples: [
+          { 'User-Agent': 'codex-cli/1.0' },
+          { originator: 'codex_cli_rs' },
+        ],
+      },
+      {
+        name: 'Normal HTTP',
+        enabled: true,
+        display_name: 'Normal HTTP',
+        examples: [{}],
+      },
+    ])
+  )
+  renderRules('[]')
+  await user.click(screen.getByRole('tab', { name: 'Built-in recognition' }))
+  expect(await screen.findByText('No client-identifying headers')).toBeVisible()
+  await user.type(
+    screen.getByRole('searchbox', { name: 'Search sources or headers' }),
+    'ORIGINATOR'
+  )
+  expect(screen.getByText('Codex CLI')).toBeVisible()
+  expect(screen.queryByText('Normal HTTP')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Save Changes' })
+  ).not.toBeInTheDocument()
+  await user.type(screen.getByRole('searchbox'), 'x')
+  expect(screen.getByText('No matches')).toBeVisible()
+})
+
+test('edits one built-in source, keeps the dialog on failure and can restore its original name and status', async () => {
+  const user = userEvent.setup()
+  let builtin = {
+    name: 'Test client',
+    display_name: 'Original override',
+    enabled: false,
+    examples: [{ 'User-Agent': 'test/1' }],
+  }
+  vi.spyOn(api, 'get').mockImplementation(async () => ok([builtin]))
+  vi.mocked(api.put).mockRejectedValueOnce(new Error('Could not save'))
+  renderRules(JSON.stringify([rule('Original')]))
+  await user.click(screen.getByRole('tab', { name: 'Built-in recognition' }))
+  await user.click(
+    await screen.findByRole('button', { name: 'Edit Test client' })
+  )
+  const modal = within(screen.getByRole('dialog'))
+  expect(modal.getByRole('switch', { name: 'Enabled' })).not.toBeChecked()
+  expect(
+    modal.getByRole('textbox', { name: 'Source display name' })
+  ).toHaveValue('Original override')
+  await user.click(modal.getByRole('button', { name: 'Restore defaults' }))
+  expect(
+    modal.getByRole('textbox', { name: 'Source display name' })
+  ).toHaveValue('')
+  expect(modal.getByRole('switch', { name: 'Enabled' })).toBeChecked()
+  await user.click(modal.getByRole('button', { name: 'Save' }))
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/option/request_source_rules/builtin',
+      { name: 'Test client', enabled: true, display_name: '' }
+    )
+  )
+  expect(screen.getByRole('dialog')).toBeVisible()
+  await user.type(
+    modal.getByRole('textbox', { name: 'Source display name' }),
+    'New name'
+  )
+  builtin = { ...builtin, display_name: 'New name', enabled: true }
+  await user.click(modal.getByRole('button', { name: 'Save' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+  expect(await screen.findByText('New name')).toBeVisible()
+  expect(api.put).toHaveBeenLastCalledWith(
+    '/api/option/request_source_rules/builtin',
+    { name: 'Test client', enabled: true, display_name: 'New name' }
+  )
+})
+
+test('continues past a fully recognized page and merges matching signatures across pages', async () => {
+  const user = userEvent.setup()
+  const get = vi
+    .spyOn(api, 'get')
+    .mockResolvedValueOnce(
+      ok({
+        ...samples,
+        next_cursor: 'one',
+        reviewed: 2,
+        groups: [{ ...sampleGroup, current_source: 'Known client', count: 2 }],
+      })
+    )
+    .mockResolvedValueOnce(
+      ok({
+        ...samples,
+        next_cursor: 'two',
+        reviewed: 3,
+        groups: [{ ...sampleGroup, count: 3 }],
+      })
+    )
+    .mockResolvedValueOnce(
+      ok({
+        ...samples,
+        next_cursor: '',
+        reviewed: 5,
+        groups: [{ ...sampleGroup, count: 5 }],
+      })
+    )
+  renderRules('[]')
+  await user.click(screen.getByRole('tab', { name: 'Unidentified requests' }))
+  await user.click(
+    await screen.findByRole('button', { name: 'Review older requests' })
+  )
+  expect(await screen.findByText('ExampleDesk/')).toBeVisible()
+  expect(get).toHaveBeenLastCalledWith(
+    '/api/option/request_source_rules/unidentified',
+    expect.objectContaining({ params: { days: 7, cursor: 'one' } })
+  )
+  await user.click(
+    screen.getByRole('button', { name: 'Review older requests' })
+  )
+  expect(await screen.findByText(/Reviewed 10/)).toBeVisible()
+  expect(screen.getAllByText('ExampleDesk/')).toHaveLength(1)
+  expect(screen.getByRole('cell', { name: '8' })).toBeVisible()
+  expect(
+    screen.queryByRole('button', { name: 'Review older requests' })
+  ).not.toBeInTheDocument()
+})
+
+test('lets an empty scan window continue to older records without claiming the full period is empty', async () => {
+  const user = userEvent.setup()
+  vi.spyOn(api, 'get')
+    .mockResolvedValueOnce(
+      ok({
+        ...samples,
+        reviewed: 0,
+        groups: [],
+        truncated: true,
+        next_cursor: 'next',
+      })
+    )
+    .mockResolvedValueOnce(
+      ok({
+        ...samples,
+        reviewed: 0,
+        groups: [],
+        truncated: false,
+        next_cursor: '',
+      })
+    )
+  renderRules('[]')
+  await user.click(screen.getByRole('tab', { name: 'Unidentified requests' }))
+  expect(
+    await screen.findByText('No unidentified requests in this batch')
+  ).toBeVisible()
+  await user.click(
+    screen.getByRole('button', { name: 'Review older requests' })
+  )
+  expect(
+    await screen.findByText('No unidentified requests in this period')
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('button', { name: 'Review older requests' })
+  ).not.toBeInTheDocument()
+})

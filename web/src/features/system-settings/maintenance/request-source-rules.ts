@@ -31,7 +31,7 @@ function validSourceHeader(value: string): boolean {
   )
 }
 
-function validSourceName(value: string): boolean {
+export function validSourceName(value: string): boolean {
   if (
     !value.trim() ||
     byteLength(value) > 64 ||
@@ -128,3 +128,10 @@ export function parseRequestSourceRules(
     return null
   }
 }
+
+export const SOURCE_MATCH_LABELS = {
+  exact: 'Exact header value',
+  prefix: 'Header value prefix',
+  contains: 'Contains',
+  regex: 'Regular expression (RE2)',
+} as const

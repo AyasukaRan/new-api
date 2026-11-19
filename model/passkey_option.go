@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -105,7 +104,7 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 		modelPricingMutationMu.Lock()
 		defer modelPricingMutationMu.Unlock()
 	}
-	if _, updatesSourceRules := values[operation_setting.RequestSourceRulesOptionKey]; updatesSourceRules {
+	if updatesRequestSourceOptions(values) {
 		requestSourceRulesMutationMu.Lock()
 		defer requestSourceRulesMutationMu.Unlock()
 	}

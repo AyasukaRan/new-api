@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -225,6 +227,7 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 						verifyRequestTraceChunkStorage(t)
 						verifyTraceConversationTree(t)
 						verifyTraceConversationList(t)
+						verifyUnidentifiedRequestSources(t)
 					})
 				}
 			}
@@ -867,7 +870,7 @@ func verifyTraceFilterBackfill(t *testing.T) {
 	leg := &model.RequestTrace{TraceId: id, RequestId: id, Direction: model.TraceDirectionClientRequest,
 		Format: "openai_responses", CreatedAt: 80, Body: `{"input":"Hello!"}`, Headers: `{"User-Agent":["codex_cli_rs/1.0"]}`}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		require.NoError(t, model.LOG_DB.Exec("CREATE TABLE IF NOT EXISTS logs (id Int64, created_at Int64, request_id String, other String) ENGINE = MergeTree ORDER BY (created_at, request_id)").Error)
+		require.NoError(t, model.LOG_DB.Exec("CREATE TABLE IF NOT EXISTS logs (id Int64, created_at Int64, request_id String, other String, type Int32, token_id Int32, token_name String, content String) ENGINE = MergeTree ORDER BY (created_at, request_id)").Error)
 	}
 	const oldID = "historical-client-from-log"
 	require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"request_id": oldID, "created_at": 79, "other": `{"client_tool":"dsprobe"}`}).Error)
@@ -918,4 +921,86 @@ func TestGreetingOnlyConversationInputs(t *testing.T) {
 			assert.Equal(t, tc.greeting, service.TraceConversationMetadata(1, nil, tc.body).GreetingOnly)
 		})
 	}
+}
+
+func verifyUnidentifiedRequestSources(t *testing.T) {
+	t.Helper()
+	const now = int64(2_000_000_000)
+	label, unknown := "already indexed", ""
+	const product = `{"User-Agent":["ReviewClient/1.7 (private device ID)"],"Authorization":["Bearer SECRET-DO-NOT-SHOW"],"X-Forwarded-For":["192.0.2.24"]}`
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{
+		{TraceId: "one", RequestId: "one", CreatedAt: now, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
+		{TraceId: "two", RequestId: "two", CreatedAt: now - 1, Direction: model.TraceDirectionClientRequest, Headers: product},
+		{TraceId: "two-indexed", RequestId: "indexed", CreatedAt: now - 1, Direction: model.TraceDirectionClientRequest, ConversationClient: &label},
+		{TraceId: "one-duplicate", RequestId: "one", CreatedAt: now - 1, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
+		{TraceId: "just-trace", RequestId: "just-trace", CreatedAt: now - 2, Direction: model.TraceDirectionClientRequest, Headers: `{"User-Agent":["sk-abcdef/2.0"]}`, ConversationClient: &unknown},
+		{TraceId: "upstream", RequestId: "uncaptured", CreatedAt: now - 3, Direction: model.TraceDirectionUpstreamRequest, Headers: product},
+		{TraceId: "too-old", RequestId: "too-old", CreatedAt: now - 86401, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
+		{TraceId: "in-future", RequestId: "in-future", CreatedAt: now + 1, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
+	}))
+	for i, row := range []struct {
+		id    string
+		kind  int
+		other string
+	}{
+		{"one", model.LogTypeConsume, "{}"},
+		{"one", model.LogTypeError, "{}"},
+		{"two", model.LogTypeConsume, `{"client_tool":null}`},
+		{"uncaptured", model.LogTypeError, ""},
+		{"identified", model.LogTypeConsume, `{"client_tool":"Codex CLI"}`},
+		{"indexed", model.LogTypeError, "{}"}, {"malformed", model.LogTypeError, `{"client_tool": broken`},
+		{"channel-test", model.LogTypeTestConsume, "{}"},
+		{"", model.LogTypeConsume, "{}"}, {"", model.LogTypeError, "{}"},
+	} {
+		seen := now - 3
+		if row.id == "two" {
+			seen = now - 1
+		}
+		require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"created_at": seen, "id": 10000 + i, "type": row.kind, "request_id": row.id, "other": row.other}).Error)
+	}
+	old := operation_setting.RequestSourceRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(old)) })
+	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(`[{"enabled":true,"name":"Review Client","conditions":[{"header":"User-Agent","match":"prefix","value":"ReviewClient/"}]}]`))
+	report, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 1, 10, model.SourceReviewPosition{})
+	require.NoError(t, err)
+	require.Equal(t, 7, report.Reviewed)
+	assert.False(t, report.Truncated)
+	require.Len(t, report.Groups, 3)
+	assert.Equal(t, "no_capture", report.Groups[0].Kind)
+	assert.Equal(t, 4, report.Groups[0].Count, "missing client legs and both anonymous legacy rows remain visible")
+	assert.Equal(t, "Review Client", report.Groups[1].CurrentSource)
+	assert.Equal(t, 2, report.Groups[1].Count, "a pair of failed/successful usage rows and its trace count once")
+	require.Len(t, report.Groups[1].Conditions, 1)
+	assert.Equal(t, "ReviewClient/", report.Groups[1].Conditions[0].Value)
+	encoded, err := common.Marshal(report)
+	require.NoError(t, err)
+	for _, private := range []string{"SECRET", "192.0.2.", "device ID", "sk-abcdef", "1.7"} {
+		assert.NotContains(t, string(encoded), private)
+	}
+	capped, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 1, 3, model.SourceReviewPosition{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, capped.Reviewed)
+	assert.True(t, capped.Truncated)
+	assert.Len(t, capped.Groups, 2)
+
+	var position model.SourceReviewPosition
+	counts := make(map[string]int)
+	for page := range 7 {
+		batch, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 1, 1, position)
+		require.NoError(t, err)
+		require.Len(t, batch.Groups, 1)
+		counts[batch.Groups[0].Kind] += batch.Reviewed
+		if page == 6 {
+			assert.False(t, batch.Truncated)
+			assert.Empty(t, batch.NextCursor)
+		} else {
+			require.True(t, batch.Truncated)
+			raw, err := base64.RawURLEncoding.DecodeString(batch.NextCursor)
+			require.NoError(t, err)
+			var decoded service.SourceReviewCursor
+			require.NoError(t, common.Unmarshal(raw, &decoded))
+			position = decoded.SourceReviewPosition
+		}
+	}
+	assert.Equal(t, map[string]int{"signature": 2, "no_capture": 4, "no_signature": 1}, counts)
 }

@@ -248,7 +248,20 @@ func SyncOptions(frequency int) {
 	}
 }
 
+func updatesRequestSourceOptions(values map[string]string) bool {
+	for key := range values {
+		if key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateOptionValue(key string, value string) error {
+	if strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+		_, err := operation_setting.ParseBuiltinRequestSourceOption(key, value)
+		return err
+	}
 	if key == operation_setting.RequestSourceRulesOptionKey {
 		return operation_setting.ValidateRequestSourceRulesJSON(value)
 	}
@@ -319,7 +332,7 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
-	if key == "ChannelModelPricing" || key == operation_setting.RequestSourceRulesOptionKey {
+	if key == "ChannelModelPricing" || key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 		return UpdateOptionsBulk(map[string]string{key: value})
 	}
 	if IsRequestPolicyOption(key) {
@@ -396,7 +409,7 @@ func UpdateOptionsBulk(values map[string]string) error {
 		defer modelPricingMutationMu.Unlock()
 	}
 	// Keep database publication and periodic reload ordered for the same rules.
-	if _, updatesSourceRules := values[operation_setting.RequestSourceRulesOptionKey]; updatesSourceRules {
+	if updatesRequestSourceOptions(values) {
 		requestSourceRulesMutationMu.Lock()
 		defer requestSourceRulesMutationMu.Unlock()
 	}
@@ -442,6 +455,13 @@ func updateOptionMap(key string, value string) (err error) {
 	}
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
+	if strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+		if err := operation_setting.LoadBuiltinRequestSourceOption(key, value); err != nil {
+			return err
+		}
+		common.OptionMap[key] = value
+		return nil
+	}
 	if key == operation_setting.RequestSourceRulesOptionKey {
 		if err := operation_setting.LoadRequestSourceRulesJSON(value); err != nil {
 			return err
