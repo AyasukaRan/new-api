@@ -232,7 +232,7 @@ test('applies combined filters to the full list and carries them through sorted 
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     let data
     if (url === '/api/log/conversations') {
-      const params = config?.params ?? {}
+      const params = (config?.params ?? {}) as Record<string, unknown>
       received.push(params)
       const id = params.cursor ? 'Next' : 'First'
       data = { items: [record(id)], next_cursor: params.cursor ? '' : 'page-2' }
@@ -322,7 +322,7 @@ test('applies the greeting-only switch independently of round count and clears t
   const requests: Record<string, unknown>[] = []
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     if (url === '/api/log/conversations') {
-      const params = config?.params ?? {}
+      const params = (config?.params ?? {}) as Record<string, unknown>
       requests.push(params)
       const items = params.hide_greetings
         ? [record('One question')]
@@ -368,7 +368,7 @@ test('distinguishes an unrecognized client from a custom client name and from al
   const queries: Record<string, unknown>[] = []
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     if (url.endsWith('/clients')) return { data: { success: true, data: [] } }
-    queries.push(config?.params ?? {})
+    queries.push((config?.params ?? {}) as Record<string, unknown>)
     return { data: { success: true, data: { items: [], next_cursor: '' } } }
   })
   admin()
