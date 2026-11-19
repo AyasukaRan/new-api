@@ -79,7 +79,8 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, c
 	case common.UsingLogDatabase(common.DatabaseTypeClickHouse):
 		client = "JSONExtractString(logs.other, 'client_tool')"
 	case common.UsingLogDatabase(common.DatabaseTypeMySQL):
-		client = "CASE WHEN JSON_VALID(logs.other) THEN NULLIF(JSON_UNQUOTE(JSON_EXTRACT(logs.other, '$.client_tool')), 'null') END"
+		const value = "JSON_EXTRACT(logs.other, '$.client_tool')"
+		client = "CASE WHEN JSON_VALID(logs.other) THEN CASE WHEN JSON_TYPE(" + value + ") = 'STRING' THEN JSON_UNQUOTE(" + value + ") END END"
 	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
 		client = `CASE WHEN logs.other LIKE '%"client_tool"%' THEN CAST(logs.other AS json)->>'client_tool' END`
 	default:

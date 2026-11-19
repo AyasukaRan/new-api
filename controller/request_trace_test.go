@@ -948,6 +948,7 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 		{"two", model.LogTypeConsume, `{"client_tool":null}`},
 		{"uncaptured", model.LogTypeError, ""},
 		{"identified", model.LogTypeConsume, `{"client_tool":"Codex CLI"}`},
+		{"named-null", model.LogTypeConsume, `{"client_tool":"null"}`},
 		{"indexed", model.LogTypeError, "{}"}, {"malformed", model.LogTypeError, `{"client_tool": broken`},
 		{"channel-test", model.LogTypeTestConsume, "{}"},
 		{"", model.LogTypeConsume, "{}"}, {"", model.LogTypeError, "{}"},
