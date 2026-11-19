@@ -1004,4 +1004,33 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 		}
 	}
 	assert.Equal(t, map[string]int{"signature": 2, "no_capture": 4, "no_signature": 1}, counts)
+	// Review a long window without scanning a month's legacy metadata in one
+	// request. The same trace/attempt may occur on both sides of midnight.
+	boundary := now - 7*86400
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{{TraceId: "old-duplicate", RequestId: "one", CreatedAt: boundary, Direction: model.TraceDirectionClientRequest, ConversationClient: &unknown, Headers: product}}))
+	for i, id := range []string{"uncaptured", "previous-week"} {
+		require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"created_at": boundary, "id": 20000 + i, "type": model.LogTypeError, "request_id": id, "other": "{}"}).Error)
+	}
+	week, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 30, 500, model.SourceReviewPosition{})
+	require.NoError(t, err)
+	require.True(t, week.Truncated)
+	assert.Equal(t, 8, week.Reviewed)
+	raw, err := base64.RawURLEncoding.DecodeString(week.NextCursor)
+	require.NoError(t, err)
+	var next service.SourceReviewCursor
+	require.NoError(t, common.Unmarshal(raw, &next))
+	assert.Equal(t, boundary, next.WindowEnd)
+	day, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 30, 500, next.SourceReviewPosition)
+	require.NoError(t, err)
+	assert.Equal(t, 1, day.Reviewed, "the earlier attempts for both known request IDs were already reviewed in the first window")
+	require.True(t, day.Truncated)
+	raw, err = base64.RawURLEncoding.DecodeString(day.NextCursor)
+	require.NoError(t, err)
+	require.NoError(t, common.Unmarshal(raw, &next))
+	assert.Equal(t, boundary-86400, next.WindowEnd)
+	empty, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 30, 500, next.SourceReviewPosition)
+	require.NoError(t, err)
+	assert.Zero(t, empty.Reviewed)
+	assert.NotEmpty(t, empty.NextCursor, "an empty day must not hide older days")
+
 }

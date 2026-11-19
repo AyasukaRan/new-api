@@ -39,9 +39,26 @@ type UnidentifiedSourceReview struct {
 
 func ReviewUnidentifiedRequestSources(ctx context.Context, now int64, days, limit int, cursor model.SourceReviewPosition) (UnidentifiedSourceReview, error) {
 	report := UnidentifiedSourceReview{Days: days, SampleLimit: limit, Groups: []UnidentifiedSourceGroup{}}
-	requests, next, err := model.RecentUnidentifiedSourceRequests(ctx, now-int64(days)*86400, now, cursor, limit)
+	window := model.SourceReviewWindow{SnapshotStart: now - int64(days)*86400, SnapshotEnd: now}
+	window.Start, window.End = window.SnapshotStart, now
+	if cursor.WindowEnd > 0 {
+		window.End = cursor.WindowEnd
+	}
+	if days > 7 {
+		width := int64(7 * 86400)
+		if window.End < now {
+			width = 86400
+		}
+		window.Start = max(window.SnapshotStart, window.End-width+1)
+	}
+	requests, next, err := model.RecentUnidentifiedSourceRequests(ctx, window, cursor, limit)
 	if err != nil {
 		return report, err
+	}
+	if next != nil {
+		next.WindowEnd = window.End
+	} else if window.Start > window.SnapshotStart {
+		next = &model.SourceReviewPosition{WindowEnd: window.Start - 1}
 	}
 	if next != nil {
 		raw, err := common.Marshal(SourceReviewCursor{SourceReviewPosition: *next, Snapshot: now, Days: days})

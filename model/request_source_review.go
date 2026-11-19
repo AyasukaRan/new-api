@@ -21,7 +21,13 @@ type UnidentifiedSourceRequest struct {
 	Count     int
 }
 
+type SourceReviewWindow struct {
+	Start, End                 int64
+	SnapshotStart, SnapshotEnd int64
+}
+
 type SourceReviewPosition struct {
+	WindowEnd int64  `json:"w,omitempty"`
 	Time      int64  `json:"t"`
 	RequestID string `json:"r,omitempty"`
 	TraceID   string `json:"i,omitempty"`
@@ -34,35 +40,37 @@ func compareSourceReview(a, b UnidentifiedSourceRequest) int {
 	return cmp.Or(cmp.Compare(b.CreatedAt, a.CreatedAt), cmp.Compare(b.RequestID, a.RequestID), cmp.Compare(b.TraceID, a.TraceID))
 }
 
-func sourceReviewPage(db, groups *gorm.DB, cursor SourceReviewPosition, limit int) *gorm.DB {
-	query := db.Table("(?) AS source_groups", groups)
-	rid, tid := "request_id", "trace_id"
+func sourceReviewPage(db, groups *gorm.DB, window SourceReviewWindow, cursor SourceReviewPosition, limit int) *gorm.DB {
+	query := db.Table("(?) AS source_groups", groups).
+		Select("source_rid AS request_id, source_tid AS trace_id, last_seen AS created_at, row_count AS count").
+		Where("last_seen BETWEEN ? AND ?", window.Start, window.End)
+	rid, tid := "source_rid", "source_tid"
 	switch {
 	case common.UsingLogDatabase(common.DatabaseTypeMySQL):
-		rid, tid = "BINARY request_id", "BINARY trace_id"
+		rid, tid = "BINARY source_rid", "BINARY source_tid"
 	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
-		rid, tid = `request_id COLLATE "C"`, `trace_id COLLATE "C"`
+		rid, tid = `source_rid COLLATE "C"`, `source_tid COLLATE "C"`
 	}
 	if cursor.Time > 0 {
 		traceOp := " < ?"
 		if cursor.Skipped > 0 {
 			traceOp = " <= ?"
 		}
-		query = query.Where("created_at < ? OR (created_at = ? AND ("+rid+" < ? OR ("+rid+" = ? AND "+tid+traceOp+")))", cursor.Time, cursor.Time, cursor.RequestID, cursor.RequestID, cursor.TraceID)
+		query = query.Where("last_seen < ? OR (last_seen = ? AND ("+rid+" < ? OR ("+rid+" = ? AND "+tid+traceOp+")))", cursor.Time, cursor.Time, cursor.RequestID, cursor.RequestID, cursor.TraceID)
 	}
-	return query.Order("created_at DESC, " + rid + " DESC, " + tid + " DESC").Limit(limit + 1)
+	return query.Order("last_seen DESC, " + rid + " DESC, " + tid + " DESC").Limit(limit + 1)
 }
 
-func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, cursor SourceReviewPosition, limit int) ([]UnidentifiedSourceRequest, *SourceReviewPosition, error) {
+func RecentUnidentifiedSourceRequests(ctx context.Context, bounds SourceReviewWindow, cursor SourceReviewPosition, limit int) ([]UnidentifiedSourceRequest, *SourceReviewPosition, error) {
 	db := LOG_DB.WithContext(ctx)
 	var captures []UnidentifiedSourceRequest
 	const rid = "COALESCE(request_id, '')"
 	const unnamedTrace = "CASE WHEN " + rid + " = '' THEN trace_id ELSE '' END"
-	window := db.Model(&RequestTrace{}).Where("created_at BETWEEN ? AND ? AND direction = ?", since, until, TraceDirectionClientRequest)
+	window := db.Model(&RequestTrace{}).Where("created_at BETWEEN ? AND ? AND direction = ?", bounds.SnapshotStart, bounds.SnapshotEnd, TraceDirectionClientRequest)
 	traceGroups := window.Session(&gorm.Session{}).Where("conversation_client = ?", "").
-		Select(rid + " AS request_id, " + unnamedTrace + " AS trace_id, MAX(created_at) AS created_at, 1 AS count").
+		Select(rid + " AS source_rid, " + unnamedTrace + " AS source_tid, MAX(created_at) AS last_seen, 1 AS row_count").
 		Group(rid + ", " + unnamedTrace)
-	if err := sourceReviewPage(db, traceGroups, cursor, limit).Scan(&captures).Error; err != nil {
+	if err := sourceReviewPage(db, traceGroups, bounds, cursor, limit).Scan(&captures).Error; err != nil {
 		return nil, nil, err
 	}
 
@@ -72,8 +80,9 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, c
 	// their logs and imported logs may have no capture.
 	indexed := window.Session(&gorm.Session{}).Where("conversation_client IS NOT NULL AND request_id <> ''").
 		Select("DISTINCT request_id, 1 AS present")
-	logs := applyLogSourceFilter(db.Model(&Log{})).Where("logs.created_at BETWEEN ? AND ? AND logs.type IN ?", since, until, []int{LogTypeConsume, LogTypeError}).
+	logs := applyLogSourceFilter(db.Model(&Log{})).Where("logs.created_at BETWEEN ? AND ? AND logs.type IN ?", bounds.Start, bounds.End, []int{LogTypeConsume, LogTypeError}).
 		Joins("LEFT JOIN (?) AS capture_index ON logs.request_id = capture_index.request_id", indexed)
+	emptyID := "''"
 	var client string
 	switch {
 	case common.UsingLogDatabase(common.DatabaseTypeClickHouse):
@@ -82,6 +91,7 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, c
 		const value = "JSON_EXTRACT(logs.other, '$.client_tool')"
 		client = "CASE WHEN JSON_VALID(logs.other) THEN CASE WHEN JSON_TYPE(" + value + ") = 'STRING' THEN JSON_UNQUOTE(" + value + ") END END"
 	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
+		emptyID = "CAST('' AS text)" // PostgreSQL 9.6 leaves an untyped literal in a derived table unresolved.
 		client = `CASE WHEN logs.other LIKE '%"client_tool"%' THEN CAST(logs.other AS json)->>'client_tool' END`
 	default:
 		client = "CASE WHEN json_valid(logs.other) THEN json_extract(logs.other, '$.client_tool') END"
@@ -90,10 +100,10 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, c
 	const anonTime = "CASE WHEN " + logRID + " = '' THEN logs.created_at ELSE 0 END"
 	logGroups := logs.Session(&gorm.Session{}).
 		Where("CASE WHEN COALESCE(capture_index.present, 0) = 0 THEN COALESCE(" + client + ", '') ELSE 'indexed' END = ''").
-		Select(logRID + " AS request_id, '' AS trace_id, MAX(logs.created_at) AS created_at, CASE WHEN " + logRID + " = '' THEN count(*) ELSE 1 END AS count").
+		Select(logRID + " AS source_rid, " + emptyID + " AS source_tid, MAX(logs.created_at) AS last_seen, count(*) AS row_count").
 		Group(logRID + ", " + anonTime)
 	var orphaned []UnidentifiedSourceRequest
-	err := sourceReviewPage(db, logGroups, cursor, limit).Scan(&orphaned).Error
+	err := sourceReviewPage(db, logGroups, bounds, cursor, limit).Scan(&orphaned).Error
 	if err != nil {
 		var pgErr interface{ SQLState() string }
 		if !errors.As(err, &pgErr) || pgErr.SQLState() != "22P02" && pgErr.SQLState() != "22P05" && pgErr.SQLState() != "22021" {
@@ -105,6 +115,11 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, c
 		orphaned, err = sourceReviewLegacyLogs(logs, cursor)
 		if err != nil {
 			return nil, nil, err
+		}
+	}
+	for i := range orphaned {
+		if orphaned[i].RequestID != "" {
+			orphaned[i].Count = 1
 		}
 	}
 	records := append(captures, orphaned...)
@@ -128,6 +143,39 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, since, until int64, c
 			break
 		}
 		remaining -= row.Count
+	}
+	// An error/retry without an inbound trace can straddle two review windows.
+	// Check only candidate orphan IDs, using the log database's request_id index.
+	if bounds.End < bounds.SnapshotEnd && len(orphaned) > 0 {
+		candidates := make([]string, 0, len(orphaned))
+		for _, row := range orphaned {
+			if row.RequestID != "" {
+				candidates = append(candidates, row.RequestID)
+			}
+		}
+		if len(candidates) > 0 {
+			later, err := applyLogSourceFilter(db.Model(&Log{})).
+				Where("request_id IN ? AND created_at > ? AND created_at <= ? AND type IN ?", candidates, bounds.End, bounds.SnapshotEnd, []int{LogTypeConsume, LogTypeError}).
+				Select("request_id, COALESCE(other, '')").Rows()
+			if err != nil {
+				return nil, nil, err
+			}
+			defer later.Close()
+			seen := make(map[string]bool)
+			for later.Next() {
+				var id, other string
+				if err := later.Scan(&id, &other); err != nil {
+					return nil, nil, err
+				}
+				if !gjson.Valid(other) || gjson.Get(other, "client_tool").String() == "" {
+					seen[id] = true
+				}
+			}
+			if err := later.Err(); err != nil {
+				return nil, nil, err
+			}
+			records = slices.DeleteFunc(records, func(item UnidentifiedSourceRequest) bool { return seen[item.RequestID] })
+		}
 	}
 	// Load original headers for the selected page only. Exclude unbounded
 	// header blocks and upstream legs. Unindexed non-conversation captures can

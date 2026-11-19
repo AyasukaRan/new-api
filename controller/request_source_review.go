@@ -52,7 +52,9 @@ func GetUnidentifiedRequestSources(c *gin.Context) {
 		} else {
 			raw, e := base64.RawURLEncoding.DecodeString(token)
 			valid = valid && e == nil && common.Unmarshal(raw, &cursor) == nil && cursor.Days == days && cursor.Snapshot > 0 &&
-				cursor.Snapshot <= now && cursor.Time >= cursor.Snapshot-int64(days)*86400 && cursor.Time > 0 && cursor.Time <= cursor.Snapshot &&
+				cursor.Snapshot <= now && cursor.WindowEnd >= cursor.Snapshot-int64(days)*86400 && cursor.WindowEnd <= cursor.Snapshot &&
+				(cursor.Time >= cursor.Snapshot-int64(days)*86400 && cursor.Time > 0 && cursor.Time <= cursor.WindowEnd ||
+					days > 7 && cursor.WindowEnd < cursor.Snapshot && cursor.Time == 0 && cursor.RequestID == "" && cursor.TraceID == "" && cursor.Skipped == 0) &&
 				len(cursor.RequestID) <= 64 && len(cursor.TraceID) <= 64 && cursor.Skipped >= 0 && (cursor.Skipped == 0 || cursor.RequestID == "" && cursor.TraceID == "")
 		}
 	}
