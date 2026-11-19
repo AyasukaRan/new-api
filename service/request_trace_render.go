@@ -21,18 +21,20 @@ type TraceToolCall struct {
 // response, whether that response arrived as one JSON document or as a stream
 // of fragments.
 type TraceRenderedResponse struct {
-	Reasoning       string          `json:"reasoning,omitempty"`
-	Content         string          `json:"content,omitempty"`
-	ToolCalls       []TraceToolCall `json:"tool_calls,omitempty"`
-	FinishReason    string          `json:"finish_reason,omitempty"`
-	HasAlternatives bool            `json:"has_alternatives,omitempty"`
+	Reasoning       string               `json:"reasoning,omitempty"`
+	Content         string               `json:"content,omitempty"`
+	ToolCalls       []TraceToolCall      `json:"tool_calls,omitempty"`
+	Images          []TraceRenderedImage `json:"images,omitempty"`
+	FinishReason    string               `json:"finish_reason,omitempty"`
+	HasAlternatives bool                 `json:"has_alternatives,omitempty"`
 	// Stream reports whether the payload was reassembled from fragments, which
 	// is worth showing because a truncated stream renders as a partial turn.
-	Stream bool `json:"stream"`
+	Stream     bool `json:"stream"`
+	seenImages map[string]struct{}
 }
 
 func (r *TraceRenderedResponse) isEmpty() bool {
-	return r.Reasoning == "" && r.Content == "" && len(r.ToolCalls) == 0 && r.FinishReason == ""
+	return r.Reasoning == "" && r.Content == "" && len(r.ToolCalls) == 0 && len(r.Images) == 0 && r.FinishReason == ""
 }
 
 // RenderTraceResponse recovers the reasoning, reply text and tool calls from a
@@ -60,6 +62,8 @@ func RenderTraceResponse(format string, body string) *TraceRenderedResponse {
 		rendered = renderClaudeResponse(events)
 	case types.RelayFormatGemini:
 		rendered = renderGeminiResponse(events)
+	case types.RelayFormatOpenAIImage:
+		rendered = renderOpenAIImageResponse(events)
 	case types.RelayFormatOpenAIResponses, types.RelayFormatOpenAIResponsesCompaction:
 		rendered = renderOpenAIResponsesResponse(events)
 	default:
@@ -69,6 +73,7 @@ func RenderTraceResponse(format string, body string) *TraceRenderedResponse {
 		return nil
 	}
 	rendered.Stream = isStream
+	rendered.seenImages = nil
 	return rendered
 }
 
@@ -155,6 +160,7 @@ type openAIChatTurn struct {
 	ReasoningContent json.RawMessage      `json:"reasoning_content"`
 	Reasoning        json.RawMessage      `json:"reasoning"`
 	ToolCalls        []openAIChatToolCall `json:"tool_calls"`
+	Images           []traceImagePart     `json:"images"`
 }
 
 type openAIChatChoice struct {
@@ -166,7 +172,7 @@ type openAIChatChoice struct {
 
 // openAIContentText reads a content field that may be a plain string or the
 // array of typed parts some providers emit.
-func openAIContentText(raw json.RawMessage) string {
+func openAIContentText(raw json.RawMessage, rendered *TraceRenderedResponse) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -174,10 +180,7 @@ func openAIContentText(raw json.RawMessage) string {
 	if err := common.Unmarshal(raw, &text); err == nil {
 		return text
 	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
+	var parts []traceImagePart
 	if err := common.Unmarshal(raw, &parts); err != nil {
 		return ""
 	}
@@ -185,6 +188,8 @@ func openAIContentText(raw json.RawMessage) string {
 	for _, part := range parts {
 		if part.Type == "" || part.Type == "text" || part.Type == "output_text" {
 			builder.WriteString(part.Text)
+		} else if rendered != nil {
+			rendered.addImagePart(part)
 		}
 	}
 	return builder.String()
@@ -215,10 +220,13 @@ func renderOpenAIChatResponse(events []string) *TraceRenderedResponse {
 				if turn == nil {
 					continue
 				}
-				content.WriteString(openAIContentText(turn.Content))
+				content.WriteString(openAIContentText(turn.Content, rendered))
+				for _, image := range turn.Images {
+					rendered.addImagePart(image)
+				}
 				reasoning.WriteString(firstNonEmpty(
-					openAIContentText(turn.ReasoningContent),
-					openAIContentText(turn.Reasoning),
+					openAIContentText(turn.ReasoningContent, nil),
+					openAIContentText(turn.Reasoning, nil),
 				))
 				appendOpenAIChatToolCalls(tools, turn.ToolCalls)
 			}
@@ -265,20 +273,22 @@ func renderClaudeResponse(events []string) *TraceRenderedResponse {
 			Index   int    `json:"index"`
 			Role    string `json:"role"`
 			Content []struct {
-				Type     string `json:"type"`
-				Text     string `json:"text"`
-				Thinking string `json:"thinking"`
-				Id       string `json:"id"`
-				Name     string `json:"name"`
-				Input    any    `json:"input"`
+				Type     string            `json:"type"`
+				Text     string            `json:"text"`
+				Thinking string            `json:"thinking"`
+				Source   *traceImageSource `json:"source"`
+				Id       string            `json:"id"`
+				Name     string            `json:"name"`
+				Input    any               `json:"input"`
 			} `json:"content"`
 			StopReason   string `json:"stop_reason"`
 			ContentBlock *struct {
-				Type     string `json:"type"`
-				Text     string `json:"text"`
-				Thinking string `json:"thinking"`
-				Id       string `json:"id"`
-				Name     string `json:"name"`
+				Type     string            `json:"type"`
+				Text     string            `json:"text"`
+				Thinking string            `json:"thinking"`
+				Source   *traceImageSource `json:"source"`
+				Id       string            `json:"id"`
+				Name     string            `json:"name"`
 			} `json:"content_block"`
 			Delta *struct {
 				Type        string `json:"type"`
@@ -297,6 +307,10 @@ func renderClaudeResponse(events []string) *TraceRenderedResponse {
 			switch block.Type {
 			case "text":
 				content.WriteString(block.Text)
+			case "image":
+				if block.Source != nil && block.Source.Type == "base64" {
+					rendered.addImage(block.Source.MediaType, block.Source.Data)
+				}
 			case "thinking", "redacted_thinking":
 				reasoning.WriteString(block.Thinking)
 			case "tool_use":
@@ -316,6 +330,10 @@ func renderClaudeResponse(events []string) *TraceRenderedResponse {
 			switch block.Type {
 			case "text":
 				content.WriteString(block.Text)
+			case "image":
+				if block.Source != nil && block.Source.Type == "base64" {
+					rendered.addImage(block.Source.MediaType, block.Source.Data)
+				}
 			case "thinking", "redacted_thinking":
 				reasoning.WriteString(block.Thinking)
 			case "tool_use":
@@ -391,6 +409,16 @@ func renderGeminiResponse(events []string) *TraceRenderedResponse {
 						continue
 					}
 					content.WriteString(part.Text)
+					inline := part.InlineData
+					if inline == nil {
+						inline = part.SnakeInlineData
+					}
+					if inline != nil {
+						mime := firstNonEmpty(inline.MimeType, inline.SnakeMimeType)
+						if strings.HasPrefix(strings.ToLower(mime), "image/") {
+							rendered.addImage(mime, inline.Data)
+						}
+					}
 				}
 			}
 		}
@@ -406,9 +434,11 @@ type geminiCandidate struct {
 	Index   int `json:"index"`
 	Content struct {
 		Parts []struct {
-			Text         string `json:"text"`
-			Thought      bool   `json:"thought"`
-			FunctionCall *struct {
+			Text            string            `json:"text"`
+			Thought         bool              `json:"thought"`
+			InlineData      *traceImageSource `json:"inlineData"`
+			SnakeInlineData *traceImageSource `json:"inline_data"`
+			FunctionCall    *struct {
 				Name string `json:"name"`
 				Args any    `json:"args"`
 			} `json:"functionCall"`
@@ -448,18 +478,17 @@ func renderOpenAIResponsesResponse(events []string) *TraceRenderedResponse {
 type openAIResponsesShape struct {
 	Status string `json:"status"`
 	Output []struct {
-		Type    string `json:"type"`
-		Name    string `json:"name"`
-		CallId  string `json:"call_id"`
-		Id      string `json:"id"`
-		Args    string `json:"arguments"`
-		Summary []struct {
+		Type         string          `json:"type"`
+		Name         string          `json:"name"`
+		CallId       string          `json:"call_id"`
+		Id           string          `json:"id"`
+		Args         string          `json:"arguments"`
+		Result       json.RawMessage `json:"result"`
+		OutputFormat string          `json:"output_format"`
+		Summary      []struct {
 			Text string `json:"text"`
 		} `json:"summary"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Content []traceImagePart `json:"content"`
 	} `json:"output"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
@@ -484,7 +513,10 @@ func (s *openAIResponsesShape) render() *TraceRenderedResponse {
 		case "message":
 			for _, part := range item.Content {
 				content.WriteString(part.Text)
+				rendered.addImagePart(part)
 			}
+		case "image_generation_call":
+			rendered.addGeneratedImage(item.OutputFormat, item.Result)
 		case "function_call", "custom_tool_call":
 			rendered.ToolCalls = append(rendered.ToolCalls, TraceToolCall{
 				Id:        firstNonEmpty(item.CallId, item.Id),
@@ -512,10 +544,12 @@ func renderOpenAIResponsesDeltas(events []string) *TraceRenderedResponse {
 			Delta  string `json:"delta"`
 			ItemId string `json:"item_id"`
 			Item   *struct {
-				Type   string `json:"type"`
-				Id     string `json:"id"`
-				CallId string `json:"call_id"`
-				Name   string `json:"name"`
+				Type         string          `json:"type"`
+				Id           string          `json:"id"`
+				CallId       string          `json:"call_id"`
+				Name         string          `json:"name"`
+				Result       json.RawMessage `json:"result"`
+				OutputFormat string          `json:"output_format"`
 			} `json:"item"`
 		}
 		if err := common.UnmarshalJsonStr(event, &payload); err != nil {
@@ -532,6 +566,10 @@ func renderOpenAIResponsesDeltas(events []string) *TraceRenderedResponse {
 				call.Id = firstNonEmpty(payload.Item.CallId, payload.Item.Id)
 				call.Name = payload.Item.Name
 				names[payload.Item.Id] = payload.Item.Name
+			}
+		case "response.output_item.done":
+			if item := payload.Item; item != nil && item.Type == "image_generation_call" {
+				rendered.addGeneratedImage(item.OutputFormat, item.Result)
 			}
 		case "response.function_call_arguments.delta":
 			call := tools.at(payload.ItemId)

@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { ChevronDown, Wrench } from 'lucide-react'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -29,7 +30,9 @@ import { JsonViewer } from '@/components/json-viewer'
 import { StatusBadge } from '@/components/status-badge'
 import { Collapsible, CollapsibleTrigger } from '@/components/ui/collapsible'
 
+import { normalizeTraceImage } from '../../lib/request-trace-image'
 import type { RequestTraceLeg, RequestTraceToolCall } from '../../types'
+import { TraceImagePreview } from './image-dialog'
 import { RequestTraceContent } from './request-trace-content'
 import { RequestTraceObject } from './request-trace-object'
 
@@ -111,6 +114,14 @@ export function RequestTraceRenderedLeg(props: {
 }) {
   const { t } = useTranslation()
   const rendered = props.leg.rendered
+  const images = useMemo(
+    () =>
+      rendered?.images?.map((image, index) => ({
+        id: `${props.leg.seq}:image:${index}`,
+        src: normalizeTraceImage(image.data, image.media_type).src,
+      })),
+    [rendered?.images, props.leg.seq]
+  )
   if (!rendered) return null
 
   return (
@@ -170,6 +181,10 @@ export function RequestTraceRenderedLeg(props: {
       )}
 
       {rendered.content && <RequestTraceContent content={rendered.content} />}
+
+      {images?.map((image) => (
+        <TraceImagePreview key={image.id} src={image.src} />
+      ))}
 
       {rendered.tool_calls?.map((call, index) => (
         <RequestTraceToolCallItem

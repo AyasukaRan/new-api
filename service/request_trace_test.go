@@ -604,6 +604,40 @@ func TestRenderTraceResponseHandlesAlternativesAndArrayContent(t *testing.T) {
 	}
 }
 
+func TestRenderTraceResponseEmbeddedImages(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgaGj4DwADhAIAV8n6LgAAAABJRU5ErkJggg=="
+	want := []TraceRenderedImage{{MediaType: "image/png", Data: png}}
+	const item = `{"type":"image_generation_call","output_format":"png","result":"` + png + `"}`
+	const sseItem = `data: {"type":"response.output_item.done","item":` + item + `}` + "\n\n"
+	const preview = `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"ignored"}` + "\n\n"
+	for _, tc := range []struct{ name, format, body, text string }{
+		{"chat mixed content", "openai", `{"choices":[{"message":{"content":[{"type":"text","text":"diagram"},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + png + `"}}]}}]}`, "diagram"},
+		{"chat extension images", "openai", `{"choices":[{"message":{"images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + png + `"}}]}}]}`, ""},
+		{"messages", "claude", `{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + png + `"}}]}`, ""},
+		{"gemini repeated stream snapshots", "gemini", strings.Repeat(`data: {"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"`+png+`"}}]}}]}`+"\n\n", 2), ""},
+		{"responses", "openai_responses", `{"output":[{"type":"custom_ext","result":{"x":1}},` + item + `]}`, ""},
+		{"completed item before interrupted stream", "openai_responses", preview + sseItem, ""},
+		{"completed response repeats item", "openai_responses", sseItem + `data: {"type":"response.completed","response":{"output":[` + item + `]}}`, ""},
+		{"complete generation stream", "openai_image", `data: {"type":"image_generation.partial_image","b64_json":"ignored"}` + "\n\n" + `data: {"type":"image_generation.completed","b64_json":"` + png + `"}`, ""},
+		{"image result", "openai_image", `{"data":[{"b64_json":"` + png + `"}]}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			image := RenderTraceResponse(tc.format, tc.body)
+			require.NotNil(t, image)
+			assert.Equal(t, tc.text, image.Content)
+			assert.Equal(t, want, image.Images)
+		})
+	}
+	assert.Nil(t, RenderTraceResponse("openai_responses", preview))
+	assert.Nil(t, RenderTraceResponse("openai", `{"choices":[{"message":{"content":[{"type":"image_url","image_url":{"url":"https://example.invalid/private.png"}}]}}]}`))
+	for _, source := range []string{"data:image/svg+xml;base64," + png, "data:image/png;base64," + png[:32] + "[REDACTED]"} {
+		reply := RenderTraceResponse("openai", `{"choices":[{"message":{"content":[{"type":"text","text":"caption"},{"type":"image_url","image_url":"`+source+`"}]}}]}`)
+		require.NotNil(t, reply)
+		assert.Equal(t, "caption", reply.Content)
+		assert.Equal(t, []TraceRenderedImage{{}}, reply.Images)
+	}
+}
+
 func TestRenderTraceResponseIgnoresUnusablePayloads(t *testing.T) {
 	assert.Nil(t, RenderTraceResponse("openai", ""))
 	assert.Nil(t, RenderTraceResponse("openai", "not json at all"))

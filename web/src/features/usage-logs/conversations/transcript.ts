@@ -20,20 +20,42 @@ import {
   pairConversationTools,
   type TraceConversationMessage,
   type TraceConversationSource,
+  type TraceToolContentPart,
 } from '../lib/request-trace-conversation'
 import type { TurnCapture } from './api'
 
 // Normalized messages come from the same trace parser for every wire format.
 // A replay can omit private reasoning while echoing the same assistant reply.
-function historyKey(message: TraceConversationMessage) {
+function historyKey(
+  message: TraceConversationMessage,
+  images: Map<string, number>
+) {
+  // Compare full image strings exactly, but serialize only a small local ID
+  // when matching long, replayed prompts and screenshots in tool results.
+  const contentKey = (part: TraceToolContentPart) => {
+    if (part.type !== 'image' || !part.src) return part
+    let id = images.get(part.src)
+    if (id === undefined) {
+      id = images.size
+      images.set(part.src, id)
+    }
+    return ['image', id]
+  }
   const visible = message.parts.filter((p) => p.type !== 'reasoning')
   return JSON.stringify([
     message.role,
-    (visible.length ? visible : message.parts).map((part) =>
-      part.type === 'tool-call' || part.type === 'tool-result'
-        ? [part.type, part.id, part.name, part.value, part.isError]
-        : part
-    ),
+    (visible.length ? visible : message.parts).map((part) => {
+      if (part.type === 'tool-call' || part.type === 'tool-result') {
+        return [
+          part.type,
+          part.id,
+          part.name,
+          part.contentParts ? part.contentParts.map(contentKey) : part.value,
+          part.isError,
+        ]
+      }
+      return part.type === 'image' ? contentKey(part) : part
+    }),
   ])
 }
 
@@ -68,14 +90,17 @@ export function recordedTurnSources(
   previous?: TurnCapture
 ): TraceConversationSource[] {
   if (!previous) return pairConversationTools(current.sources)
+  const images = new Map<string, number>()
+  const keyFor = (message: TraceConversationMessage) =>
+    historyKey(message, images)
   const prior = previous.sources.flatMap((source) => source.messages)
   const history = prior
     .filter((m) => m.role !== 'system' && m.role !== 'developer')
-    .map(historyKey)
+    .map(keyFor)
   const instructions = new Set(
     prior
       .filter((m) => m.role === 'system' || m.role === 'developer')
-      .map(historyKey)
+      .map(keyFor)
   )
   const sources = current.sources.map((source) => {
     if (!source.leg.direction.endsWith('_request')) return source
@@ -84,14 +109,14 @@ export function recordedTurnSources(
     while (start < source.messages.length) {
       const message = source.messages[start]
       if (message.role !== 'system' && message.role !== 'developer') break
-      if (!instructions.has(historyKey(message))) front.push(message)
+      if (!instructions.has(keyFor(message))) front.push(message)
       start++
     }
     const messages = source.messages.slice(start)
     let shared = 0
     // An identical user prompt can be a genuinely new turn.
     if (messages.some((m) => m.role === 'assistant' || m.role === 'tool')) {
-      const keys = messages.map(historyKey)
+      const keys = messages.map(keyFor)
       shared = overlap(history, keys)
       // When an echoed answer has been edited, retain its changed tail.
       if (!shared) {

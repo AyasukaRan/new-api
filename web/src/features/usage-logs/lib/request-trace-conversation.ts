@@ -18,20 +18,31 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import type { RequestTraceLeg } from '../types'
+import { normalizeTraceImage, type TraceImagePart } from './request-trace-image'
+
+export type TraceToolContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'raw'; value: unknown }
+  | TraceImagePart
+
+type ToolResultContent = {
+  value: unknown
+  contentParts?: TraceToolContentPart[]
+}
 
 export type TraceConversationPart =
-  | { type: 'text'; text: string }
+  | TraceToolContentPart
   | { type: 'reasoning'; text: string }
-  | { type: 'raw'; value: unknown }
   | {
       type: 'tool-call' | 'tool-result'
       id?: string
       name?: string
       value: unknown
+      contentParts?: TraceToolContentPart[]
       rawArguments?: string
       linked?: boolean
       isError?: boolean
-      result?: { value: unknown; isError?: boolean; name?: string }
+      result?: ToolResultContent & { isError?: boolean; name?: string }
     }
 
 export interface TraceConversationMessage {
@@ -85,16 +96,121 @@ function toolValue(value: unknown): unknown {
   }
 }
 
+/** Only a whole image URI is an attachment; leave prose and code examples intact. */
+function traceText(text: string): TraceToolContentPart {
+  if (/^\s*data:image\/[\w.+-]+;base64,[a-z\d+/=]+\s*$/i.test(text)) {
+    return normalizeTraceImage(text)
+  }
+  return { type: 'text', text }
+}
+
+function blockImage(part: Record<string, unknown>): TraceImagePart | undefined {
+  if (
+    [
+      'image_url',
+      'input_image',
+      'output_image',
+      'computer_screenshot',
+    ].includes(String(part.type))
+  ) {
+    const url = record(part.image_url)?.url ?? part.image_url
+    if (typeof url === 'string' && /^data:/i.test(url.trimStart())) {
+      return normalizeTraceImage(url)
+    }
+  }
+  if (part.type === 'image') {
+    const source = record(part.source)
+    if (source?.type === 'base64') {
+      return normalizeTraceImage(source.data, source.media_type)
+    }
+    if ('data' in part) {
+      return normalizeTraceImage(part.data, part.mimeType ?? part.mime_type)
+    }
+  }
+  const inline = record(part.inlineData ?? part.inline_data)
+  if (inline) {
+    const mime = inline.mimeType ?? inline.mime_type
+    if (typeof mime === 'string' && /^image\//i.test(mime)) {
+      return normalizeTraceImage(inline.data, mime)
+    }
+  }
+  if (part.type === 'image_generation_call' && 'result' in part) {
+    return normalizeTraceImage(part.result, part.output_format)
+  }
+  if (typeof part.b64_json === 'string') {
+    return normalizeTraceImage(part.b64_json, part.output_format)
+  }
+  return undefined
+}
+
+/** Tool results can be a normal value, a content-block array or an MCP envelope.
+ * Keep unknown siblings inspectable, and transfer each image's bytes only once. */
+function toolResultContent(value: unknown): ToolResultContent {
+  let parsed = value
+  if (typeof value === 'string') {
+    const whole = traceText(value)
+    if (whole.type === 'image') return { value: null, contentParts: [whole] }
+    if (
+      !/^\s*[[{]/.test(value) ||
+      !/image|inlineData|inline_data|b64_json/.test(value)
+    ) {
+      return { value }
+    }
+    parsed = toolValue(value)
+  }
+  const envelope = record(parsed)
+  const wrapped = Array.isArray(envelope?.content) ? envelope : undefined
+  const content = wrapped?.content ?? parsed
+  const blocks = Array.isArray(content) ? content : [content]
+  const parts: TraceToolContentPart[] = []
+  let hasImage = false
+  for (const block of blocks) {
+    const item = record(block)
+    const image = item && blockImage(item)
+    if (image) {
+      hasImage = true
+      parts.push(image)
+    } else if (typeof block === 'string') {
+      const part = traceText(block)
+      hasImage ||= part.type === 'image'
+      parts.push(part)
+    } else if (
+      item &&
+      ['text', 'input_text', 'output_text'].includes(String(item.type)) &&
+      typeof item.text === 'string'
+    ) {
+      const part = traceText(item.text)
+      hasImage ||= part.type === 'image'
+      parts.push(part)
+    } else {
+      parts.push({ type: 'raw', value: block })
+    }
+  }
+  if (!hasImage) return { value }
+  if (wrapped) {
+    const { content: _, ...metadata } = wrapped
+    if (Object.keys(metadata).length) {
+      parts.push({ type: 'raw', value: metadata })
+    }
+  }
+  return { value: null, contentParts: parts }
+}
+
 /** Keep unknown and multimodal blocks inspectable instead of silently dropping them. */
 function conversationParts(content: unknown): TraceConversationPart[] {
-  if (typeof content === 'string') return [{ type: 'text', text: content }]
+  if (typeof content === 'string') return [traceText(content)]
   if (content === null || content === undefined) return []
-  if (!Array.isArray(content)) return [{ type: 'raw', value: content }]
+  if (!Array.isArray(content)) {
+    const item = record(content)
+    return [(item && blockImage(item)) ?? { type: 'raw', value: content }]
+  }
 
   return content.map((value): TraceConversationPart => {
-    if (typeof value === 'string') return { type: 'text', text: value }
+    if (typeof value === 'string') return traceText(value)
     const part = record(value)
     if (!part) return { type: 'raw', value }
+    const image = blockImage(part)
+    if (image) return image
 
     if (
       typeof part.text === 'string' &&
@@ -107,13 +223,10 @@ function conversationParts(content: unknown): TraceConversationPart[] {
           'reasoning_text',
         ].includes(String(part.type)))
     ) {
-      return {
-        type:
-          part.thought === true || part.type === 'reasoning_text'
-            ? 'reasoning'
-            : 'text',
-        text: part.text,
+      if (part.thought === true || part.type === 'reasoning_text') {
+        return { type: 'reasoning', text: part.text }
       }
+      return traceText(part.text)
     }
     if (part.type === 'thinking' && typeof part.thinking === 'string') {
       return { type: 'reasoning', text: part.thinking }
@@ -137,19 +250,31 @@ function conversationParts(content: unknown): TraceConversationPart[] {
         type: 'tool-result',
         id: optionalString(result.id),
         name: optionalString(result.name),
-        value: result.response ?? null,
+        ...toolResultContent(
+          Array.isArray(result.parts)
+            ? {
+                ...('response' in result ? { response: result.response } : {}),
+                content: result.parts,
+              }
+            : (result.response ?? null)
+        ),
       }
     }
     if (
-      ['tool_use', 'function_call', 'custom_tool_call'].includes(
-        String(part.type)
-      )
+      [
+        'tool_use',
+        'function_call',
+        'custom_tool_call',
+        'computer_call',
+      ].includes(String(part.type))
     ) {
       return {
         type: 'tool-call',
         id: optionalString(part.call_id) ?? optionalString(part.id),
         name: optionalString(part.name),
-        value: toolValue(part.arguments ?? part.input),
+        value: toolValue(
+          part.arguments ?? part.input ?? part.action ?? part.actions
+        ),
         rawArguments: optionalString(part.arguments ?? part.input),
       }
     }
@@ -158,12 +283,13 @@ function conversationParts(content: unknown): TraceConversationPart[] {
         'tool_result',
         'function_call_output',
         'custom_tool_call_output',
+        'computer_call_output',
       ].includes(String(part.type))
     ) {
       return {
         type: 'tool-result',
         id: optionalString(part.call_id) ?? optionalString(part.tool_use_id),
-        value: part.output ?? part.content ?? null,
+        ...toolResultContent(part.output ?? part.content ?? null),
         isError: part.is_error === true,
       }
     }
@@ -205,11 +331,16 @@ function conversationMessages(items: unknown[]): TraceConversationMessage[] {
       [
         'function_call',
         'custom_tool_call',
+        'computer_call',
         'function_call_output',
         'custom_tool_call_output',
+        'computer_call_output',
       ].includes(String(item.type))
     ) {
       role = String(item.type).endsWith('_output') ? 'tool' : 'assistant'
+      parts = conversationParts([item])
+    } else if (item.type === 'image_generation_call') {
+      role = 'assistant'
       parts = conversationParts([item])
     } else if (role === 'unknown') {
       parts = [{ type: 'raw', value }]
@@ -219,11 +350,14 @@ function conversationMessages(items: unknown[]): TraceConversationMessage[] {
           type: 'tool-result',
           id: optionalString(item.tool_call_id),
           name: optionalString(item.name),
-          value: item.content ?? null,
+          ...toolResultContent(item.content ?? null),
         },
       ]
     } else {
       parts = conversationParts(item.content ?? item.parts)
+      if (role === 'assistant' && Array.isArray(item.images)) {
+        parts.push(...conversationParts(item.images))
+      }
       const reasoning = item.reasoning_content ?? item.reasoning
       if (typeof reasoning === 'string' && reasoning) {
         parts.unshift({ type: 'reasoning', text: reasoning })
@@ -523,6 +657,11 @@ export function conversationSource(
             body.choices[0]
           const message = record(record(primary)?.message)
           if (message) items.push({ ...message, role: 'assistant' })
+        } else if (
+          Array.isArray(body.data) &&
+          body.data.some((item) => typeof record(item)?.b64_json === 'string')
+        ) {
+          items.push({ role: 'assistant', content: body.data })
         }
         break
       case 'claude':
@@ -553,7 +692,10 @@ export function conversationSource(
     if (rendered.reasoning) {
       parts.push({ type: 'reasoning', text: rendered.reasoning })
     }
-    if (rendered.content) parts.push({ type: 'text', text: rendered.content })
+    if (rendered.content) parts.push(traceText(rendered.content))
+    for (const image of rendered.images ?? []) {
+      parts.push(normalizeTraceImage(image.data, image.media_type))
+    }
     for (const call of rendered.tool_calls ?? []) {
       parts.push({
         type: 'tool-call',
@@ -667,6 +809,7 @@ export function pairConversationTools(
         call.linked = true
         call.result = {
           value: part.value,
+          ...(part.contentParts ? { contentParts: part.contentParts } : {}),
           ...(part.isError ? { isError: true } : {}),
           ...(part.name ? { name: part.name } : {}),
         }

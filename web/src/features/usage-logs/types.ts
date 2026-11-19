@@ -602,6 +602,7 @@ export interface RequestTraceToolCall {
 export interface RequestTraceRendered {
   reasoning?: string
   content?: string
+  images?: { data: string; media_type?: string }[]
   tool_calls?: RequestTraceToolCall[]
   finish_reason?: string
   has_alternatives?: boolean

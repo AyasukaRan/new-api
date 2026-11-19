@@ -16,20 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { sanitizeImageSrc, type ImageNode } from 'stream-markdown-parser'
 
 type ResponseImageProps = {
-  node: ImageNode
+  node: Pick<ImageNode, 'src' | 'alt' | 'title'>
+  onError?: () => void
 }
 
 export function ResponseImage(props: ResponseImageProps) {
   const { t } = useTranslation()
-  const [hasError, setHasError] = useState(false)
-  const src = sanitizeImageSrc(props.node.src)
+  const [failedSrc, setFailedSrc] = useState('')
+  const src = useMemo(() => sanitizeImageSrc(props.node.src), [props.node.src])
 
-  if (!src || hasError) {
+  if (!src || failedSrc === src) {
     return (
       <span className='border-border/70 text-muted-foreground my-4 inline-flex rounded-md border px-3 py-2 text-xs italic'>
         {props.node.alt || t('Image not available')}
@@ -42,7 +43,11 @@ export function ResponseImage(props: ResponseImageProps) {
       alt={props.node.alt}
       className='border-border/70 my-4 block h-auto max-h-96 max-w-full rounded-lg border object-contain'
       loading='lazy'
-      onError={() => setHasError(true)}
+      decoding='async'
+      onError={() => {
+        setFailedSrc(src)
+        props.onError?.()
+      }}
       src={src}
       title={props.node.title ?? undefined}
     />

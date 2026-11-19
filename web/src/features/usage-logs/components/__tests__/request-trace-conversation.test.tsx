@@ -57,6 +57,178 @@ function leg(
 }
 
 describe('request trace conversation', () => {
+  const png =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL4cAAAAASUVORK5CYII='
+  const imageSrc = `data:image/png;base64,${png}`
+
+  test('renders an embedded image beside the prompt, opens it by keyboard and copies readable content', async ({
+    onTestFinished,
+  }) => {
+    // jsdom does not implement the Web Animations API used by the preview scroll area.
+    if (!HTMLElement.prototype.getAnimations) {
+      Object.defineProperty(HTMLElement.prototype, 'getAnimations', {
+        configurable: true,
+        value: () => [],
+      })
+      onTestFinished(() => {
+        Reflect.deleteProperty(HTMLElement.prototype, 'getAnimations')
+      })
+    }
+    const user = userEvent.setup()
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg({
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'What is shown?' },
+                  { type: 'image_url', image_url: { url: imageSrc } },
+                ],
+              },
+            ],
+          }),
+        ]}
+      />
+    )
+
+    expect(screen.getByRole('img', { name: 'Image' })).toHaveAttribute(
+      'src',
+      imageSrc
+    )
+    expect(screen.getByRole('img', { name: 'Image' })).toHaveAttribute(
+      'loading',
+      'lazy'
+    )
+    await user.click(screen.getByRole('button', { name: 'Copy message' }))
+    expect(await navigator.clipboard.readText()).toBe(
+      'What is shown?\n\n[Image]'
+    )
+    screen.getByRole('button', { name: 'Click to view image' }).focus()
+    await user.keyboard('{Enter}')
+    const dialog = await screen.findByRole('dialog', { name: 'Image Preview' })
+    expect(within(dialog).getByRole('img', { name: 'Image' })).toHaveAttribute(
+      'src',
+      imageSrc
+    )
+    expect(document.body.textContent).not.toContain(png)
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  test('keeps an invalid embedded image readable without displaying or opening its payload', () => {
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg({
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'image_url',
+                    image_url: { url: 'data:image/png;base64,invalid-image' },
+                  },
+                ],
+              },
+            ],
+          }),
+        ]}
+      />
+    )
+    expect(screen.getByText('Image not available')).toBeVisible()
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Click to view image' })
+    ).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('invalid-image')
+  })
+
+  test('renders embedded images from a parsed response leg and reports decoder failure', () => {
+    render(
+      <RequestTraceRenderedLeg
+        label='Final response'
+        showAttempt={false}
+        leg={leg(null, {
+          direction: 'client_response',
+          rendered: {
+            stream: true,
+            images: [{ data: png, media_type: 'image/png' }],
+          },
+        })}
+      />
+    )
+    const image = screen.getByRole('img', { name: 'Image' })
+    expect(image).toHaveAttribute('src', imageSrc)
+    fireEvent.error(image)
+    expect(screen.getByText('Image not available')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Click to view image' })
+    ).not.toBeInTheDocument()
+  })
+
+  test('loads a paired tool image on expansion and keeps the copied tool result readable', async () => {
+    const user = userEvent.setup()
+    render(
+      <RequestTraceConversation
+        legs={[
+          leg(
+            {
+              messages: [
+                {
+                  role: 'assistant',
+                  content: [
+                    {
+                      type: 'tool_use',
+                      id: 'tool-img',
+                      name: 'screenshot',
+                      input: {},
+                    },
+                  ],
+                },
+                {
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'tool_result',
+                      tool_use_id: 'tool-img',
+                      content: [
+                        { type: 'text', text: 'Screenshot ready' },
+                        {
+                          type: 'image',
+                          source: {
+                            type: 'base64',
+                            media_type: 'image/png',
+                            data: png,
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+            { format: 'claude' }
+          ),
+        ]}
+      />
+    )
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    await user.click(
+      screen.getByRole('button', { name: /Tool call screenshot/ })
+    )
+    expect(screen.getByText('Screenshot ready')).toBeVisible()
+    expect(screen.getByRole('img', { name: 'Image' })).toHaveAttribute(
+      'src',
+      imageSrc
+    )
+    await user.click(screen.getByRole('button', { name: 'Copy message' }))
+    expect(
+      JSON.parse(await navigator.clipboard.readText())['tool-result']
+    ).toEqual(['Screenshot ready', '[Image]'])
+  })
+
   test('labels consecutive assistant fragments once without merging across another role or the final reply', async () => {
     const user = userEvent.setup()
     render(

@@ -47,6 +47,7 @@ import {
   type TraceConversationMessage,
   type TraceConversationPart,
   type TraceConversationSource,
+  type TraceToolContentPart,
 } from '../../lib/request-trace-conversation'
 import {
   getTraceJsonContent,
@@ -54,6 +55,7 @@ import {
   requestTraceMarkdown,
 } from '../../lib/request-trace-json'
 import type { RequestTraceLeg } from '../../types'
+import { TraceImagePreview } from './image-dialog'
 import {
   MAX_TRACE_CONTENT_CHARACTERS,
   RequestTraceContent,
@@ -207,7 +209,22 @@ function TraceToolPart(props: {
           </div>
         )}
         {/* ToolOutput omits falsy results and lacks trace copy/line-limit controls. */}
-        {result && <TraceToolResult value={result.value} />}
+        {result?.contentParts ? (
+          <div className='space-y-2 p-3'>
+            {result.contentParts.map((part, i) => {
+              const key = `${props.part.id ?? toolName}:${part.type}:${i}`
+              if (part.type === 'image') {
+                return <TraceImagePreview key={key} src={part.src} />
+              }
+              if (part.type === 'text') {
+                return <RequestTraceContent key={key} content={part.text} />
+              }
+              return <TraceToolResult key={key} value={part.value} />
+            })}
+          </div>
+        ) : (
+          result && <TraceToolResult value={result.value} />
+        )}
       </ToolContent>
     </Tool>
   )
@@ -224,33 +241,49 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
     unknown: t('Unknown role'),
   }
   const message = props.entry.message
-  const copyText = useMemo(
-    () =>
-      props.entry.parts
-        .map(({ part }) => {
-          if (part.type === 'text' || part.type === 'reasoning') {
-            return part.text
-          }
-          if (part.type === 'tool-call' || part.type === 'tool-result') {
-            return JSON.stringify(
-              {
-                id: part.id,
-                name: part.name ?? part.result?.name,
-                [part.type]: part.value,
-                ...(part.result ? { 'tool-result': part.result.value } : {}),
-                ...(part.isError || part.result?.isError
-                  ? { is_error: true }
-                  : {}),
-              },
-              null,
-              2
-            )
-          }
-          return JSON.stringify(part.value, null, 2)
-        })
-        .join('\n\n'),
-    [props.entry.parts]
-  )
+  const imagePlaceholder = `[${t('Image')}]`
+  const copyText = useMemo(() => {
+    const toolContent = (
+      parts: TraceToolContentPart[] | undefined,
+      value: unknown
+    ) =>
+      parts?.map((part) => {
+        if (part.type === 'image') return imagePlaceholder
+        if (part.type === 'text') return part.text
+        return part.value
+      }) ?? value
+    return props.entry.parts
+      .map(({ part }) => {
+        if (part.type === 'text' || part.type === 'reasoning') {
+          return part.text
+        }
+        if (part.type === 'image') return imagePlaceholder
+        if (part.type === 'tool-call' || part.type === 'tool-result') {
+          return JSON.stringify(
+            {
+              id: part.id,
+              name: part.name ?? part.result?.name,
+              [part.type]: toolContent(part.contentParts, part.value),
+              ...(part.result
+                ? {
+                    'tool-result': toolContent(
+                      part.result.contentParts,
+                      part.result.value
+                    ),
+                  }
+                : {}),
+              ...(part.isError || part.result?.isError
+                ? { is_error: true }
+                : {}),
+            },
+            null,
+            2
+          )
+        }
+        return JSON.stringify(part.value, null, 2)
+      })
+      .join('\n\n')
+  }, [props.entry.parts, imagePlaceholder])
   // JSON and tools own bounded disclosures. Only long prose needs
   // another message-level collapse; a JSON reply should immediately show its tree.
   const textLength = useMemo(
@@ -357,6 +390,9 @@ function TraceMessage(props: { entry: TraceConversationEntry }) {
           >
             {props.entry.parts.map((entry) => {
               const part = entry.part
+              if (part.type === 'image') {
+                return <TraceImagePreview key={entry.id} src={part.src} />
+              }
               if (part.type === 'text') {
                 return (
                   <RequestTraceContent key={entry.id} content={part.text} />
@@ -666,6 +702,9 @@ export function RequestTraceConversation(props: {
                     part.type === 'tool-result'
                   ) {
                     return [part.type, part.id, part.name]
+                  }
+                  if (part.type === 'image') {
+                    return [part.type, part.src?.length]
                   }
                   return [
                     part.type,
