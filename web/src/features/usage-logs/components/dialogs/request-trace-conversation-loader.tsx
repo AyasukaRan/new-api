@@ -100,7 +100,7 @@ export function RequestTraceConversationLoader(props: {
             key={currentLeg.seq}
             role='status'
             aria-label={label}
-            className='mx-auto w-full max-w-4xl shrink-0'
+            className='w-full min-w-0 shrink-0'
           >
             <LoadingState
               inline
@@ -114,7 +114,7 @@ export function RequestTraceConversationLoader(props: {
         )
       })}
       {sources.length > 0 && (
-        <div className='min-h-0 flex-1'>
+        <div className='min-h-0 min-w-0 flex-1'>
           <RequestTraceConversation legs={props.legs} sources={sources} />
         </div>
       )}

@@ -184,9 +184,14 @@ describe('streamed request trace loading', () => {
     expect(
       await screen.findByText('First complete history message')
     ).toBeInTheDocument()
-    expect(
-      screen.getByRole('status', { name: 'Input history' })
-    ).toBeInTheDocument()
+    const progress = screen.getByRole('status', { name: 'Input history' })
+    expect(progress).toHaveClass('w-full')
+    expect(progress).not.toHaveClass('max-w-4xl')
+    const streamed = screen.getByRole('log', {
+      name: 'Conversation',
+    }).parentElement
+    expect(streamed).toHaveClass('w-full')
+    expect(streamed).not.toHaveClass('max-w-4xl')
     expect(requests.map((request) => request.seq).sort()).toEqual([0, 2])
     await act(async () => {
       input?.enqueue(

@@ -127,6 +127,55 @@ describe('conversation timeline', () => {
     expect(screen.getByRole('button', { name: /dispatch/ })).toHaveFocus()
   })
 
+  it('connects each branch to its parent with one continuous stroke when a turn expands', async () => {
+    const user = userEvent.setup()
+    const positions = () => [
+      ...document.querySelectorAll('[data-timeline-event]'),
+    ]
+    const bounds = vi
+      .spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: Element) {
+        const headers = positions()
+        const row = headers.indexOf(this)
+        if (row < 0) return DOMRect.fromRect({ width: 44, height: 400 })
+        const firstOpen = headers[0]?.getAttribute('aria-expanded') === 'true'
+        return DOMRect.fromRect({
+          y: row * 40 + (row > 0 && firstOpen ? 180 : 0),
+          height: 40,
+        })
+      })
+    try {
+      const parent = { ...turn('dispatch', 'main', 1000, 1), turn_id: 'p' }
+      const child = {
+        ...turn('review', 'worker', 3000, 3, 'main'),
+        parent_turn_id: 'p',
+      }
+      const { container } = render(
+        <ConversationTimeline
+          conversationId='main'
+          turns={[parent, child, turn('middle', 'main', 2000, 2)]}
+        />
+      )
+      const path = () =>
+        container
+          .querySelector('svg[data-timeline-graph] path[data-thread="worker"]')
+          ?.getAttribute('d')
+      const graph = container.querySelector('svg[data-timeline-graph]')
+      expect(graph).toBeInTheDocument()
+      const anchor = () => graph?.querySelector('circle[data-event="dispatch"]')
+      const endpoint = () =>
+        ` ${anchor()?.getAttribute('cx')} ${anchor()?.getAttribute('cy')}`
+      expect(path()).toContain('C')
+      expect(path()?.endsWith(endpoint())).toBe(true)
+      const before = path()
+      await user.click(screen.getByRole('button', { name: /review/ }))
+      expect(path()).not.toBe(before)
+      expect(path()?.endsWith(endpoint())).toBe(true)
+    } finally {
+      bounds.mockRestore()
+    }
+  })
+
   it('retains a recorded subagent identity when its parent has expired', () => {
     render(
       <ConversationTimeline

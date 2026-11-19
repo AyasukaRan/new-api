@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import { Fragment, useMemo, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -92,7 +92,6 @@ function layoutTimeline(turns: RecordedTurn[], root: string) {
     if (turn.parent_id !== id) thread.parent ||= turn.parent_id
   }
   for (const rows of turnRows.values()) rows.reverse()
-  const forks = new Map<number, ThreadLane[]>()
   for (const thread of threads.values()) {
     const parent = threads.get(thread.parent)
     if (parent) {
@@ -108,9 +107,6 @@ function layoutTimeline(turns: RecordedTurn[], root: string) {
         thread.forkRow = anchorRow
         thread.lastRow = Math.max(thread.lastRow, anchorRow)
       }
-      const atRow = forks.get(thread.forkRow) ?? []
-      atRow.push(thread)
-      forks.set(thread.forkRow, atRow)
       parent.firstRow = Math.min(parent.firstRow, thread.forkRow)
       parent.lastRow = Math.max(parent.lastRow, thread.forkRow)
     }
@@ -127,7 +123,6 @@ function layoutTimeline(turns: RecordedTurn[], root: string) {
     ordered,
     threads,
     previousTurns,
-    forks,
     lanes: laneStartRows.length + 1,
   }
 }
@@ -144,42 +139,131 @@ export function ConversationTimeline(props: {
   const [expanded, setExpanded] = useState<string | null>(
     () => graph.ordered[0]?.trace_id ?? null
   )
-  // Use the same scale for every row, including expanded ones. Narrow screens
-  // can still read names and timestamps when several agents run concurrently.
-  const position = (lane: number) => `${((lane + 0.5) / graph.lanes) * 100}%`
+  const list = useRef<HTMLDivElement>(null)
+  const canvas = useRef<SVGSVGElement>(null)
+  const [layout, setLayout] = useState<{ width: number; centers: number[] }>({
+    width: 0,
+    centers: [],
+  })
+  useLayoutEffect(() => {
+    const container = list.current
+    const svg = canvas.current
+    if (!container || !svg) return
+    const headers = [
+      ...container.querySelectorAll<HTMLElement>('[data-timeline-event]'),
+    ]
+    const measure = () => {
+      const rect = svg.getBoundingClientRect()
+      const centers = headers.map((header) => {
+        const { top, height } = header.getBoundingClientRect()
+        return top + height / 2 - rect.top
+      })
+      setLayout((previous) =>
+        previous.width === rect.width &&
+        previous.centers.length === centers.length &&
+        centers.every((y, i) => y === previous.centers[i])
+          ? previous
+          : { width: rect.width, centers }
+      )
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(svg)
+    for (const header of headers) {
+      observer.observe(header)
+      if (header.parentElement) observer.observe(header.parentElement)
+    }
+    return () => observer.disconnect()
+  }, [graph, expanded])
+
+  // The SVG and timeline occupy the same grid rows. All paths and nodes use
+  // the measured center of the event header, even after an image or tool opens.
+  const x = (lane: number) => ((lane + 0.5) / graph.lanes) * layout.width
+  const center = (row: number) => layout.centers[row]
+  const joinY = (thread: ThreadLane) =>
+    center(thread.forkRow) + (thread.anchor ? 0 : 12)
+  const bottoms = new Map<string, number>()
+  for (const thread of graph.threads.values()) {
+    if (graph.threads.has(thread.parent)) {
+      bottoms.set(
+        thread.parent,
+        Math.max(bottoms.get(thread.parent) ?? 0, joinY(thread))
+      )
+    }
+  }
   const label = (thread: ThreadLane) =>
     thread.name || (thread.parent ? t('Subagent') : t('Main thread'))
   return (
     <div
+      ref={list}
       role='list'
       aria-label={t('Conversation timeline')}
-      className='isolate grid min-w-0 content-start px-1'
+      className='relative isolate grid min-w-0 content-start px-1'
       style={{
         gridTemplateColumns: `min(30%, ${graph.lanes * 14 + 6}px) minmax(0, 1fr)`,
       }}
     >
-      {Array.from(
-        graph.threads.values(),
-        (thread) =>
-          thread.firstRow < thread.lastRow && (
-            <div
-              key={thread.id}
-              aria-hidden='true'
-              className='pointer-events-none relative col-start-1 translate-y-5'
-              style={{
-                gridRow: `${thread.firstRow + 1} / ${thread.lastRow + 1}`,
-              }}
-            >
-              <span
-                className={cn(
-                  'absolute inset-y-0 border-l-2 border-current opacity-65',
-                  laneColors[thread.lane % laneColors.length]
-                )}
-                style={{ left: position(thread.lane) }}
-              />
-            </div>
-          )
-      )}
+      <svg
+        ref={canvas}
+        aria-hidden='true'
+        data-timeline-graph=''
+        className='pointer-events-none absolute inset-0 col-start-1 col-end-2 h-full w-full overflow-visible'
+        style={{ gridRow: `1 / span ${Math.max(1, graph.ordered.length)}` }}
+        fill='none'
+        strokeWidth='2'
+        strokeLinecap='round'
+      >
+        {layout.width > 0 && layout.centers.length === graph.ordered.length && (
+          <>
+            {Array.from(graph.threads.values(), (thread) => {
+              const parent = graph.threads.get(thread.parent)
+              const lane = x(thread.lane)
+              const top = center(thread.firstRow)
+              const bottom = Math.max(
+                center(thread.lastRow),
+                bottoms.get(thread.id) ?? 0
+              )
+              let path = `M ${lane} ${top} V ${bottom}`
+              if (parent) {
+                const parentX = x(parent.lane)
+                const end = joinY(thread)
+                const bend = Math.min(thread.anchor ? 18 : 12, end - top)
+                path = `M ${lane} ${top} V ${end - bend} C ${lane} ${end - bend / 2} ${parentX} ${end - bend / 2} ${parentX} ${end}`
+              }
+              return (
+                <path
+                  key={thread.id}
+                  data-thread={thread.id}
+                  d={path}
+                  className={laneColors[thread.lane % laneColors.length]}
+                  stroke='currentColor'
+                />
+              )
+            })}
+            {graph.ordered.map((turn, row) => {
+              const thread = graph.threads.get(turn.conversation_id)
+              if (!thread) return null
+              return (
+                <circle
+                  key={turn.trace_id}
+                  data-event={turn.trace_id}
+                  cx={x(thread.lane)}
+                  cy={center(row)}
+                  r='4'
+                  stroke='currentColor'
+                  className={cn(
+                    laneColors[thread.lane % laneColors.length],
+                    turn.trace_id === expanded
+                      ? 'fill-current'
+                      : 'fill-background'
+                  )}
+                />
+              )
+            })}
+          </>
+        )}
+      </svg>
       {graph.ordered.map((turn, index) => {
         const thread = graph.threads.get(turn.conversation_id)
         if (!thread) return null
@@ -188,119 +272,77 @@ export function ConversationTimeline(props: {
         const open = expanded === turn.trace_id
         const time = formatTimestampToDate(start(turn), 'milliseconds')
         return (
-          <Fragment key={turn.trace_id}>
-            <div
-              aria-hidden='true'
-              className={cn('pointer-events-none relative col-start-1', color)}
-              style={{ gridRow: index + 1 }}
+          <div
+            key={turn.trace_id}
+            role='listitem'
+            className='col-start-2 min-w-0 pl-2'
+            style={{ gridRow: index + 1 }}
+          >
+            <Button
+              data-timeline-event=''
+              id={`event-${turn.trace_id}`}
+              type='button'
+              variant='ghost'
+              aria-expanded={open}
+              aria-controls={open ? `turn-${turn.trace_id}` : undefined}
+              className='h-auto min-h-10 w-full justify-start gap-2 rounded-md px-2 py-1.5 text-left'
+              onClick={() => setExpanded(open ? null : turn.trace_id)}
             >
-              {graph.forks.get(index)?.map((child) => {
-                const origin = graph.threads.get(child.parent)
-                if (!origin) return null
-                const left = Math.min(child.lane, origin.lane)
-                const right = Math.max(child.lane, origin.lane)
-                const border =
-                  origin.lane < child.lane
-                    ? 'rounded-tl-lg border-l-2'
-                    : 'rounded-tr-lg border-r-2'
-                const join =
-                  origin.lane < child.lane
-                    ? 'rounded-br-lg border-r-2'
-                    : 'rounded-bl-lg border-l-2'
-                return (
-                  <span
-                    key={child.id}
-                    className={cn(
-                      'absolute h-3 border-current',
-                      laneColors[child.lane % laneColors.length],
-                      child.anchor ? 'top-2 border-b-2' : 'top-5 border-t-2',
-                      child.anchor ? join : border
-                    )}
-                    style={{
-                      left: position(left),
-                      right: position(graph.lanes - 1 - right),
-                    }}
-                  />
-                )
-              })}
-              <span
-                className={cn(
-                  'absolute top-5 z-10 size-2.5 translate-x-[calc(-50%+1px)] -translate-y-1/2 rounded-full border-2 border-current',
-                  open ? 'bg-current' : 'bg-background'
-                )}
-                style={{ left: position(thread.lane) }}
-              />
-            </div>
-            <div
-              role='listitem'
-              className='col-start-2 min-w-0 pl-2'
-              style={{ gridRow: index + 1 }}
-            >
-              <Button
-                id={`event-${turn.trace_id}`}
-                type='button'
-                variant='ghost'
-                aria-expanded={open}
-                aria-controls={open ? `turn-${turn.trace_id}` : undefined}
-                className='h-auto min-h-10 w-full justify-start gap-2 rounded-md px-2 py-1.5 text-left'
-                onClick={() => setExpanded(open ? null : turn.trace_id)}
-              >
-                <span className={cn('truncate text-sm font-semibold', color)}>
-                  {label(thread)}
+              <span className={cn('truncate text-sm font-semibold', color)}>
+                {label(thread)}
+              </span>
+              {thread.parent && (
+                <span className='sr-only'>
+                  {t('Parent thread: {{name}}', {
+                    name: parent ? label(parent) : thread.parent,
+                  })}
                 </span>
-                {thread.parent && (
-                  <span className='sr-only'>
-                    {t('Parent thread: {{name}}', {
-                      name: parent ? label(parent) : thread.parent,
-                    })}
-                  </span>
-                )}
-                {turn.model_name && (
-                  <span className='text-muted-foreground truncate text-xs'>
-                    {turn.model_name}
-                  </span>
-                )}
-                <time
-                  dateTime={new Date(start(turn)).toISOString()}
-                  title={time}
-                  className='text-muted-foreground ms-auto shrink-0 text-xs tabular-nums'
-                >
-                  {time}
-                </time>
-                {open ? (
-                  <ChevronDown aria-hidden='true' />
-                ) : (
-                  <ChevronRight aria-hidden='true' />
-                )}
-              </Button>
-              {open && (
-                <div className='pb-4' id={`turn-${turn.trace_id}`}>
-                  {thread.anchor && parent && (
-                    <Button
-                      type='button'
-                      variant='link'
-                      size='sm'
-                      className='text-muted-foreground'
-                      onClick={() => {
-                        const anchor = thread.anchor
-                        if (!anchor) return
-                        setExpanded(anchor.trace_id)
-                        document
-                          .getElementById(`event-${anchor.trace_id}`)
-                          ?.focus()
-                      }}
-                    >
-                      {t('Parent thread: {{name}}', { name: label(parent) })}
-                    </Button>
-                  )}
-                  <RecordedTurnBody
-                    turn={turn}
-                    previousTurn={graph.previousTurns.get(turn.trace_id)}
-                  />
-                </div>
               )}
-            </div>
-          </Fragment>
+              {turn.model_name && (
+                <span className='text-muted-foreground truncate text-xs'>
+                  {turn.model_name}
+                </span>
+              )}
+              <time
+                dateTime={new Date(start(turn)).toISOString()}
+                title={time}
+                className='text-muted-foreground ms-auto shrink-0 text-xs tabular-nums'
+              >
+                {time}
+              </time>
+              {open ? (
+                <ChevronDown aria-hidden='true' />
+              ) : (
+                <ChevronRight aria-hidden='true' />
+              )}
+            </Button>
+            {open && (
+              <div className='pb-4' id={`turn-${turn.trace_id}`}>
+                {thread.anchor && parent && (
+                  <Button
+                    type='button'
+                    variant='link'
+                    size='sm'
+                    className='text-muted-foreground'
+                    onClick={() => {
+                      const anchor = thread.anchor
+                      if (!anchor) return
+                      setExpanded(anchor.trace_id)
+                      document
+                        .getElementById(`event-${anchor.trace_id}`)
+                        ?.focus()
+                    }}
+                  >
+                    {t('Parent thread: {{name}}', { name: label(parent) })}
+                  </Button>
+                )}
+                <RecordedTurnBody
+                  turn={turn}
+                  previousTurn={graph.previousTurns.get(turn.trace_id)}
+                />
+              </div>
+            )}
+          </div>
         )
       })}
     </div>

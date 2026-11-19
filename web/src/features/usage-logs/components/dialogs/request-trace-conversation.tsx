@@ -589,7 +589,7 @@ function WindowedTraceConversation(props: {
   return (
     <div
       className={cn(
-        'mx-auto flex h-full min-h-0 w-full max-w-4xl flex-col gap-3',
+        'flex h-full min-h-0 w-full min-w-0 flex-col gap-3',
         props.inlineTurn && 'h-[min(65dvh,44rem)] min-h-52'
       )}
     >
@@ -760,7 +760,7 @@ export function RequestTraceConversation(props: {
   }
 
   return (
-    <div className='mx-auto w-full max-w-4xl space-y-6'>
+    <div className='w-full min-w-0 space-y-6'>
       {!props.inlineTurn && (
         <p className='text-muted-foreground text-xs leading-relaxed'>
           {t(

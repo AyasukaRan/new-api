@@ -93,6 +93,12 @@ describe('request trace conversation', () => {
       />
     )
 
+    const transcript = screen.getByRole('region', {
+      name: 'Input history',
+    }).parentElement
+    expect(transcript).toHaveClass('w-full')
+    expect(transcript).not.toHaveClass('max-w-4xl')
+
     expect(screen.getByRole('img', { name: 'Image' })).toHaveAttribute(
       'src',
       imageSrc
