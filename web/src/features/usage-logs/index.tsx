@@ -155,6 +155,7 @@ function UsageLogsContent() {
             )}
             <div className='min-h-0 flex-1'>
               <UsageLogsTable
+                key={`${activeCategory}:${viewScope}`}
                 logCategory={isTest ? 'common' : activeCategory}
               />
             </div>

@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
 import { GitBranch, Sparkles, KeyRound } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { GroupBadge } from '@/components/group-badge'
@@ -83,7 +83,6 @@ import {
 import type { LogOtherData, LogSource } from '../../types'
 import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { CacheHitRate } from '../cache-hit-rate'
-import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCostDisplay } from '../log-cost-display'
 import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
@@ -382,7 +381,7 @@ function buildTypeDetailSegments(
 
 export function useCommonLogsColumns(
   isAdmin: boolean,
-  isRoot: boolean,
+  onShowDetails: (log: UsageLog) => void,
   source: LogSource = 'usage',
   showBillingSource = false
 ): ColumnDef<UsageLog>[] {
@@ -881,7 +880,6 @@ export function useCommonLogsColumns(
         header: t('Details'),
         cell: function DetailsCell({ row }) {
           const { t, i18n } = useTranslation()
-          const [dialogOpen, setDialogOpen] = useState(false)
           const log = row.original
           const other = parseLogOther(log.other)
 
@@ -976,34 +974,22 @@ export function useCommonLogsColumns(
             <button
               type='button'
               className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
-              onClick={() => setDialogOpen(true)}
+              onClick={() => onShowDetails(log)}
               title={t('Click to view full details')}
             >
               {detailPreview}
             </button>
           )
 
-          return (
-            <>
-              {periodLabel ? (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger render={detailsButton} />
-                    <TooltipContent>{periodLabel}</TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              ) : (
-                detailsButton
-              )}
-              <DetailsDialog
-                log={log}
-                source={source}
-                isAdmin={isAdmin}
-                isRoot={isRoot}
-                open={dialogOpen}
-                onOpenChange={setDialogOpen}
-              />
-            </>
+          return periodLabel ? (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger render={detailsButton} />
+                <TooltipContent>{periodLabel}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          ) : (
+            detailsButton
           )
         },
         size: 180,
@@ -1014,5 +1000,5 @@ export function useCommonLogsColumns(
     return columns
     // Log formatters read currency settings from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, isAdmin, isRoot, showBillingSource, source, currency])
+  }, [t, isAdmin, onShowDetails, showBillingSource, source, currency])
 }

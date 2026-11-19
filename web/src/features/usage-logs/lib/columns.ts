@@ -24,6 +24,7 @@ import type { ColumnDef } from '@tanstack/react-table'
 import { useCommonLogsColumns } from '../components/columns/common-logs-columns'
 import { useDrawingLogsColumns } from '../components/columns/drawing-logs-columns'
 import { useTaskLogsColumns } from '../components/columns/task-logs-columns'
+import type { UsageLog } from '../data/schema'
 import type { LogCategory, LogSource } from '../types'
 
 /**
@@ -34,13 +35,14 @@ export function useColumnsByCategory(
   logCategory: LogCategory,
   isAdmin: boolean,
   isRoot: boolean,
+  onShowDetails: (log: UsageLog) => void,
   source: LogSource = 'usage',
   showBillingSource = false
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): ColumnDef<any>[] {
   const commonColumns = useCommonLogsColumns(
     isAdmin,
-    isRoot,
+    onShowDetails,
     source,
     showBillingSource
   )

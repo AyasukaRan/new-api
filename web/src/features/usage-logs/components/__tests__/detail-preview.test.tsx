@@ -32,6 +32,7 @@ import {
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
+import { useState } from 'react'
 import { I18nextProvider } from 'react-i18next'
 import {
   afterAll,
@@ -100,9 +101,10 @@ function DetailPreview(props: {
   source?: LogSource
   columnId?: 'content' | 'prompt_tokens'
 }) {
+  const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
   const table = useReactTable({
     data: [makeLog(props.other, props.type)],
-    columns: useCommonLogsColumns(props.isAdmin, false, props.source),
+    columns: useCommonLogsColumns(props.isAdmin, setSelectedLog, props.source),
     getCoreRowModel: getCoreRowModel(),
   })
   const cell = table
@@ -110,7 +112,23 @@ function DetailPreview(props: {
     .rows[0].getAllCells()
     .find((item) => item.column.id === (props.columnId ?? 'content'))
   if (!cell) throw new Error('The log must have a content column')
-  return flexRender(cell.column.columnDef.cell, cell.getContext())
+  return (
+    <>
+      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+      {selectedLog && (
+        <DetailsDialog
+          open
+          log={selectedLog}
+          source={props.source}
+          isAdmin={props.isAdmin}
+          isRoot={false}
+          onOpenChange={(open) => {
+            if (!open) setSelectedLog(null)
+          }}
+        />
+      )}
+    </>
+  )
 }
 const plugin = {
   key: 'incho',

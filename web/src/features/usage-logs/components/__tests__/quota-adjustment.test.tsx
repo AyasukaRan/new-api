@@ -62,10 +62,12 @@ vi.hoisted(() => {
 
 afterAll(() => vi.unstubAllGlobals())
 
+const onShowDetails = () => undefined
+
 function QuotaLogPreview(props: { log: UsageLog }) {
   const table = useReactTable({
     data: [props.log],
-    columns: useCommonLogsColumns(false, false),
+    columns: useCommonLogsColumns(false, onShowDetails),
     getCoreRowModel: getCoreRowModel(),
   })
   const cell = table

@@ -57,6 +57,8 @@ const log = usageLogSchema.parse({
 })
 const clients: QueryClient[] = []
 
+const onShowDetails = () => undefined
+
 function renderWithQueries(element: ReactNode, client?: QueryClient) {
   const queryClient =
     client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -76,7 +78,7 @@ function renderWithQueries(element: ReactNode, client?: QueryClient) {
 }
 
 function LogSurface(props: { mobile: boolean; isAdmin: boolean }) {
-  const columns = useCommonLogsColumns(props.isAdmin, false)
+  const columns = useCommonLogsColumns(props.isAdmin, onShowDetails)
   const table = useReactTable({
     data: [log],
     columns,

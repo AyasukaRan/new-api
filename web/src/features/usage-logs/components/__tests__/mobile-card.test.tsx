@@ -25,10 +25,12 @@ import {
 } from '@tanstack/react-table'
 import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { expect, it, vi } from 'vitest'
 
 import { usageLogSchema, type UsageLog } from '../../data/schema'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
+import { DetailsDialog } from '../dialogs/details-dialog'
 import { UsageLogsMobileList } from '../usage-logs-mobile-card'
 import { UsageLogsProvider, useUsageLogsContext } from '../usage-logs-provider'
 
@@ -63,8 +65,13 @@ function Fixture(props: {
   logs?: UsageLog[]
   loading?: boolean
 }) {
-  const columns = useCommonLogsColumns(props.admin ?? true, false)
+  const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
   const context = useUsageLogsContext()
+  const columns = useCommonLogsColumns(
+    props.admin ?? true,
+    setSelectedLog,
+    context.logSource
+  )
   const table = useReactTable({
     data: props.logs ?? [log],
     columns,
@@ -89,6 +96,18 @@ function Fixture(props: {
         logCategory='common'
         isLoading={props.loading}
       />
+      {selectedLog && (
+        <DetailsDialog
+          log={selectedLog}
+          source={context.logSource}
+          isAdmin={props.admin ?? true}
+          isRoot={false}
+          open
+          onOpenChange={(open) => {
+            if (!open) setSelectedLog(null)
+          }}
+        />
+      )}
     </>
   )
 }
