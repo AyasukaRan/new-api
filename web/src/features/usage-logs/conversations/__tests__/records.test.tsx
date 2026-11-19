@@ -225,3 +225,166 @@ test('cancels stale reads on selection change and identifies missing and truncat
     )
   ).toBeVisible()
 })
+
+test('applies combined filters to the full list and carries them through sorted pagination', async () => {
+  const user = userEvent.setup()
+  const received: Record<string, unknown>[] = []
+  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+    let data
+    if (url === '/api/log/conversations') {
+      const params = config?.params ?? {}
+      received.push(params)
+      const id = params.cursor ? 'Next' : 'First'
+      data = { items: [record(id)], next_cursor: params.cursor ? '' : 'page-2' }
+    } else if (url === '/api/log/conversations/clients') {
+      data = ['Codex CLI', 'Claude Code']
+    } else if (url.startsWith('/api/user/')) {
+      data = { items: [{ id: 18, username: 'alice' }] }
+    } else throw new Error(url)
+    return { data: { success: true, data } }
+  })
+  admin()
+  await screen.findByRole('button', { name: /Discussion First/ })
+  await user.click(
+    screen.getByRole('button', { name: 'Load more conversations' })
+  )
+  await screen.findByRole('button', { name: /Discussion Next/ })
+  await user.click(screen.getByRole('button', { name: 'Filter' }))
+  const userInput = screen.getByRole('combobox', { name: 'User' })
+  await user.click(userInput)
+  await user.click(await screen.findByRole('option', { name: 'alice' }))
+  await user.click(screen.getByRole('combobox', { name: 'Request client' }))
+  await user.click(await screen.findByRole('option', { name: 'Codex CLI' }))
+  await user.type(
+    screen.getByRole('textbox', { name: 'Model Name' }),
+    'test-model'
+  )
+  await user.type(
+    screen.getByRole('spinbutton', { name: 'Minimum turns' }),
+    '3'
+  )
+  await user.type(
+    screen.getByRole('spinbutton', { name: 'Maximum turns' }),
+    '1'
+  )
+  expect(screen.getByRole('button', { name: 'Apply Filters' })).toBeDisabled()
+  await user.type(
+    screen.getByRole('spinbutton', { name: 'Maximum turns' }),
+    '0'
+  )
+  await user.click(screen.getByRole('button', { name: 'Apply Filters' }))
+  await waitFor(() =>
+    expect(received.at(-1)).toMatchObject({
+      cursor: '',
+      user_id: 18,
+      client_tool: 'Codex CLI',
+      model_name: 'test-model',
+      min_turns: 3,
+      max_turns: 10,
+    })
+  )
+  expect(
+    screen.queryByRole('button', { name: /Discussion Next/ })
+  ).not.toBeInTheDocument()
+  await user.selectOptions(
+    screen.getByRole('combobox', { name: 'Sort' }),
+    'turn_count:asc'
+  )
+  await screen.findByRole('button', { name: /Discussion First/ })
+  await user.click(
+    screen.getByRole('button', { name: 'Load more conversations' })
+  )
+  await waitFor(() =>
+    expect(received.at(-1)).toMatchObject({
+      cursor: 'page-2',
+      user_id: 18,
+      sort_by: 'turn_count',
+      sort_order: 'asc',
+      client_tool: 'Codex CLI',
+      min_turns: 3,
+      max_turns: 10,
+    })
+  )
+  await user.click(screen.getByRole('button', { name: /Filter/ }))
+  await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+  await waitFor(() =>
+    expect(received.at(-1)).toEqual({
+      cursor: '',
+      limit: 30,
+      sort_by: 'turn_count',
+      sort_order: 'asc',
+    })
+  )
+})
+
+test('applies the greeting-only switch independently of round count and clears the previous reader', async () => {
+  const user = userEvent.setup()
+  const requests: Record<string, unknown>[] = []
+  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+    if (url === '/api/log/conversations') {
+      const params = config?.params ?? {}
+      requests.push(params)
+      const items = params.hide_greetings
+        ? [record('One question')]
+        : [record('Hello'), record('One question')]
+      return { data: { success: true, data: { items, next_cursor: '' } } }
+    }
+    if (url === '/api/log/conversations/turns') {
+      return { data: { success: true, data: { items: [], next_cursor: '' } } }
+    }
+    throw new Error(url)
+  })
+  admin()
+  await user.click(
+    await screen.findByRole('button', { name: /Discussion Hello/ })
+  )
+  expect(
+    screen.getByRole('heading', { name: 'Discussion Hello' })
+  ).toBeVisible()
+  await user.click(
+    screen.getByRole('switch', { name: 'Hide greeting-only conversations' })
+  )
+  expect(
+    await screen.findByRole('button', { name: /Discussion One question/ })
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('heading', { name: 'Discussion Hello' })
+  ).not.toBeInTheDocument()
+  expect(requests.at(-1)).toMatchObject({ hide_greetings: true, cursor: '' })
+  expect(requests.at(-1)).not.toHaveProperty('min_turns')
+  expect(
+    screen.getByRole('switch', { name: 'Hide greeting-only conversations' })
+  ).toBeChecked()
+  await user.click(
+    screen.getByRole('switch', { name: 'Hide greeting-only conversations' })
+  )
+  expect(
+    await screen.findByRole('button', { name: /Discussion Hello/ })
+  ).toBeVisible()
+})
+
+test('distinguishes an unrecognized client from a custom client name and from all clients', async () => {
+  const user = userEvent.setup()
+  const queries: Record<string, unknown>[] = []
+  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+    if (url.endsWith('/clients')) return { data: { success: true, data: [] } }
+    queries.push(config?.params ?? {})
+    return { data: { success: true, data: { items: [], next_cursor: '' } } }
+  })
+  admin()
+  await screen.findByText('No saved conversations')
+  await user.click(screen.getByRole('button', { name: 'Filter' }))
+  await user.click(screen.getByRole('combobox', { name: 'Request client' }))
+  await user.click(screen.getByRole('option', { name: 'Unidentified source' }))
+  await user.click(screen.getByRole('button', { name: 'Apply Filters' }))
+  await waitFor(() => expect(queries.at(-1)?.client_tool_unknown).toBe(true))
+  expect(queries.at(-1)?.client_tool).toBeUndefined()
+  await screen.findByText('No records found. Try adjusting your filters.')
+  await user.click(screen.getByRole('button', { name: /Filter/ }))
+  const input = screen.getByRole('combobox', { name: 'Request client' })
+  await user.clear(input)
+  await user.type(input, 'Internal SDK')
+  await user.click(screen.getByRole('button', { name: 'Apply Filters' }))
+  await waitFor(() => expect(queries.at(-1)?.client_tool).toBe('Internal SDK'))
+  expect(queries.at(-1)?.client_tool_unknown).toBeUndefined()
+})

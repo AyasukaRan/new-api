@@ -49,6 +49,7 @@ type TraceConversation struct {
 	AgentName      string `json:"agent_name"`
 	Title          string `json:"title"`
 	ModelName      string `json:"model_name"`
+	ClientTool     string `json:"client_tool"`
 	UserID         int    `json:"user_id"`
 	StartedAt      int64  `json:"started_at"`
 	UpdatedAt      int64  `json:"updated_at"`
@@ -73,31 +74,132 @@ type TraceConversationCursor struct {
 	Snapshot int64  `json:"s"`
 	Time     int64  `json:"t"`
 	ID       string `json:"i"`
+	Rank     int64  `json:"r,omitempty"`
+	Query    string `json:"q,omitempty"`
+}
+
+// TraceConversationFilter applies to complete conversations, including their recorded descendants.
+type TraceConversationFilter struct {
+	UserID            int    `form:"user_id" binding:"min=0"`
+	ModelName         string `form:"model_name" binding:"max=192"`
+	ClientTool        string `form:"client_tool" binding:"max=64"`
+	ClientToolUnknown bool   `form:"client_tool_unknown"`
+	MinTurns          int    `form:"min_turns" binding:"min=0"`
+	MaxTurns          int    `form:"max_turns" binding:"min=0"`
+	HideGreetings     bool   `form:"hide_greetings"`
+	SortBy            string `form:"sort_by" binding:"omitempty,oneof=updated_at started_at turn_count"`
+	SortOrder         string `form:"sort_order" binding:"omitempty,oneof=desc asc"`
+}
+
+func (f TraceConversationFilter) SortValue(item TraceConversation) int64 {
+	switch f.SortBy {
+	case "started_at":
+		return item.StartedAt
+	case "turn_count":
+		return int64(item.TurnCount)
+	default:
+		return item.UpdatedAt
+	}
+}
+
+func (f TraceConversationFilter) page(query *gorm.DB, cursor TraceConversationCursor, single bool, limit int) *gorm.DB {
+	column, id := "updated_at", "conversation_id"
+	switch f.SortBy {
+	case "started_at", "turn_count":
+		column = f.SortBy
+	}
+	if single {
+		column, id = "created_at", "trace_id"
+		if f.SortBy == "turn_count" {
+			column = "1"
+		}
+	}
+	// Match Go's byte-wise ID comparison when merging independent and linked threads.
+	switch query.Dialector.Name() {
+	case "mysql":
+		id = "BINARY " + id
+	case "postgres":
+		id += ` COLLATE "C"`
+	}
+	order, op := " DESC", " < "
+	if f.SortOrder == "asc" {
+		order, op = " ASC", " > "
+	}
+	if cursor.ID != "" {
+		value := cursor.Time
+		if f.SortBy == "turn_count" {
+			value = cursor.Rank
+		}
+		bound := "<="
+		if f.SortOrder == "asc" {
+			bound = ">="
+		}
+		query = query.Where(column+" "+bound+" ? AND ("+column+op+"? OR "+id+op+"?)", value, value, cursor.ID)
+	}
+	if column != "1" {
+		query = query.Order(column + order)
+	}
+	return query.Order(id + order).Limit(limit)
 }
 
 type conversationSummary struct {
 	TraceConversation
 	FirstTrace string
+	Matched    int
+	Greeting   int
 }
 
-func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor, limit int) ([]TraceConversation, error) {
-	db := LOG_DB.WithContext(ctx)
-	// A standalone capture has exactly one client request leg. Page these on the
-	// chronological index instead of grouping an entire retention window by trace ID.
-	single := ConversationTraceQuery(db).Where("created_at <= ? AND (conversation_key = trace_id OR conversation_key IS NULL OR conversation_key = '')", cursor.Snapshot)
-	if cursor.ID != "" {
-		single = single.Where("created_at <= ? AND (created_at < ? OR trace_id < ?)", cursor.Time, cursor.Time, cursor.ID)
+func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor, limit int, filters ...TraceConversationFilter) ([]TraceConversation, error) {
+	var filter TraceConversationFilter
+	if len(filters) > 0 {
+		filter = filters[0]
 	}
+	db := LOG_DB.WithContext(ctx)
+	if filter.UserID > 0 {
+		db = db.Where("conversation_user_id = ?", filter.UserID).Session(&gorm.Session{})
+	}
+	var conditions []string
+	var args []any
+	if filter.ModelName != "" {
+		conditions = append(conditions, "conversation_model = ?")
+		args = append(args, filter.ModelName)
+	}
+	if filter.ClientTool != "" {
+		conditions = append(conditions, "conversation_client = ?")
+		args = append(args, filter.ClientTool)
+	} else if filter.ClientToolUnknown {
+		conditions = append(conditions, "COALESCE(conversation_client, '') = ''")
+	}
+	match := strings.Join(conditions, " AND ")
 	var rows []conversationSummary
-	if err := single.Select("trace_id AS conversation_id, trace_id AS first_trace, created_at AS started_at, created_at AS updated_at, 1 AS turn_count, conversation_user_id AS user_id").
-		Order("created_at DESC, trace_id DESC").Limit(limit).Scan(&rows).Error; err != nil {
-		return nil, err
+	// A standalone capture has one client request leg; ordinary time paging
+	// can use the chronological index without grouping the retention window.
+	if filter.MinTurns <= 1 {
+		single := ConversationTraceQuery(db).Where("created_at <= ? AND (conversation_key = trace_id OR conversation_key IS NULL OR conversation_key = '')", cursor.Snapshot)
+		if match != "" {
+			single = single.Where(match, args...)
+		}
+		if filter.HideGreetings {
+			single = single.Where("conversation_greeting IS NULL OR conversation_greeting = ?", false)
+		}
+		query := filter.page(single, cursor, true, limit)
+		if err := query.Select("trace_id AS conversation_id, trace_id AS first_trace, created_at AS started_at, created_at AS updated_at, 1 AS turn_count, conversation_user_id AS user_id").
+			Scan(&rows).Error; err != nil {
+			return nil, err
+		}
 	}
 	// Session IDs have the server-issued c_ prefix. An explicit range uses the
 	// (direction, conversation_key, created_at) index even on non-C collations.
 	threads := db.Model(&RequestTrace{}).Where("direction = ? AND created_at <= ? AND conversation_key >= ? AND conversation_key < ? AND conversation_key <> trace_id",
 		TraceDirectionClientRequest, cursor.Snapshot, "c_", "d").Session(&gorm.Session{})
-	const summaryFields = "conversation_key AS conversation_id, MIN(trace_id) AS first_trace, MIN(created_at) AS started_at, MAX(created_at) AS updated_at, COUNT(*) AS turn_count, MAX(conversation_user_id) AS user_id"
+	summaryFields := "conversation_key AS conversation_id, MIN(trace_id) AS first_trace, MIN(created_at) AS started_at, MAX(created_at) AS updated_at, COUNT(*) AS turn_count, MAX(conversation_user_id) AS user_id"
+	// Compute matches without removing nonmatching turns from counts, dates, or graph edges.
+	if match != "" {
+		summaryFields += ", MAX(CASE WHEN " + match + " THEN 1 ELSE 0 END) AS matched"
+	}
+	if filter.HideGreetings {
+		summaryFields += ", MIN(CASE WHEN conversation_greeting THEN 1 ELSE 0 END) AS greeting"
+	}
 	// Only threads with an explicit parent claim need graph resolution. Ordinary
 	// one-request conversations stay on the database's bounded pagination path.
 	linked := db.Model(&RequestTrace{}).Where("direction = ? AND created_at <= ? AND conversation_user_id > 0 AND conversation_parent_key > ''",
@@ -110,16 +212,25 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 		Order("conversation_key, conversation_parent_key").Find(&edges).Error; err != nil {
 		return nil, err
 	}
-	summaries := threads.Select(summaryFields).Group("conversation_key")
+	summaries := threads.Select(summaryFields, args...).Group("conversation_key")
 	if len(edges) > 0 {
 		summaries = summaries.Where("conversation_key NOT IN (?) AND conversation_key NOT IN (?)", linked.Select("conversation_key"), linked.Select("conversation_parent_key"))
 	}
-	page := db.Table("(?) AS grouped", summaries)
-	if cursor.ID != "" {
-		page = page.Where("updated_at < ? OR (updated_at = ? AND conversation_id < ?)", cursor.Time, cursor.Time, cursor.ID)
+	page := LOG_DB.WithContext(ctx).Table("(?) AS grouped", summaries)
+	if match != "" {
+		page = page.Where("matched > 0")
+	}
+	if filter.MinTurns > 0 {
+		page = page.Where("turn_count >= ?", filter.MinTurns)
+	}
+	if filter.MaxTurns > 0 {
+		page = page.Where("turn_count <= ?", filter.MaxTurns)
+	}
+	if filter.HideGreetings {
+		page = page.Where("greeting = 0")
 	}
 	var independentThreads []conversationSummary
-	if err := page.Order("updated_at DESC, conversation_id DESC").Limit(limit).Scan(&independentThreads).Error; err != nil {
+	if err := filter.page(page, cursor, false, limit).Scan(&independentThreads).Error; err != nil {
 		return nil, err
 	}
 	rows = append(rows, independentThreads...)
@@ -132,7 +243,7 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 		nodes := make(map[string]conversationSummary)
 		for batch := range slices.Chunk(slices.Compact(keys), 256) {
 			var matches []conversationSummary
-			if err := threads.Where("conversation_key IN ?", batch).Select(summaryFields).Group("conversation_key").Scan(&matches).Error; err != nil {
+			if err := threads.Where("conversation_key IN ?", batch).Select(summaryFields, args...).Group("conversation_key").Scan(&matches).Error; err != nil {
 				return nil, err
 			}
 			for _, node := range matches {
@@ -164,18 +275,37 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 				total.TurnCount = 0
 			}
 			total.TurnCount += node.TurnCount
+			total.Matched = max(total.Matched, node.Matched)
+			total.Greeting = min(total.Greeting, node.Greeting)
 			total.StartedAt = min(total.StartedAt, node.StartedAt)
 			total.UpdatedAt = max(total.UpdatedAt, node.UpdatedAt)
 			totals[root] = total
 		}
 		for _, total := range totals {
-			if cursor.ID == "" || total.UpdatedAt < cursor.Time || total.UpdatedAt == cursor.Time && total.ConversationID < cursor.ID {
-				rows = append(rows, total)
+			if match != "" && total.Matched == 0 || total.TurnCount < filter.MinTurns ||
+				filter.MaxTurns > 0 && total.TurnCount > filter.MaxTurns ||
+				filter.HideGreetings && total.Greeting > 0 {
+				continue
 			}
+			if cursor.ID != "" {
+				value := cursor.Time
+				if filter.SortBy == "turn_count" {
+					value = cursor.Rank
+				}
+				position := cmp.Or(cmp.Compare(filter.SortValue(total.TraceConversation), value), strings.Compare(total.ConversationID, cursor.ID))
+				if filter.SortOrder == "asc" && position <= 0 || filter.SortOrder != "asc" && position >= 0 {
+					continue
+				}
+			}
+			rows = append(rows, total)
 		}
 	}
 	slices.SortFunc(rows, func(a, b conversationSummary) int {
-		return cmp.Or(cmp.Compare(b.UpdatedAt, a.UpdatedAt), strings.Compare(b.ConversationID, a.ConversationID))
+		order := cmp.Or(cmp.Compare(filter.SortValue(a.TraceConversation), filter.SortValue(b.TraceConversation)), strings.Compare(a.ConversationID, b.ConversationID))
+		if filter.SortOrder == "asc" {
+			return order
+		}
+		return -order
 	})
 	rows = rows[:min(len(rows), limit)]
 
@@ -190,7 +320,7 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 		ids = append(ids, row.FirstTrace)
 	}
 	var labels []RequestTrace
-	if err := db.Select("trace_id, conversation_title, conversation_model, conversation_parent_key, conversation_agent").
+	if err := db.Select("trace_id, conversation_title, conversation_model, conversation_client, conversation_parent_key, conversation_agent").
 		Where("trace_id IN ? AND direction = ?", ids, TraceDirectionClientRequest).Find(&labels).Error; err != nil {
 		return nil, err
 	}
@@ -202,6 +332,9 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 		label := byTrace[row.FirstTrace]
 		row.Title, row.ModelName = label.ConversationTitle, label.ConversationModel
 		row.ParentID, row.AgentName = label.ConversationParentKey, label.ConversationAgent
+		if label.ConversationClient != nil {
+			row.ClientTool = *label.ConversationClient
+		}
 		items = append(items, row.TraceConversation)
 	}
 	return items, nil

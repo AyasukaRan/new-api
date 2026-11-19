@@ -376,6 +376,13 @@ func InitResources() error {
 
 	service.StartAuthArtifactCleanup()
 	service.StartRequestTraceCleanup()
+	if common.IsMasterNode {
+		go func() {
+			if err := service.BackfillTraceConversationFilters(context.Background()); err != nil {
+				common.SysError("failed to index historical conversation filters: " + err.Error())
+			}
+		}()
+	}
 
 	return nil
 }

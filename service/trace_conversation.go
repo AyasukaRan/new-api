@@ -13,6 +13,7 @@ import (
 
 type ConversationTraceMetadata struct {
 	Key, Title, Model, ParentKey, Agent, TurnKey, ParentTurnKey string
+	GreetingOnly                                                bool
 }
 
 // TraceConversationMetadata accepts only the authenticated gateway user ID and an
@@ -61,6 +62,9 @@ func TraceConversationMetadata(userID int, headers http.Header, requestBody stri
 		}
 		return true
 	})
+	if isGreetingText(result.Title) {
+		result.GreetingOnly = isGreetingOnlyRequest(requestBody)
+	}
 	if userID <= 0 {
 		return result
 	}
@@ -122,6 +126,75 @@ func TraceConversationMetadata(userID int, headers http.Header, requestBody stri
 		}
 	}
 	return result
+}
+
+// Classify whole utterances only. A salutation followed by a question is substantive.
+func isGreetingText(text string) bool {
+	if len(text) > 128 {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	text = strings.TrimRight(text, "!?.,~！？，。～…")
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "你好", "您好", "你好啊", "你好呀", "您好呀", "哈喽", "哈囉", "嗨", "hello", "hi", "hey", "hello there", "hi there", "早上好", "下午好", "晚上好", "good morning", "good afternoon", "good evening":
+		return true
+	}
+	return false
+}
+
+// A preview title alone cannot distinguish a greeting from a caption on an image
+// or the opening line of a replayed history. Only mark a complete text-only input.
+func isGreetingOnlyRequest(body string) bool {
+	if !gjson.Valid(body) {
+		return false
+	}
+	request := gjson.Parse(body)
+	if request.Get("previous_response_id").Str != "" {
+		return false
+	}
+	for _, key := range []string{"messages", "input", "contents"} {
+		messages := request.Get(key)
+		if !messages.Exists() {
+			continue
+		}
+		if messages.Type == gjson.String {
+			return key == "input" && isGreetingText(messages.Str)
+		}
+		if !messages.IsArray() {
+			return false
+		}
+		valid, users := true, 0
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := message.Get("role").Str
+			if role == "system" || role == "developer" {
+				return true
+			}
+			users++
+			kind := message.Get("type").Str
+			if users > 1 || (role != "user" && !(role == "" && key == "contents")) ||
+				(kind != "" && kind != "message") || message.Get("attachments.0").Exists() || message.Get("tool_calls.0").Exists() || message.Get("audio").Exists() {
+				valid = false
+				return false
+			}
+			content := message.Get("content")
+			if key == "contents" {
+				content = message.Get("parts")
+			}
+			if content.Type == gjson.String {
+				valid = isGreetingText(content.Str)
+			} else {
+				part := content.Get("0")
+				partType := part.Get("type").Str
+				valid = content.IsArray() && !content.Get("1").Exists() &&
+					(partType == "text" || partType == "input_text" || key == "contents" && partType == "") &&
+					isGreetingText(part.Get("text").Str) && !part.Get("inlineData").Exists() && !part.Get("fileData").Exists() &&
+					!part.Get("inline_data").Exists() && !part.Get("file_data").Exists()
+			}
+			return valid
+		})
+		return valid && users == 1
+	}
+	return false
 }
 
 func traceScopedID(prefix, owner, id string) string {

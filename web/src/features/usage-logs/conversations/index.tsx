@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  hashKey,
+  useInfiniteQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { ArrowLeft, MessagesSquare, RefreshCw } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -35,8 +39,11 @@ import { useAuthStore } from '@/stores/auth-store'
 import {
   getConversationRecords,
   getRecordedTurns,
+  type ConversationFilters,
   type ConversationRecord,
+  type ConversationSort,
 } from './api'
+import { ConversationFilterBar } from './filters'
 import { ConversationTimeline } from './timeline'
 
 function ConversationReader({
@@ -139,10 +146,15 @@ export function ConversationRecordsPage() {
   const viewer = useAuthStore((s) => s.auth.user)
   const client = useQueryClient()
   const [selected, setSelected] = useState<ConversationRecord>()
+  const [filters, setFilters] = useState<ConversationFilters>({})
+  const [sort, setSort] = useState<ConversationSort>({
+    sort_by: 'updated_at',
+    sort_order: 'desc',
+  })
   const query = useInfiniteQuery({
-    queryKey: ['saved-conversations', viewer?.id, 'list'],
+    queryKey: ['saved-conversations', viewer?.id, 'list', filters, sort],
     queryFn: ({ pageParam, signal }) =>
-      getConversationRecords(pageParam, signal),
+      getConversationRecords(pageParam, signal, filters, sort),
     enabled: !!viewer && viewer.role >= ROLE.ADMIN,
     initialPageParam: '',
     getNextPageParam: (page) => page.next_cursor || undefined,
@@ -194,67 +206,95 @@ export function ConversationRecordsPage() {
           <nav
             aria-label={t('Conversation Records')}
             className={cn(
-              'min-h-0 overflow-y-auto p-2 md:border-r',
+              'flex min-h-0 min-w-0 flex-col md:border-r',
               active && 'max-md:hidden'
             )}
           >
-            {query.isPending && <LoadingState />}
-            {query.isError && (
-              <ErrorState
-                className='min-h-28'
-                title={t('Failed to load conversations')}
-                onRetry={() =>
-                  void (query.isFetchNextPageError
-                    ? query.fetchNextPage()
-                    : query.refetch())
+            <ConversationFilterBar
+              filters={filters}
+              sort={sort}
+              viewer={viewer.id}
+              onSort={setSort}
+              onFilter={(next) => {
+                if (hashKey([next]) !== hashKey([filters])) {
+                  setSelected(undefined)
+                  setFilters(next)
                 }
-              />
-            )}
-            {records.map((record) => {
-              const chosen = record.conversation_id === active?.conversation_id
-              return (
-                <Button
-                  key={record.conversation_id}
-                  variant={chosen ? 'secondary' : 'ghost'}
-                  aria-current={chosen ? 'true' : undefined}
-                  onClick={() => setSelected(record)}
-                  className='h-auto w-full flex-col items-start justify-start gap-1 px-3 py-2.5 text-left'
-                >
-                  <span className='w-full truncate font-medium'>
-                    {record.title || t('Untitled conversation')}
-                  </span>
-                  <span className='text-muted-foreground w-full truncate text-xs font-normal'>
-                    {record.model_name} · {t('User ID')} {record.user_id}
-                  </span>
-                  <span className='text-muted-foreground flex w-full flex-wrap justify-between gap-x-2 text-xs font-normal'>
-                    <span>{formatTimestamp(record.updated_at)}</span>
-                    <span>
-                      {t('Recorded turns: {{total}}', {
-                        total: formatNumber(record.turn_count, locale),
-                      })}
+              }}
+            />
+            <div
+              className='min-h-0 flex-1 overflow-y-auto p-2'
+              key={hashKey([filters, sort])}
+            >
+              {query.isPending && <LoadingState />}
+              {query.isError && (
+                <ErrorState
+                  className='min-h-28'
+                  title={t('Failed to load conversations')}
+                  onRetry={() =>
+                    void (query.isFetchNextPageError
+                      ? query.fetchNextPage()
+                      : query.refetch())
+                  }
+                />
+              )}
+              {records.map((record) => {
+                const chosen =
+                  record.conversation_id === active?.conversation_id
+                return (
+                  <Button
+                    key={record.conversation_id}
+                    variant={chosen ? 'secondary' : 'ghost'}
+                    aria-current={chosen ? 'true' : undefined}
+                    onClick={() => setSelected(record)}
+                    className='h-auto w-full flex-col items-start justify-start gap-1 px-3 py-2.5 text-left'
+                  >
+                    <span className='w-full truncate font-medium'>
+                      {record.title || t('Untitled conversation')}
                     </span>
-                  </span>
+                    <span className='text-muted-foreground w-full truncate text-xs font-normal'>
+                      {[
+                        record.model_name,
+                        record.client_tool,
+                        `${t('User ID')} ${record.user_id}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
+                    <span className='text-muted-foreground flex w-full flex-wrap justify-between gap-x-2 text-xs font-normal'>
+                      <span>{formatTimestamp(record.updated_at)}</span>
+                      <span>
+                        {t('Recorded turns: {{total}}', {
+                          total: formatNumber(record.turn_count, locale),
+                        })}
+                      </span>
+                    </span>
+                  </Button>
+                )
+              })}
+              {query.isSuccess && !records.length && (
+                <EmptyState
+                  icon={MessagesSquare}
+                  className='min-h-32'
+                  title={
+                    Object.values(filters).some((v) => v !== undefined)
+                      ? t('No records found. Try adjusting your filters.')
+                      : t('No saved conversations')
+                  }
+                />
+              )}
+              {query.hasNextPage && !query.isFetchNextPageError && (
+                <Button
+                  className='mt-2 w-full'
+                  size='sm'
+                  variant='outline'
+                  disabled={query.isFetching}
+                  onClick={() => void query.fetchNextPage()}
+                >
+                  {t('Load more conversations')}
                 </Button>
-              )
-            })}
-            {query.isSuccess && !records.length && (
-              <EmptyState
-                icon={MessagesSquare}
-                className='min-h-32'
-                title={t('No saved conversations')}
-              />
-            )}
-            {query.hasNextPage && !query.isFetchNextPageError && (
-              <Button
-                className='mt-2 w-full'
-                size='sm'
-                variant='outline'
-                disabled={query.isFetching}
-                onClick={() => void query.fetchNextPage()}
-              >
-                {t('Load more conversations')}
-              </Button>
-            )}
+              )}
+            </div>
           </nav>
           {active ? (
             <ConversationReader

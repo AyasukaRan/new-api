@@ -64,8 +64,11 @@ type RequestTrace struct {
 	ConversationParentTurnKey string `json:"-" gorm:"type:varchar(64)"`
 	ConversationAgent         string `json:"-" gorm:"type:varchar(96)"`
 	ConversationUserId        int    `json:"-"`
-	ConversationTitle         string `json:"-" gorm:"type:varchar(128)"`
-	ConversationModel         string `json:"-" gorm:"type:varchar(192)"`
+	// A nil client distinguishes old captures awaiting classification from a recorded unknown source.
+	ConversationClient   *string `json:"-" gorm:"type:varchar(64)"`
+	ConversationGreeting bool    `json:"-"`
+	ConversationTitle    string  `json:"-" gorm:"type:varchar(128)"`
+	ConversationModel    string  `json:"-" gorm:"type:varchar(192)"`
 }
 
 // MySQL TEXT holds only 64 KiB, below even the default 1 MiB payload cap.
@@ -94,7 +97,7 @@ func MigrateRequestTraces() error {
 		method String, url String, status Int32,
 		headers String, body String, body_size Int64, truncated UInt8,
 		object_key String, content_type String, body_encoding String,
-		conversation_key String, conversation_user_id Int64, conversation_title String, conversation_model String,
+		conversation_key String, conversation_user_id Int64, conversation_client Nullable(String), conversation_greeting UInt8, conversation_title String, conversation_model String,
 		conversation_parent_key String, conversation_agent String, conversation_turn_key String, conversation_parent_turn_key String
 	) ENGINE = MergeTree()
 	PARTITION BY toYYYYMM(toDateTime(created_at))
@@ -105,7 +108,7 @@ func MigrateRequestTraces() error {
 	// table, so a column added after the first release needs its own statement
 	// or every insert naming it would fail. ClickHouse has no AutoMigrate.
 	for _, column := range []string{"object_key String", "content_type String", "body_encoding String",
-		"conversation_key String", "conversation_user_id Int64", "conversation_title String", "conversation_model String",
+		"conversation_key String", "conversation_user_id Int64", "conversation_client Nullable(String)", "conversation_greeting UInt8", "conversation_title String", "conversation_model String",
 		"conversation_parent_key String", "conversation_agent String", "conversation_turn_key String", "conversation_parent_turn_key String"} {
 		if err := LOG_DB.Exec("ALTER TABLE request_traces ADD COLUMN IF NOT EXISTS " + column).Error; err != nil {
 			return err

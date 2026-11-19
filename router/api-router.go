@@ -335,6 +335,7 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/search", middleware.AdminAuth(), controller.SearchAllLogs)
 		logRoute.GET("/request_body", middleware.DisableCache(), middleware.AdminAuth(), controller.GetLogRequestBody)
 		logRoute.GET("/conversations", middleware.DisableCache(), middleware.AdminAuth(), controller.GetTraceConversations)
+		logRoute.GET("/conversations/clients", middleware.DisableCache(), middleware.AdminAuth(), controller.GetTraceConversationClients)
 		logRoute.GET("/conversations/turns", middleware.DisableCache(), middleware.AdminAuth(), controller.GetTraceConversationTurns)
 		logRoute.GET("/trace", middleware.DisableCache(), middleware.AdminAuth(), controller.GetRequestTrace)
 		logRoute.GET("/trace/body", middleware.DisableCache(), middleware.AdminAuth(), controller.GetRequestTraceBody)

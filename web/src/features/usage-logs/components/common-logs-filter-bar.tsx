@@ -44,14 +44,15 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { getGroups, getUsers, searchUsers } from '@/features/users/api'
-import { useDebounce, useMediaQuery } from '@/hooks'
+import { getGroups } from '@/features/users/api'
+import { useMediaQuery } from '@/hooks'
 import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { getUserGroups } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { LOG_TYPE_ALL_VALUE, LOG_TYPE_FILTERS } from '../constants'
 import { useLiveLogRange } from '../hooks/use-live-log-range'
+import { useLogUserOptions } from '../hooks/use-log-user-options'
 import { buildSearchParams } from '../lib/filter'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import type { CommonLogFilters } from '../types'
@@ -132,37 +133,19 @@ function LogUsernameFilter(props: {
   maskClass?: string
 }) {
   const { t } = useTranslation()
-  const scope = useModelAccessScope()
-  const [search, setSearch] = useState<string | null>(null)
-  const term = search?.trim() ?? ''
-  const debounced = useDebounce(term, 250)
-  const keyword = term ? debounced : ''
-  const { data, isFetching } = useQuery({
-    queryKey: ['log-username-options', ...scope, keyword],
-    enabled: search !== null && keyword === term,
-    staleTime: 60_000,
-    queryFn: async () => {
-      const page = { p: 1, page_size: 50 }
-      const response = keyword
-        ? await searchUsers({ ...page, keyword })
-        : await getUsers(page)
-      const users = requireServerSuccess(response).data?.items ?? []
-      return users.map(({ username }) => ({ value: username, label: username }))
-    },
-  })
+  const { users, loading, setSearch } = useLogUserOptions()
   return (
     <LogsFilterField className={props.maskClass}>
       <ComboboxInput
-        options={data ?? []}
+        options={users.map(({ username }) => ({
+          label: username,
+          value: username,
+        }))}
         allowCustomValue
         showEmptyOnOpen
         aria-label={t('Username')}
         placeholder={t('Username')}
-        emptyText={
-          isFetching || keyword !== term
-            ? t('Loading...')
-            : t('No matching results')
-        }
+        emptyText={loading ? t('Loading...') : t('No matching results')}
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={props.maskClass}
         value={props.value}

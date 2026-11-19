@@ -277,3 +277,35 @@ describe('selected option icons', () => {
     expect(screen.queryByAltText('')).not.toBeInTheDocument()
   })
 })
+
+it('aligns editable choices with their field inside a positioned dialog', async () => {
+  const change = vi.fn()
+  render(
+    <div role='dialog' style={{ position: 'fixed' }}>
+      <Combobox
+        options={options}
+        allowCustomValue
+        onValueChange={change}
+        aria-label='Editable provider'
+      />
+    </div>
+  )
+  const input = screen.getByRole('combobox', { name: 'Editable provider' })
+  vi.spyOn(input, 'getBoundingClientRect').mockReturnValue(
+    DOMRect.fromRect({ x: 540, y: 350, width: 300, height: 36 })
+  )
+  vi.spyOn(screen.getByRole('dialog'), 'getBoundingClientRect').mockReturnValue(
+    DOMRect.fromRect({ x: 500, y: 300, width: 400, height: 500 })
+  )
+  const user = userEvent.setup()
+  await user.click(input)
+  const popup = (await screen.findByRole('listbox')).parentElement
+  expect(popup).toHaveStyle({
+    position: 'absolute',
+    left: '40px',
+    top: '90px',
+    width: '300px',
+  })
+  await user.click(screen.getByRole('option', { name: 'Google' }))
+  expect(change).toHaveBeenCalledWith('gemini')
+})

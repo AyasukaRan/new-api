@@ -631,6 +631,7 @@ func (job *traceWriteJob) persist() {
 			}
 			meta := TraceConversationMetadata(job.userID, headers, conversationBody)
 			leg.record.ConversationKey, leg.record.ConversationParentKey = meta.Key, meta.ParentKey
+			leg.record.ConversationGreeting = meta.GreetingOnly
 			// Parsing JSON can decode an escaped credential that wasn't literal in the wire payload.
 			leg.record.ConversationTitle = traceConversationLabel(redactor.scrub(meta.Title), 96)
 			leg.record.ConversationAgent = traceConversationLabel(redactor.scrub(meta.Agent), 96)
@@ -815,6 +816,11 @@ func (t *requestTraceCollector) clientRequestLeg(c *gin.Context) *traceLeg {
 		record.Url = t.scrub(relaycommon.SanitizeURLForLog(c.Request.URL.String()))
 	}
 	if model.IsConversationTrace(record.Format, record.Url) {
+		client := IdentifyRequestClient(c.Request.Header)
+		if t.scrub(client) != client {
+			client = ""
+		}
+		record.ConversationClient = &client
 		record.ConversationModel = traceConversationLabel(t.scrub(common.GetContextKeyString(c, constant.ContextKeyOriginalModel)), 192)
 	}
 	record.Headers = t.encodeHeaders(c.Request.Header, nil)

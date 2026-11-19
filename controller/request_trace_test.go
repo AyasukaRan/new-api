@@ -114,7 +114,7 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 								require.NoError(t, logDB.AutoMigrate(&releasedRequestTrace{}))
 							}
 							require.False(t, logDB.Migrator().HasColumn(&model.RequestTrace{}, "body_encoding"))
-							require.NoError(t, logDB.Omit("BodyEncoding", "ConversationKey", "ConversationUserId", "ConversationModel", "ConversationTitle", "ConversationParentKey", "ConversationAgent", "ConversationTurnKey", "ConversationParentTurnKey").Create(&oldTrace).Error)
+							require.NoError(t, logDB.Omit("BodyEncoding", "ConversationKey", "ConversationUserId", "ConversationClient", "ConversationGreeting", "ConversationModel", "ConversationTitle", "ConversationParentKey", "ConversationAgent", "ConversationTurnKey", "ConversationParentTurnKey").Create(&oldTrace).Error)
 						}
 						for range 2 {
 							require.NoError(t, model.MigrateRequestTraces())
@@ -150,6 +150,7 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 						ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
 						ctx.Request.Header.Set("Content-Type", "application/json")
 						ctx.Request.Header.Set("X-DeepSeek-Harness-Session-Id", "harness-test-session")
+						ctx.Request.Header.Set("User-Agent", "deepseek-harness/1.0")
 						ctx.Set(common.RequestIdKey, "large-unicode-trace")
 						ctx.Set("id", 41)
 						ctx.Set(common.KeyBodyStorage, storage)
@@ -212,13 +213,15 @@ func TestRequestTraceLargeTextDatabaseMatrix(t *testing.T) {
 						assert.Contains(t, bodyResponse.Header().Get("Cache-Control"), "no-store")
 						assert.True(t, bodyResponse.Flushed)
 						var captured model.RequestTrace
-						require.NoError(t, logDB.Select("conversation_key, conversation_user_id, conversation_model, conversation_title").
+						require.NoError(t, logDB.Select("conversation_key, conversation_user_id, conversation_model, conversation_title, conversation_client").
 							Where("trace_id = ? AND direction = ?", traceID, model.TraceDirectionClientRequest).First(&captured).Error)
 						meta := service.TraceConversationMetadata(41, ctx.Request.Header, "")
 						assert.Equal(t, meta.Key, captured.ConversationKey)
 						assert.Equal(t, 41, captured.ConversationUserId)
 						assert.Equal(t, "capture-model", captured.ConversationModel)
 						assert.Equal(t, "capture title", captured.ConversationTitle)
+						require.NotNil(t, captured.ConversationClient)
+						assert.Equal(t, "DeepSeek Harness", *captured.ConversationClient)
 						verifyRequestTraceChunkStorage(t)
 						verifyTraceConversationTree(t)
 						verifyTraceConversationList(t)
@@ -756,4 +759,163 @@ func verifyTraceConversationList(t *testing.T) {
 	assert.Equal(t, "a-single", page[0].ConversationID)
 	assert.Equal(t, "c_orphan", page[1].ConversationID)
 	assert.Equal(t, 259, page[1].TurnCount)
+	verifyTraceConversationFilters(t)
+	verifyTraceFilterBackfill(t)
+}
+
+func verifyTraceConversationFilters(t *testing.T) {
+	t.Helper()
+	cli, sdk := "Codex CLI", "Go HTTP Client"
+	const owner = 71
+	traces := []*model.RequestTrace{
+		{TraceId: "filter-a1", ConversationKey: "c_filterroot", ConversationClient: &cli, ConversationModel: "model-a", ConversationGreeting: true, CreatedAt: 201},
+		{TraceId: "filter-a2", ConversationKey: "c_filterroot", ConversationClient: &cli, ConversationModel: "model-b", CreatedAt: 205},
+		{TraceId: "filter-a3", ConversationKey: "c_filterchild", ConversationParentKey: "c_filterroot", ConversationClient: &sdk, ConversationModel: "model-c", CreatedAt: 204},
+		{TraceId: "filter-b1", ConversationKey: "c_filterpair", ConversationClient: &sdk, ConversationModel: "model-c", CreatedAt: 199},
+		{TraceId: "filter-b2", ConversationKey: "c_filterpair", ConversationClient: &sdk, ConversationModel: "model-c", CreatedAt: 206},
+		{TraceId: "filter-greet", ConversationKey: "c_greet", ConversationClient: &sdk, ConversationModel: "model-c", ConversationGreeting: true, CreatedAt: 209},
+		{TraceId: "filter-hi", ConversationKey: "filter-hi", ConversationClient: &sdk, ConversationModel: "model-c", ConversationGreeting: true, CreatedAt: 208},
+		{TraceId: "filter-short", ConversationKey: "filter-short", ConversationClient: &sdk, ConversationModel: "model-c", CreatedAt: 202},
+		{TraceId: "filter-unknown", Format: "claude", CreatedAt: 200},
+		{TraceId: "filter-repeat1", ConversationKey: "c_helloagain", ConversationClient: &cli, ConversationGreeting: true, CreatedAt: 212, ConversationUserId: 72},
+		{TraceId: "filter-repeat2", ConversationKey: "c_hellobranch", ConversationParentKey: "c_helloagain", ConversationClient: &cli, ConversationGreeting: true, CreatedAt: 213, ConversationUserId: 72},
+		{TraceId: "filter-repeat3", ConversationKey: "c_helloagain", ConversationClient: &cli, ConversationGreeting: true, CreatedAt: 215, ConversationUserId: 72},
+		{TraceId: "filter-Zebra", ConversationKey: "filter-Zebra", ConversationClient: &cli, ConversationModel: "case-tie", CreatedAt: 212, ConversationUserId: 72},
+		{TraceId: "filter-apple", ConversationKey: "filter-apple", ConversationClient: &cli, ConversationModel: "case-tie", CreatedAt: 212, ConversationUserId: 72},
+		{TraceId: "filter-other", ConversationKey: "c_foreign", ConversationUserId: 72, ConversationClient: &sdk, ConversationModel: "model-c", CreatedAt: 210},
+	}
+	for _, trace := range traces {
+		trace.Direction = model.TraceDirectionClientRequest
+		if trace.ConversationUserId == 0 {
+			trace.ConversationUserId = owner
+		}
+	}
+	require.NoError(t, model.SaveRequestTraces(traces))
+
+	const path = "/api/log/conversations?user_id=71"
+	for _, test := range []struct {
+		query string
+		want  []string
+	}{
+		{"&sort_by=turn_count&sort_order=asc&hide_greetings=true", []string{"filter-short", "filter-unknown", "c_filterpair", "c_filterroot"}},
+		{"&sort_by=turn_count&sort_order=desc", []string{"c_filterroot", "c_filterpair", "filter-unknown", "filter-short", "filter-hi", "c_greet"}},
+		{"&sort_by=started_at&sort_order=asc&min_turns=2", []string{"c_filterpair", "c_filterroot"}},
+		{"&sort_by=updated_at&sort_order=asc&max_turns=2&hide_greetings=true", []string{"filter-unknown", "filter-short", "c_filterpair"}},
+		{"&client_tool=Go+HTTP+Client&model_name=model-c&min_turns=3&max_turns=3", []string{"c_filterroot"}},
+		{"&client_tool=Go+HTTP+Client&model_name=model-b", nil},
+		{"&client_tool_unknown=true", []string{"filter-unknown"}},
+	} {
+		var ids []string
+		cursor := ""
+		for {
+			var response struct {
+				Success bool
+				Data    struct {
+					Items []model.TraceConversation
+					Next  string `json:"next_cursor"`
+				}
+			}
+			r := modelManagementRequest(t, GetTraceConversations, http.MethodGet, path+test.query+"&limit=1&cursor="+cursor, nil, &response)
+			require.Equal(t, http.StatusOK, r.Code, test.query)
+			require.True(t, response.Success, r.Body.String())
+			for _, row := range response.Data.Items {
+				ids = append(ids, row.ConversationID)
+				if row.ConversationID == "c_filterroot" {
+					assert.Equal(t, 3, row.TurnCount)
+					assert.Equal(t, cli, row.ClientTool)
+				}
+			}
+			if response.Data.Next == "" {
+				break
+			}
+			require.LessOrEqual(t, len(ids), len(test.want), test.query)
+			require.NotEqual(t, cursor, response.Data.Next)
+			cursor = response.Data.Next
+		}
+		assert.Equal(t, test.want, ids, test.query)
+	}
+	repeated, err := model.ListTraceConversations(t.Context(), model.TraceConversationCursor{Snapshot: 300}, 10, model.TraceConversationFilter{UserID: 72, MinTurns: 2, HideGreetings: true})
+	require.NoError(t, err)
+	assert.Empty(t, repeated, "a conversation with only confirmed greeting retries, including subagents, stays hidden")
+	tied := model.TraceConversationFilter{UserID: 72, ModelName: "case-tie", SortBy: "turn_count", SortOrder: "asc"}
+	cursor := model.TraceConversationCursor{Snapshot: 300}
+	for _, want := range []string{"filter-Zebra", "filter-apple"} {
+		page, err := model.ListTraceConversations(t.Context(), cursor, 1, tied)
+		require.NoError(t, err)
+		require.Len(t, page, 1)
+		assert.Equal(t, want, page[0].ConversationID, "stable ID order across database collations")
+		cursor.ID, cursor.Rank = page[0].ConversationID, int64(page[0].TurnCount)
+	}
+	for _, invalid := range []string{"&min_turns=5&max_turns=2", "&sort_by=unknown", "&sort_order=unknown", "&client_tool=SDK&client_tool_unknown=true", "&min_turns=-1"} {
+		response := modelManagementRequest(t, GetTraceConversations, http.MethodGet, path+invalid, nil, nil)
+		assert.Equal(t, http.StatusBadRequest, response.Code, invalid)
+	}
+	var first struct {
+		Data struct {
+			Next string `json:"next_cursor"`
+		}
+	}
+	modelManagementRequest(t, GetTraceConversations, http.MethodGet, path+"&limit=1&sort_by=turn_count", nil, &first)
+	require.NotEmpty(t, first.Data.Next)
+	changed := modelManagementRequest(t, GetTraceConversations, http.MethodGet, path+"&limit=1&client_tool=Other&cursor="+first.Data.Next, nil, nil)
+	assert.Equal(t, http.StatusBadRequest, changed.Code)
+}
+
+func verifyTraceFilterBackfill(t *testing.T) {
+	t.Helper()
+	const id = "historical-greeting-index"
+	leg := &model.RequestTrace{TraceId: id, RequestId: id, Direction: model.TraceDirectionClientRequest,
+		Format: "openai_responses", CreatedAt: 80, Body: `{"input":"Hello!"}`, Headers: `{"User-Agent":["codex_cli_rs/1.0"]}`}
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		require.NoError(t, model.LOG_DB.Exec("CREATE TABLE IF NOT EXISTS logs (id Int64, created_at Int64, request_id String, other String) ENGINE = MergeTree ORDER BY (created_at, request_id)").Error)
+	}
+	const oldID = "historical-client-from-log"
+	require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"request_id": oldID, "created_at": 79, "other": `{"client_tool":"dsprobe"}`}).Error)
+	attachment := &model.RequestTrace{TraceId: oldID, RequestId: oldID, Direction: model.TraceDirectionClientRequest, Format: "openai_responses",
+		ConversationTitle: "hi", Headers: `{"Content-Type":["application/json"]}`, BodyEncoding: "chunks_v1", Body: "missing manifest", CreatedAt: 79}
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{leg, attachment}))
+	require.NoError(t, service.BackfillTraceConversationFilters(context.Background()))
+	require.NoError(t, service.BackfillTraceConversationFilters(context.Background()))
+	var result model.RequestTrace
+	require.NoError(t, model.LOG_DB.Where("trace_id = ?", id).First(&result).Error)
+	require.NotNil(t, result.ConversationClient)
+	assert.Equal(t, "Codex CLI", *result.ConversationClient)
+	assert.True(t, result.ConversationGreeting)
+	var retained model.RequestTrace
+	require.NoError(t, model.LOG_DB.Where("trace_id = ?", oldID).First(&retained).Error)
+	require.NotNil(t, retained.ConversationClient)
+	assert.Equal(t, "dsprobe", *retained.ConversationClient)
+	assert.False(t, retained.ConversationGreeting)
+	var clients struct {
+		Success bool
+		Data    []string
+	}
+	modelManagementRequest(t, GetTraceConversationClients, http.MethodGet, "/api/log/conversations/clients", nil, &clients)
+	require.True(t, clients.Success)
+	assert.Contains(t, clients.Data, "dsprobe")
+	assert.Contains(t, clients.Data, "Codex CLI")
+	assert.NotContains(t, clients.Data, "")
+}
+
+func TestGreetingOnlyConversationInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		greeting   bool
+	}{
+		{"responses string", `{"input":"  你好！ "}`, true},
+		{"user after system", `{"messages":[{"role":"system","content":"Support agent"},{"role":"user","content":"Hi!"}]}`, true},
+		{"messages text block", `{"messages":[{"role":"user","content":[{"type":"text","text":"HELLO?"}]}]}`, true},
+		{"gemini", `{"contents":[{"parts":[{"text":"您好。"}]}]}`, true},
+		{"short question", `{"input":"多少钱？"}`, false},
+		{"greeting with question", `{"input":"你好，收费吗？"}`, false},
+		{"image caption", `{"input":[{"role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"sample"}]}]}`, false},
+		{"two text blocks", `{"input":[{"role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_text","text":"fix it"}]}]}`, false},
+		{"replayed history", `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"价格？"}]}`, false},
+		{"continuation", `{"previous_response_id":"resp_older","input":"hi"}`, false},
+		{"truncated", `{"input":"hello",`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.greeting, service.TraceConversationMetadata(1, nil, tc.body).GreetingOnly)
+		})
+	}
 }

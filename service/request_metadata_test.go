@@ -452,9 +452,9 @@ func TestRequestSourceRulesPrecedenceAndOriginalHeaders(t *testing.T) {
 	require.NoError(t, operation_setting.ValidateRequestSourceRulesJSON(rules))
 	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(rules))
 	header := http.Header{"User-Agent": {"codex_cli_rs/1.2.3"}, "X-Title": {"my-team-runner"}, "Originator": {"CLI"}, "Editor-Version": {"editor/1"}}
-	assert.Equal(t, "Custom client", identifyClientTool(header), "the first enabled custom rule precedes built-ins")
+	assert.Equal(t, "Custom client", IdentifyRequestClient(header), "the first enabled custom rule precedes built-ins")
 	header.Set("Originator", "cli")
-	assert.Equal(t, "Later rule", identifyClientTool(header), "all conditions must match, including case sensitivity")
+	assert.Equal(t, "Later rule", IdentifyRequestClient(header), "all conditions must match, including case sensitivity")
 	header.Set("Originator", "CLI")
 	var saved []operation_setting.RequestSourceRule
 	require.NoError(t, common.UnmarshalJsonStr(operation_setting.RequestSourceRulesJSONString(), &saved))
@@ -478,8 +478,8 @@ func TestRequestSourceRulesPrecedenceAndOriginalHeaders(t *testing.T) {
 
 	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON("[]"))
 	assert.Equal(t, "[]", operation_setting.RequestSourceRulesJSONString())
-	assert.Equal(t, "Codex CLI", identifyClientTool(header), "clearing rules restores built-in recognition")
-	assert.Equal(t, "Normal HTTP", identifyClientTool(nil))
+	assert.Equal(t, "Codex CLI", IdentifyRequestClient(header), "clearing rules restores built-in recognition")
+	assert.Equal(t, "Normal HTTP", IdentifyRequestClient(nil))
 }
 
 func TestRequestSourceRulesMatchModesAndHeaderBounds(t *testing.T) {
@@ -566,7 +566,7 @@ func TestRequestSourceRulesInvalidLoadsPreserveLastSnapshot(t *testing.T) {
 		assert.NotContains(t, message.Error(), "sk-never-retained")
 		require.Error(t, operation_setting.LoadRequestSourceRulesJSON(raw))
 		assert.Equal(t, saved, operation_setting.RequestSourceRulesJSONString())
-		assert.Equal(t, "Configured", identifyClientTool(http.Header{"User-Agent": {"client/1"}}))
+		assert.Equal(t, "Configured", IdentifyRequestClient(http.Header{"User-Agent": {"client/1"}}))
 	}
 	for _, name := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Api-Key", "api_key", "X-APIKEY", "X-Access-Key-Id", "X-Authentication", "X-Password", "Client-Secret", "X-Credential", "X-Access-Token", "X-CSRF-Token", "Bad Header", " User-Agent", "User-Agent\r\n", "来源"} {
 		encoded, err := common.Marshal([]operation_setting.RequestSourceRule{{Enabled: true, Name: "Configured", Conditions: []operation_setting.RequestSourceCondition{{Header: name, Match: "exact", Value: "private-value"}}}})
@@ -601,7 +601,7 @@ func TestRequestSourceRulesConcurrentSnapshots(t *testing.T) {
 	workers.Go(func() {
 		<-start
 		for range 64 {
-			assert.Contains(t, []string{"First", "Second"}, identifyClientTool(header))
+			assert.Contains(t, []string{"First", "Second"}, IdentifyRequestClient(header))
 			var rules []operation_setting.RequestSourceRule
 			if assert.NoError(t, common.UnmarshalJsonStr(operation_setting.RequestSourceRulesJSONString(), &rules)) && assert.Len(t, rules, 1) {
 				assert.Contains(t, []string{"First", "Second"}, rules[0].Name)

@@ -34,9 +34,25 @@ export interface ConversationRecord {
   title: string
   model_name: string
   user_id: number
+  client_tool?: string
   started_at: number
   updated_at: number
   turn_count: number
+}
+
+export interface ConversationFilters {
+  user_id?: number
+  model_name?: string
+  client_tool?: string
+  client_tool_unknown?: boolean
+  min_turns?: number
+  max_turns?: number
+  hide_greetings?: boolean
+}
+
+export interface ConversationSort {
+  sort_by: 'updated_at' | 'started_at' | 'turn_count'
+  sort_order: 'asc' | 'desc'
 }
 
 export interface RecordedTurn {
@@ -59,7 +75,7 @@ interface CursorPage<T> {
 
 async function getPage<T>(
   path: string,
-  params: Record<string, number | string>,
+  params: Record<string, number | string | boolean | undefined>,
   signal: AbortSignal
 ) {
   const { data } = await api.get<{ success: boolean; data?: CursorPage<T> }>(
@@ -72,12 +88,26 @@ async function getPage<T>(
   return data.data
 }
 
-export const getConversationRecords = (cursor: string, signal: AbortSignal) =>
+export const getConversationRecords = (
+  cursor: string,
+  signal: AbortSignal,
+  filters: ConversationFilters,
+  sort: ConversationSort
+) =>
   getPage<ConversationRecord>(
     '/api/log/conversations',
-    { cursor, limit: 30 },
+    { cursor, limit: 30, ...filters, ...sort },
     signal
   )
+
+export async function getConversationClients(signal: AbortSignal) {
+  const { data } = await api.get<{ success: boolean; data?: string[] }>(
+    '/api/log/conversations/clients',
+    { signal, disableDuplicate: true }
+  )
+  if (!data.success || !Array.isArray(data.data)) throw createServerError(data)
+  return data.data
+}
 
 export const getRecordedTurns = (
   conversationId: string,

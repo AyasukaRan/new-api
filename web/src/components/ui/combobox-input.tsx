@@ -39,6 +39,7 @@ interface ComboboxInputProps {
   // An open list starts with all choices. Null suspends remote suggestions.
   onSearchChange?: (query: string | null) => void
   placeholder?: string
+  maxLength?: number
   emptyText?: string
   showEmptyOnOpen?: boolean
   className?: string
@@ -59,6 +60,7 @@ export function ComboboxInput({
   onValueChange,
   onSearchChange,
   placeholder = 'Select or type...',
+  maxLength,
   emptyText = 'No option found.',
   showEmptyOnOpen = false,
   className,
@@ -87,6 +89,7 @@ export function ComboboxInput({
   // from treating option clicks as outside presses.
   const [dropdown, setDropdown] = React.useState<{
     container: HTMLElement
+    position: 'absolute' | 'fixed'
     top: number
     left: number
     width: number
@@ -150,10 +153,24 @@ export function ComboboxInput({
       input.closest<HTMLElement>('[role="dialog"]') ?? document.body
     const measure = () => {
       const rect = input.getBoundingClientRect()
+      // Dialogs and sheets create a local coordinate system. Anchor the
+      // portaled list to their padding box, including their scroll offset.
+      const local =
+        container !== document.body &&
+        getComputedStyle(container).position !== 'static'
+      const origin = local ? container.getBoundingClientRect() : null
       setDropdown({
         container,
-        top: rect.bottom + 4,
-        left: rect.left,
+        position: local ? 'absolute' : 'fixed',
+        top:
+          rect.bottom +
+          4 -
+          (origin?.top ?? 0) +
+          (local ? container.scrollTop - container.clientTop : 0),
+        left:
+          rect.left -
+          (origin?.left ?? 0) +
+          (local ? container.scrollLeft - container.clientLeft : 0),
         width: rect.width,
       })
     }
@@ -240,6 +257,7 @@ export function ComboboxInput({
         ref={inputRef}
         id={id}
         type='text'
+        maxLength={maxLength}
         role='combobox'
         disabled={disabled}
         aria-label={ariaLabel}
@@ -302,7 +320,7 @@ export function ComboboxInput({
           <div
             ref={dropdownRef}
             style={{
-              position: 'fixed',
+              position: dropdown.position,
               top: dropdown.top,
               left: dropdown.left,
               width: dropdown.width,

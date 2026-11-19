@@ -55,7 +55,7 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 	if c == nil || c.Request == nil || info == nil {
 		return func() {}
 	}
-	metadata := &requestMetadata{format: info.RelayFormat, stream: info.IsStream, clientTool: identifyClientTool(c.Request.Header), reasoningLabel: strings.Clone(requestReasoningLabel(info))}
+	metadata := &requestMetadata{format: info.RelayFormat, stream: info.IsStream, clientTool: IdentifyRequestClient(c.Request.Header), reasoningLabel: strings.Clone(requestReasoningLabel(info))}
 	c.Set(requestMetadataContextKey, metadata)
 	supported := info.RelayFormat == types.RelayFormatClaude ||
 		info.RelayFormat == types.RelayFormatGemini && info.RelayMode != relayconstant.RelayModeEmbeddings ||
@@ -481,7 +481,8 @@ func requestReasoningLabel(info *relaycommon.RelayInfo) string {
 	return effort
 }
 
-func identifyClientTool(header http.Header) string {
+// IdentifyRequestClient returns the public source label for original client headers.
+func IdentifyRequestClient(header http.Header) string {
 	// Inspect original request headers only. Adaptors can inject a different
 	// User-Agent/originator upstream, which does not identify the caller.
 	if source := operation_setting.IdentifyConfiguredRequestSource(header); source != "" {
