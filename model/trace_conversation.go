@@ -82,12 +82,25 @@ type conversationSummary struct {
 
 func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor, limit int) ([]TraceConversation, error) {
 	db := LOG_DB.WithContext(ctx)
-	const key = "COALESCE(NULLIF(conversation_key, ''), trace_id)"
-	const summaryFields = key + " AS conversation_id, MIN(trace_id) AS first_trace, MIN(created_at) AS started_at, MAX(created_at) AS updated_at, COUNT(*) AS turn_count, MAX(conversation_user_id) AS user_id"
-	base := ConversationTraceQuery(db).Where("created_at <= ?", cursor.Snapshot).Session(&gorm.Session{})
+	// A standalone capture has exactly one client request leg. Page these on the
+	// chronological index instead of grouping an entire retention window by trace ID.
+	single := ConversationTraceQuery(db).Where("created_at <= ? AND (conversation_key = trace_id OR conversation_key IS NULL OR conversation_key = '')", cursor.Snapshot)
+	if cursor.ID != "" {
+		single = single.Where("created_at <= ? AND (created_at < ? OR trace_id < ?)", cursor.Time, cursor.Time, cursor.ID)
+	}
+	var rows []conversationSummary
+	if err := single.Select("trace_id AS conversation_id, trace_id AS first_trace, created_at AS started_at, created_at AS updated_at, 1 AS turn_count, conversation_user_id AS user_id").
+		Order("created_at DESC, trace_id DESC").Limit(limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	// Session IDs have the server-issued c_ prefix. An explicit range uses the
+	// (direction, conversation_key, created_at) index even on non-C collations.
+	threads := db.Model(&RequestTrace{}).Where("direction = ? AND created_at <= ? AND conversation_key >= ? AND conversation_key < ? AND conversation_key <> trace_id",
+		TraceDirectionClientRequest, cursor.Snapshot, "c_", "d").Session(&gorm.Session{})
+	const summaryFields = "conversation_key AS conversation_id, MIN(trace_id) AS first_trace, MIN(created_at) AS started_at, MAX(created_at) AS updated_at, COUNT(*) AS turn_count, MAX(conversation_user_id) AS user_id"
 	// Only threads with an explicit parent claim need graph resolution. Ordinary
 	// one-request conversations stay on the database's bounded pagination path.
-	linked := db.Model(&RequestTrace{}).Where("direction = ? AND created_at <= ? AND conversation_user_id > 0 AND conversation_parent_key <> ''",
+	linked := db.Model(&RequestTrace{}).Where("direction = ? AND created_at <= ? AND conversation_user_id > 0 AND conversation_parent_key > ''",
 		TraceDirectionClientRequest, cursor.Snapshot).Session(&gorm.Session{})
 	var edges []struct {
 		ConversationKey       string
@@ -97,18 +110,19 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 		Order("conversation_key, conversation_parent_key").Find(&edges).Error; err != nil {
 		return nil, err
 	}
-	summaries := base.Select(summaryFields).Group(key)
+	summaries := threads.Select(summaryFields).Group("conversation_key")
 	if len(edges) > 0 {
-		summaries = summaries.Where(key+" NOT IN (?) AND "+key+" NOT IN (?)", linked.Select("conversation_key"), linked.Select("conversation_parent_key"))
+		summaries = summaries.Where("conversation_key NOT IN (?) AND conversation_key NOT IN (?)", linked.Select("conversation_key"), linked.Select("conversation_parent_key"))
 	}
 	page := db.Table("(?) AS grouped", summaries)
 	if cursor.ID != "" {
 		page = page.Where("updated_at < ? OR (updated_at = ? AND conversation_id < ?)", cursor.Time, cursor.Time, cursor.ID)
 	}
-	var rows []conversationSummary
-	if err := page.Order("updated_at DESC, conversation_id DESC").Limit(limit).Scan(&rows).Error; err != nil {
+	var independentThreads []conversationSummary
+	if err := page.Order("updated_at DESC, conversation_id DESC").Limit(limit).Scan(&independentThreads).Error; err != nil {
 		return nil, err
 	}
+	rows = append(rows, independentThreads...)
 	if len(edges) > 0 {
 		keys := make([]string, 0, len(edges)*2)
 		for _, edge := range edges {
@@ -118,7 +132,7 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 		nodes := make(map[string]conversationSummary)
 		for batch := range slices.Chunk(slices.Compact(keys), 256) {
 			var matches []conversationSummary
-			if err := base.Where("conversation_key IN ?", batch).Select(summaryFields).Group(key).Scan(&matches).Error; err != nil {
+			if err := threads.Where("conversation_key IN ?", batch).Select(summaryFields).Group("conversation_key").Scan(&matches).Error; err != nil {
 				return nil, err
 			}
 			for _, node := range matches {
@@ -159,11 +173,11 @@ func ListTraceConversations(ctx context.Context, cursor TraceConversationCursor,
 				rows = append(rows, total)
 			}
 		}
-		slices.SortFunc(rows, func(a, b conversationSummary) int {
-			return cmp.Or(cmp.Compare(b.UpdatedAt, a.UpdatedAt), strings.Compare(b.ConversationID, a.ConversationID))
-		})
-		rows = rows[:min(len(rows), limit)]
 	}
+	slices.SortFunc(rows, func(a, b conversationSummary) int {
+		return cmp.Or(cmp.Compare(b.UpdatedAt, a.UpdatedAt), strings.Compare(b.ConversationID, a.ConversationID))
+	})
+	rows = rows[:min(len(rows), limit)]
 
 	items := make([]TraceConversation, 0, len(rows))
 	if len(rows) == 0 {

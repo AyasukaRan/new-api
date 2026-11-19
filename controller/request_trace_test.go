@@ -733,4 +733,27 @@ func verifyTraceConversationList(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, turns, 1)
 	assert.Equal(t, "legacy-chat", turns[0].TraceID)
+
+	// Same timestamp across both paged sources: a historical single request,
+	// a multi-turn session, and a new standalone capture.
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{
+		{TraceId: "z-legacy", Direction: model.TraceDirectionClientRequest, Format: "claude", CreatedAt: 100},
+		{TraceId: "session-older", Direction: model.TraceDirectionClientRequest, ConversationKey: "c_012345", ConversationUserId: 61, CreatedAt: 99},
+		{TraceId: "session-latest", Direction: model.TraceDirectionClientRequest, ConversationKey: "c_012345", ConversationUserId: 61, CreatedAt: 100},
+		{TraceId: "a-single", Direction: model.TraceDirectionClientRequest, ConversationKey: "a-single", CreatedAt: 100},
+	}))
+	cursor = model.TraceConversationCursor{Snapshot: 100}
+	page, err := model.ListTraceConversations(t.Context(), cursor, 2)
+	require.NoError(t, err)
+	require.Len(t, page, 2)
+	assert.Equal(t, "z-legacy", page[0].ConversationID)
+	assert.Equal(t, "c_012345", page[1].ConversationID)
+	assert.Equal(t, 2, page[1].TurnCount)
+	cursor.Time, cursor.ID = page[1].UpdatedAt, page[1].ConversationID
+	page, err = model.ListTraceConversations(t.Context(), cursor, 2)
+	require.NoError(t, err)
+	require.Len(t, page, 2)
+	assert.Equal(t, "a-single", page[0].ConversationID)
+	assert.Equal(t, "c_orphan", page[1].ConversationID)
+	assert.Equal(t, 259, page[1].TurnCount)
 }
