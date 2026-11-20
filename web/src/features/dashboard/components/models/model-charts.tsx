@@ -150,11 +150,11 @@ export function ModelCharts(props: ModelChartsProps) {
     <div
       role='group'
       aria-label={title}
-      className='overflow-hidden rounded-lg border'
+      className='bg-card min-w-0 overflow-hidden rounded-2xl border shadow-xs'
     >
-      <div className='flex w-full flex-col gap-1.5 border-b px-3 py-2 sm:gap-3 sm:px-5 sm:py-3 lg:flex-row lg:items-center lg:justify-between'>
+      <div className='flex w-full flex-col gap-1.5 border-b px-3 py-2 sm:gap-3 sm:px-5 sm:py-3 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between'>
         <div className='min-w-0 space-y-1'>
-          <div className='flex items-center gap-2'>
+          <div className='flex flex-wrap items-center gap-x-2 gap-y-1'>
             <IconBadge tone='chart-4' size='sm'>
               <PieChartIcon />
             </IconBadge>

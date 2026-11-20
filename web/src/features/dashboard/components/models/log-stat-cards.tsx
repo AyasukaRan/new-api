@@ -16,34 +16,26 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useState } from 'react'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { IconBadge } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { getUserQuotaDates } from '@/features/dashboard/api'
 import { useModelStatCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
-import {
-  buildQueryParams,
-  calculateDashboardStats,
-  getDefaultDays,
-} from '@/features/dashboard/lib'
-import type {
-  QuotaDataItem,
-  DashboardFilters,
-} from '@/features/dashboard/types'
+import { calculateDashboardStats } from '@/features/dashboard/lib'
+import type { QuotaDataItem } from '@/features/dashboard/types'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
-import { requireServerSuccess } from '@/lib/server-error-message'
-import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/auth-store'
 
 import { FinancialSummary } from './financial-summary'
 
 interface LogStatCardsProps {
-  filters?: DashboardFilters
-  onDataUpdate?: (data: QuotaDataItem[], loading: boolean) => void
+  data: QuotaDataItem[]
+  loading: boolean
+  error: boolean
+  isAdmin: boolean
+  timeRangeMinutes: number
 }
 
 const MAX_INLINE_STAT_CHARS = 7
@@ -64,67 +56,15 @@ function formatStatNumber(value: number, locale: Intl.LocalesArgument) {
 export function LogStatCards(props: LogStatCardsProps) {
   const { i18n } = useTranslation()
   const statCardsConfig = useModelStatCardsConfig()
-  const user = useAuthStore((state) => state.auth.user)
-  const isAdmin = !!(user?.role && user.role >= 10)
-  const [stats, setStats] = useState<ReturnType<
-    typeof calculateDashboardStats
-  > | null>(null)
-  const [data, setData] = useState<QuotaDataItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(false)
-
-  const [timeRangeMinutes, setTimeRangeMinutes] = useState(0)
-
-  const { filters, onDataUpdate } = props
-
-  useEffect(() => {
-    const abortController = new AbortController()
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoading(true)
-
-    setError(false)
-    onDataUpdate?.([], true)
-
-    const timeRange = computeTimeRange(
-      getDefaultDays(filters?.time_granularity),
-      filters?.start_timestamp,
-      filters?.end_timestamp
-    )
-    const timeDiff = (timeRange.end_timestamp - timeRange.start_timestamp) / 60
-    setTimeRangeMinutes(timeDiff)
-
-    void getUserQuotaDates(buildQueryParams(timeRange, filters), isAdmin)
-      .then((res) => {
-        if (abortController.signal.aborted) return
-        const data = requireServerSuccess(res).data || []
-        setData(data)
-        setStats(calculateDashboardStats(data))
-        onDataUpdate?.(data, false)
-      })
-      .catch(() => {
-        if (abortController.signal.aborted) return
-        setData([])
-        setStats(null)
-        setError(true)
-        onDataUpdate?.([], false)
-      })
-      .finally(() => {
-        if (!abortController.signal.aborted) {
-          setLoading(false)
-        }
-      })
-
-    return () => {
-      abortController.abort()
-    }
-  }, [filters, isAdmin, onDataUpdate])
+  const { data, loading, error, isAdmin, timeRangeMinutes } = props
+  const stats = useMemo(() => calculateDashboardStats(data), [data])
 
   const adaptedStats = {
-    rpm: stats?.totalCount ?? 0,
-    quota: stats?.totalQuota ?? 0,
-    tpm: stats?.totalTokens ?? 0,
-    cacheRead: stats?.totalCacheReadTokens ?? 0,
-    cacheCreation: stats?.totalCacheCreationTokens ?? 0,
+    rpm: stats.totalCount,
+    quota: stats.totalQuota,
+    tpm: stats.totalTokens,
+    cacheRead: stats.totalCacheReadTokens,
+    cacheCreation: stats.totalCacheCreationTokens,
   }
 
   const items = statCardsConfig.map((config) => {

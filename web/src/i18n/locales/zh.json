@@ -4269,6 +4269,7 @@
     "Mutex contention": "互斥锁争用次数",
     "Mutex wait": "互斥锁等待时间",
     "My Subscriptions": "我的订阅",
+    "My usage trends": "我的用量趋势",
     "my-status": "我的状态",
     "MySQL detected": "检测到 MySQL",
     "MySQL is a production-ready relational database. Keep your credentials secure.": "MySQL 是生产就绪的关系数据库。请确保凭据安全。",

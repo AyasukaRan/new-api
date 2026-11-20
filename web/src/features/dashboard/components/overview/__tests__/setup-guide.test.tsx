@@ -137,9 +137,13 @@ describe('overview setup guide', () => {
 
     const toggle = await screen.findByRole('button', { name: 'Setup guide' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(
-      screen.getAllByRole('heading').map((heading) => heading.textContent)
-    ).toEqual(['Overview', 'Usage at a glance'])
+    const usage = screen.getByRole('group', { name: 'Last 24h usage' })
+    const trend = await screen.findByRole('heading', {
+      name: 'My usage trends',
+    })
+    expect(usage.compareDocumentPosition(trend)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
     expect(screen.queryByText('Setup guide complete')).not.toBeInTheDocument()
     expect(screen.queryByText('Setup progress: 3/3')).not.toBeInTheDocument()
     for (const name of ['API Keys', 'Channels', 'Usage Logs', 'Pricing']) {

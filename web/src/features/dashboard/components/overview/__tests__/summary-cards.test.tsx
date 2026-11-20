@@ -305,3 +305,39 @@ it('names the free allowance and its monthly refresh separately from the wallet'
   expect(within(card).getByText('Next allowance refresh')).toBeVisible()
   expect(within(card).getByText(formatTimestamp(now + 86400))).toBeVisible()
 })
+
+it('keeps a pending or unavailable 24h measurement distinct from a confirmed empty day', async () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'member', role: 1, quota: 1000000 })
+  let finishUsage!: (value: { data: { success: boolean; data: null } }) => void
+  const pending = new Promise<{ data: { success: boolean; data: null } }>(
+    (resolve) => {
+      finishUsage = resolve
+    }
+  )
+  const get = vi
+    .spyOn(api, 'get')
+    .mockImplementation((path) =>
+      path === '/api/data/self'
+        ? pending
+        : Promise.resolve({
+            data: { success: true, data: { subscriptions: [] } },
+          })
+    )
+  await renderSummary()
+  const usage = await screen.findByRole('group', { name: 'Last 24h usage' })
+  const credit = await screen.findByRole('group', { name: 'Credit remaining' })
+  expect(usage).toHaveAttribute('aria-busy', 'true')
+  expect(within(usage).queryByText(formatQuota(0))).not.toBeInTheDocument()
+  expect(within(credit).queryByText('No recent usage')).not.toBeInTheDocument()
+  await act(() => finishUsage({ data: { success: false, data: null } }))
+  expect(await within(usage).findByText('Unavailable')).toBeVisible()
+  expect(await within(credit).findByText('Unavailable')).toBeVisible()
+  expect(within(credit).queryByText('Healthy')).not.toBeInTheDocument()
+
+  get.mockResolvedValue({ data: { success: true, data: [] } })
+  await act(() => client.refetchQueries())
+  expect(await within(usage).findByText(formatQuota(0))).toBeVisible()
+  expect(await within(credit).findByText('No recent usage')).toBeVisible()
+})

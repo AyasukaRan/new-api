@@ -16,11 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { Eye, EyeOff } from 'lucide-react'
 import { useState, useCallback, useMemo, lazy, Suspense } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
 import { FadeIn } from '@/components/page-transition'
 import { Button } from '@/components/ui/button'
@@ -32,17 +34,22 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ROLE } from '@/lib/roles'
+import { requireServerSuccess } from '@/lib/server-error-message'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { getUserQuotaDates } from './api'
 import { DashboardMetricSelector } from './components/models/dashboard-metric-selector'
 import { ModelsChartPreferences } from './components/models/models-chart-preferences'
 import { ModelsFilter } from './components/models/models-filter-dialog'
+import { ModelRequestShare } from './components/overview/model-request-share'
 import { OverviewDashboard } from './components/overview/overview-dashboard'
+import { PanelWrapper } from './components/ui/panel-wrapper'
 import { DEFAULT_TIME_GRANULARITY } from './constants'
 import {
   buildDefaultDashboardFilters,
+  buildQueryParams,
   getDefaultDays,
   getSavedChartPreferences,
   getSavedGranularity,
@@ -64,6 +71,8 @@ import type {
 } from './types'
 
 const route = getRouteApi('/_authenticated/dashboard/$section')
+
+const EMPTY_MODEL_DATA: QuotaDataItem[] = []
 
 const LOG_STAT_CARD_FALLBACK_KEYS = [
   'count',
@@ -211,13 +220,13 @@ export function Dashboard() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const params = route.useParams()
+  const userId = useAuthStore((state) => state.auth.user?.id)
   const userRole = useAuthStore((state) => state.auth.user?.role)
+  const isAdmin = Boolean(userRole && userRole >= ROLE.ADMIN)
   const activeSection = (params.section ??
     DASHBOARD_DEFAULT_SECTION) as DashboardSectionId
 
   const [metric, setMetric] = useState<DashboardMetric>('requests')
-  const [modelData, setModelData] = useState<QuotaDataItem[]>([])
-  const [dataLoading, setDataLoading] = useState(false)
   const [chartPreferences, setChartPreferences] =
     useState<DashboardChartPreferences>(() => getSavedChartPreferences())
   const [analyticsTab, setAnalyticsTab] = useState<ModelAnalyticsChartTab>(
@@ -237,19 +246,41 @@ export function Dashboard() {
     }
   )
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
-  const chartTimeDomain = useMemo(
+  const timeGranularity =
+    modelFilters.time_granularity || DEFAULT_TIME_GRANULARITY
+  const modelRange = useMemo(
     () =>
-      buildChartTimeDomain(
-        computeTimeRange(
-          getDefaultDays(modelFilters.time_granularity),
-          modelFilters.start_timestamp,
-          modelFilters.end_timestamp
-        ),
-        modelFilters.time_granularity || DEFAULT_TIME_GRANULARITY
+      computeTimeRange(
+        getDefaultDays(timeGranularity),
+        modelFilters.start_timestamp,
+        modelFilters.end_timestamp
       ),
-    [modelFilters]
+    [timeGranularity, modelFilters.start_timestamp, modelFilters.end_timestamp]
   )
-
+  const chartTimeDomain = useMemo(
+    () => buildChartTimeDomain(modelRange, timeGranularity),
+    [modelRange, timeGranularity]
+  )
+  const modelParams = buildQueryParams(modelRange, {
+    time_granularity: timeGranularity,
+    username: isAdmin ? modelFilters.username : undefined,
+  })
+  const modelQuery = useQuery({
+    queryKey: ['dashboard', 'model-analytics', userId, isAdmin, modelParams],
+    enabled: activeSection === 'models' && userId != null,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const response = requireServerSuccess(
+        await getUserQuotaDates(modelParams, isAdmin)
+      )
+      if (response.data !== null && !Array.isArray(response.data)) {
+        throw new Error('Invalid response')
+      }
+      return response.data ?? []
+    },
+  })
+  const modelData = modelQuery.data ?? EMPTY_MODEL_DATA
+  const dataLoading = modelQuery.isPending
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
     setModelFilters(filters)
   }, [])
@@ -257,14 +288,6 @@ export function Dashboard() {
   const handleResetFilters = useCallback(() => {
     setModelFilters(buildDefaultDashboardFilters(chartPreferences))
   }, [chartPreferences])
-
-  const handleDataUpdate = useCallback(
-    (data: QuotaDataItem[], loading: boolean) => {
-      setModelData(data)
-      setDataLoading(loading)
-    },
-    []
-  )
 
   const handleChartPreferencesChange = useCallback(
     (preferences: DashboardChartPreferences) => {
@@ -277,8 +300,9 @@ export function Dashboard() {
   )
 
   const meta = SECTION_META[activeSection] ?? SECTION_META.overview
-  const isAdmin = Boolean(userRole && userRole >= ROLE.ADMIN)
   const effectiveMetric = isAdmin ? metric : 'requests'
+  const showRequestShare =
+    effectiveMetric === 'requests' && analyticsTab === 'trend'
   const visibleSections = useMemo(
     () =>
       DASHBOARD_SECTION_IDS.filter(
@@ -385,10 +409,71 @@ export function Dashboard() {
               <FadeIn>
                 <Suspense fallback={<LogStatCardsFallback />}>
                   <LazyLogStatCards
-                    filters={modelFilters}
-                    onDataUpdate={handleDataUpdate}
+                    data={modelData}
+                    loading={dataLoading}
+                    error={modelQuery.isError}
+                    isAdmin={isAdmin}
+                    timeRangeMinutes={
+                      (modelRange.end_timestamp - modelRange.start_timestamp) /
+                      60
+                    }
                   />
                 </Suspense>
+              </FadeIn>
+              {isAdmin && (
+                <DashboardMetricSelector
+                  value={metric}
+                  onChange={setMetric}
+                  includeRequests
+                />
+              )}
+              <FadeIn delay={0.05}>
+                {modelQuery.isError ? (
+                  <PanelWrapper title={t('Model Call Analytics')}>
+                    <ErrorState
+                      className='min-h-48'
+                      title={t('Failed to fetch usage')}
+                      onRetry={() => void modelQuery.refetch()}
+                    />
+                  </PanelWrapper>
+                ) : (
+                  <div
+                    className={cn(
+                      'grid min-w-0 gap-3 sm:gap-4',
+                      showRequestShare &&
+                        'xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]'
+                    )}
+                  >
+                    {dataLoading || modelData.length === 0 ? (
+                      <PanelWrapper
+                        title={t('Model Call Analytics')}
+                        loading={dataLoading}
+                        empty
+                      />
+                    ) : (
+                      <Suspense fallback={<ModelChartsFallback />}>
+                        <LazyModelCharts
+                          metric={effectiveMetric}
+                          data={modelData}
+                          timeDomain={chartTimeDomain}
+                          activeTab={analyticsTab}
+                          onActiveTabChange={setAnalyticsTab}
+                          timeGranularity={timeGranularity}
+                        />
+                      </Suspense>
+                    )}
+                    {showRequestShare &&
+                      (dataLoading ? (
+                        <PanelWrapper
+                          title={t('Top models')}
+                          description={t('Request share')}
+                          loading
+                        />
+                      ) : (
+                        <ModelRequestShare data={modelData} />
+                      ))}
+                  </div>
+                )}
               </FadeIn>
               {isAdmin && (
                 <FadeIn delay={0.05}>
@@ -396,13 +481,6 @@ export function Dashboard() {
                     <LazyPerformanceOverview />
                   </Suspense>
                 </FadeIn>
-              )}
-              {isAdmin && (
-                <DashboardMetricSelector
-                  value={metric}
-                  onChange={setMetric}
-                  includeRequests
-                />
               )}
               <FadeIn delay={0.1}>
                 <Suspense fallback={<ModelChartsFallback />}>
@@ -415,37 +493,22 @@ export function Dashboard() {
                   />
                 </Suspense>
               </FadeIn>
-              <FadeIn delay={0.1}>
-                <Suspense fallback={<ModelChartsFallback />}>
-                  <LazyConsumptionDistributionChart
-                    metric={effectiveMetric}
-                    data={modelData}
-                    loading={dataLoading}
-                    timeDomain={chartTimeDomain}
-                    defaultChartType={
-                      chartPreferences.consumptionDistributionChart
-                    }
-                    timeGranularity={
-                      modelFilters.time_granularity || DEFAULT_TIME_GRANULARITY
-                    }
-                  />
-                </Suspense>
-              </FadeIn>
-              <FadeIn delay={0.15}>
-                <Suspense fallback={<ModelChartsFallback />}>
-                  <LazyModelCharts
-                    metric={effectiveMetric}
-                    data={modelData}
-                    loading={dataLoading}
-                    timeDomain={chartTimeDomain}
-                    activeTab={analyticsTab}
-                    onActiveTabChange={setAnalyticsTab}
-                    timeGranularity={
-                      modelFilters.time_granularity || DEFAULT_TIME_GRANULARITY
-                    }
-                  />
-                </Suspense>
-              </FadeIn>
+              {modelQuery.data && !modelQuery.isError && (
+                <FadeIn delay={0.1}>
+                  <Suspense fallback={<ModelChartsFallback />}>
+                    <LazyConsumptionDistributionChart
+                      metric={effectiveMetric}
+                      data={modelData}
+                      loading={dataLoading}
+                      timeDomain={chartTimeDomain}
+                      defaultChartType={
+                        chartPreferences.consumptionDistributionChart
+                      }
+                      timeGranularity={timeGranularity}
+                    />
+                  </Suspense>
+                </FadeIn>
+              )}
             </>
           )}
           {activeSection === 'users' && (

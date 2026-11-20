@@ -4269,6 +4269,7 @@
     "Mutex contention": "Mutex の競合回数",
     "Mutex wait": "Mutex の待機時間",
     "My Subscriptions": "マイサブスクリプション",
+    "My usage trends": "自分の利用状況の推移",
     "my-status": "my-status",
     "MySQL detected": "MySQLが検出されました",
     "MySQL is a production-ready relational database. Keep your credentials secure.": "MySQL は本番環境対応のリレーショナルデータベースです。認証情報を安全に管理してください。",
