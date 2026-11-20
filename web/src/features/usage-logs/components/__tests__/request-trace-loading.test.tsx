@@ -148,7 +148,8 @@ describe('streamed request trace loading', () => {
       if (url === '/api/log/trace') {
         return { data: { success: true, data: { legs: [input, output] } } }
       }
-      requests.push(config?.params.seq)
+      const params = config?.params as { seq: number }
+      requests.push(params.seq)
       return {
         data: bodyStream(
           JSON.stringify({
