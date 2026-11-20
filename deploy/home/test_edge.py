@@ -94,7 +94,8 @@ http {{
             '--network', NETWORK, '--cpus', '.5', '--memory', '64m', '--pids-limit', '64',
             '--log-opt', 'max-size=2m', '--log-opt', 'max-file=2',
             '-p', '127.0.0.1::8079', '-v', str(config) + ':/etc/nginx/nginx.conf:ro',
-            'nginx:1.27-alpine', 'nginx', '-g', 'daemon off;')
+            'nginx:1.30.7-alpine@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3',
+            'nginx', '-g', 'daemon off;')
         containers.append(proxy)
         port = int(cmd('docker', 'port', proxy, '8079/tcp').split(':')[-1])
         edge.wait_for(lambda: edge.status('127.0.0.1', port, 'old'), 10)
