@@ -35,6 +35,8 @@ export interface DashboardFinance {
 
 export type DashboardMetric = 'requests' | 'quota' | 'cost' | 'profit'
 
+export type ModelDashboardMetric = DashboardMetric | 'tokens'
+
 export interface QuotaDataItem {
   finance?: DashboardFinance
   id?: number

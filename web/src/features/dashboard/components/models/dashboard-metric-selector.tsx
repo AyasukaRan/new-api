@@ -19,36 +19,40 @@ For commercial licensing, please contact support@quantumnous.com
 import { useTranslation } from 'react-i18next'
 
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import type { DashboardMetric } from '@/features/dashboard/types'
+import type { ModelDashboardMetric } from '@/features/dashboard/types'
 
-interface DashboardMetricSelectorProps {
-  value: DashboardMetric
-  onChange: (metric: DashboardMetric) => void
-  includeRequests?: boolean
+interface DashboardMetricSelectorProps<M extends ModelDashboardMetric> {
+  value: M
+  options: readonly M[]
+  onChange: (metric: M) => void
 }
 
-export function DashboardMetricSelector(props: DashboardMetricSelectorProps) {
+export function DashboardMetricSelector<M extends ModelDashboardMetric>(
+  props: DashboardMetricSelectorProps<M>
+) {
   const { t } = useTranslation()
-  const items = [
-    ...(props.includeRequests
-      ? [{ value: 'requests' as const, label: t('Requests') }]
-      : []),
-    { value: 'quota' as const, label: t('Revenue') },
-    { value: 'cost' as const, label: t('Upstream cost') },
-    { value: 'profit' as const, label: t('Gross profit') },
-  ]
+  const labels = {
+    requests: t('Requests'),
+    tokens: t('Tokens'),
+    quota: t('Revenue'),
+    cost: t('Upstream cost'),
+    profit: t('Gross profit'),
+  }
   return (
     <Tabs
       value={props.value}
-      onValueChange={(value) => props.onChange(value as DashboardMetric)}
+      onValueChange={(value) => {
+        const metric = props.options.find((option) => option === value)
+        if (metric) props.onChange(metric)
+      }}
     >
       <TabsList
         aria-label={t('Chart metric')}
         className='max-w-full flex-wrap group-data-horizontal/tabs:h-auto'
       >
-        {items.map((item) => (
-          <TabsTrigger key={item.value} value={item.value}>
-            {item.label}
+        {props.options.map((metric) => (
+          <TabsTrigger key={metric} value={metric}>
+            {labels[metric]}
           </TabsTrigger>
         ))}
       </TabsList>

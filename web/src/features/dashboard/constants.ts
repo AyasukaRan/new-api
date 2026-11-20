@@ -23,6 +23,9 @@ export const DASHBOARD_CHART_PREFERENCES_STORAGE_KEY =
   'dashboard_models_chart_preferences'
 export const DEFAULT_TIME_GRANULARITY = 'hour' as const
 export const MAX_CHART_TREND_POINTS = 7
+export const FINANCE_METRICS = ['quota', 'cost', 'profit'] as const
+export const TRAFFIC_METRICS = ['requests', 'tokens'] as const
+export const MODEL_METRICS = [...TRAFFIC_METRICS, ...FINANCE_METRICS] as const
 
 export const DEFAULT_DASHBOARD_CHART_PREFERENCES: DashboardChartPreferences = {
   consumptionDistributionChart: 'bar',

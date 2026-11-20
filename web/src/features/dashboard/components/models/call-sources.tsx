@@ -31,7 +31,7 @@ import { buildChartTimeDomain } from '@/features/dashboard/lib/charts'
 import { getDefaultDays } from '@/features/dashboard/lib/filters'
 import type {
   DashboardChartTimeDomain,
-  DashboardMetric,
+  ModelDashboardMetric,
   DashboardFilters,
   ModelAnalyticsChartTab,
   QuotaDataItem,
@@ -49,7 +49,7 @@ import { PanelWrapper } from '../ui/panel-wrapper'
 import { ModelCharts } from './model-charts'
 
 interface CallSourcesProps {
-  metric?: DashboardMetric
+  metric?: ModelDashboardMetric
   filters?: DashboardFilters
   timeDomain?: DashboardChartTimeDomain
   activeTab?: ModelAnalyticsChartTab
@@ -61,7 +61,9 @@ export function CallSources(props: CallSourcesProps) {
   const userId = useAuthStore((state) => state.auth.user?.id)
   const role = useAuthStore((state) => state.auth.user?.role)
   const isAdmin = Boolean(role && role >= ROLE.ADMIN)
-  const title = isAdmin ? t('Call Sources') : t('Call Trend')
+  const metric = isAdmin || props.metric === 'tokens' ? props.metric : undefined
+  const personalTitle = metric === 'tokens' ? t('Token trend') : t('Call Trend')
+  const title = isAdmin ? t('Call Sources') : personalTitle
   const loadError = isAdmin
     ? t('Failed to load call sources')
     : t('Failed to fetch usage')
@@ -106,6 +108,7 @@ export function CallSources(props: CallSourcesProps) {
   })
   const chartData = useMemo(() => {
     const chartData: QuotaDataItem[] = []
+    const personalSeries = metric === 'tokens' ? t('Tokens') : t('Requests')
     for (const row of query.data ?? []) {
       if (
         typeof row.created_at === 'number' &&
@@ -114,7 +117,7 @@ export function CallSources(props: CallSourcesProps) {
         chartData.push({
           model_name: isAdmin
             ? row.client_tool || t('Unidentified source')
-            : t('Requests'),
+            : personalSeries,
           created_at: row.created_at,
           count: row.count,
           token_used: row.token_used,
@@ -124,7 +127,7 @@ export function CallSources(props: CallSourcesProps) {
       }
     }
     return chartData
-  }, [query.data, isAdmin, t])
+  }, [query.data, isAdmin, metric, t])
 
   let content
   if (query.isPending) {
@@ -174,7 +177,7 @@ export function CallSources(props: CallSourcesProps) {
     <section aria-label={title} aria-busy={query.isFetching}>
       {query.isSuccess && chartData.length > 0 ? (
         <ModelCharts
-          metric={isAdmin ? props.metric : undefined}
+          metric={metric}
           title={title}
           description={description}
           headerActions={refreshButton}

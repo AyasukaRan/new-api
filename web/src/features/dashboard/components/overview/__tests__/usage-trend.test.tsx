@@ -38,19 +38,65 @@ it('preserves empty time buckets and sums hourly model rows for both views', () 
   const day = dayjs('2026-11-18').startOf('day')
   const hour = Math.ceil(day.unix() / 3600) * 3600
   const rows = [
-    { created_at: hour, count: 2, quota: 3, token_used: 5 },
-    { created_at: hour, count: 7, quota: 1, token_used: 1 },
-    { created_at: hour + 7200, count: 1, token_used: 2 },
+    {
+      created_at: hour,
+      count: 2,
+      quota: 3,
+      token_used: 5,
+      cache_read_tokens: 17,
+      cache_creation_tokens: 4,
+    },
+    {
+      created_at: hour,
+      count: 7,
+      quota: 1,
+      token_used: 1,
+      cache_read_tokens: 8,
+      cache_creation_tokens: 0,
+    },
+    {
+      created_at: hour + 7200,
+      count: 1,
+      token_used: 2,
+      cache_creation_tokens: 3,
+    },
     { created_at: hour - 3600, count: 100 },
   ]
   const hourly = summarizePersonalUsage('24h', hour, hour + 23 * 3600, rows)
   expect(hourly.points).toHaveLength(24)
   expect(hourly.points.slice(0, 3)).toEqual([
-    { time: hour, requests: 9, usage: 4, tokens: 6 },
-    { time: hour + 3600, requests: 0, usage: 0, tokens: 0 },
-    { time: hour + 7200, requests: 1, usage: 0, tokens: 2 },
+    {
+      time: hour,
+      requests: 9,
+      usage: 4,
+      tokens: 6,
+      cacheRead: 25,
+      cacheWrite: 4,
+    },
+    {
+      time: hour + 3600,
+      requests: 0,
+      usage: 0,
+      tokens: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    {
+      time: hour + 7200,
+      requests: 1,
+      usage: 0,
+      tokens: 2,
+      cacheRead: null,
+      cacheWrite: 3,
+    },
   ])
-  expect(hourly.totals).toEqual({ requests: 10, usage: 4, tokens: 8 })
+  expect(hourly.totals).toEqual({
+    requests: 10,
+    usage: 4,
+    tokens: 8,
+    cacheRead: null,
+    cacheWrite: 7,
+  })
   const weekly = summarizePersonalUsage(
     '7d',
     day.unix(),
@@ -60,7 +106,13 @@ it('preserves empty time buckets and sums hourly model rows for both views', () 
   expect(weekly.points.map((point) => point.requests)).toEqual([
     10, 0, 0, 0, 0, 0, 4,
   ])
-  expect(weekly.totals).toEqual({ requests: 14, usage: 4, tokens: 8 })
+  expect(weekly.totals).toEqual({
+    requests: 14,
+    usage: 4,
+    tokens: 8,
+    cacheRead: null,
+    cacheWrite: null,
+  })
 })
 
 it('shares the active personal time window with the model ranking, including for admins', async () => {
@@ -84,10 +136,18 @@ it('shares the active personal time window with the model ranking, including for
             ...['B', 'C', 'D', 'E', 'F', 'G'].map((model_name) => ({
               created_at: time,
               count: 1,
+              token_used: model_name === 'G' ? 75 : 1,
               model_name,
             })),
           ]
-        : [{ created_at: time, count: 4, model_name: 'week-only-model' }]
+        : [
+            {
+              created_at: time,
+              count: 4,
+              token_used: 400,
+              model_name: 'week-only-model',
+            },
+          ]
     return { data: { success: true, data: rows } }
   })
   const user = userEvent.setup()
@@ -100,15 +160,22 @@ it('shares the active personal time window with the model ranking, including for
   const requestTotal = await screen.findByRole('button', {
     name: /Requests 16/,
   })
+  const tokens = screen.getByRole('button', { name: /Tokens 88/ })
+  expect(tokens).toHaveAttribute('aria-pressed', 'true')
+  const models = screen.getByRole('table', { name: 'Top models' })
+  const tokenLeader = within(models).getAllByRole('row')[1]
+  expect(
+    within(tokenLeader).getByRole('progressbar', { name: 'G' })
+  ).toHaveAttribute('aria-valuetext', '85.2%')
+  expect(within(tokenLeader).getByRole('cell', { name: '75' })).toBeVisible()
+  await user.click(requestTotal)
   expect(requestTotal).toHaveAttribute('aria-pressed', 'true')
-  const models = screen.getByRole('list', { name: 'Top models' })
   expect(
     within(models).getByRole('progressbar', { name: 'A' })
   ).toHaveAttribute('aria-valuetext', '62.5%')
   expect(
     within(models).getByRole('progressbar', { name: 'Other models' })
   ).toHaveAttribute('aria-valuetext', '12.5%')
-  const tokens = screen.getByRole('button', { name: /Tokens 8/ })
   await user.click(tokens)
   expect(tokens).toHaveAttribute('aria-pressed', 'true')
   expect(get).toHaveBeenCalledTimes(1)

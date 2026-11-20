@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, Clock3, ShieldCheck, TrendingDown } from 'lucide-react'
+import {
+  ArrowRight,
+  Clock3,
+  Layers,
+  ShieldCheck,
+  TrendingDown,
+} from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -33,7 +39,7 @@ import { formatTimestamp } from '@/features/subscriptions/lib/format'
 import { useStatus } from '@/hooks/use-status'
 import { toIntlLocale } from '@/i18n/languages'
 import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
-import { formatNumber, formatQuota } from '@/lib/format'
+import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -155,6 +161,7 @@ export function SummaryCards() {
     return {
       usage: usageStats.points.map((point) => point.usage),
       requests: usageStats.points.map((point) => point.requests),
+      tokens: usageStats.points.map((point) => point.tokens),
     }
   }, [usageStats])
   const recentUsage = usageStats?.totals.usage ?? 0
@@ -230,44 +237,67 @@ export function SummaryCards() {
     todayUsageDisplay,
     currencyEnabled,
     currencyLabel,
+  }).map((item, index) => ({
+    ...item,
+    tone: (['accent-1', 'accent-2', 'accent-3'] as const)[index],
+    sparkline:
+      item.key === 'requests' ? sparklines?.requests : sparklines?.usage,
+    daily: item.key === 'todayUsage',
+  }))
+  const tokenTotal = usageStats?.totals.tokens
+  const fullTokenCount = formatNumber(tokenTotal, locale)
+  const compactTokens = tokenTotal != null && fullTokenCount.length > 9
+  let tokenDisplay = usagePlaceholder
+  if (tokenTotal != null) {
+    tokenDisplay = compactTokens
+      ? formatCompactNumber(tokenTotal, locale)
+      : fullTokenCount
+  }
+  items.unshift({
+    key: 'tokens',
+    title: t('Tokens (24h)'),
+    value: tokenDisplay,
+    description: `${t('Input tokens')} + ${t('Output tokens')}`,
+    icon: Layers,
+    tone: 'accent-2',
+    sparkline: sparklines?.tokens,
+    daily: true,
   })
 
   return (
     <section aria-label={t('Usage at a glance')}>
-      <StaggerContainer className='grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4'>
-        {items.map((item, index) => {
-          const dailyUsage = item.key === 'todayUsage'
-          const tone = (['accent-1', 'accent-2', 'accent-3'] as const)[index]
-          return (
-            <StaggerItem
-              key={item.key}
-              className='bg-card min-w-0 rounded-xl border p-3 sm:p-4'
+      <StaggerContainer className='grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-5'>
+        {items.map((item) => (
+          <StaggerItem
+            key={item.key}
+            className='bg-card min-w-0 rounded-xl border p-3 sm:p-4'
+          >
+            <div
+              role='group'
+              aria-label={item.title}
+              aria-busy={item.daily && usageTrendQuery.isLoading}
             >
-              <div
-                role='group'
-                aria-label={item.title}
-                aria-busy={dailyUsage && usageTrendQuery.isLoading}
-              >
-                <StatCard
-                  title={item.title}
-                  value={item.value}
-                  description={item.description}
-                  icon={item.icon}
-                  tone={tone}
-                  sparkline={
-                    item.key === 'requests'
-                      ? sparklines?.requests
-                      : sparklines?.usage
-                  }
-                  sparklineVariant='line'
-                  loading={loading || (dailyUsage && usageTrendQuery.isLoading)}
-                  compactMobile
-                />
-              </div>
-            </StaggerItem>
-          )
-        })}
-        <StaggerItem className='bg-card min-w-0 rounded-xl border p-3 sm:p-4'>
+              <StatCard
+                title={item.title}
+                value={item.value}
+                exactValue={
+                  item.key === 'tokens' && compactTokens
+                    ? fullTokenCount
+                    : undefined
+                }
+                description={item.description}
+                icon={item.icon}
+                tone={item.tone}
+                sparkline={item.sparkline}
+                sparklineVariant='line'
+                showMobileSparkline={item.key === 'tokens'}
+                loading={loading || (item.daily && usageTrendQuery.isLoading)}
+                compactMobile
+              />
+            </div>
+          </StaggerItem>
+        ))}
+        <StaggerItem className='bg-card col-span-2 min-w-0 rounded-xl border p-3 sm:p-4 xl:col-span-1'>
           <div
             role='group'
             aria-label={t('Credit remaining')}

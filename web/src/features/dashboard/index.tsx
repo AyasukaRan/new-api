@@ -46,7 +46,11 @@ import { ModelsFilter } from './components/models/models-filter-dialog'
 import { ModelRequestShare } from './components/overview/model-request-share'
 import { OverviewDashboard } from './components/overview/overview-dashboard'
 import { PanelWrapper } from './components/ui/panel-wrapper'
-import { DEFAULT_TIME_GRANULARITY } from './constants'
+import {
+  DEFAULT_TIME_GRANULARITY,
+  MODEL_METRICS,
+  TRAFFIC_METRICS,
+} from './constants'
 import {
   buildDefaultDashboardFilters,
   buildQueryParams,
@@ -63,7 +67,7 @@ import {
 } from './section-registry'
 import type {
   DashboardChartPreferences,
-  DashboardMetric,
+  ModelDashboardMetric,
   DashboardFilters,
   ModelAnalyticsChartTab,
   QuotaDataItem,
@@ -226,7 +230,7 @@ export function Dashboard() {
   const activeSection = (params.section ??
     DASHBOARD_DEFAULT_SECTION) as DashboardSectionId
 
-  const [metric, setMetric] = useState<DashboardMetric>('requests')
+  const [metric, setMetric] = useState<ModelDashboardMetric>('requests')
   const [chartPreferences, setChartPreferences] =
     useState<DashboardChartPreferences>(() => getSavedChartPreferences())
   const [analyticsTab, setAnalyticsTab] = useState<ModelAnalyticsChartTab>(
@@ -300,9 +304,12 @@ export function Dashboard() {
   )
 
   const meta = SECTION_META[activeSection] ?? SECTION_META.overview
-  const effectiveMetric = isAdmin ? metric : 'requests'
-  const showRequestShare =
-    effectiveMetric === 'requests' && analyticsTab === 'trend'
+  const effectiveMetric = isAdmin || metric === 'tokens' ? metric : 'requests'
+  const shareMetric =
+    effectiveMetric === 'requests' || effectiveMetric === 'tokens'
+      ? effectiveMetric
+      : undefined
+  const showRequestShare = shareMetric !== undefined && analyticsTab === 'trend'
   const visibleSections = useMemo(
     () =>
       DASHBOARD_SECTION_IDS.filter(
@@ -420,13 +427,11 @@ export function Dashboard() {
                   />
                 </Suspense>
               </FadeIn>
-              {isAdmin && (
-                <DashboardMetricSelector
-                  value={metric}
-                  onChange={setMetric}
-                  includeRequests
-                />
-              )}
+              <DashboardMetricSelector
+                value={effectiveMetric}
+                onChange={setMetric}
+                options={isAdmin ? MODEL_METRICS : TRAFFIC_METRICS}
+              />
               <FadeIn delay={0.05}>
                 {modelQuery.isError ? (
                   <PanelWrapper title={t('Model Call Analytics')}>
@@ -466,11 +471,18 @@ export function Dashboard() {
                       (dataLoading ? (
                         <PanelWrapper
                           title={t('Top models')}
-                          description={t('Request share')}
+                          description={
+                            shareMetric === 'tokens'
+                              ? t('Token share')
+                              : t('Request share')
+                          }
                           loading
                         />
                       ) : (
-                        <ModelRequestShare data={modelData} />
+                        <ModelRequestShare
+                          data={modelData}
+                          metric={shareMetric}
+                        />
                       ))}
                   </div>
                 )}

@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { VChart } from '@visactor/react-vchart'
-import { AreaChart, BarChart3, WalletCards } from 'lucide-react'
+import { AreaChart, BarChart3, Layers, WalletCards } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -32,7 +32,7 @@ import { processChartData } from '@/features/dashboard/lib'
 import type {
   ConsumptionDistributionChartType,
   DashboardChartTimeDomain,
-  DashboardMetric,
+  ModelDashboardMetric,
   QuotaDataItem,
 } from '@/features/dashboard/types'
 import { useThemeRadiusPx } from '@/lib/theme-radius'
@@ -44,7 +44,7 @@ let themeManagerPromise: Promise<
 > | null = null
 
 interface ConsumptionDistributionChartProps {
-  metric?: DashboardMetric
+  metric?: ModelDashboardMetric
   data: QuotaDataItem[]
   loading?: boolean
   timeGranularity?: TimeGranularity
@@ -123,6 +123,7 @@ export function ConsumptionDistributionChart(
     ]
   )
   let titleKey = 'Quota Distribution'
+  if (props.metric === 'tokens') titleKey = 'Token distribution'
   if (props.metric === 'cost') titleKey = 'Upstream cost'
   if (props.metric === 'profit') titleKey = 'Gross profit'
   const spec = chartType === 'bar' ? chartData.spec_line : chartData.spec_area
@@ -142,7 +143,7 @@ export function ConsumptionDistributionChart(
       <div className='flex w-full flex-col gap-1.5 border-b px-3 py-2 sm:gap-3 sm:px-5 sm:py-3 lg:flex-row lg:items-center lg:justify-between'>
         <div className='flex items-center gap-2'>
           <IconBadge tone='success' size='sm'>
-            <WalletCards />
+            {props.metric === 'tokens' ? <Layers /> : <WalletCards />}
           </IconBadge>
           <div className='text-sm font-semibold'>{t(titleKey)}</div>
           <span className='text-muted-foreground text-xs'>

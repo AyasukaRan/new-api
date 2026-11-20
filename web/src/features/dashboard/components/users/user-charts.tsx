@@ -28,6 +28,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTheme } from '@/context/theme-provider'
 import { getUserQuotaDataByUsers } from '@/features/dashboard/api'
 import {
+  FINANCE_METRICS,
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
 } from '@/features/dashboard/constants'
@@ -180,7 +181,11 @@ export function UserCharts(props: UserChartsProps) {
         loading={isLoading}
         error={isError}
       />
-      <DashboardMetricSelector value={metric} onChange={setMetric} />
+      <DashboardMetricSelector
+        value={metric}
+        options={FINANCE_METRICS}
+        onChange={setMetric}
+      />
       <div className='flex items-center gap-1.5 overflow-x-auto pb-1 sm:gap-2'>
         <Tabs
           value={String(selectedRange)}

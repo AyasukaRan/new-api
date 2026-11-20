@@ -19,7 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 import { RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts'
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  XAxis,
+  YAxis,
+} from 'recharts'
 
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
@@ -48,17 +55,26 @@ import {
 import { ModelRequestShare } from './model-request-share'
 
 const metrics = ['requests', 'tokens', 'usage'] as const
+const cacheSeries = ['cacheRead', 'cacheWrite'] as const
+const tokenSeries = ['tokens', ...cacheSeries] as const
 
 export function UsageTrend() {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const [range, setRange] = useState<PersonalUsageRange>('24h')
-  const [metric, setMetric] = useState<PersonalUsageMetric>('requests')
+  const [metric, setMetric] = useState<PersonalUsageMetric>('tokens')
   const query = usePersonalUsage(range)
   const labels = {
     requests: t('Requests'),
     tokens: t('Tokens'),
     usage: t('Usage'),
+  }
+  const series = {
+    requests: { label: labels.requests, color: 'var(--chart-1)' },
+    usage: { label: labels.usage, color: 'var(--chart-1)' },
+    tokens: { label: t('Total Tokens'), color: 'var(--chart-1)' },
+    cacheRead: { label: t('Cache Read'), color: 'var(--chart-2)' },
+    cacheWrite: { label: t('Cache Write'), color: 'var(--chart-3)' },
   }
   const axisDate = new Intl.DateTimeFormat(
     locale,
@@ -180,13 +196,34 @@ export function UsageTrend() {
               })}
             </ToggleGroup>
 
-            <ChartContainer
-              config={{
-                [metric]: { label: labels[metric], color: 'var(--chart-1)' },
-              }}
-              className='aspect-auto h-52 w-full'
-            >
-              <AreaChart
+            {metric === 'tokens' && (
+              <ul
+                aria-label={t('Token Breakdown')}
+                className='mb-2 flex flex-wrap gap-x-5 gap-y-2 px-1 text-xs'
+              >
+                {tokenSeries.map((key) => (
+                  <li key={key} className='flex items-baseline gap-1.5'>
+                    <span className='text-muted-foreground flex items-center gap-1.5'>
+                      <span
+                        aria-hidden='true'
+                        className='size-2 rounded-sm'
+                        style={{ backgroundColor: series[key].color }}
+                      />
+                      {series[key].label}
+                    </span>
+                    {key !== 'tokens' && (
+                      <span className='font-medium tabular-nums'>
+                        {data.totals[key] === null
+                          ? t('Unavailable')
+                          : formatNumber(data.totals[key], locale)}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <ChartContainer config={series} className='aspect-auto h-52 w-full'>
+              <ComposedChart
                 data={data.points}
                 accessibilityLayer
                 title={labels[metric]}
@@ -223,9 +260,9 @@ export function UsageTrend() {
                           Number(payload?.[0]?.payload?.time) * 1000
                         )
                       }
-                      formatter={(value) => (
+                      formatter={(value, name) => (
                         <>
-                          {labels[metric]}
+                          {name}
                           <span className='ml-auto pl-2 font-medium tabular-nums'>
                             {metric === 'usage'
                               ? formatQuota(Number(value))
@@ -239,16 +276,31 @@ export function UsageTrend() {
                 <Area
                   type='linear'
                   dataKey={metric}
+                  name={series[metric].label}
                   stroke={`var(--color-${metric})`}
                   fill={`var(--color-${metric})`}
                   fillOpacity={0.12}
                   strokeWidth={2}
                   isAnimationActive={false}
                 />
-              </AreaChart>
+                {metric === 'tokens' &&
+                  cacheSeries.map((key) => (
+                    <Line
+                      key={key}
+                      type='linear'
+                      dataKey={key}
+                      name={series[key].label}
+                      stroke={series[key].color}
+                      strokeWidth={2}
+                      strokeDasharray={key === 'cacheWrite' ? '4 3' : undefined}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  ))}
+              </ComposedChart>
             </ChartContainer>
           </div>
-          <ModelRequestShare data={data.rows} />
+          <ModelRequestShare data={data.rows} metric={metric} />
         </div>
       )}
     </section>

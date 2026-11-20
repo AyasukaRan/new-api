@@ -31,6 +31,17 @@ export type PersonalUsageMetric = 'requests' | 'tokens' | 'usage'
 
 const HOUR = 3600
 
+type UsageBucket = Record<PersonalUsageMetric, number> & {
+  time: number
+  cacheRead: number | null
+  cacheWrite: number | null
+}
+
+// Older responses may omit cache measurements. A partial sum would understate usage.
+function addReportedTokens(sum: number | null, tokens: number | undefined) {
+  return sum === null || tokens == null ? null : sum + tokens
+}
+
 function startOfUsageWindow(range: PersonalUsageRange, end: number): number {
   // The gateway stores one row per model and UTC hour.
   if (range === '24h') return end - (end % HOUR) - 23 * HOUR
@@ -47,7 +58,7 @@ export function summarizePersonalUsage(
   rows: QuotaDataItem[]
 ) {
   const first = dayjs(start * 1000)
-  const points = Array.from(
+  const points: UsageBucket[] = Array.from(
     { length: range === '24h' ? 24 : 7 },
     (_, index) => ({
       time:
@@ -55,10 +66,18 @@ export function summarizePersonalUsage(
       requests: 0,
       tokens: 0,
       usage: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
     })
   )
   const buckets = new Map(points.map((point) => [point.time, point]))
-  const totals = { requests: 0, tokens: 0, usage: 0 }
+  const totals: Omit<UsageBucket, 'time'> = {
+    requests: 0,
+    tokens: 0,
+    usage: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  }
   const windowRows: QuotaDataItem[] = []
   for (const row of rows) {
     if (row.created_at < start || row.created_at > end) continue
@@ -74,9 +93,22 @@ export function summarizePersonalUsage(
     point.requests += requests
     point.tokens += tokens
     point.usage += usage
+    point.cacheRead = addReportedTokens(point.cacheRead, row.cache_read_tokens)
+    point.cacheWrite = addReportedTokens(
+      point.cacheWrite,
+      row.cache_creation_tokens
+    )
     totals.requests += requests
     totals.tokens += tokens
     totals.usage += usage
+    totals.cacheRead = addReportedTokens(
+      totals.cacheRead,
+      row.cache_read_tokens
+    )
+    totals.cacheWrite = addReportedTokens(
+      totals.cacheWrite,
+      row.cache_creation_tokens
+    )
     windowRows.push(row)
   }
   return { rows: windowRows, points, totals, start, end }

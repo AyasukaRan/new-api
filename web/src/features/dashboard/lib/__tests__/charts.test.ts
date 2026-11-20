@@ -192,6 +192,67 @@ it('bounds a multi-year hourly chart by combining adjacent buckets and preservin
   ).toBe(60)
 })
 
+it('uses actual token volume in model trends, shares, rankings and both distribution charts', () => {
+  const start = timestamp('2026-11-20T06:00:00')
+  const domain = buildChartTimeDomain(
+    { start_timestamp: start, end_timestamp: start + 3600 },
+    'hour'
+  )
+  const rows = [
+    {
+      created_at: start,
+      model_name: 'bulk',
+      token_used: 1000,
+      count: 1,
+      quota: 0,
+    },
+    {
+      created_at: start,
+      model_name: 'small',
+      token_used: 9,
+      count: 20,
+      quota: 80000,
+    },
+    {
+      created_at: start + 3600,
+      model_name: 'bulk',
+      token_used: 3,
+      count: 1,
+      quota: 1,
+    },
+  ]
+  const charts = processChartData(
+    rows,
+    'hour',
+    undefined,
+    undefined,
+    domain,
+    'tokens'
+  )
+  expect(charts.totalCountDisplay).toBe('1,012')
+  expect(charts.totalQuotaDisplay).toBe('1,012')
+  expect(charts.spec_pie.data[0].values).toEqual([
+    { type: 'bulk', value: 1003 },
+    { type: 'small', value: 9 },
+  ])
+  expect(charts.spec_rank_bar.data[0].values).toEqual([
+    { Model: 'bulk', Count: 1003 },
+    { Model: 'small', Count: 9 },
+  ])
+  const trend = charts.spec_model_line.data[0].values as TrendPoint[]
+  expect(
+    trend.filter((point) => point.Model === 'bulk').map((point) => point.Count)
+  ).toEqual([1000, 3])
+  for (const chart of [charts.spec_line, charts.spec_area]) {
+    expect(chart.data[0].values).toContainEqual(
+      expect.objectContaining({ Model: 'bulk', Usage: 1000 })
+    )
+    expect(chart.tooltip.mark.content[0].value({ rawQuota: 1000 })).toBe(
+      '1,000'
+    )
+  }
+})
+
 const cases: Array<{
   granularity: TimeGranularity
   start: string

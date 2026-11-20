@@ -316,28 +316,67 @@ it('keeps a pending or unavailable 24h measurement distinct from a confirmed emp
       finishUsage = resolve
     }
   )
-  const get = vi
-    .spyOn(api, 'get')
-    .mockImplementation((path) =>
-      path === '/api/data/self'
-        ? pending
-        : Promise.resolve({
-            data: { success: true, data: { subscriptions: [] } },
-          })
-    )
+  const get = vi.spyOn(api, 'get').mockImplementation((path) =>
+    path === '/api/data/self'
+      ? pending
+      : Promise.resolve({
+          data: { success: true, data: { subscriptions: [] } },
+        })
+  )
   await renderSummary()
   const usage = await screen.findByRole('group', { name: 'Last 24h usage' })
+  const tokens = await screen.findByRole('group', { name: 'Tokens (24h)' })
   const credit = await screen.findByRole('group', { name: 'Credit remaining' })
   expect(usage).toHaveAttribute('aria-busy', 'true')
+  expect(tokens).toHaveAttribute('aria-busy', 'true')
+  expect(within(tokens).queryByText('0')).not.toBeInTheDocument()
   expect(within(usage).queryByText(formatQuota(0))).not.toBeInTheDocument()
   expect(within(credit).queryByText('No recent usage')).not.toBeInTheDocument()
   await act(() => finishUsage({ data: { success: false, data: null } }))
   expect(await within(usage).findByText('Unavailable')).toBeVisible()
+  expect(await within(tokens).findByText('Unavailable')).toBeVisible()
   expect(await within(credit).findByText('Unavailable')).toBeVisible()
   expect(within(credit).queryByText('Healthy')).not.toBeInTheDocument()
 
   get.mockResolvedValue({ data: { success: true, data: [] } })
   await act(() => client.refetchQueries())
   expect(await within(usage).findByText(formatQuota(0))).toBeVisible()
+  expect(await within(tokens).findByText('0')).toBeVisible()
   expect(await within(credit).findByText('No recent usage')).toBeVisible()
+})
+
+it('shows the personal 24h token count across models without adding cached tokens twice', async () => {
+  vi.spyOn(api, 'get').mockImplementation(async (path) => ({
+    data: {
+      success: true,
+      data:
+        path === '/api/data/self'
+          ? [
+              {
+                model_name: 'A',
+                created_at: now - 3600,
+                token_used: 100000000,
+                cache_read_tokens: 85000000,
+                quota: 10,
+              },
+              {
+                model_name: 'B',
+                created_at: now - 7200,
+                token_used: 23456789,
+                cache_creation_tokens: 3000,
+                quota: 5,
+              },
+              {
+                model_name: 'A',
+                created_at: now - 2 * 86400,
+                token_used: 12000,
+              },
+            ]
+          : { subscriptions: [] },
+    },
+  }))
+  await renderSummary()
+  const tokens = await screen.findByRole('group', { name: 'Tokens (24h)' })
+  expect(await within(tokens).findByText('123.5M')).toBeVisible()
+  expect(within(tokens).getByText('123,456,789')).toBeVisible()
 })

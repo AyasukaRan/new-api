@@ -41,6 +41,7 @@ export interface StatCardDetail {
 interface StatCardProps {
   title: string
   value: string | number
+  exactValue?: string
   description: string
   icon: LucideIcon
   sparkline?: number[]
@@ -52,6 +53,7 @@ interface StatCardProps {
   action?: ReactNode
   iconTone?: IconBadgeTone
   compactMobile?: boolean
+  showMobileSparkline?: boolean
 }
 
 const TONE_CLASSES: Record<StatCardTone, string> = {
@@ -273,16 +275,19 @@ export function StatCard(props: StatCardProps) {
   } else {
     valueContent = (
       <div className='flex flex-col gap-1'>
-        <div className='text-foreground font-mono text-base font-semibold tracking-tight break-all tabular-nums sm:text-2xl'>
+        <div
+          className='text-foreground font-mono text-base font-semibold tracking-tight break-all tabular-nums sm:text-2xl'
+          title={props.exactValue}
+        >
           {props.value}
         </div>
         <p
           className={cn(
             'text-muted-foreground/60 line-clamp-1 text-[11px] leading-relaxed sm:text-xs',
-            props.compactMobile && 'hidden sm:block'
+            props.compactMobile && !props.exactValue && 'hidden sm:block'
           )}
         >
-          {props.description}
+          {props.exactValue ?? props.description}
         </p>
       </div>
     )
@@ -325,7 +330,9 @@ export function StatCard(props: StatCardProps) {
 
       {valueContent}
 
-      <div className='hidden sm:block'>{visualization}</div>
+      <div className={cn(!props.showMobileSparkline && 'hidden sm:block')}>
+        {visualization}
+      </div>
     </div>
   )
 }

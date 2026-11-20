@@ -32,7 +32,7 @@ import {
 import { processChartData } from '@/features/dashboard/lib'
 import type {
   DashboardChartTimeDomain,
-  DashboardMetric,
+  ModelDashboardMetric,
   ModelAnalyticsChartTab,
   QuotaDataItem,
 } from '@/features/dashboard/types'
@@ -53,7 +53,7 @@ const CHART_SPEC_KEYS: Record<ModelAnalyticsChartTab, ChartSpecKey> = {
 }
 
 interface ModelChartsProps {
-  metric?: DashboardMetric
+  metric?: ModelDashboardMetric
   data: QuotaDataItem[]
   loading?: boolean
   timeGranularity?: TimeGranularity

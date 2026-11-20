@@ -455,6 +455,30 @@ it('combines all personal calls into one trend even with source names and a save
   expect(screen.queryByText('Call Sources')).not.toBeInTheDocument()
 })
 
+it('switches a personal call trend to tokens without exposing client names or fetching again', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: rows },
+  })
+  const tree = (metric: 'requests' | 'tokens') => (
+    <QueryClientProvider client={client}>
+      <CallSources filters={filters} metric={metric} />
+    </QueryClientProvider>
+  )
+  const view = render(tree('requests'))
+  await screen.findByLabelText('Rendered area chart')
+  view.rerender(tree('tokens'))
+  const panel = await screen.findByRole('group', { name: 'Token trend' })
+  const chart = await within(panel).findByLabelText('Rendered area chart')
+  const points = JSON.parse(chart.textContent ?? '[]')[0].values as Array<{
+    Model: string
+    Count: number
+  }>
+  expect([...new Set(points.map((point) => point.Model))]).toEqual(['Tokens'])
+  expect(points.reduce((sum, point) => sum + point.Count, 0)).toBe(1300)
+  expect(within(panel).getByText('1,300')).toBeVisible()
+  expect(get).toHaveBeenCalledTimes(1)
+})
+
 it('does not fetch or expose user financial charts after administrator access is removed', async () => {
   const get = vi.spyOn(api, 'get').mockResolvedValue({
     data: {
