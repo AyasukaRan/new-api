@@ -43,6 +43,11 @@ import { MonitoredModelHotspots } from '../models/monitored-model-hotspots'
 import { PanelWrapper } from '../ui/panel-wrapper'
 
 type MonitorPeriod = { hours?: 24 | 168 }
+type PerformanceMetric = 'latency' | 'ttft' | 'throughput' | 'concurrency'
+
+function durationLabel(value?: number | null) {
+  return value === 0 ? '0ms' : formatLatency(value ?? Number.NaN)
+}
 
 export function PerformanceHealthPanel(
   props: MonitorPeriod & { timelineOnly?: boolean }
@@ -101,9 +106,7 @@ function GatewayMonitorPanel(
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const query = usePerfMetricsSummary({ diagnostics: true, hours: props.hours })
-  const [metric, setMetric] = useState<'latency' | 'ttft' | 'throughput'>(
-    'latency'
-  )
+  const [metric, setMetric] = useState<PerformanceMetric>('latency')
   const [showModels, setShowModels] = useState(false)
   const health = props.view === 'health'
   const title = health ? t('Request health') : t('Response performance')
@@ -115,10 +118,9 @@ function GatewayMonitorPanel(
     ttft: hour.avg_ttft_ms ?? null,
     success: hour.success_count,
     failed: hour.request_count - hour.success_count,
-    latency:
-      hour.request_count > 0 && hour.avg_latency_ms > 0
-        ? hour.avg_latency_ms
-        : null,
+    latency: hour.request_count > 0 ? hour.avg_latency_ms : null,
+    p95: hour.p95_latency_ms ?? null,
+    concurrency: hour.peak_concurrency ?? null,
     throughput: hour.avg_tps > 0 ? hour.avg_tps : null,
   }))
   const totals = diagnostics?.total
@@ -132,13 +134,18 @@ function GatewayMonitorPanel(
     ttft: { label: t('Average TTFT'), color: 'var(--color-violet-500)' },
     latency: { label: t('Average latency'), color: 'var(--color-blue-500)' },
     throughput: { label: t('Throughput'), color: 'var(--color-emerald-500)' },
+    p95: { label: t('P95 latency'), color: 'var(--chart-4)' },
+    concurrency: { label: t('Peak concurrency'), color: 'var(--chart-5)' },
   }
-  const perfFormat =
-    metric === 'throughput'
-      ? formatThroughput
-      : (value: number) => (value === 0 ? '0ms' : formatLatency(value))
+  const perfFormat = {
+    latency: durationLabel,
+    ttft: durationLabel,
+    throughput: formatThroughput,
+    concurrency: (value: number) => formatNumber(value, locale),
+  }[metric]
   const perfTitle = {
-    latency: t('Hourly average latency'),
+    latency: t('Hourly average and P95 latency'),
+    concurrency: t('Hourly peak concurrency'),
     ttft: t('Hourly time to first token'),
     throughput: t('Hourly generation speed'),
   }[metric]
@@ -177,15 +184,19 @@ function GatewayMonitorPanel(
     : [
         {
           label: config.latency.label,
-          value: formatLatency(totals?.avg_latency_ms ?? 0),
+          value: durationLabel(
+            totals?.request_count ? totals.avg_latency_ms : null
+          ),
           dot: config.latency.color,
         },
         {
+          label: config.p95.label,
+          value: durationLabel(totals?.p95_latency_ms),
+          dot: config.p95.color,
+        },
+        {
           label: config.ttft.label,
-          value:
-            totals?.avg_ttft_ms === 0
-              ? '0ms'
-              : formatLatency(totals?.avg_ttft_ms ?? 0),
+          value: durationLabel(totals?.avg_ttft_ms),
           dot: config.ttft.color,
         },
         {
@@ -193,10 +204,21 @@ function GatewayMonitorPanel(
           value: formatThroughput(totals?.avg_tps ?? 0),
           dot: config.throughput.color,
         },
+        {
+          label: config.concurrency.label,
+          value:
+            totals?.peak_concurrency != null
+              ? formatNumber(totals.peak_concurrency, locale)
+              : '—',
+          dot: config.concurrency.color,
+        },
       ]
   const hasSeries = health
     ? (totals?.request_count ?? 0) > 0
-    : points.some((point) => point[metric] !== null)
+    : points.some(
+        (point) =>
+          point[metric] !== null || (metric === 'latency' && point.p95 !== null)
+      )
   const tickTime = new Intl.DateTimeFormat(locale, {
     ...(props.hours === 168
       ? ({ month: 'numeric', day: 'numeric' } as const)
@@ -248,12 +270,14 @@ function GatewayMonitorPanel(
             <ToggleGroup
               aria-label={title}
               size='sm'
+              className='max-w-full flex-wrap'
               value={[metric]}
               onValueChange={([value]) => {
                 if (
                   value === 'latency' ||
                   value === 'ttft' ||
-                  value === 'throughput'
+                  value === 'throughput' ||
+                  value === 'concurrency'
                 ) {
                   setMetric(value)
                 }
@@ -263,6 +287,9 @@ function GatewayMonitorPanel(
               <ToggleGroupItem value='ttft'>{t('First token')}</ToggleGroupItem>
               <ToggleGroupItem value='throughput'>
                 {t('Throughput')}
+              </ToggleGroupItem>
+              <ToggleGroupItem value='concurrency'>
+                {t('Concurrency')}
               </ToggleGroupItem>
             </ToggleGroup>
           ))
@@ -278,7 +305,9 @@ function GatewayMonitorPanel(
             <dl
               className={cn(
                 'bg-muted/55 grid gap-2 rounded-lg px-3 py-2.5',
-                health ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'
+                health
+                  ? 'grid-cols-2 sm:grid-cols-4'
+                  : 'grid-cols-[repeat(auto-fit,minmax(min(100%,5.5rem),1fr))]'
               )}
             >
               {kpis.map((kpi) => (
@@ -337,7 +366,7 @@ function GatewayMonitorPanel(
                       <YAxis
                         width='auto'
                         tickCount={4}
-                        allowDecimals={!health}
+                        allowDecimals={!health && metric !== 'concurrency'}
                         tick={{ fill: 'var(--muted-foreground)' }}
                         tickLine={false}
                         axisLine={false}
@@ -390,7 +419,9 @@ function GatewayMonitorPanel(
                         </>
                       ) : (
                         <Line
-                          type='linear'
+                          type={
+                            metric === 'concurrency' ? 'stepAfter' : 'linear'
+                          }
                           dataKey={metric}
                           name={config[metric].label}
                           stroke={config[metric].color}
@@ -403,6 +434,18 @@ function GatewayMonitorPanel(
                           isAnimationActive={false}
                         />
                       )}
+                      {!health && metric === 'latency' && (
+                        <Line
+                          type='linear'
+                          dataKey='p95'
+                          name={config.p95.label}
+                          stroke={config.p95.color}
+                          strokeWidth={2}
+                          strokeDasharray='4 3'
+                          dot={{ r: 2, strokeWidth: 0, fill: config.p95.color }}
+                          isAnimationActive={false}
+                        />
+                      )}
                     </ComposedChart>
                   </ChartContainer>
                 </figure>
@@ -412,6 +455,42 @@ function GatewayMonitorPanel(
                   className='min-h-44'
                 />
               ))}
+            {!health && (metric === 'latency' || metric === 'concurrency') && (
+              <div className='text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs'>
+                {metric === 'latency' &&
+                  totals?.latency_sample_count != null && (
+                    <span>
+                      {t('P95 samples: {{samples}}', {
+                        samples: formatNumber(
+                          totals.latency_sample_count,
+                          locale
+                        ),
+                      })}
+                    </span>
+                  )}
+                {diagnostics?.observed_from != null && (
+                  <span>
+                    {t('Earliest observation: {{time}}', {
+                      time: hoverTime.format(diagnostics.observed_from * 1000),
+                    })}
+                  </span>
+                )}
+                {metric === 'latency' && (
+                  <span>
+                    {t(
+                      '95% of measured relay requests finished within the P95 time.'
+                    )}
+                  </span>
+                )}
+                {metric === 'concurrency' && (
+                  <span>
+                    {t(
+                      'Peak concurrency is the highest number of simultaneous requests on a single gateway instance.'
+                    )}
+                  </span>
+                )}
+              </div>
+            )}
           </>
         )}
       </PanelWrapper>

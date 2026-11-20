@@ -17,6 +17,9 @@ func flushLoop() {
 		time.Sleep(time.Duration(interval) * time.Minute)
 		setting := perf_metrics_setting.GetSetting()
 		if !setting.Enabled {
+			gatewayLoad.mu.Lock()
+			gatewayLoad.pauseLocked()
+			gatewayLoad.mu.Unlock()
 			continue
 		}
 		if err := Flush(); err != nil {
@@ -29,7 +32,7 @@ func flushLoop() {
 // Flush persists both aggregate and channel observations, including the current
 // bucket. Failed writes remain buffered so a later flush can retry them.
 func Flush() error {
-	return errors.Join(flushAggregateMetrics(), FlushChannelMetrics())
+	return errors.Join(flushAggregateMetrics(), FlushChannelMetrics(), gatewayLoad.flush())
 }
 
 func flushAggregateMetrics() error {
@@ -79,6 +82,9 @@ func cleanupExpiredMetrics(retentionDays int) {
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
 	if err := model.DeletePerfMetricsBefore(cutoff); err != nil {
 		common.SysError(common.LogText("failed to cleanup expired perf metrics: %s", err.Error()))
+	}
+	if err := model.DeleteGatewayLoadHoursBefore(cutoff); err != nil {
+		common.SysError("failed to clean up gateway load metrics: " + err.Error())
 	}
 	if err := model.DeleteChannelPerfMetricsBefore(cutoff); err != nil {
 		common.SysError("failed to cleanup expired channel perf metrics: " + err.Error())

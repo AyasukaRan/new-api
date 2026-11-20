@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -195,6 +196,31 @@ func mergedHotBuckets() map[bucketKey]counters {
 	return merged
 }
 
+// Changes to the monitoring setting must not invent idle hours or carry an
+// interrupted stream into a new monitoring period.
+func TestGatewayLoadMonitoringGap(t *testing.T) {
+	const key = "perf_metrics_setting.enabled"
+	original := config.GlobalConfig.ExportAllConfigs()[key]
+	t.Cleanup(func() { require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{key: original})) })
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{key: "true"}))
+	now := time.Unix(3601, 0)
+	worker := gatewayLoadCollector{now: func() time.Time { return now }}
+	worker.start()
+	interrupted := worker.begin(now)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{key: "false"}))
+	now = now.Add(time.Hour)
+	worker.begin(now)()
+	now = now.Add(time.Hour)
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{key: "true"}))
+	worker.begin(now)()
+	interrupted()
+	_, buckets := worker.snapshot(0, 0)
+	require.Len(t, buckets, 2)
+	assert.NotContains(t, buckets, int64(7200))
+	assert.Equal(t, int64(1), buckets[10800].peak)
+	assert.Equal(t, latencyHistogram{0: 1}, buckets[10800].counts)
+}
+
 // TEST_PERF_MYSQL_DSN / TEST_PERF_POSTGRES_DSN optionally run the aggregation
 // against isolated real MySQL/PostgreSQL databases.
 func TestPerformanceAggregationAndFlush(t *testing.T) {
@@ -226,8 +252,8 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 			sqlDB, err := db.DB()
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
-			require.NoError(t, db.Migrator().DropTable(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.Channel{}))
-			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.Channel{}))
+			require.NoError(t, db.Migrator().DropTable(&model.PerfMetric{}, &model.GatewayLoadHour{}, &model.ChannelPerfMetric{}, &model.Channel{}))
+			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.GatewayLoadHour{}, &model.ChannelPerfMetric{}, &model.Channel{}))
 			versionQuery := "SELECT version()"
 			if dialect.name == "sqlite" {
 				versionQuery = "SELECT sqlite_version()"
@@ -310,11 +336,69 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 				{"test-model", RequestDiagnostics{RequestCount: 101, SuccessCount: 100, AvgLatencyMs: 1009, AvgTps: 5, AvgTtftMs: common.GetPointer(int64(100))}},
 				{"second-model", RequestDiagnostics{RequestCount: 1, AvgTtftMs: common.GetPointer(int64(0))}},
 			}, report.Diagnostics.Models)
-			assert.Equal(t, RequestDiagnostics{RequestCount: 102, SuccessCount: 100, AvgLatencyMs: 1000, AvgTps: 5, AvgTtftMs: common.GetPointer(int64(99))}, report.Diagnostics.Total)
+			assert.Equal(t, RequestDiagnostics{RequestCount: 102, SuccessCount: 100, AvgLatencyMs: 1000, AvgTps: 5, AvgTtftMs: common.GetPointer(int64(99))}, report.Diagnostics.Total.RequestDiagnostics)
 			assert.Equal(t, HourDiagnostics{hour, report.Diagnostics.Total}, report.Diagnostics.Hours[(hour-report.WindowStart)/3600])
 			assert.Equal(t, HourDiagnostics{Ts: report.WindowStart}, report.Diagnostics.Hours[0])
 			assert.Equal(t, 98.04, combined.Summary.SuccessRate)
 			assert.Equal(t, 99.01, combined.Models[0].SuccessRate)
+
+			t.Run("exact load samples survive flush and restart", func(t *testing.T) {
+				base := time.Unix(hour-6*3600, 0)
+				clock := base.Add(59*time.Minute + 58*time.Second)
+				worker := gatewayLoadCollector{instance: "worker-1", now: func() time.Time { return clock }}
+				worker.start()
+				report := func(worker *gatewayLoadCollector) *GatewayDiagnostics {
+					start, end := base.Add(-time.Hour).Unix(), clock.Unix()
+					d := gatewayDiagnostics(nil, nil, counters{}, start, end)
+					require.NoError(t, worker.fillDiagnostics(d, start, end))
+					return d
+				}
+
+				before := report(&worker)
+				assert.Nil(t, before.Hours[0].PeakConcurrency) // pre-upgrade
+				assert.Equal(t, common.GetPointer(int64(0)), before.Total.PeakConcurrency)
+				assert.Nil(t, before.Total.P95LatencyMs)
+				assert.Equal(t, common.GetPointer(clock.Unix()), before.ObservedFrom)
+
+				long := worker.begin(clock.Add(-100 * time.Millisecond))
+				clock = clock.Add(500 * time.Millisecond)
+				short := worker.begin(clock)
+				clock = clock.Add(2 * time.Second)
+				short()
+				require.NoError(t, worker.flush()) // long request remains active across flush and two hour boundaries
+				clock = base.Add(2*time.Hour + 2*time.Second)
+				long()
+				clock = base.Add(3*time.Hour + time.Second)
+
+				initial := report(&worker)
+				assert.Equal(t, common.GetPointer(int64(2)), initial.Hours[1].PeakConcurrency)
+				assert.Nil(t, initial.Hours[1].P95LatencyMs)
+				assert.Equal(t, common.GetPointer(int64(2)), initial.Hours[2].PeakConcurrency)
+				assert.Equal(t, common.GetPointer(int64(2000)), initial.Hours[2].P95LatencyMs)
+				assert.Equal(t, common.GetPointer(int64(1)), initial.Hours[3].PeakConcurrency)
+				assert.Equal(t, common.GetPointer(int64(3604100)), initial.Hours[3].P95LatencyMs)
+				assert.Equal(t, common.GetPointer(int64(0)), initial.Hours[4].PeakConcurrency)
+
+				// Independent workers contribute samples to the same percentile; their peaks need not coincide.
+				require.NoError(t, model.SaveGatewayLoadHour(&model.GatewayLoadHour{
+					BucketTs: base.Unix() + 3600, InstanceID: "worker-2", ObservedFrom: base.Unix() + 3600,
+					PeakConcurrency: 3, LatencyCounts: latencyHistogram{20: 38}.encode(),
+				}))
+				result := report(&worker)
+				assert.Equal(t, LoadDiagnostics{
+					PeakConcurrency: common.GetPointer(int64(3)), P95LatencyMs: common.GetPointer(int64(20)), LatencySampleCount: 40,
+				}, result.Total.LoadDiagnostics)
+				require.NoError(t, worker.flush())
+				require.NoError(t, worker.flush())
+				assert.Equal(t, result, report(&worker))
+				assert.Equal(t, result, report(&gatewayLoadCollector{instance: "restarted"}))
+
+				// A zero-millisecond completion is a measurement, and new samples can follow a flushed current hour.
+				worker.begin(clock)()
+				assert.Equal(t, common.GetPointer(int64(0)), report(&worker).Hours[4].P95LatencyMs)
+				require.NoError(t, worker.flush())
+				assert.Equal(t, int64(41), report(&gatewayLoadCollector{}).Total.LatencySampleCount)
+			})
 
 			t.Run("recent history does not change window summaries", func(t *testing.T) {
 				for i := range 26 {

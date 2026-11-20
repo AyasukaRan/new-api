@@ -144,7 +144,11 @@ describe('server performance summaries', () => {
       data: {
         summary: { success_rate: 100, avg_latency_ms: 250, avg_tps: 45 },
         diagnostics: {
+          observed_from: windowStart + 3600,
           total: {
+            p95_latency_ms: 2000,
+            latency_sample_count: 1,
+            peak_concurrency: 7,
             request_count: 101,
             success_count: 100,
             avg_ttft_ms: 120,
@@ -162,6 +166,9 @@ describe('server performance summaries', () => {
             },
             {
               ts: windowStart + 3600,
+              p95_latency_ms: 2000,
+              latency_sample_count: 1,
+              peak_concurrency: 7,
               request_count: 1,
               success_count: 0,
               avg_latency_ms: 2000,
@@ -193,8 +200,13 @@ describe('server performance summaries', () => {
     )
     expect(performance.getByText('1.01s')).toBeVisible()
     expect(
-      performance.getByRole('figure', { name: 'Hourly average latency' })
+      performance.getByRole('figure', {
+        name: 'Hourly average and P95 latency',
+      })
     ).toBeVisible()
+    expect(performance.getByText('2.00s')).toBeVisible()
+    expect(performance.getByText('P95 samples: 1')).toBeVisible()
+    expect(performance.getByText(/^Earliest observation:/)).toBeVisible()
     expect(performance.getByText('120ms')).toBeVisible()
     await userEvent.click(
       performance.getByRole('button', { name: 'First token' })
@@ -208,6 +220,14 @@ describe('server performance summaries', () => {
     expect(
       performance.getByRole('figure', { name: 'Hourly generation speed' })
     ).toBeVisible()
+    await userEvent.click(
+      performance.getByRole('button', { name: 'Concurrency' })
+    )
+    expect(performance.getByText('7')).toBeVisible()
+    expect(
+      performance.getByRole('figure', { name: 'Hourly peak concurrency' })
+    ).toBeVisible()
+    expect(performance.getByText(/single gateway instance/)).toBeVisible()
   })
 
   it('keeps a seven-day monitoring window distinct from the daily totals and preserves a measured zero TTFT', () => {
@@ -256,6 +276,69 @@ describe('server performance summaries', () => {
         screen.getByRole('region', { name: 'Monitored model hotspots' })
       ).getByText('weekly-model')
     ).toBeVisible()
+  })
+
+  it('keeps historical metrics unknown, then shows a measured concurrency peak even without a completed request', async () => {
+    const key = ['perf-metrics-summary', 24, 'diagnostics']
+    const legacy = {
+      request_count: 10,
+      success_count: 10,
+      avg_latency_ms: 750,
+      avg_ttft_ms: null,
+      avg_tps: 0,
+    }
+    client.setQueryData(key, {
+      success: true,
+      data: {
+        diagnostics: {
+          total: legacy,
+          hours: [{ ...legacy, ts: windowStart }],
+          models: [],
+        },
+      },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <ResponsePerformancePanel />
+      </QueryClientProvider>
+    )
+    expect(
+      screen.getByText('P95 latency').nextElementSibling
+    ).toHaveTextContent('—')
+    expect(
+      screen.getByText('Peak concurrency').nextElementSibling
+    ).toHaveTextContent('—')
+    await userEvent.click(screen.getByRole('button', { name: 'Concurrency' }))
+    expect(screen.getByText('No data available')).toBeVisible()
+    const telemetry = {
+      request_count: 0,
+      success_count: 0,
+      avg_ttft_ms: null,
+      avg_latency_ms: 0,
+      avg_tps: 0,
+      peak_concurrency: 3,
+      p95_latency_ms: null,
+      latency_sample_count: 0,
+    }
+    client.setQueryData(key, {
+      success: true,
+      data: {
+        diagnostics: {
+          total: telemetry,
+          hours: [{ ...telemetry, ts: windowStart }],
+          models: [],
+        },
+      },
+    })
+    expect(
+      await screen.findByRole('figure', { name: 'Hourly peak concurrency' })
+    ).toBeVisible()
+    expect(
+      screen.getByText('Peak concurrency').nextElementSibling
+    ).toHaveTextContent('3')
+    expect(
+      screen.getByText('P95 latency').nextElementSibling
+    ).toHaveTextContent('—')
   })
 
   it('keeps model availability distinct from weighted request success and uses weighted latency', () => {

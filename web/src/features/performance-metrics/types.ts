@@ -127,9 +127,16 @@ export type RequestDiagnostics = {
   avg_tps: number
 }
 
+type GatewayWindowDiagnostics = RequestDiagnostics & {
+  p95_latency_ms?: number | null
+  peak_concurrency?: number | null
+  latency_sample_count?: number
+}
+
 export type GatewayDiagnostics = {
-  total: RequestDiagnostics
-  hours: Array<RequestDiagnostics & { ts: number }>
+  observed_from?: number | null
+  total: GatewayWindowDiagnostics
+  hours: Array<GatewayWindowDiagnostics & { ts: number }>
   models: Array<RequestDiagnostics & { model_name: string }>
 }
 

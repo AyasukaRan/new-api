@@ -104,9 +104,22 @@ type RequestDiagnostics struct {
 	AvgTps       float64 `json:"avg_tps"`
 }
 
+// Load diagnostics cover synchronous relay work. A peak is measured on a single
+// gateway instance; simultaneous peaks on different instances cannot be added.
+type LoadDiagnostics struct {
+	P95LatencyMs       *int64 `json:"p95_latency_ms"`
+	PeakConcurrency    *int64 `json:"peak_concurrency"`
+	LatencySampleCount int64  `json:"latency_sample_count"`
+}
+
+type GatewayRequestDiagnostics struct {
+	RequestDiagnostics
+	LoadDiagnostics
+}
+
 type HourDiagnostics struct {
 	Ts int64 `json:"ts"`
-	RequestDiagnostics
+	GatewayRequestDiagnostics
 }
 
 type ModelDiagnostics struct {
@@ -115,9 +128,10 @@ type ModelDiagnostics struct {
 }
 
 type GatewayDiagnostics struct {
-	Total  RequestDiagnostics `json:"total"`
-	Hours  []HourDiagnostics  `json:"hours"`
-	Models []ModelDiagnostics `json:"models"`
+	ObservedFrom *int64                    `json:"observed_from"`
+	Total        GatewayRequestDiagnostics `json:"total"`
+	Hours        []HourDiagnostics         `json:"hours"`
+	Models       []ModelDiagnostics        `json:"models"`
 }
 
 type SummaryAllResult struct {

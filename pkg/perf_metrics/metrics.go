@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/go-redis/redis/v8"
 )
 
 var hotBuckets sync.Map
@@ -34,6 +35,7 @@ const recentSuccessSampleLimit = 24
 const recentSuccessHistoryHours = 7 * 24
 
 func Init() {
+	gatewayLoad.start()
 	go flushLoop()
 }
 
@@ -242,9 +244,9 @@ func Record(sample Sample) {
 	actual, _ := hotBuckets.LoadOrStore(key, &atomicBucket{})
 	actual.(*atomicBucket).add(sample)
 	metricsMu.RUnlock()
-	gopool.Go(func() {
-		recordRedis(key, sample)
-	})
+	if client := common.RDB; common.RedisEnabled && client != nil {
+		gopool.Go(func() { recordRedis(client, key, sample) })
+	}
 }
 
 // queryWindow covers the current partial hour plus the preceding complete
@@ -422,6 +424,9 @@ func QueryAdminSummary(hours int, groups []string, includeDiagnostics bool, rece
 	result := SummaryAllResult{Summary: summarize(all), WindowStart: startTs, WindowEnd: endTs, Models: models, RecentSuccessSeries: recentSeries}
 	if includeDiagnostics {
 		result.Diagnostics = gatewayDiagnostics(modelBuckets, models, all, startTs, endTs)
+		if err := gatewayLoad.fillDiagnostics(result.Diagnostics, startTs, endTs); err != nil {
+			return SummaryAllResult{}, err
+		}
 	}
 	if err := attachSummaryAvailability(&result, hours, groups, modelBuckets, startTs); err != nil {
 		return SummaryAllResult{}, err
@@ -446,7 +451,7 @@ func requestDiagnostics(total counters) RequestDiagnostics {
 func gatewayDiagnostics(modelBuckets map[string]map[int64]counters, models []ModelSummary, all counters, start, end int64) *GatewayDiagnostics {
 	hours := make([]counters, (end-start)/3600+1)
 	result := &GatewayDiagnostics{
-		Total:  requestDiagnostics(all),
+		Total:  GatewayRequestDiagnostics{RequestDiagnostics: requestDiagnostics(all)},
 		Hours:  make([]HourDiagnostics, len(hours)),
 		Models: make([]ModelDiagnostics, 0, len(models)),
 	}
@@ -460,7 +465,7 @@ func gatewayDiagnostics(modelBuckets map[string]map[int64]counters, models []Mod
 		result.Models = append(result.Models, ModelDiagnostics{model.ModelName, requestDiagnostics(total)})
 	}
 	for i, total := range hours {
-		result.Hours[i] = HourDiagnostics{start + int64(i)*3600, requestDiagnostics(total)}
+		result.Hours[i] = HourDiagnostics{Ts: start + int64(i)*3600, GatewayRequestDiagnostics: GatewayRequestDiagnostics{RequestDiagnostics: requestDiagnostics(total)}}
 	}
 	return result
 }
@@ -696,15 +701,12 @@ func avgTps(value counters) float64 {
 	return float64(value.outputTokens) / (float64(value.generationMs) / 1000)
 }
 
-func recordRedis(key bucketKey, sample Sample) {
-	if !common.RedisEnabled || common.RDB == nil {
-		return
-	}
+func recordRedis(client *redis.Client, key bucketKey, sample Sample) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	redisKey := redisBucketKey(key)
-	pipe := common.RDB.TxPipeline()
+	pipe := client.TxPipeline()
 	pipe.HIncrBy(ctx, redisKey, "req", 1)
 	if sample.Success {
 		pipe.HIncrBy(ctx, redisKey, "ok", 1)

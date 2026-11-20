@@ -21,11 +21,15 @@ func init() {
 }
 
 func GetSetting() PerfMetricsSetting {
-	return perfMetricsSetting
+	var setting PerfMetricsSetting
+	config.GlobalConfig.Read("perf_metrics_setting", func(value any) {
+		setting = *value.(*PerfMetricsSetting)
+	})
+	return setting
 }
 
 func GetBucketSeconds() int64 {
-	switch perfMetricsSetting.BucketTime {
+	switch GetSetting().BucketTime {
 	case "minute":
 		return 60
 	case "5min":
@@ -38,8 +42,5 @@ func GetBucketSeconds() int64 {
 }
 
 func GetFlushIntervalMinutes() int {
-	if perfMetricsSetting.FlushInterval < 1 {
-		return 1
-	}
-	return perfMetricsSetting.FlushInterval
+	return max(1, GetSetting().FlushInterval)
 }

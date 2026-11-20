@@ -373,6 +373,7 @@ func migrateDB() error {
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
 		&PerfMetric{},
+		&GatewayLoadHour{},
 		&ChannelPerfMetric{},
 		&ChannelModelActivity{},
 		&ChannelKeyObservation{},

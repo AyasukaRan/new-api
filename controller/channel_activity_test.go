@@ -513,7 +513,7 @@ func TestChannelKeyMonitoringAdminAPI(t *testing.T) {
 
 func TestMarketplaceMonitoringViewerScope(t *testing.T) {
 	db := modelManagementDB(t, "sqlite", "")
-	require.NoError(t, db.AutoMigrate(&model.UserSession{}, &model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}))
+	require.NoError(t, db.AutoMigrate(&model.UserSession{}, &model.PerfMetric{}, &model.GatewayLoadHour{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}))
 	withSelfUseModeDisabled(t)
 	originalGroups, originalRatios := setting.UserUsableGroups2JSONString(), ratio_setting.GroupRatio2JSONString()
 	special := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup

@@ -174,6 +174,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	finishMetadata := service.BeginRequestMetadata(c, relayInfo)
 	defer finishMetadata()
+	if relayFormat != types.RelayFormatOpenAIRealtime && !relayInfo.IsChannelTest {
+		defer perfmetrics.BeginGatewayRequest(relayInfo.StartTime)()
+	}
 
 	defer func() {
 		recovered := recover()
