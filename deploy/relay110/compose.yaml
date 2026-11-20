@@ -44,9 +44,13 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?}
       CRYPTO_SECRET: ${CRYPTO_SECRET:?}
       TRUSTED_PROXIES: 172.29.244.2/32
+      DEFAULT_LANGUAGE: zh-CN
+      ERROR_LOG_ENABLED: "true"
+      DEEPSEEK_DOCUMENT_PAGES_SOCKET: /run/document-pages/pages.sock
       TZ: Asia/Shanghai
     volumes:
       - app-data:/data
+      - document-pages:/run/document-pages:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/status"]
       interval: 10s
@@ -79,3 +83,6 @@ volumes:
   postgres-data:
   redis-data:
   app-data:
+  document-pages:
+    external: true
+    name: new-api-document-pages-socket

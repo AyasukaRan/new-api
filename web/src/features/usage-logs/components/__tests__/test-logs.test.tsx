@@ -193,7 +193,7 @@ it('keeps the independent test page and its filters on test-only API requests', 
   expect(
     logRequests.some(
       (url) =>
-        url.pathname === '/api/log/' && url.searchParams.get('compact') === '1'
+        url.pathname === '/api/log/' && !url.searchParams.has('compact')
     )
   ).toBe(true)
   expect(logRequests.some((url) => url.pathname === '/api/log/stat')).toBe(true)

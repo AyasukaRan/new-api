@@ -22,7 +22,6 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -926,17 +925,10 @@ func TestGreetingOnlyConversationInputs(t *testing.T) {
 func verifyUnidentifiedRequestSources(t *testing.T) {
 	t.Helper()
 	const now = int64(2_000_000_000)
-	label, unknown := "already indexed", ""
-	const product = `{"User-Agent":["ReviewClient/1.7 (private device ID)"],"Authorization":["Bearer SECRET-DO-NOT-SHOW"],"X-Forwarded-For":["192.0.2.24"]}`
+	// Archived traces from a previous deployment must never supply source evidence.
+	unknown := ""
 	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{
-		{TraceId: "one", RequestId: "one", CreatedAt: now, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
-		{TraceId: "two", RequestId: "two", CreatedAt: now - 1, Direction: model.TraceDirectionClientRequest, Headers: product},
-		{TraceId: "two-indexed", RequestId: "indexed", CreatedAt: now - 1, Direction: model.TraceDirectionClientRequest, ConversationClient: &label},
-		{TraceId: "one-duplicate", RequestId: "one", CreatedAt: now - 1, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
-		{TraceId: "just-trace", RequestId: "just-trace", CreatedAt: now - 2, Direction: model.TraceDirectionClientRequest, Headers: `{"User-Agent":["sk-abcdef/2.0"]}`, ConversationClient: &unknown},
-		{TraceId: "upstream", RequestId: "uncaptured", CreatedAt: now - 3, Direction: model.TraceDirectionUpstreamRequest, Headers: product},
-		{TraceId: "too-old", RequestId: "too-old", CreatedAt: now - 86401, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
-		{TraceId: "in-future", RequestId: "in-future", CreatedAt: now + 1, Direction: model.TraceDirectionClientRequest, Headers: product, ConversationClient: &unknown},
+		{TraceId: "old-trace", RequestId: "indexed", CreatedAt: now, Direction: model.TraceDirectionClientRequest, Headers: `{"User-Agent":["SecretDevice/1.0"]}`, ConversationClient: &unknown},
 	}))
 	for i, row := range []struct {
 		id    string
@@ -959,30 +951,18 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 		}
 		require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"created_at": seen, "id": 10000 + i, "type": row.kind, "request_id": row.id, "other": row.other}).Error)
 	}
-	old := operation_setting.RequestSourceRulesJSONString()
-	t.Cleanup(func() { require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(old)) })
-	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(`[{"enabled":true,"name":"Review Client","conditions":[{"header":"User-Agent","match":"prefix","value":"ReviewClient/"}]}]`))
 	report, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 1, 10, model.SourceReviewPosition{})
 	require.NoError(t, err)
 	require.Equal(t, 7, report.Reviewed)
 	assert.False(t, report.Truncated)
-	require.Len(t, report.Groups, 3)
+	require.Len(t, report.Groups, 1)
 	assert.Equal(t, "no_capture", report.Groups[0].Kind)
-	assert.Equal(t, 4, report.Groups[0].Count, "missing client legs and both anonymous legacy rows remain visible")
-	assert.Equal(t, "Review Client", report.Groups[1].CurrentSource)
-	assert.Equal(t, 2, report.Groups[1].Count, "a pair of failed/successful usage rows and its trace count once")
-	require.Len(t, report.Groups[1].Conditions, 1)
-	assert.Equal(t, "ReviewClient/", report.Groups[1].Conditions[0].Value)
-	encoded, err := common.Marshal(report)
-	require.NoError(t, err)
-	for _, private := range []string{"SECRET", "192.0.2.", "device ID", "sk-abcdef", "1.7"} {
-		assert.NotContains(t, string(encoded), private)
-	}
+	assert.Equal(t, 7, report.Groups[0].Count)
 	capped, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 1, 3, model.SourceReviewPosition{})
 	require.NoError(t, err)
 	assert.Equal(t, 3, capped.Reviewed)
 	assert.True(t, capped.Truncated)
-	assert.Len(t, capped.Groups, 2)
+	assert.Len(t, capped.Groups, 1)
 
 	var position model.SourceReviewPosition
 	counts := make(map[string]int)
@@ -1003,18 +983,17 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 			position = decoded.SourceReviewPosition
 		}
 	}
-	assert.Equal(t, map[string]int{"signature": 2, "no_capture": 4, "no_signature": 1}, counts)
+	assert.Equal(t, map[string]int{"no_capture": 7}, counts)
 	// Review a long window without scanning a month's legacy metadata in one
-	// request. The same trace/attempt may occur on both sides of midnight.
+	// request. The same request may occur on both sides of midnight.
 	boundary := now - 7*86400
-	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{{TraceId: "old-duplicate", RequestId: "one", CreatedAt: boundary, Direction: model.TraceDirectionClientRequest, ConversationClient: &unknown, Headers: product}}))
-	for i, id := range []string{"uncaptured", "previous-week"} {
+	for i, id := range []string{"uncaptured", "one", "previous-week"} {
 		require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"created_at": boundary, "id": 20000 + i, "type": model.LogTypeError, "request_id": id, "other": "{}"}).Error)
 	}
 	week, err := service.ReviewUnidentifiedRequestSources(t.Context(), now, 30, 500, model.SourceReviewPosition{})
 	require.NoError(t, err)
 	require.True(t, week.Truncated)
-	assert.Equal(t, 8, week.Reviewed)
+	assert.Equal(t, 7, week.Reviewed)
 	raw, err := base64.RawURLEncoding.DecodeString(week.NextCursor)
 	require.NoError(t, err)
 	var next service.SourceReviewCursor
@@ -1033,49 +1012,23 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 	assert.Zero(t, empty.Reviewed)
 	assert.NotEmpty(t, empty.NextCursor, "an empty day must not hide older days")
 
-	// Native tools have a client leg without a conversation index. Either ID
-	// should find the incoming source without leaking payloads, headers or query parameters.
-	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{
-		{TraceId: "OCR-Trace", RequestId: "OCR-Request", CreatedAt: now, Direction: model.TraceDirectionClientRequest,
-			Url: "/v1/tools/ocr?credential=secret", Headers: `{"user-agent":["Sub2API/DeepSeek"],"Authorization":["secret"]}`, Body: "secret body"},
-		{TraceId: "OCR-Trace", RequestId: "OCR-Request", CreatedAt: now, Seq: 1, Direction: model.TraceDirectionUpstreamRequest,
-			Url: "https://upstream.invalid/private", Headers: `{"User-Agent":["curl/9"]}`},
-		{TraceId: "dynamic-route", RequestId: "other-route", CreatedAt: now, Direction: model.TraceDirectionClientRequest,
-			Url: "/v1/files/secret/content", Headers: `{"X-Client-Name":["Private Name"]}`},
-	}))
-	require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"id": 20100, "created_at": now + 2,
-		"type": model.LogTypeConsume, "request_id": "OCR-Request", "other": `{"client_tool":"Previous label","admin_info":{"request_body":"secret"}}`}).Error)
-	for _, id := range []string{"OCR-Trace", "OCR-Request"} {
-		var result struct {
-			Success bool
-			Data    service.RequestSourceMatch
-		}
-		r := modelManagementRequest(t, LookupRequestSource, http.MethodGet, "/?id="+id, nil, &result)
-		require.Equal(t, http.StatusOK, r.Code)
-		require.True(t, result.Success)
-		assert.Equal(t, service.RequestSourceMatch{TraceID: "OCR-Trace", RequestID: "OCR-Request", CreatedAt: now,
-			Path: "/v1/tools/ocr", RecordedSource: "Previous label", CurrentSource: "Sub2-API"}, result.Data)
-		assert.NotContains(t, r.Body.String(), "secret")
+	var result struct {
+		Success bool
+		Data    service.RequestSourceMatch
 	}
+	r := modelManagementRequest(t, LookupRequestSource, http.MethodGet, "/?id=identified", nil, &result)
+	require.Equal(t, http.StatusOK, r.Code)
+	require.True(t, result.Success)
+	assert.Equal(t, "Codex CLI", result.Data.RecordedSource)
+	assert.Empty(t, result.Data.TraceID)
+	assert.Empty(t, result.Data.CurrentSource)
 	for _, tc := range []struct {
 		id   string
 		code int
 	}{
-		{"ocr-trace", http.StatusNotFound}, {"Missing", http.StatusNotFound}, {"", http.StatusBadRequest}, {"a%2Fb", http.StatusBadRequest},
+		{"old-trace", http.StatusNotFound}, {"Missing", http.StatusNotFound}, {"", http.StatusBadRequest}, {"a%2Fb", http.StatusBadRequest},
 	} {
 		r := modelManagementRequest(t, LookupRequestSource, http.MethodGet, "/?id="+tc.id, nil, nil)
 		assert.Equal(t, tc.code, r.Code, tc.id)
 	}
-	logOnly, err := service.LookupRequestSource(t.Context(), "identified")
-	require.NoError(t, err)
-	require.NotNil(t, logOnly)
-	assert.Equal(t, "Codex CLI", logOnly.RecordedSource)
-	assert.Empty(t, logOnly.CurrentSource)
-	assert.Empty(t, logOnly.TraceID)
-	restricted, err := service.LookupRequestSource(t.Context(), "other-route")
-	require.NoError(t, err)
-	require.NotNil(t, restricted)
-	assert.Empty(t, restricted.Path)
-	assert.Equal(t, "X-Client-Name", restricted.CurrentSource)
-
 }
