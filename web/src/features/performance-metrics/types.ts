@@ -119,6 +119,20 @@ export type PerfModelSummary = {
   availability_series?: SuccessRatePoint[] | null
 }
 
+export type RequestDiagnostics = {
+  avg_ttft_ms: number | null
+  request_count: number
+  success_count: number
+  avg_latency_ms: number
+  avg_tps: number
+}
+
+export type GatewayDiagnostics = {
+  total: RequestDiagnostics
+  hours: Array<RequestDiagnostics & { ts: number }>
+  models: Array<RequestDiagnostics & { model_name: string }>
+}
+
 export type PerfSummaryAllData = {
   success: boolean
   message?: string
@@ -126,6 +140,7 @@ export type PerfSummaryAllData = {
     summary?: PerformanceSummary | null
     window_start?: number
     window_end?: number
+    diagnostics?: GatewayDiagnostics
     models: PerfModelSummary[]
     recent_success_series?: Record<string, SuccessRatePoint[]>
   }

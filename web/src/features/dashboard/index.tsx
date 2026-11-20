@@ -33,10 +33,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 import { ROLE } from '@/lib/roles'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { computeTimeRange } from '@/lib/time'
-import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getUserQuotaDates } from './api'
@@ -51,6 +51,7 @@ import {
   MODEL_METRICS,
   TRAFFIC_METRICS,
 } from './constants'
+import { summarizeUsageRows } from './hooks/use-personal-usage'
 import {
   buildDefaultDashboardFilters,
   buildQueryParams,
@@ -87,15 +88,11 @@ const LOG_STAT_CARD_FALLBACK_KEYS = [
   'average-rpm',
   'average-tpm',
 ] as const
-const PERFORMANCE_METRIC_FALLBACK_KEYS = [
-  'success-rate',
-  'average-latency',
-  'throughput',
-] as const
-const PERFORMANCE_MODEL_FALLBACK_KEYS = [
-  'primary-model',
-  'secondary-model',
-] as const
+const LazyFinancialSummary = lazy(() =>
+  import('./components/models/financial-summary').then((m) => ({
+    default: m.FinancialSummary,
+  }))
+)
 
 const LazyLogStatCards = lazy(() =>
   import('./components/models/log-stat-cards').then((m) => ({
@@ -121,9 +118,12 @@ const LazyCallSources = lazy(() =>
   }))
 )
 
-const LazyPerformanceOverview = lazy(() =>
-  import('./components/models/performance-overview').then((m) => ({
-    default: m.PerformanceOverview,
+const LazyGatewayDiagnostics = lazy(
+  () => import('./components/overview/gateway-diagnostics')
+)
+const LazyUsageEfficiency = lazy(() =>
+  import('./components/overview/usage-efficiency').then((m) => ({
+    default: m.UsageEfficiency,
   }))
 )
 
@@ -141,29 +141,13 @@ const LazyFlowCharts = lazy(() =>
 
 function LogStatCardsFallback() {
   return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-7'>
-        {LOG_STAT_CARD_FALLBACK_KEYS.map((key, index) => (
-          <div
-            key={key}
-            className={cn(
-              'min-w-0 px-2.5 py-1.5 sm:px-3 sm:py-4 xl:px-4',
-              index === LOG_STAT_CARD_FALLBACK_KEYS.length - 1 &&
-                'col-span-2 sm:col-span-1'
-            )}
-          >
-            <div className='flex items-center gap-1.5 sm:gap-2'>
-              <Skeleton className='size-4 rounded-sm sm:size-7 sm:rounded-md' />
-              <Skeleton className='h-4 w-16' />
-            </div>
-            <Skeleton className='mt-1 h-5 w-16 sm:mt-2 sm:h-7 sm:w-20' />
-            <Skeleton className='mt-1 hidden h-3.5 w-28 md:block' />
-          </div>
-        ))}
-      </div>
-      <div className='border-t px-3 py-2'>
-        <Skeleton className='h-4 w-full max-w-md' />
-      </div>
+    <div className='bg-card grid grid-cols-2 gap-px rounded-xl border sm:grid-cols-4 xl:grid-cols-7'>
+      {LOG_STAT_CARD_FALLBACK_KEYS.map((key) => (
+        <div key={key} className='min-w-0 space-y-2 px-3 py-3'>
+          <Skeleton className='h-3 w-16' />
+          <Skeleton className='h-5 w-20' />
+        </div>
+      ))}
     </div>
   )
 }
@@ -175,31 +159,8 @@ function ModelChartsFallback() {
         <Skeleton className='h-5 w-32' />
         <Skeleton className='h-8 w-72' />
       </div>
-      <div className='h-96 p-2'>
+      <div className='h-60 p-2'>
         <Skeleton className='h-full w-full' />
-      </div>
-    </div>
-  )
-}
-
-function PerformanceOverviewFallback() {
-  return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 sm:px-5'>
-        <div className='flex items-center gap-2'>
-          <Skeleton className='h-4 w-24' />
-        </div>
-        {PERFORMANCE_METRIC_FALLBACK_KEYS.map((key) => (
-          <div key={key} className='flex items-center gap-1.5'>
-            <Skeleton className='h-3 w-14' />
-            <Skeleton className='h-4 w-16' />
-          </div>
-        ))}
-        <div className='ml-auto flex items-center gap-2'>
-          {PERFORMANCE_MODEL_FALLBACK_KEYS.map((key) => (
-            <Skeleton key={key} className='h-5 w-28 rounded-full' />
-          ))}
-        </div>
       </div>
     </div>
   )
@@ -221,7 +182,7 @@ const SECTION_META: Record<DashboardSectionId, { titleKey: string }> = {
 }
 
 export function Dashboard() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const navigate = useNavigate()
   const params = route.useParams()
   const userId = useAuthStore((state) => state.auth.user?.id)
@@ -283,7 +244,12 @@ export function Dashboard() {
       return response.data ?? []
     },
   })
-  const modelData = modelQuery.data ?? EMPTY_MODEL_DATA
+  const periodRows = modelQuery.data ?? EMPTY_MODEL_DATA
+  const periodUsage = useMemo(
+    () => chartTimeDomain && summarizeUsageRows(periodRows, chartTimeDomain),
+    [periodRows, chartTimeDomain]
+  )
+  const modelData = periodUsage?.rows ?? periodRows
   const dataLoading = modelQuery.isPending
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
     setModelFilters(filters)
@@ -310,6 +276,16 @@ export function Dashboard() {
       ? effectiveMetric
       : undefined
   const showRequestShare = shareMetric !== undefined && analyticsTab === 'trend'
+  const rangeFormat = new Intl.DateTimeFormat(
+    toIntlLocale(i18n.resolvedLanguage || i18n.language),
+    {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }
+  )
   const visibleSections = useMemo(
     () =>
       DASHBOARD_SECTION_IDS.filter(
@@ -387,7 +363,7 @@ export function Dashboard() {
   }
 
   return (
-    <SectionPageLayout>
+    <SectionPageLayout className='dashboard-workbench'>
       <SectionPageLayout.Title>{t(meta.titleKey)}</SectionPageLayout.Title>
       <SectionPageLayout.Content>
         <div className='space-y-3 sm:space-y-4'>
@@ -419,7 +395,6 @@ export function Dashboard() {
                     data={modelData}
                     loading={dataLoading}
                     error={modelQuery.isError}
-                    isAdmin={isAdmin}
                     timeRangeMinutes={
                       (modelRange.end_timestamp - modelRange.start_timestamp) /
                       60
@@ -427,13 +402,27 @@ export function Dashboard() {
                   />
                 </Suspense>
               </FadeIn>
-              <DashboardMetricSelector
-                value={effectiveMetric}
-                onChange={setMetric}
-                options={isAdmin ? MODEL_METRICS : TRAFFIC_METRICS}
-              />
-              <FadeIn delay={0.05}>
-                {modelQuery.isError ? (
+              <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
+                <DashboardMetricSelector
+                  value={effectiveMetric}
+                  onChange={setMetric}
+                  options={isAdmin ? MODEL_METRICS : TRAFFIC_METRICS}
+                />
+                <div
+                  aria-label={t('Time range')}
+                  className='text-muted-foreground text-xs tabular-nums'
+                >
+                  {isAdmin && modelFilters.username && (
+                    <span className='text-foreground mr-2 font-medium'>
+                      {modelFilters.username}
+                    </span>
+                  )}
+                  {rangeFormat.format(modelRange.start_timestamp * 1000)} –{' '}
+                  {rangeFormat.format(modelRange.end_timestamp * 1000)}
+                </div>
+              </div>
+              <div className='grid min-w-0 grid-cols-1 items-stretch gap-3 lg:grid-cols-2'>
+                {modelQuery.isError && (
                   <PanelWrapper title={t('Model Call Analytics')}>
                     <ErrorState
                       className='min-h-48'
@@ -441,60 +430,32 @@ export function Dashboard() {
                       onRetry={() => void modelQuery.refetch()}
                     />
                   </PanelWrapper>
-                ) : (
-                  <div
-                    className={cn(
-                      'grid min-w-0 gap-3 sm:gap-4',
-                      showRequestShare &&
-                        'xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]'
-                    )}
-                  >
-                    {dataLoading || modelData.length === 0 ? (
-                      <PanelWrapper
-                        title={t('Model Call Analytics')}
-                        loading={dataLoading}
-                        empty
-                      />
-                    ) : (
-                      <Suspense fallback={<ModelChartsFallback />}>
-                        <LazyModelCharts
-                          metric={effectiveMetric}
-                          data={modelData}
-                          timeDomain={chartTimeDomain}
-                          activeTab={analyticsTab}
-                          onActiveTabChange={setAnalyticsTab}
-                          timeGranularity={timeGranularity}
-                        />
-                      </Suspense>
-                    )}
-                    {showRequestShare &&
-                      (dataLoading ? (
-                        <PanelWrapper
-                          title={t('Top models')}
-                          description={
-                            shareMetric === 'tokens'
-                              ? t('Token share')
-                              : t('Request share')
-                          }
-                          loading
-                        />
-                      ) : (
-                        <ModelRequestShare
-                          data={modelData}
-                          metric={shareMetric}
-                        />
-                      ))}
-                  </div>
                 )}
-              </FadeIn>
-              {isAdmin && (
-                <FadeIn delay={0.05}>
-                  <Suspense fallback={<PerformanceOverviewFallback />}>
-                    <LazyPerformanceOverview />
+                {!modelQuery.isError &&
+                  (dataLoading || modelData.length === 0) && (
+                    <PanelWrapper
+                      title={t('Model Call Analytics')}
+                      loading={dataLoading}
+                      empty
+                    />
+                  )}
+                {modelQuery.isSuccess && modelData.length > 0 && (
+                  <Suspense fallback={<ModelChartsFallback />}>
+                    <LazyModelCharts
+                      metric={effectiveMetric}
+                      data={modelData}
+                      timeDomain={chartTimeDomain}
+                      activeTab={analyticsTab}
+                      onActiveTabChange={setAnalyticsTab}
+                      timeGranularity={timeGranularity}
+                    />
                   </Suspense>
-                </FadeIn>
-              )}
-              <FadeIn delay={0.1}>
+                )}
+                {showRequestShare &&
+                  !modelQuery.isError &&
+                  modelData.length > 0 && (
+                    <ModelRequestShare data={modelData} metric={shareMetric} />
+                  )}
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyCallSources
                     metric={effectiveMetric}
@@ -504,14 +465,11 @@ export function Dashboard() {
                     onActiveTabChange={setAnalyticsTab}
                   />
                 </Suspense>
-              </FadeIn>
-              {modelQuery.data && !modelQuery.isError && (
-                <FadeIn delay={0.1}>
+                {modelQuery.isSuccess && modelData.length > 0 && (
                   <Suspense fallback={<ModelChartsFallback />}>
                     <LazyConsumptionDistributionChart
                       metric={effectiveMetric}
                       data={modelData}
-                      loading={dataLoading}
                       timeDomain={chartTimeDomain}
                       defaultChartType={
                         chartPreferences.consumptionDistributionChart
@@ -519,7 +477,31 @@ export function Dashboard() {
                       timeGranularity={timeGranularity}
                     />
                   </Suspense>
-                </FadeIn>
+                )}
+                {modelQuery.isSuccess &&
+                  periodUsage &&
+                  periodUsage.rows.length > 0 && (
+                    <Suspense fallback={<ModelChartsFallback />}>
+                      <LazyUsageEfficiency
+                        data={periodUsage}
+                        granularity={timeGranularity}
+                      />
+                    </Suspense>
+                  )}
+                {isAdmin && (
+                  <Suspense fallback={<ModelChartsFallback />}>
+                    <LazyFinancialSummary
+                      data={modelData}
+                      loading={dataLoading}
+                      error={modelQuery.isError}
+                    />
+                  </Suspense>
+                )}
+              </div>
+              {isAdmin && !modelFilters.username?.trim() && (
+                <Suspense fallback={<ModelChartsFallback />}>
+                  <LazyGatewayDiagnostics />
+                </Suspense>
               )}
             </>
           )}

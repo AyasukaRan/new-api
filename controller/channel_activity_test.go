@@ -582,7 +582,13 @@ func TestMarketplaceMonitoringViewerScope(t *testing.T) {
 				require.NoError(t, common.Unmarshal(w.Body.Bytes(), out))
 			}
 			var summary struct{ Data perfmetrics.SummaryAllResult }
-			request("/summary?recent_model=guest-model&recent_model=member-model&recent_model=hidden-model&recent_model=retired-model&role=100", &summary)
+			request("/summary?recent_model=guest-model&recent_model=member-model&recent_model=hidden-model&recent_model=retired-model&role=100&diagnostics=true", &summary)
+			if viewer.role >= common.RoleAdminUser {
+				require.NotNil(t, summary.Data.Diagnostics)
+				assert.Len(t, summary.Data.Diagnostics.Models, len(viewer.wantModels))
+			} else {
+				assert.Nil(t, summary.Data.Diagnostics)
+			}
 			var names []string
 			for _, item := range summary.Data.Models {
 				names = append(names, item.ModelName)

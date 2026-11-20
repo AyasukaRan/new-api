@@ -70,3 +70,40 @@ export function summarizeDashboardFinance(
   }
   return summary
 }
+
+export function hourlyDashboardFinance(
+  rows: QuotaDataItem[],
+  start: number,
+  end: number
+) {
+  const byHour = new Map<number, QuotaDataItem[]>()
+  for (const row of rows) {
+    if (
+      !Number.isFinite(row.created_at) ||
+      row.created_at < start ||
+      row.created_at > end
+    ) {
+      continue
+    }
+    const time = row.created_at - (row.created_at % 3600)
+    const bucket = byHour.get(time)
+    if (bucket) bucket.push(row)
+    else byHour.set(time, [row])
+  }
+  return Array.from(
+    { length: Math.floor((end - start) / 3600) + 1 },
+    (_, i) => {
+      const time = start + i * 3600
+      const summary = summarizeDashboardFinance(byHour.get(time) ?? [])
+      const complete =
+        summary.unrecorded_count === 0 &&
+        summary.recorded_count >= summary.count
+      return {
+        time,
+        revenue: summary.revenue_quota,
+        cost: complete ? summary.cost_quota : null,
+        profit: complete ? summary.profit_quota : null,
+      }
+    }
+  )
+}

@@ -80,8 +80,26 @@ it('uses the selected hourly window for sparse model and source series with diff
     expect(points.map((point) => point.Time)).toEqual(
       modelPoints.map((point) => point.Time)
     )
-    expect(points.reduce((sum, point) => sum + point.rawQuota, 0)).toBe(100)
+    expect(points.reduce((sum, point) => sum + point.rawQuota, 0)).toBe(4)
   }
+})
+
+it('starts an hourly trend at the first stored UTC hour within the filter, without a fabricated leading zero', () => {
+  const hour = Date.UTC(2026, 10, 20, 0) / 1000
+  const domain = buildChartTimeDomain(
+    { start_timestamp: hour + 2700, end_timestamp: hour + 8000 },
+    'hour'
+  )
+  expect(domain?.buckets.map((bucket) => bucket.start)).toEqual([
+    hour + 3600,
+    hour + 7200,
+  ])
+  expect(
+    buildChartTimeDomain(
+      { start_timestamp: hour + 1200, end_timestamp: hour + 1800 },
+      'hour'
+    )?.buckets
+  ).toEqual([])
 })
 
 it('aggregates hourly requests into shared daily and weekly buckets without losing totals', () => {
@@ -122,6 +140,10 @@ it('aggregates hourly requests into shared daily and weekly buckets without losi
     undefined,
     buildChartTimeDomain(range, 'week')
   )
+  expect(daily.totalDisplay).toBe('9')
+  expect(daily.spec_line.tooltip.mark.content[0].value({ rawQuota: 9 })).toBe(
+    '9'
+  )
   const dailyPoints = daily.spec_model_line.data[0].values as TrendPoint[]
   const weeklyPoints = weekly.spec_model_line.data[0].values as TrendPoint[]
   expect(dailyPoints).toHaveLength(9)
@@ -129,13 +151,13 @@ it('aggregates hourly requests into shared daily and weekly buckets without losi
     dailyPoints.filter((point) => point.Count).map((point) => point.Count)
   ).toEqual([5, 4])
   expect(weeklyPoints.map((point) => point.Count)).toEqual([5, 4])
-  expect(weekly.totalCountDisplay).toBe('9')
+  expect(weekly.totalDisplay).toBe('9')
   expect(
     (weekly.spec_area.data[0].values as UsagePoint[]).reduce(
       (sum, point) => sum + point.rawQuota,
       0
     )
-  ).toBe(60)
+  ).toBe(9)
 })
 
 it('keeps cross-year buckets chronological and distinct rather than sorting month labels', () => {
@@ -189,7 +211,7 @@ it('bounds a multi-year hourly chart by combining adjacent buckets and preservin
       (sum, point) => sum + point.rawQuota,
       0
     )
-  ).toBe(60)
+  ).toBe(10)
 })
 
 it('uses actual token volume in model trends, shares, rankings and both distribution charts', () => {
@@ -229,8 +251,7 @@ it('uses actual token volume in model trends, shares, rankings and both distribu
     domain,
     'tokens'
   )
-  expect(charts.totalCountDisplay).toBe('1,012')
-  expect(charts.totalQuotaDisplay).toBe('1,012')
+  expect(charts.totalDisplay).toBe('1,012')
   expect(charts.spec_pie.data[0].values).toEqual([
     { type: 'bulk', value: 1003 },
     { type: 'small', value: 9 },
@@ -250,6 +271,44 @@ it('uses actual token volume in model trends, shares, rankings and both distribu
     expect(chart.tooltip.mark.content[0].value({ rawQuota: 1000 })).toBe(
       '1,000'
     )
+  }
+})
+
+it('keeps the largest six series legible and preserves all other traffic in the same remainder across charts', () => {
+  const start = timestamp('2026-11-20T06:00:00')
+  const rows = [80, 70, 60, 50, 40, 30, 20, 10].map((count) => ({
+    model_name: String(count),
+    created_at: start,
+    count,
+    quota: 500000,
+  }))
+  const chart = processChartData(
+    rows,
+    'hour',
+    undefined,
+    undefined,
+    buildChartTimeDomain(
+      { start_timestamp: start, end_timestamp: start },
+      'hour'
+    ),
+    'requests'
+  )
+  expect(chart.totalDisplay).toBe('360')
+  expect(chart.spec_pie.data[0].values.at(-1)).toEqual({
+    type: 'Other',
+    value: 30,
+  })
+  expect(chart.spec_model_line.data[0].values.at(-1)).toMatchObject({
+    Model: 'Other',
+    Count: 30,
+  })
+  for (const spec of [chart.spec_line, chart.spec_area]) {
+    expect(spec.data[0].values).toHaveLength(7)
+    expect(spec.data[0].values.at(-1)).toMatchObject({
+      Model: 'Other',
+      Usage: 30,
+      TimeSum: 360,
+    })
   }
 })
 
@@ -347,7 +406,7 @@ describe.each(cases)('dashboard $granularity chart chronology', (scenario) => {
       expect(values.map((row) => row.Time)).toEqual(scenario.labels)
       expect(
         values.map((row) =>
-          key === 'spec_model_line' ? row.Count : row.rawQuota / 500000
+          key === 'spec_model_line' ? row.Count : row.rawQuota
         )
       ).toEqual([11, 2, 3, 4, 5, 6, 7, 8])
     }
@@ -378,7 +437,7 @@ describe.each(cases)('dashboard $granularity chart chronology', (scenario) => {
       expect(values.map((row) => row.Time)).toEqual(scenario.labels.slice(1))
       expect(
         values.map((row) =>
-          key === 'spec_model_line' ? row.Count : row.rawQuota / 500000
+          key === 'spec_model_line' ? row.Count : row.rawQuota
         )
       ).toEqual([0, 0, 0, 0, 0, 0, 8])
     }
@@ -448,7 +507,11 @@ describe('administrator financial charts', () => {
       result.spec_line.data[0].values.map(
         (point: { Usage: number | null }) => point.Usage
       )
-    ).toEqual([-0.3, null, 0])
+    ).toEqual([-150000, null, 0])
+    const grossProfitAxis = result.spec_line.axes.find(
+      (axis: { orient: string }) => axis.orient === 'left'
+    )
+    expect(grossProfitAxis.label.formatMethod(-150000)).toBe('-$0.3')
     const costs = processChartData(
       rows,
       'hour',
@@ -483,7 +546,7 @@ describe('administrator financial charts', () => {
       'cost'
     )
     expect(result.spec_model_line.data[0].values).toEqual([])
-    expect(result.totalCountDisplay).toBe('Not recorded')
+    expect(result.totalDisplay).toBe('Not recorded')
   })
 
   it('uses recorded cost and signed gross profit for user ranks and preserves missing-cost gaps', () => {
@@ -579,7 +642,7 @@ describe('administrator financial charts', () => {
   )
 
   it('keeps the overflow series unrecorded when all of its costs are missing in a bucket', () => {
-    const complete = Array.from({ length: 20 }, (_, index) => ({
+    const complete = Array.from({ length: 6 }, (_, index) => ({
       ...rows[0],
       model_name: `model-${index}`,
       finance: { ...finance, profit_quota: 100000 },

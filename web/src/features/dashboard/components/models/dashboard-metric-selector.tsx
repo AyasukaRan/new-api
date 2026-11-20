@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useTranslation } from 'react-i18next'
 
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { MODEL_METRIC_LABELS } from '@/features/dashboard/constants'
 import type { ModelDashboardMetric } from '@/features/dashboard/types'
 
 interface DashboardMetricSelectorProps<M extends ModelDashboardMetric> {
@@ -31,13 +32,6 @@ export function DashboardMetricSelector<M extends ModelDashboardMetric>(
   props: DashboardMetricSelectorProps<M>
 ) {
   const { t } = useTranslation()
-  const labels = {
-    requests: t('Requests'),
-    tokens: t('Tokens'),
-    quota: t('Revenue'),
-    cost: t('Upstream cost'),
-    profit: t('Gross profit'),
-  }
   return (
     <Tabs
       value={props.value}
@@ -52,7 +46,7 @@ export function DashboardMetricSelector<M extends ModelDashboardMetric>(
       >
         {props.options.map((metric) => (
           <TabsTrigger key={metric} value={metric}>
-            {labels[metric]}
+            {t(MODEL_METRIC_LABELS[metric])}
           </TabsTrigger>
         ))}
       </TabsList>

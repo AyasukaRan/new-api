@@ -33,13 +33,26 @@ const refreshInterval = 60_000
 export function usePerfMetricsSummary(options?: {
   enabled?: boolean
   poll?: boolean
+  diagnostics?: boolean
+  hours?: 24 | 168
 }) {
   const scope = useModelAccessScope()
+  const hours = options?.hours ?? windowHours
   return useQuery({
-    queryKey: [...perfMetricsQueryKeys.summaries, windowHours, ...scope],
+    queryKey: [
+      ...perfMetricsQueryKeys.summaries,
+      hours,
+      ...scope,
+      ...(options?.diagnostics ? ['diagnostics'] : []),
+    ],
     queryFn: async ({ signal }) =>
       requireServerSuccess(
-        await getPerfMetricsSummary(windowHours, undefined, signal)
+        await getPerfMetricsSummary(
+          hours,
+          undefined,
+          signal,
+          options?.diagnostics
+        )
       ),
     staleTime: refreshInterval,
     refetchInterval: options?.poll ? refreshInterval : false,

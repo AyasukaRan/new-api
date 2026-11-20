@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { DashboardChartPreferences, DashboardFilters } from './types'
+import type {
+  DashboardChartPreferences,
+  DashboardFilters,
+  ModelDashboardMetric,
+} from './types'
 
 export const TIME_GRANULARITY_STORAGE_KEY = 'data_export_default_time'
 export const DASHBOARD_CHART_PREFERENCES_STORAGE_KEY =
@@ -26,6 +30,13 @@ export const MAX_CHART_TREND_POINTS = 7
 export const FINANCE_METRICS = ['quota', 'cost', 'profit'] as const
 export const TRAFFIC_METRICS = ['requests', 'tokens'] as const
 export const MODEL_METRICS = [...TRAFFIC_METRICS, ...FINANCE_METRICS] as const
+export const MODEL_METRIC_LABELS = {
+  requests: 'Requests',
+  tokens: 'Tokens',
+  quota: 'Revenue',
+  cost: 'Upstream cost',
+  profit: 'Gross profit',
+} as const satisfies Record<ModelDashboardMetric, string>
 
 export const DEFAULT_DASHBOARD_CHART_PREFERENCES: DashboardChartPreferences = {
   consumptionDistributionChart: 'bar',

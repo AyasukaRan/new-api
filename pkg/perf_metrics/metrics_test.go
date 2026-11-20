@@ -298,9 +298,21 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 			assert.Nil(t, empty.Summary)
 			assert.Empty(t, empty.Series)
 
-			require.NoError(t, model.UpsertPerfMetric(&model.PerfMetric{ModelName: "second-model", Group: "a", BucketTs: hour, RequestCount: 1}))
+			require.NoError(t, model.UpsertPerfMetric(&model.PerfMetric{ModelName: "second-model", Group: "a", BucketTs: hour, RequestCount: 1, TtftCount: 1}))
 			combined, err := QuerySummaryAll(24, groups)
 			require.NoError(t, err)
+			assert.Nil(t, combined.Diagnostics)
+			report, err := QueryAdminSummary(24, groups, true)
+			require.NoError(t, err)
+			require.NotNil(t, report.Diagnostics)
+			require.Len(t, report.Diagnostics.Hours, 24)
+			assert.Equal(t, []ModelDiagnostics{
+				{"test-model", RequestDiagnostics{RequestCount: 101, SuccessCount: 100, AvgLatencyMs: 1009, AvgTps: 5, AvgTtftMs: common.GetPointer(int64(100))}},
+				{"second-model", RequestDiagnostics{RequestCount: 1, AvgTtftMs: common.GetPointer(int64(0))}},
+			}, report.Diagnostics.Models)
+			assert.Equal(t, RequestDiagnostics{RequestCount: 102, SuccessCount: 100, AvgLatencyMs: 1000, AvgTps: 5, AvgTtftMs: common.GetPointer(int64(99))}, report.Diagnostics.Total)
+			assert.Equal(t, HourDiagnostics{hour, report.Diagnostics.Total}, report.Diagnostics.Hours[(hour-report.WindowStart)/3600])
+			assert.Equal(t, HourDiagnostics{Ts: report.WindowStart}, report.Diagnostics.Hours[0])
 			assert.Equal(t, 98.04, combined.Summary.SuccessRate)
 			assert.Equal(t, 99.01, combined.Models[0].SuccessRate)
 

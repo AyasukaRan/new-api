@@ -304,6 +304,7 @@ export function StatCard(props: StatCardProps) {
 
   return (
     <div
+      data-slot='dashboard-stat'
       className={cn(
         'group flex flex-col justify-between sm:min-h-32 sm:gap-3',
         props.compactMobile ? 'gap-1' : 'gap-1.5'
@@ -330,7 +331,10 @@ export function StatCard(props: StatCardProps) {
 
       {valueContent}
 
-      <div className={cn(!props.showMobileSparkline && 'hidden sm:block')}>
+      <div
+        data-slot='stat-trend'
+        className={cn(!props.showMobileSparkline && 'hidden sm:block')}
+      >
         {visualization}
       </div>
     </div>

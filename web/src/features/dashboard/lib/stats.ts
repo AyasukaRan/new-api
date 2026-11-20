@@ -27,7 +27,7 @@ export function safeDivide(
   precision: number = 3
 ): number {
   const result = value / divisor
-  if (isNaN(result) || !isFinite(result)) return 0
+  if (!Number.isFinite(result)) return 0
   const factor = Math.pow(10, precision)
   return Math.round(result * factor) / factor
 }
@@ -41,6 +41,11 @@ export function calculateDashboardStats(data: QuotaDataItem[]) {
       const cacheRead = item.cache_read_tokens ?? 0
       const cacheCreation = item.cache_creation_tokens ?? 0
       return {
+        cacheReadRecorded:
+          acc.cacheReadRecorded && Number.isFinite(item.cache_read_tokens),
+        cacheCreationRecorded:
+          acc.cacheCreationRecorded &&
+          Number.isFinite(item.cache_creation_tokens),
         totalQuota: acc.totalQuota + (Number(item.quota) || 0),
         totalCount: acc.totalCount + (Number(item.count) || 0),
         totalTokens: acc.totalTokens + (Number(item.token_used) || 0),
@@ -53,6 +58,8 @@ export function calculateDashboardStats(data: QuotaDataItem[]) {
       }
     },
     {
+      cacheReadRecorded: true,
+      cacheCreationRecorded: true,
       totalQuota: 0,
       totalCount: 0,
       totalTokens: 0,

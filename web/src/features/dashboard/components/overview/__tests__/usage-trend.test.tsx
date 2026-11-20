@@ -23,9 +23,14 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 import dayjs from '@/lib/dayjs'
+import { formatLogQuota } from '@/lib/format'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { summarizePersonalUsage } from '../../../hooks/use-personal-usage'
+import {
+  summarizePersonalUsage,
+  summarizeUsageRows,
+} from '../../../hooks/use-personal-usage'
+import { UsageEfficiency } from '../usage-efficiency'
 import { UsageTrend } from '../usage-trend'
 
 afterEach(() => {
@@ -131,12 +136,19 @@ it('shares the active personal time window with the model ranking, including for
     const rows =
       params.default_time === 'hour'
         ? [
-            { created_at: time, count: 5, model_name: 'A', token_used: 8 },
+            {
+              created_at: time,
+              count: 5,
+              model_name: 'A',
+              token_used: 8,
+              quota: 100000,
+            },
             { created_at: time - 3600, count: 5, model_name: 'A' },
             ...['B', 'C', 'D', 'E', 'F', 'G'].map((model_name) => ({
               created_at: time,
               count: 1,
               token_used: model_name === 'G' ? 75 : 1,
+              quota: model_name === 'B' ? 1000000 : 0,
               model_name,
             })),
           ]
@@ -162,7 +174,7 @@ it('shares the active personal time window with the model ranking, including for
   })
   const tokens = screen.getByRole('button', { name: /Tokens 88/ })
   expect(tokens).toHaveAttribute('aria-pressed', 'true')
-  const models = screen.getByRole('table', { name: 'Top models' })
+  const models = screen.getByRole('table', { name: 'Model hotspots' })
   const tokenLeader = within(models).getAllByRole('row')[1]
   expect(
     within(tokenLeader).getByRole('progressbar', { name: 'G' })
@@ -176,6 +188,14 @@ it('shares the active personal time window with the model ranking, including for
   expect(
     within(models).getByRole('progressbar', { name: 'Other models' })
   ).toHaveAttribute('aria-valuetext', '12.5%')
+  await user.click(within(models).getByRole('button', { name: 'Billed usage' }))
+  expect(requestTotal).toHaveAttribute('aria-pressed', 'true')
+  expect(
+    within(models).getByRole('columnheader', { name: 'Billed usage' })
+  ).toHaveAttribute('aria-sort', 'descending')
+  expect(
+    within(within(models).getAllByRole('row')[1]).getByRole('rowheader')
+  ).toHaveTextContent('B')
   await user.click(tokens)
   expect(tokens).toHaveAttribute('aria-pressed', 'true')
   expect(get).toHaveBeenCalledTimes(1)
@@ -190,5 +210,82 @@ it('shares the active personal time window with the model ranking, including for
     '/api/data/self',
     '/api/data/self',
   ])
+  act(() => client.clear())
+})
+
+it('computes per-request efficiency from summed usage, preserves missing cache values and omits unavailable ratios', async () => {
+  const summary = summarizeUsageRows(
+    [
+      {
+        created_at: 1,
+        count: 9,
+        token_used: 700,
+        quota: 1000000,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 4,
+      },
+      {
+        created_at: 3,
+        count: 1,
+        token_used: 300,
+        quota: 4000000,
+        cache_creation_tokens: 6,
+      },
+      { created_at: 6, count: 1, token_used: 999, quota: 99000000 },
+    ],
+    {
+      start_timestamp: 0,
+      end_timestamp: 4,
+      buckets: [
+        { start: 0, end: 2 },
+        { start: 2, end: 5 },
+      ],
+    }
+  )
+  const { rerender } = render(<UsageEfficiency data={summary} />)
+  const billed = formatLogQuota(500000)
+  expect(screen.getByText(billed)).toBeVisible()
+  expect(screen.getByText('100')).toBeVisible()
+  expect(screen.getByText('10')).toBeVisible()
+  expect(screen.getByText('Unavailable')).toBeVisible()
+  const toggle = screen.getByRole('button', { name: 'Usage per request' })
+  await userEvent.click(toggle)
+  expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  rerender(
+    <UsageEfficiency
+      data={{
+        ...summary,
+        totals: {
+          tokens: 0,
+          requests: 0,
+          usage: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        },
+      }}
+    />
+  )
+  expect(screen.getAllByText('Unavailable')).toHaveLength(2)
+})
+
+it('offers a retry on a failed time range after an empty personal result', async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 8, username: 'owner', role: 100, quota: 0 })
+  const get = vi
+    .spyOn(api, 'get')
+    .mockResolvedValue({ data: { success: true, data: [] } })
+  render(
+    <QueryClientProvider client={client}>
+      <UsageTrend />
+    </QueryClientProvider>
+  )
+  await screen.findByText('No Data')
+  get.mockRejectedValue(new Error('Service unavailable'))
+  await userEvent.click(screen.getByRole('button', { name: 'Last 7 days' }))
+  await screen.findByRole('button', { name: /retry/i })
   act(() => client.clear())
 })

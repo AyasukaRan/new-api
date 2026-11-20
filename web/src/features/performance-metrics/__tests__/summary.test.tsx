@@ -18,10 +18,14 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { PerformanceOverview } from '@/features/dashboard/components/models/performance-overview'
-import { PerformanceHealthPanel } from '@/features/dashboard/components/overview/performance-health-panel'
+import {
+  GatewayModelHotspotsPanel,
+  PerformanceHealthPanel,
+  ResponsePerformancePanel,
+} from '@/features/dashboard/components/overview/performance-health-panel'
 import { ModelDetailsPerformance } from '@/features/pricing/components/model-details-performance'
 import { UptimeSparkline } from '@/features/pricing/components/model-details-uptime-sparkline'
 
@@ -134,29 +138,125 @@ function renderModelDetails() {
 }
 
 describe('server performance summaries', () => {
-  it.each([PerformanceHealthPanel, PerformanceOverview])(
-    'uses the weighted server result across models',
-    (Component) => {
-      client.setQueryData(['perf-metrics-summary', 24], {
-        success: true,
-        data: {
-          summary,
-          models: groups.map((group) => ({
-            ...group,
-            model_name: group.group,
-          })),
+  it('uses exact outcome counts and weighted timing for the monitored requests in the window', async () => {
+    client.setQueryData(['perf-metrics-summary', 24, 'diagnostics'], {
+      success: true,
+      data: {
+        summary: { success_rate: 100, avg_latency_ms: 250, avg_tps: 45 },
+        diagnostics: {
+          total: {
+            request_count: 101,
+            success_count: 100,
+            avg_ttft_ms: 120,
+            avg_latency_ms: 1009,
+            avg_tps: 5,
+          },
+          hours: [
+            {
+              ts: windowStart,
+              avg_ttft_ms: 120,
+              request_count: 100,
+              success_count: 100,
+              avg_latency_ms: 1000,
+              avg_tps: 5,
+            },
+            {
+              ts: windowStart + 3600,
+              request_count: 1,
+              success_count: 0,
+              avg_latency_ms: 2000,
+              avg_tps: 0,
+            },
+          ],
+          models: [],
         },
-      })
-      render(
-        <QueryClientProvider client={client}>
-          <Component />
-        </QueryClientProvider>
-      )
-      expect(screen.getByText('99.01%')).toBeVisible()
-      expect(screen.queryByText('50.00%')).not.toBeInTheDocument()
-      expect(screen.getByText('1.01s')).toBeVisible()
+        models: [],
+      },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <PerformanceHealthPanel />
+        <ResponsePerformancePanel />
+      </QueryClientProvider>
+    )
+    const health = within(
+      screen.getByRole('region', { name: 'Request health' })
+    )
+    expect(health.getByText('101')).toBeVisible()
+    expect(health.getByText('1')).toBeVisible()
+    expect(health.getByText('99.01%')).toBeVisible()
+    expect(
+      health.getByRole('figure', { name: 'Hourly request outcomes' })
+    ).toBeVisible()
+    const performance = within(
+      screen.getByRole('region', { name: 'Response performance' })
+    )
+    expect(performance.getByText('1.01s')).toBeVisible()
+    expect(
+      performance.getByRole('figure', { name: 'Hourly average latency' })
+    ).toBeVisible()
+    expect(performance.getByText('120ms')).toBeVisible()
+    await userEvent.click(
+      performance.getByRole('button', { name: 'First token' })
+    )
+    expect(
+      performance.getByRole('figure', { name: 'Hourly time to first token' })
+    ).toBeVisible()
+    await userEvent.click(
+      performance.getByRole('button', { name: 'Throughput' })
+    )
+    expect(
+      performance.getByRole('figure', { name: 'Hourly generation speed' })
+    ).toBeVisible()
+  })
+
+  it('keeps a seven-day monitoring window distinct from the daily totals and preserves a measured zero TTFT', () => {
+    const counts = {
+      request_count: 126,
+      success_count: 125,
+      avg_latency_ms: 900,
+      avg_ttft_ms: 0,
+      avg_tps: 5,
     }
-  )
+    client.setQueryData(['perf-metrics-summary', 168, 'diagnostics'], {
+      success: true,
+      data: {
+        diagnostics: {
+          total: counts,
+          hours: [{ ts: windowStart, ...counts }],
+          models: [{ model_name: 'weekly-model', ...counts }],
+        },
+        models: [],
+      },
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <PerformanceHealthPanel timelineOnly hours={168} />
+        <GatewayModelHotspotsPanel hours={168} />
+        <ResponsePerformancePanel hours={168} />
+      </QueryClientProvider>
+    )
+    expect(
+      screen.getAllByText('Monitored gateway requests · last 7 days')
+    ).toHaveLength(3)
+    const health = within(
+      screen.getByRole('region', { name: 'Request health' })
+    )
+    expect(health.getByText('126')).toBeVisible()
+    expect(
+      health.queryByRole('button', { name: 'Models' })
+    ).not.toBeInTheDocument()
+    expect(
+      within(
+        screen.getByRole('region', { name: 'Response performance' })
+      ).getByText('0ms')
+    ).toBeVisible()
+    expect(
+      within(
+        screen.getByRole('region', { name: 'Monitored model hotspots' })
+      ).getByText('weekly-model')
+    ).toBeVisible()
+  })
 
   it('keeps model availability distinct from weighted request success and uses weighted latency', () => {
     renderModelDetails()
@@ -217,16 +317,31 @@ describe('server performance summaries', () => {
   })
 
   it('keeps an empty summary unknown instead of inventing a zero success rate', () => {
-    client.setQueryData(['perf-metrics-summary', 24], {
+    client.setQueryData(['perf-metrics-summary', 24, 'diagnostics'], {
       success: true,
-      data: { models: [], summary: null },
+      data: {
+        models: [],
+        summary: null,
+        diagnostics: {
+          total: {
+            request_count: 0,
+            success_count: 0,
+            avg_ttft_ms: null,
+            avg_latency_ms: 0,
+            avg_tps: 0,
+          },
+          hours: [],
+          models: [],
+        },
+      },
     })
     render(
       <QueryClientProvider client={client}>
         <PerformanceHealthPanel />
       </QueryClientProvider>
     )
-    expect(screen.getAllByText('—')).toHaveLength(3)
+    expect(screen.getByText('—')).toBeVisible()
+    expect(screen.getByText('No data available')).toBeVisible()
     expect(screen.queryByText('0.00%')).not.toBeInTheDocument()
   })
 })

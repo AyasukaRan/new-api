@@ -19,8 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import {
+  Activity,
   ArrowRight,
   Clock3,
+  Coins,
   Layers,
   ShieldCheck,
   TrendingDown,
@@ -32,13 +34,11 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { StaggerContainer, StaggerItem } from '@/components/page-transition'
 import { Button } from '@/components/ui/button'
-import { useSummaryCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
 import { usePersonalUsage } from '@/features/dashboard/hooks/use-personal-usage'
 import { getSelfSubscriptionFull } from '@/features/subscriptions/api'
 import { formatTimestamp } from '@/features/subscriptions/lib/format'
 import { useStatus } from '@/hooks/use-status'
 import { toIntlLocale } from '@/i18n/languages'
-import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
 import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -86,7 +86,7 @@ export function SummaryCards() {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const user = useAuthStore((state) => state.auth.user)
-  const { status, loading } = useStatus()
+  const { loading } = useStatus()
 
   const usageTrendQuery = usePersonalUsage()
   const remainQuota = Number(user?.quota ?? 0)
@@ -143,17 +143,6 @@ export function SummaryCards() {
     }
   }, [subscriptionsQuery.data])
   const hasSubscriptions = subscriptionSummary.count > 0
-
-  const currencyEnabledFromStore = isCurrencyDisplayEnabled()
-  const statusCurrencyFlag =
-    typeof status?.display_in_currency === 'boolean'
-      ? Boolean(status.display_in_currency)
-      : undefined
-  const currencyEnabled =
-    statusCurrencyFlag !== undefined
-      ? statusCurrencyFlag
-      : currencyEnabledFromStore
-  const currencyLabel = currencyEnabled ? getCurrencyLabel() : 'Tokens'
 
   const usageStats = usageTrendQuery.data
   const sparklines = useMemo(() => {
@@ -231,19 +220,6 @@ export function SummaryCards() {
     TimingIcon = TrendingDown
   }
 
-  const items = useSummaryCardsConfig({
-    usedDisplay: formatQuota(usedQuota),
-    requestCountDisplay: formatNumber(requestCount, locale),
-    todayUsageDisplay,
-    currencyEnabled,
-    currencyLabel,
-  }).map((item, index) => ({
-    ...item,
-    tone: (['accent-1', 'accent-2', 'accent-3'] as const)[index],
-    sparkline:
-      item.key === 'requests' ? sparklines?.requests : sparklines?.usage,
-    daily: item.key === 'todayUsage',
-  }))
   const tokenTotal = usageStats?.totals.tokens
   const fullTokenCount = formatNumber(tokenTotal, locale)
   const compactTokens = tokenTotal != null && fullTokenCount.length > 9
@@ -253,29 +229,52 @@ export function SummaryCards() {
       ? formatCompactNumber(tokenTotal, locale)
       : fullTokenCount
   }
-  items.unshift({
-    key: 'tokens',
-    title: t('Tokens (24h)'),
-    value: tokenDisplay,
-    description: `${t('Input tokens')} + ${t('Output tokens')}`,
-    icon: Layers,
-    tone: 'accent-2',
-    sparkline: sparklines?.tokens,
-    daily: true,
-  })
+  const items = [
+    {
+      key: 'tokens',
+      title: t('Tokens (24h)'),
+      value: tokenDisplay,
+      description: `${t('Input tokens')} + ${t('Output tokens')}`,
+      icon: Layers,
+      tone: 'accent-2',
+      sparkline: sparklines?.tokens,
+    },
+    {
+      key: 'requests',
+      title: t('Requests (24h)'),
+      value: usageStats
+        ? formatNumber(usageStats.totals.requests, locale)
+        : usagePlaceholder,
+      description: t('All-time requests: {{total}}', {
+        total: formatNumber(requestCount, locale),
+      }),
+      icon: Activity,
+      tone: 'accent-1',
+      sparkline: sparklines?.requests,
+    },
+    {
+      key: 'usage',
+      title: t('Last 24h usage'),
+      value: todayUsageDisplay,
+      description: t('All-time usage: {{amount}}', {
+        amount: formatQuota(usedQuota),
+      }),
+      icon: Coins,
+      tone: 'accent-3',
+      sparkline: sparklines?.usage,
+    },
+  ] as const
 
   return (
     <section aria-label={t('Usage at a glance')}>
-      <StaggerContainer className='grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-5'>
+      <h3 className='mb-2 text-sm font-semibold'>{t('My account')}</h3>
+      <StaggerContainer className='dashboard-account-metrics grid grid-cols-2 gap-px overflow-hidden rounded-xl border lg:grid-cols-4'>
         {items.map((item) => (
-          <StaggerItem
-            key={item.key}
-            className='bg-card min-w-0 rounded-xl border p-3 sm:p-4'
-          >
+          <StaggerItem key={item.key} className='bg-card min-w-0 p-3 sm:px-4'>
             <div
               role='group'
               aria-label={item.title}
-              aria-busy={item.daily && usageTrendQuery.isLoading}
+              aria-busy={usageTrendQuery.isLoading}
             >
               <StatCard
                 title={item.title}
@@ -291,13 +290,13 @@ export function SummaryCards() {
                 sparkline={item.sparkline}
                 sparklineVariant='line'
                 showMobileSparkline={item.key === 'tokens'}
-                loading={loading || (item.daily && usageTrendQuery.isLoading)}
+                loading={loading || usageTrendQuery.isLoading}
                 compactMobile
               />
             </div>
           </StaggerItem>
         ))}
-        <StaggerItem className='bg-card col-span-2 min-w-0 rounded-xl border p-3 sm:p-4 xl:col-span-1'>
+        <StaggerItem className='bg-card min-w-0 p-3 sm:px-4'>
           <div
             role='group'
             aria-label={t('Credit remaining')}

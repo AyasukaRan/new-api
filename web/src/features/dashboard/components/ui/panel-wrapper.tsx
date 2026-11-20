@@ -41,8 +41,8 @@ function PanelHeader(props: {
   actions?: ReactNode
 }) {
   const heading = (
-    <div className='flex flex-col gap-1'>
-      <div className='text-sm font-semibold'>{props.title}</div>
+    <div className='flex min-w-0 flex-col gap-1'>
+      <h3 className='text-sm font-semibold'>{props.title}</h3>
       {props.description != null && (
         <div className='text-muted-foreground text-xs'>{props.description}</div>
       )}
@@ -52,9 +52,9 @@ function PanelHeader(props: {
   return (
     <div className='border-b px-4 py-3 sm:px-5'>
       {props.actions != null ? (
-        <div className='flex items-start justify-between gap-2'>
+        <div className='flex flex-wrap items-start justify-between gap-2'>
           {heading}
-          {props.actions}
+          <div className='max-w-full min-w-0'>{props.actions}</div>
         </div>
       ) : (
         heading

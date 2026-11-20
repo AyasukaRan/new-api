@@ -20,7 +20,6 @@ import { useQuery } from '@tanstack/react-query'
 
 import dayjs from '@/lib/dayjs'
 import { requireServerSuccess } from '@/lib/server-error-message'
-import { toStartOfDay } from '@/lib/time'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getUserQuotaDates } from '../api'
@@ -42,7 +41,10 @@ function addReportedTokens(sum: number | null, tokens: number | undefined) {
   return sum === null || tokens == null ? null : sum + tokens
 }
 
-function startOfUsageWindow(range: PersonalUsageRange, end: number): number {
+export function startOfUsageWindow(
+  range: PersonalUsageRange,
+  end: number
+): number {
   // The gateway stores one row per model and UTC hour.
   if (range === '24h') return end - (end % HOUR) - 23 * HOUR
   return dayjs(end * 1000)
@@ -58,19 +60,39 @@ export function summarizePersonalUsage(
   rows: QuotaDataItem[]
 ) {
   const first = dayjs(start * 1000)
-  const points: UsageBucket[] = Array.from(
-    { length: range === '24h' ? 24 : 7 },
-    (_, index) => ({
-      time:
-        range === '24h' ? start + index * HOUR : first.add(index, 'day').unix(),
-      requests: 0,
-      tokens: 0,
-      usage: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-    })
-  )
-  const buckets = new Map(points.map((point) => [point.time, point]))
+  const buckets = Array.from({ length: range === '24h' ? 24 : 7 }, (_, i) => {
+    if (range === '24h') {
+      return { start: start + i * HOUR, end: start + (i + 1) * HOUR }
+    }
+    return {
+      start: first.add(i, 'day').unix(),
+      end: first.add(i + 1, 'day').unix(),
+    }
+  })
+  return summarizeUsageRows(rows, {
+    start_timestamp: start,
+    end_timestamp: end,
+    buckets,
+  })
+}
+
+export function summarizeUsageRows(
+  rows: readonly QuotaDataItem[],
+  domain: {
+    start_timestamp: number
+    end_timestamp: number
+    buckets: ReadonlyArray<{ start: number; end: number }>
+  }
+) {
+  const { start_timestamp: start, end_timestamp: end, buckets } = domain
+  const points: UsageBucket[] = buckets.map((bucket) => ({
+    time: bucket.start,
+    requests: 0,
+    tokens: 0,
+    usage: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  }))
   const totals: Omit<UsageBucket, 'time'> = {
     requests: 0,
     tokens: 0,
@@ -80,13 +102,22 @@ export function summarizePersonalUsage(
   }
   const windowRows: QuotaDataItem[] = []
   for (const row of rows) {
-    if (row.created_at < start || row.created_at > end) continue
-    const time =
-      range === '24h'
-        ? row.created_at - (row.created_at % HOUR)
-        : toStartOfDay(row.created_at)
-    const point = buckets.get(time)
-    if (!point) continue
+    if (
+      !Number.isFinite(row.created_at) ||
+      row.created_at < start ||
+      row.created_at > end
+    ) {
+      continue
+    }
+    let low = 0
+    let high = buckets.length
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2)
+      if (buckets[mid].end <= row.created_at) low = mid + 1
+      else high = mid
+    }
+    if (!buckets[low] || row.created_at < buckets[low].start) continue
+    const point = points[low]
     const requests = row.count ?? 0
     const tokens = row.token_used ?? 0
     const usage = row.quota ?? 0
@@ -113,6 +144,8 @@ export function summarizePersonalUsage(
   }
   return { rows: windowRows, points, totals, start, end }
 }
+
+export type UsageSeries = ReturnType<typeof summarizeUsageRows>
 
 export function usePersonalUsage(range: PersonalUsageRange = '24h') {
   const userId = useAuthStore((state) => state.auth.user?.id)

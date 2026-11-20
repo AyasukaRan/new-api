@@ -1,0 +1,117 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+
+/* Kept on the analytics canvas so navigation and account settings retain their theme. */
+.dashboard-workbench {
+  --radius: 0.65rem;
+  --background: #f2f5f9;
+  --foreground: #1b2a40;
+  --card: #ffffff;
+  --card-foreground: var(--foreground);
+  --muted: #e9eff6;
+  --muted-foreground: #52647b;
+  --border: #dbe4ed;
+  --input: var(--border);
+  --primary: #215cb8;
+  --accent: #e3edfc;
+  --accent-foreground: var(--foreground);
+  --chart-1: #326dcb;
+  --chart-2: #087e70;
+  --chart-3: #8660be;
+  --chart-4: #ba6815;
+  --chart-5: #32834c;
+  --overview-accent-1: var(--chart-1);
+  --overview-accent-2: var(--chart-2);
+  --overview-accent-3: var(--chart-3);
+  background: var(--background);
+  color: var(--foreground);
+}
+.dark .dashboard-workbench {
+  --background: #0c1420;
+  --foreground: #e0e9f5;
+  --card: #131f2f;
+  --muted: #1e3045;
+  --muted-foreground: #a2b3c8;
+  --border: #27374c;
+  --primary: #7bafff;
+  --primary-foreground: #101c30;
+  --accent: #223a56;
+  --success: #4bd4a5;
+  --destructive: #ff7b83;
+  --chart-1: #71a6ff;
+  --chart-2: #48d5b3;
+  --chart-3: #b29afa;
+  --chart-4: #f4b567;
+  --chart-5: #7bd999;
+}
+.dashboard-workbench .dashboard-account-metrics {
+  background: var(--border);
+}
+.dashboard-account-metrics [data-slot='dashboard-stat'] {
+  position: relative;
+  min-height: 0;
+  justify-content: flex-start;
+  gap: 0.4rem;
+}
+.dashboard-account-metrics [data-slot='stat-trend'] {
+  align-self: flex-end;
+  width: 30%;
+}
+.dashboard-account-metrics [data-slot='stat-trend'] > div {
+  height: 1.15rem;
+}
+@media (min-width: 48rem) {
+  .dashboard-account-metrics [data-slot='stat-trend'] {
+    position: absolute;
+    top: 0.25rem;
+    right: 0;
+    max-width: 5rem;
+  }
+  .dashboard-account-metrics [data-slot='dashboard-stat'] > :first-child {
+    padding-right: 31%;
+  }
+}
+.dashboard-workbench [data-slot='table-header'] {
+  background: var(--muted);
+}
+.dashboard-workbench [data-slot='table-body'] > tr:nth-child(even) {
+  background: color-mix(in srgb, var(--card) 68%, var(--muted));
+}
+.dashboard-workbench [data-slot='table-body'] > tr:hover {
+  background: var(--accent);
+}
+.dashboard-finance [data-slot='dashboard-stat'] {
+  min-height: 0;
+  justify-content: flex-start;
+  gap: 0.5rem;
+}
+.dashboard-finance [data-slot='stat-trend'] {
+  display: none;
+}
+
+.dashboard-workbench [data-slot='chart'] .recharts-cartesian-axis-tick text {
+  fill: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.dashboard-workbench
+  [data-slot='chart']
+  .recharts-cartesian-grid-horizontal
+  line {
+  stroke: var(--border);
+}

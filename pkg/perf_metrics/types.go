@@ -94,11 +94,38 @@ type ModelSummary struct {
 	AvailabilitySeries  []SuccessRatePoint `json:"availability_series,omitempty"`
 }
 
+// RequestDiagnostics describes final monitored requests, independently of
+// per-channel attempts and availability observations from probes.
+type RequestDiagnostics struct {
+	AvgTtftMs    *int64  `json:"avg_ttft_ms"`
+	RequestCount int64   `json:"request_count"`
+	SuccessCount int64   `json:"success_count"`
+	AvgLatencyMs int64   `json:"avg_latency_ms"`
+	AvgTps       float64 `json:"avg_tps"`
+}
+
+type HourDiagnostics struct {
+	Ts int64 `json:"ts"`
+	RequestDiagnostics
+}
+
+type ModelDiagnostics struct {
+	ModelName string `json:"model_name"`
+	RequestDiagnostics
+}
+
+type GatewayDiagnostics struct {
+	Total  RequestDiagnostics `json:"total"`
+	Hours  []HourDiagnostics  `json:"hours"`
+	Models []ModelDiagnostics `json:"models"`
+}
+
 type SummaryAllResult struct {
-	Summary     *Summary       `json:"summary"`
-	WindowStart int64          `json:"window_start"`
-	WindowEnd   int64          `json:"window_end"`
-	Models      []ModelSummary `json:"models"`
+	Diagnostics *GatewayDiagnostics `json:"diagnostics,omitempty"`
+	Summary     *Summary            `json:"summary"`
+	WindowStart int64               `json:"window_start"`
+	WindowEnd   int64               `json:"window_end"`
+	Models      []ModelSummary      `json:"models"`
 	// RecentSuccessSeries contains up to 24 nonempty hours from the last 7 days,
 	// including requested models with no traffic in the summary window.
 	RecentSuccessSeries map[string][]SuccessRatePoint `json:"recent_success_series,omitempty"`

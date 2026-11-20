@@ -23,7 +23,14 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -93,6 +100,27 @@ beforeEach(() => {
             data: { subscriptions: [], all_subscriptions: [] },
           },
         }
+      case '/api/perf-metrics/summary':
+        return {
+          data: {
+            success: true,
+            data: {
+              summary: null,
+              models: [],
+              diagnostics: {
+                hours: [],
+                models: [],
+                total: {
+                  request_count: 0,
+                  success_count: 0,
+                  avg_ttft_ms: null,
+                  avg_latency_ms: 0,
+                  avg_tps: 0,
+                },
+              },
+            },
+          },
+        }
       case '/api/data/':
       case '/api/data/self':
         return { data: { success: true, data: [] } }
@@ -137,6 +165,16 @@ describe('overview setup guide', () => {
 
     const toggle = await screen.findByRole('button', { name: 'Setup guide' })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(
+      screen.queryByRole('region', { name: 'Gateway activity' })
+    ).not.toBeInTheDocument()
+    expect(
+      vi
+        .mocked(api.get)
+        .mock.calls.some(
+          ([url]) => url === '/api/perf-metrics/summary' || url === '/api/data/'
+        )
+    ).toBe(false)
     const usage = screen.getByRole('group', { name: 'Last 24h usage' })
     const trend = await screen.findByRole('heading', {
       name: 'My usage trends',
@@ -170,6 +208,59 @@ describe('overview setup guide', () => {
     expect(
       screen.queryByRole('button', { name: 'Copy ready-to-run curl' })
     ).not.toBeInTheDocument()
+  })
+
+  it('keeps gateway diagnostics and finance on the same window even when the admin has no personal usage', async () => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 42, username: 'admin', role: 10, quota: 0 })
+    await renderOverview()
+    const site = within(
+      await screen.findByRole('region', { name: 'Gateway activity' })
+    )
+    expect(
+      await site.findByRole('region', { name: 'Monitored model hotspots' })
+    ).toBeVisible()
+    expect(
+      await site.findByRole('region', { name: 'Financial summary' })
+    ).toBeVisible()
+    const week = site.getByRole('button', { name: 'Last 7 days' })
+    await userEvent.click(week)
+    expect(week).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() => {
+      expect(api.get).toHaveBeenCalledWith(
+        '/api/perf-metrics/summary',
+        expect.objectContaining({
+          params: expect.objectContaining({ hours: 168, diagnostics: true }),
+        })
+      )
+      const siteQuery = vi
+        .mocked(api.get)
+        .mock.calls.filter(([url]) => url === '/api/data/')
+        .at(-1)?.[1]?.params
+      if (
+        !siteQuery ||
+        typeof siteQuery !== 'object' ||
+        !('end_timestamp' in siteQuery) ||
+        typeof siteQuery.end_timestamp !== 'number' ||
+        !('start_timestamp' in siteQuery) ||
+        typeof siteQuery.start_timestamp !== 'number'
+      ) {
+        throw new Error('Expected a numeric sitewide reporting window')
+      }
+      expect(
+        siteQuery.end_timestamp - siteQuery.start_timestamp
+      ).toBeGreaterThanOrEqual(167 * 3600)
+      expect(siteQuery.end_timestamp - siteQuery.start_timestamp).toBeLessThan(
+        168 * 3600
+      )
+    })
+    expect(
+      within(screen.getByRole('region', { name: 'My usage trends' })).getByRole(
+        'button',
+        { name: 'Last 24 hours' }
+      )
+    ).toHaveAttribute('aria-pressed', 'true')
   })
 
   it('toggles the completed guide with the keyboard and restores focus after hiding it', async () => {

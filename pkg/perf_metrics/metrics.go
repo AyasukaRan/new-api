@@ -317,6 +317,10 @@ func Query(params QueryParams) (QueryResult, error) {
 }
 
 func QuerySummaryAll(hours int, groups []string, recentModels ...string) (SummaryAllResult, error) {
+	return QueryAdminSummary(hours, groups, false, recentModels...)
+}
+
+func QueryAdminSummary(hours int, groups []string, includeDiagnostics bool, recentModels ...string) (SummaryAllResult, error) {
 	if len(recentModels) > MaxRecentModels {
 		return SummaryAllResult{}, common.NewMessage("Invalid parameters")
 	}
@@ -359,6 +363,8 @@ func QuerySummaryAll(hours int, groups []string, recentModels ...string) (Summar
 			requestCount:   row.RequestCount,
 			successCount:   row.SuccessCount,
 			totalLatencyMs: row.TotalLatencyMs,
+			ttftSumMs:      row.TtftSumMs,
+			ttftCount:      row.TtftCount,
 			outputTokens:   row.OutputTokens,
 			generationMs:   row.GenerationMs,
 		}
@@ -414,10 +420,49 @@ func QuerySummaryAll(hours int, groups []string, recentModels ...string) (Summar
 		recentSeries[name] = points[max(0, len(points)-recentSuccessSampleLimit):]
 	}
 	result := SummaryAllResult{Summary: summarize(all), WindowStart: startTs, WindowEnd: endTs, Models: models, RecentSuccessSeries: recentSeries}
+	if includeDiagnostics {
+		result.Diagnostics = gatewayDiagnostics(modelBuckets, models, all, startTs, endTs)
+	}
 	if err := attachSummaryAvailability(&result, hours, groups, modelBuckets, startTs); err != nil {
 		return SummaryAllResult{}, err
 	}
 	return result, nil
+}
+
+func requestDiagnostics(total counters) RequestDiagnostics {
+	var ttft *int64
+	if total.ttftCount > 0 {
+		ttft = common.GetPointer(avg(total.ttftSumMs, total.ttftCount))
+	}
+	return RequestDiagnostics{
+		AvgTtftMs:    ttft,
+		RequestCount: total.requestCount,
+		SuccessCount: total.successCount,
+		AvgLatencyMs: avg(total.totalLatencyMs, total.requestCount),
+		AvgTps:       math.Round(avgTps(total)*100) / 100,
+	}
+}
+
+func gatewayDiagnostics(modelBuckets map[string]map[int64]counters, models []ModelSummary, all counters, start, end int64) *GatewayDiagnostics {
+	hours := make([]counters, (end-start)/3600+1)
+	result := &GatewayDiagnostics{
+		Total:  requestDiagnostics(all),
+		Hours:  make([]HourDiagnostics, len(hours)),
+		Models: make([]ModelDiagnostics, 0, len(models)),
+	}
+	for _, model := range models {
+		var total counters
+		for ts, value := range modelBuckets[model.ModelName] {
+			i := (ts - start) / 3600
+			hours[i] = addCounterValues(hours[i], value)
+			total = addCounterValues(total, value)
+		}
+		result.Models = append(result.Models, ModelDiagnostics{model.ModelName, requestDiagnostics(total)})
+	}
+	for i, total := range hours {
+		result.Hours[i] = HourDiagnostics{start + int64(i)*3600, requestDiagnostics(total)}
+	}
+	return result
 }
 
 func modelPerformanceSummary(modelName string, buckets map[int64]counters) ModelSummary {

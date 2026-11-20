@@ -346,6 +346,15 @@ it('keeps a pending or unavailable 24h measurement distinct from a confirmed emp
 })
 
 it('shows the personal 24h token count across models without adding cached tokens twice', async () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({
+      id: 1,
+      username: 'member',
+      role: 1,
+      quota: 0,
+      request_count: 7300,
+    })
   vi.spyOn(api, 'get').mockImplementation(async (path) => ({
     data: {
       success: true,
@@ -355,6 +364,7 @@ it('shows the personal 24h token count across models without adding cached token
               {
                 model_name: 'A',
                 created_at: now - 3600,
+                count: 13,
                 token_used: 100000000,
                 cache_read_tokens: 85000000,
                 quota: 10,
@@ -362,6 +372,7 @@ it('shows the personal 24h token count across models without adding cached token
               {
                 model_name: 'B',
                 created_at: now - 7200,
+                count: 7,
                 token_used: 23456789,
                 cache_creation_tokens: 3000,
                 quota: 5,
@@ -369,6 +380,7 @@ it('shows the personal 24h token count across models without adding cached token
               {
                 model_name: 'A',
                 created_at: now - 2 * 86400,
+                count: 100,
                 token_used: 12000,
               },
             ]
@@ -379,4 +391,9 @@ it('shows the personal 24h token count across models without adding cached token
   const tokens = await screen.findByRole('group', { name: 'Tokens (24h)' })
   expect(await within(tokens).findByText('123.5M')).toBeVisible()
   expect(within(tokens).getByText('123,456,789')).toBeVisible()
+  const requests = screen.getByRole('group', { name: 'Requests (24h)' })
+  expect(within(requests).getByText('20')).toBeVisible()
+  expect(
+    within(requests).getByText('All-time requests: 7,300')
+  ).toBeInTheDocument()
 })

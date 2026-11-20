@@ -74,7 +74,7 @@ func GetPerfMetricsSummary(c *gin.Context) {
 	var result perfmetrics.SummaryAllResult
 	var err error
 	if c.GetInt("role") >= common.RoleAdminUser {
-		result, err = perfmetrics.QuerySummaryAll(hours, scope.AllowedGroups, recentModels...)
+		result, err = perfmetrics.QueryAdminSummary(hours, scope.AllowedGroups, c.Query("diagnostics") == "true", recentModels...)
 	} else {
 		result, err = perfmetrics.QueryVisibleSummary(scope, recentModels...)
 	}

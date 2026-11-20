@@ -16,19 +16,25 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { act, cleanup, render, screen, within } from '@testing-library/react'
 import i18next from 'i18next'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import {
   getDashboardMetricValue,
+  hourlyDashboardFinance,
   summarizeDashboardFinance,
 } from '@/features/dashboard/lib/finance'
 import { buildDashboardFlowData } from '@/features/dashboard/lib/flow'
 import type { QuotaDataItem } from '@/features/dashboard/types'
+import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { FinancialSummary } from '../financial-summary'
+import {
+  FinancialSummary,
+  OverviewFinancialSummary,
+} from '../financial-summary'
 
 const data: QuotaDataItem[] = [
   {
@@ -57,6 +63,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   cleanup()
   useAuthStore.getState().auth.reset()
   localStorage.clear()
@@ -80,7 +87,10 @@ it('summarizes only recorded costs and keeps unrecorded revenue outside gross pr
       '-$0.3'
     )
   ).toBeVisible()
-  expect(screen.getByText('Cost coverage: 50%')).toBeVisible()
+  expect(
+    screen.getByRole('progressbar', { name: 'Cost coverage' })
+  ).toHaveAttribute('aria-valuenow', '50')
+  expect(screen.getByText('-30%')).toBeVisible()
   expect(
     screen.getByText(
       'Cost and profit include only requests with recorded costs.'
@@ -101,7 +111,9 @@ it('shows no cost data for normal users even if a caller supplies finance fields
 
 it('does not warn about missing history when all costs are recorded', () => {
   render(<FinancialSummary data={[data[0]]} />)
-  expect(screen.queryByText('Cost coverage: 100%')).not.toBeInTheDocument()
+  expect(
+    screen.getByRole('progressbar', { name: 'Cost coverage' })
+  ).toHaveAttribute('aria-valuenow', '100')
   expect(
     screen.queryByText(
       'Cost and profit include only requests with recorded costs.'
@@ -187,4 +199,90 @@ it('preserves free deductions when aggregating flow rows into the financial summ
       },
     ]).revenue_quota
   ).toBe(250000)
+})
+
+it('keeps free usage out of hourly revenue, negative profit visible and partial or absent costs as gaps', () => {
+  const snapshot = data[0].finance
+  if (!snapshot) throw new Error('Missing finance fixture')
+  const points = hourlyDashboardFinance(
+    [
+      {
+        ...data[0],
+        created_at: 3700,
+        finance: {
+          ...snapshot,
+          free_quota: 250000,
+          profit_quota: -400000,
+          covered_revenue_quota: 250000,
+        },
+      },
+      { ...data[1], created_at: 7200 },
+      { ...data[0], created_at: 10900 },
+      { ...data[1], created_at: 10910 },
+      { ...data[0], created_at: 11001 },
+    ],
+    0,
+    11000
+  )
+  expect(points).toEqual([
+    { time: 0, revenue: 0, cost: 0, profit: 0 },
+    { time: 3600, revenue: 250000, cost: 650000, profit: -400000 },
+    { time: 7200, revenue: 900000, cost: null, profit: null },
+    { time: 10800, revenue: 1400000, cost: null, profit: null },
+  ])
+})
+
+it('reads sitewide finance in aligned 24 or 168 hourly buckets and only for administrators', async () => {
+  const now = new Date('2026-11-20T11:27:03Z')
+  vi.spyOn(Date, 'now').mockReturnValue(now.getTime())
+  const end = now.getTime() / 1000
+  const get = vi
+    .spyOn(api, 'get')
+    .mockResolvedValue({
+      data: {
+        success: true,
+        data: [{ ...data[0], created_at: end - (end % 3600) }],
+      },
+    })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  const mount = (hours: 24 | 168) => (
+    <QueryClientProvider client={client}>
+      <OverviewFinancialSummary hours={hours} />
+    </QueryClientProvider>
+  )
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 2, username: 'member', role: 1, quota: 0 })
+  const { rerender } = render(mount(24))
+  expect(get).not.toHaveBeenCalled()
+  expect(
+    screen.queryByRole('region', { name: 'Financial summary' })
+  ).not.toBeInTheDocument()
+  act(() =>
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'owner', role: 10, quota: 0 })
+  )
+  expect(
+    await screen.findByRole('figure', { name: 'Financial summary · Trend' })
+  ).toBeVisible()
+  rerender(mount(168))
+  expect(
+    await screen.findByRole('figure', { name: 'Financial summary · Trend' })
+  ).toBeVisible()
+  expect(get.mock.calls).toEqual(
+    [24, 168].map((hours) => [
+      '/api/data/',
+      {
+        params: {
+          start_timestamp: end - (end % 3600) - (hours - 1) * 3600,
+          end_timestamp: end,
+          default_time: 'hour',
+        },
+      },
+    ])
+  )
+  client.clear()
 })

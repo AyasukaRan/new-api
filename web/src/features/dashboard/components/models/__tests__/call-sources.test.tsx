@@ -189,17 +189,17 @@ it('keeps source and model chart types synchronized in both directions without r
   const sources = await screen.findByRole('group', { name: 'Call Sources' })
   const models = screen.getByRole('group', { name: 'Model Call Analytics' })
   expect(
-    within(sources).getByRole('button', { name: 'Call Count Ranking' })
+    within(sources).getByRole('button', { name: 'Ranking' })
   ).toHaveAttribute('aria-pressed', 'true')
   expect(
-    within(models).getByRole('button', { name: 'Call Count Ranking' })
+    within(models).getByRole('button', { name: 'Ranking' })
   ).toHaveAttribute('aria-pressed', 'true')
 
   await user.click(
-    within(sources).getByRole('button', { name: 'Call Count Distribution' })
+    within(sources).getByRole('button', { name: 'Distribution' })
   )
   expect(
-    within(models).getByRole('button', { name: 'Call Count Distribution' })
+    within(models).getByRole('button', { name: 'Distribution' })
   ).toHaveAttribute('aria-pressed', 'true')
   expect(
     await within(models).findByLabelText('Rendered pie chart')
@@ -208,9 +208,9 @@ it('keeps source and model chart types synchronized in both directions without r
     await within(sources).findByLabelText('Rendered pie chart')
   ).toBeVisible()
 
-  await user.click(within(models).getByRole('button', { name: 'Call Trend' }))
+  await user.click(within(models).getByRole('button', { name: 'Trend' }))
   expect(
-    within(sources).getByRole('button', { name: 'Call Trend' })
+    within(sources).getByRole('button', { name: 'Trend' })
   ).toHaveAttribute('aria-pressed', 'true')
   const sourceChart = await within(sources).findByLabelText(
     'Rendered area chart'
@@ -238,9 +238,7 @@ it('includes unidentified historical requests with zero cost in the distribution
   renderSources()
   await userEvent
     .setup()
-    .click(
-      await screen.findByRole('button', { name: 'Call Count Distribution' })
-    )
+    .click(await screen.findByRole('button', { name: 'Distribution' }))
   const chart = await screen.findByLabelText('Rendered pie chart')
   expect(JSON.parse(chart.textContent ?? '[]')[0].values).toEqual([
     { type: 'DeepSeek Harness', value: 3 },
@@ -422,7 +420,10 @@ it('renders source gross profit as signed bars for an administrator, sharing the
   expect(JSON.parse(chart.textContent ?? '[]')[0].values).toEqual([
     { Model: 'DeepSeek Harness', Count: -150000 },
   ])
-  expect(screen.getByRole('button', { name: 'Distribution' })).toHaveAttribute(
+  expect(
+    screen.queryByRole('button', { name: 'Distribution' })
+  ).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Ranking' })).toHaveAttribute(
     'aria-pressed',
     'true'
   )

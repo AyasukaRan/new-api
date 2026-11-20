@@ -19,32 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 import { RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import {
-  Area,
-  CartesianGrid,
-  ComposedChart,
-  Line,
-  XAxis,
-  YAxis,
-} from 'recharts'
 
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from '@/components/ui/chart'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { toIntlLocale } from '@/i18n/languages'
-import {
-  formatCompactNumber,
-  formatNumber,
-  formatQuota,
-  formatTimeStr,
-} from '@/lib/format'
+import { formatNumber, formatQuota, formatTimeStr } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import {
@@ -52,51 +34,27 @@ import {
   type PersonalUsageMetric,
   type PersonalUsageRange,
 } from '../../hooks/use-personal-usage'
+import { PanelWrapper } from '../ui/panel-wrapper'
 import { ModelRequestShare } from './model-request-share'
+import { UsageEfficiency } from './usage-efficiency'
+import { UsageTimeChart } from './usage-time-chart'
 
 const metrics = ['requests', 'tokens', 'usage'] as const
-const cacheSeries = ['cacheRead', 'cacheWrite'] as const
-const tokenSeries = ['tokens', ...cacheSeries] as const
 
 export function UsageTrend() {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const [range, setRange] = useState<PersonalUsageRange>('24h')
   const [metric, setMetric] = useState<PersonalUsageMetric>('tokens')
+  const [rankBy, setRankBy] = useState<PersonalUsageMetric>('tokens')
   const query = usePersonalUsage(range)
   const labels = {
     requests: t('Requests'),
     tokens: t('Tokens'),
-    usage: t('Usage'),
+    usage: t('Billed usage'),
   }
-  const series = {
-    requests: { label: labels.requests, color: 'var(--chart-1)' },
-    usage: { label: labels.usage, color: 'var(--chart-1)' },
-    tokens: { label: t('Total Tokens'), color: 'var(--chart-1)' },
-    cacheRead: { label: t('Cache Read'), color: 'var(--chart-2)' },
-    cacheWrite: { label: t('Cache Write'), color: 'var(--chart-3)' },
-  }
-  const axisDate = new Intl.DateTimeFormat(
-    locale,
-    range === '24h'
-      ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }
-      : { month: 'short', day: 'numeric' }
-  )
-  const tooltipDate = new Intl.DateTimeFormat(
-    locale,
-    range === '24h'
-      ? {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          hourCycle: 'h23',
-          timeZoneName: 'short',
-        }
-      : { year: 'numeric', month: 'short', day: 'numeric' }
-  )
   const data = query.data
-
+  const granularity = range === '24h' ? 'hour' : 'day'
   return (
     <section className='min-w-0 space-y-3' aria-label={t('My usage trends')}>
       <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
@@ -149,160 +107,75 @@ export function UsageTrend() {
           onRetry={() => void query.refetch()}
         />
       )}
-      {query.isSuccess && data && data.rows.length === 0 && (
+      {query.isSuccess && data?.rows.length === 0 && (
         <EmptyState className='bg-card min-h-64 rounded-xl' bordered />
       )}
-      {query.isSuccess && data && data.rows.length > 0 && (
-        <div className='grid items-stretch gap-3 xl:grid-cols-[minmax(0,2fr)_minmax(16rem,1fr)]'>
-          <div className='bg-card min-w-0 rounded-xl border p-3 sm:p-5'>
-            <ToggleGroup
-              value={[metric]}
-              spacing={1}
-              aria-label={t('Value metric')}
-              onValueChange={([value]) => {
-                if (
-                  value === 'requests' ||
-                  value === 'tokens' ||
-                  value === 'usage'
-                ) {
-                  setMetric(value)
-                }
-              }}
-              className='mb-3 grid w-full grid-cols-3 gap-1.5'
+      <div className='grid min-w-0 gap-3 lg:grid-cols-2'>
+        {query.isSuccess && data && data.rows.length > 0 && (
+          <>
+            <PanelWrapper
+              title={t('Traffic volume')}
+              className='min-w-0'
+              contentClassName='space-y-4 p-3 sm:p-4'
             >
-              {metrics.map((key) => {
-                const value =
-                  key === 'usage'
-                    ? formatQuota(data.totals[key])
-                    : formatNumber(data.totals[key], locale)
-                return (
-                  <ToggleGroupItem
-                    key={key}
-                    value={key}
-                    aria-label={`${labels[key]} ${value}`}
-                    className='aria-pressed:border-primary/30 aria-pressed:bg-primary/5 h-auto min-w-0 flex-col items-start gap-1 rounded-lg border border-transparent px-2 py-2 sm:px-3'
-                  >
-                    <span className='text-muted-foreground text-xs'>
-                      {labels[key]}
-                    </span>
-                    <span
-                      className='max-w-full truncate text-base font-semibold tracking-tight tabular-nums sm:text-xl'
-                      title={value}
-                    >
-                      {value}
-                    </span>
-                  </ToggleGroupItem>
-                )
-              })}
-            </ToggleGroup>
-
-            {metric === 'tokens' && (
-              <ul
-                aria-label={t('Token Breakdown')}
-                className='mb-2 flex flex-wrap gap-x-5 gap-y-2 px-1 text-xs'
+              <ToggleGroup
+                value={[metric]}
+                spacing={1}
+                aria-label={t('Value metric')}
+                onValueChange={([value]) => {
+                  if (
+                    value === 'requests' ||
+                    value === 'tokens' ||
+                    value === 'usage'
+                  ) {
+                    setMetric(value)
+                    setRankBy(value)
+                  }
+                }}
+                className='bg-muted/50 grid w-full grid-cols-3 gap-1 rounded-lg p-1'
               >
-                {tokenSeries.map((key) => (
-                  <li key={key} className='flex items-baseline gap-1.5'>
-                    <span className='text-muted-foreground flex items-center gap-1.5'>
-                      <span
-                        aria-hidden='true'
-                        className='size-2 rounded-sm'
-                        style={{ backgroundColor: series[key].color }}
-                      />
-                      {series[key].label}
-                    </span>
-                    {key !== 'tokens' && (
-                      <span className='font-medium tabular-nums'>
-                        {data.totals[key] === null
-                          ? t('Unavailable')
-                          : formatNumber(data.totals[key], locale)}
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <ChartContainer config={series} className='aspect-auto h-52 w-full'>
-              <ComposedChart
-                data={data.points}
-                accessibilityLayer
-                title={labels[metric]}
-                margin={{ top: 10, bottom: 0, left: 0, right: 6 }}
-              >
-                <CartesianGrid vertical={false} strokeDasharray='3 4' />
-                <XAxis
-                  dataKey='time'
-                  tickLine={false}
-                  axisLine={false}
-                  minTickGap={20}
-                  tickMargin={8}
-                  tickFormatter={(value: number) =>
-                    axisDate.format(value * 1000)
-                  }
-                />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  width='auto'
-                  tickMargin={8}
-                  allowDecimals={false}
-                  tickFormatter={(value: number) =>
-                    metric === 'usage'
-                      ? formatQuota(value)
-                      : formatCompactNumber(value, locale)
-                  }
-                />
-                <ChartTooltip
-                  content={
-                    <ChartTooltipContent
-                      labelFormatter={(_, payload) =>
-                        tooltipDate.format(
-                          Number(payload?.[0]?.payload?.time) * 1000
-                        )
-                      }
-                      formatter={(value, name) => (
-                        <>
-                          {name}
-                          <span className='ml-auto pl-2 font-medium tabular-nums'>
-                            {metric === 'usage'
-                              ? formatQuota(Number(value))
-                              : formatNumber(Number(value), locale)}
-                          </span>
-                        </>
-                      )}
-                    />
-                  }
-                />
-                <Area
-                  type='linear'
-                  dataKey={metric}
-                  name={series[metric].label}
-                  stroke={`var(--color-${metric})`}
-                  fill={`var(--color-${metric})`}
-                  fillOpacity={0.12}
-                  strokeWidth={2}
-                  isAnimationActive={false}
-                />
-                {metric === 'tokens' &&
-                  cacheSeries.map((key) => (
-                    <Line
+                {metrics.map((key) => {
+                  const value =
+                    key === 'usage'
+                      ? formatQuota(data.totals[key])
+                      : formatNumber(data.totals[key], locale)
+                  return (
+                    <ToggleGroupItem
                       key={key}
-                      type='linear'
-                      dataKey={key}
-                      name={series[key].label}
-                      stroke={series[key].color}
-                      strokeWidth={2}
-                      strokeDasharray={key === 'cacheWrite' ? '4 3' : undefined}
-                      dot={false}
-                      isAnimationActive={false}
-                    />
-                  ))}
-              </ComposedChart>
-            </ChartContainer>
-          </div>
-          <ModelRequestShare data={data.rows} metric={metric} />
-        </div>
-      )}
+                      value={key}
+                      aria-label={`${labels[key]} ${value}`}
+                      className='aria-pressed:bg-background h-auto min-w-0 flex-col items-start gap-1 rounded-md px-2 py-2 aria-pressed:shadow-xs sm:px-3'
+                    >
+                      <span className='text-muted-foreground text-xs'>
+                        {labels[key]}
+                      </span>
+                      <span
+                        className='max-w-full truncate text-sm font-semibold tabular-nums sm:text-base'
+                        title={value}
+                      >
+                        {value}
+                      </span>
+                    </ToggleGroupItem>
+                  )
+                })}
+              </ToggleGroup>
+              <UsageTimeChart
+                points={data.points}
+                metric={metric}
+                granularity={granularity}
+              />
+            </PanelWrapper>
+            <ModelRequestShare
+              data={data.rows}
+              metric={rankBy}
+              onMetricChange={setRankBy}
+            />
+            <div className='min-w-0 lg:col-span-2'>
+              <UsageEfficiency data={data} granularity={granularity} />
+            </div>
+          </>
+        )}
+      </div>
     </section>
   )
 }

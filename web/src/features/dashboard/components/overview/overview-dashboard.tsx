@@ -41,6 +41,8 @@ import { lazy, Suspense, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import '@/styles/dashboard.css'
+
 import { SectionPageLayout } from '@/components/layout'
 import {
   CardStaggerContainer,
@@ -66,13 +68,13 @@ import {
   useApiInfo,
   useDashboardContentVisibility,
 } from '../../hooks/use-status-data'
-import { OverviewFinancialSummary } from '../models/financial-summary'
 import { AnnouncementsPanel } from './announcements-panel'
 import { ApiInfoPanel } from './api-info-panel'
 import { FAQPanel } from './faq-panel'
-import { PerformanceHealthPanel } from './performance-health-panel'
 import { SummaryCards } from './summary-cards'
 import { UptimePanel } from './uptime-panel'
+
+const GatewayDiagnostics = lazy(() => import('./gateway-diagnostics'))
 
 const UsageTrend = lazy(() =>
   import('./usage-trend').then((module) => ({ default: module.UsageTrend }))
@@ -623,7 +625,7 @@ export function OverviewDashboard() {
   const setupGuideExpanded =
     manualSetupGuideExpanded ?? (setupStatusReady && !setupComplete)
   const showLeftContentPanels =
-    isAdmin || showApiInfoPanel || showAnnouncementsPanel || showFAQPanel
+    showApiInfoPanel || showAnnouncementsPanel || showFAQPanel
   const showContentPanels = showLeftContentPanels || showUptimePanel
 
   const handleSetupGuideToggle = () => {
@@ -636,7 +638,7 @@ export function OverviewDashboard() {
   }
 
   return (
-    <SectionPageLayout>
+    <SectionPageLayout className='dashboard-workbench'>
       <SectionPageLayout.Title>{t('Overview')}</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
         {setupStatusReady && setupComplete && (
@@ -654,12 +656,16 @@ export function OverviewDashboard() {
         )}
       </SectionPageLayout.Actions>
       <SectionPageLayout.Content>
-        <div className='flex flex-col gap-4'>
+        <div className='flex flex-col gap-3 sm:gap-4'>
           <SummaryCards />
+          {isAdmin && (
+            <Suspense fallback={<Skeleton className='h-64 w-full' />}>
+              <GatewayDiagnostics overview />
+            </Suspense>
+          )}
           <Suspense fallback={<Skeleton className='h-72 w-full' />}>
             <UsageTrend />
           </Suspense>
-          {isAdmin && <OverviewFinancialSummary />}
           <div id={setupGuideId} hidden={!setupGuideExpanded}>
             {setupGuideExpanded && (
               <CardStaggerContainer className='grid items-stretch gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'>
@@ -819,11 +825,6 @@ export function OverviewDashboard() {
                       'lg:grid-cols-2'
                   )}
                 >
-                  {isAdmin && (
-                    <CardStaggerItem className='lg:col-span-2'>
-                      <PerformanceHealthPanel />
-                    </CardStaggerItem>
-                  )}
                   {showApiInfoPanel && (
                     <CardStaggerItem>
                       <ApiInfoPanel />
