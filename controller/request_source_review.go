@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/base64"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
@@ -39,6 +40,26 @@ func UpdateBuiltinRequestSourceRule(c *gin.Context) {
 		return
 	}
 	common.ApiSuccess(c, nil)
+}
+
+var sourceLookupID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func LookupRequestSource(c *gin.Context) {
+	id := c.Query("id")
+	if !sourceLookupID.MatchString(id) {
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
+		return
+	}
+	match, err := service.LookupRequestSource(c.Request.Context(), id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if match == nil {
+		common.ApiErrorStatus(c, http.StatusNotFound, common.NewMessage("No matching results"))
+		return
+	}
+	common.ApiSuccess(c, match)
 }
 
 func GetUnidentifiedRequestSources(c *gin.Context) {

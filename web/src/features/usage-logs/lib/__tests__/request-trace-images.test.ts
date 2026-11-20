@@ -25,6 +25,7 @@ import {
   conversationSource,
   pairConversationTools,
 } from '../request-trace-conversation'
+import { parseTraceOcr, isTraceOcr } from '../request-trace-ocr'
 import {
   parseTracePayload,
   TraceHistoryStreamParser,
@@ -49,6 +50,43 @@ const capture: RequestTraceLeg = {
   truncated: false,
   has_object: false,
 }
+
+describe('standalone OCR traces', () => {
+  it('recognizes the OCR endpoint and previews only a retained raster upload', () => {
+    const ocr = { ...capture, format: 'deepseek_tools' }
+    expect(
+      isTraceOcr({ ...ocr, url: 'https://example.org/v1/tools/ocr?client=a' })
+    ).toBe(true)
+    expect(
+      isTraceOcr({ ...ocr, url: '/v1/tools/asr?next=/v1/tools/ocr' })
+    ).toBe(false)
+    expect(parseTraceOcr(JSON.stringify({ image_url: src }), true)).toEqual({
+      kind: 'image',
+      src,
+    })
+    expect(
+      parseTraceOcr(
+        JSON.stringify({ file: 'https://example.org/private.jpg' }),
+        true
+      )
+    ).toEqual({ kind: 'image' })
+  })
+
+  it('preserves an upstream OCR error and does not present unrelated or incomplete JSON as a successful result', () => {
+    expect(
+      parseTraceOcr('{"error":{"message":"File could not be read"}}', false)
+    ).toEqual({ kind: 'error', message: 'File could not be read' })
+    expect(
+      parseTraceOcr('{"page_count":1,"pages":[{"text":"unrelated"}]}', false)
+    ).toEqual({ kind: 'unavailable' })
+    expect(
+      parseTraceOcr(
+        '{"object":"ocr.result","page_count":2,"pages":[{"text":"incomplete"}]}',
+        false
+      )
+    ).toEqual({ kind: 'unavailable' })
+  })
+})
 
 describe('captured conversation images', () => {
   it.each([

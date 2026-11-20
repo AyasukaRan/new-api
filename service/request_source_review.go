@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -77,20 +78,8 @@ func ReviewUnidentifiedRequestSources(ctx context.Context, now int64, days, limi
 		var header http.Header
 		key := signature{kind: "no_capture"}
 		if common.UnmarshalJsonStr(request.Headers, &header) == nil && len(header) > 0 {
-			// Canonicalize old or imported maps as net/http does on ingress.
-			normalized := make(http.Header, len(header))
-			for name, values := range header {
-				field := http.CanonicalHeaderKey(name)
-				normalized[field] = append(normalized[field], values...)
-			}
-			key.kind, key.current = "no_signature", IdentifyRequestClient(normalized)
-			// A declaration can be a valid display label yet still be a person's
-			// name or an installation identifier. Show the rule that matched it.
-			if key.current != "" && strings.EqualFold(key.current, strings.TrimSpace(normalized.Get("X-Client-Name"))) &&
-				identifyBuiltinRequestClient(normalized) == "X-Client-Name" && operation_setting.IdentifyConfiguredRequestSource(normalized) == "" &&
-				operation_setting.BuiltinRequestSourceSettingFor("X-Client-Name").DisplayName == "" {
-				key.current = "X-Client-Name"
-			}
+			normalized, source := sourceReviewHeaders(header)
+			key.kind, key.current = "no_signature", source
 			condition := requestSourceSignature(normalized)
 			if condition.Header != "" {
 				key.kind, key.header, key.match, key.value = "signature", condition.Header, condition.Match, condition.Value
@@ -114,6 +103,59 @@ func ReviewUnidentifiedRequestSources(ctx context.Context, now int64, days, limi
 		return cmp.Or(cmp.Compare(b.Count, a.Count), cmp.Compare(b.LastSeen, a.LastSeen))
 	})
 	return report, nil
+}
+
+// A source review exposes rule names and sanitized declarations only.
+func sourceReviewHeaders(header http.Header) (http.Header, string) {
+	normalized := make(http.Header, len(header))
+	for name, values := range header {
+		field := http.CanonicalHeaderKey(name)
+		normalized[field] = append(normalized[field], values...)
+	}
+	source := IdentifyRequestClient(normalized)
+	if source != "" && strings.EqualFold(source, strings.TrimSpace(normalized.Get("X-Client-Name"))) &&
+		identifyBuiltinRequestClient(normalized) == "X-Client-Name" && operation_setting.IdentifyConfiguredRequestSource(normalized) == "" &&
+		operation_setting.BuiltinRequestSourceSettingFor("X-Client-Name").DisplayName == "" {
+		source = "X-Client-Name"
+	}
+	return normalized, source
+}
+
+type RequestSourceMatch struct {
+	RequestID      string `json:"request_id"`
+	TraceID        string `json:"trace_id"`
+	CreatedAt      int64  `json:"created_at"`
+	RecordedSource string `json:"recorded_source"`
+	CurrentSource  string `json:"current_source"`
+	Path           string `json:"path"`
+}
+
+func LookupRequestSource(ctx context.Context, id string) (*RequestSourceMatch, error) {
+	request, err := model.LookupRequestSource(ctx, id)
+	if err != nil || request == nil {
+		return nil, err
+	}
+	match := &RequestSourceMatch{RequestID: request.RequestID, TraceID: request.TraceID, CreatedAt: request.CreatedAt,
+		RecordedSource: operation_setting.NormalizeRequestSourceName(request.RecordedSource)}
+	var header http.Header
+	if common.UnmarshalJsonStr(request.Headers, &header) == nil && header != nil {
+		normalized, source := sourceReviewHeaders(header)
+		match.CurrentSource = source
+		if match.RecordedSource != "" && strings.EqualFold(match.RecordedSource, strings.TrimSpace(normalized.Get("X-Client-Name"))) {
+			match.RecordedSource = "X-Client-Name"
+		}
+	}
+	// Only return static endpoint names: custom routes and path parameters can contain identifiers.
+	if path, err := url.Parse(request.URL); err == nil {
+		switch endpoint := path.EscapedPath(); endpoint {
+		case "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/responses", "/v1/responses/compact",
+			"/v1/embeddings", "/v1/rerank", "/v1/moderations", "/v1/images/generations", "/v1/images/edits",
+			"/v1/audio/speech", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/files",
+			"/v1/tools/ocr", "/v1/tools/asr", "/v1/tools/tts", "/v1/tools/search", "/v1/tools/fetch", "/v1/alpha/search":
+			match.Path = endpoint
+		}
+	}
+	return match, nil
 }
 
 // Operators need a reusable declaration, not the raw header: versions, URLs,

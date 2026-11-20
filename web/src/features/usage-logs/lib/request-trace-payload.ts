@@ -22,11 +22,13 @@ import {
   conversationSource,
   type TraceConversationSource,
 } from './request-trace-conversation'
+import { parseTraceOcr } from './request-trace-ocr'
 
-export type TracePayloadView = 'conversation' | 'rendered' | 'body'
+export type TracePayloadView = 'conversation' | 'rendered' | 'body' | 'ocr'
 export interface TracePayload {
   leg: RequestTraceLeg
   source?: TraceConversationSource
+  ocr?: ReturnType<typeof parseTraceOcr>
   download?: Blob
 }
 export type TraceWorkerRequest =
@@ -45,6 +47,12 @@ export function parseTracePayload(
   view: TracePayloadView,
   body: string
 ): TracePayload {
+  if (view === 'ocr') {
+    return {
+      leg: { ...leg, body: '' },
+      ocr: parseTraceOcr(body, leg.direction.endsWith('_request')),
+    }
+  }
   if (view === 'body') {
     // Large raw payloads remain downloadable in full without building a giant JSON tree.
     const large = body.length > 200_000

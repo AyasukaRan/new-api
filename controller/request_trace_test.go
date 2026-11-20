@@ -1033,4 +1033,49 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 	assert.Zero(t, empty.Reviewed)
 	assert.NotEmpty(t, empty.NextCursor, "an empty day must not hide older days")
 
+	// Native tools have a client leg without a conversation index. Either ID
+	// should find the incoming source without leaking payloads, headers or query parameters.
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{
+		{TraceId: "OCR-Trace", RequestId: "OCR-Request", CreatedAt: now, Direction: model.TraceDirectionClientRequest,
+			Url: "/v1/tools/ocr?credential=secret", Headers: `{"user-agent":["Sub2API/DeepSeek"],"Authorization":["secret"]}`, Body: "secret body"},
+		{TraceId: "OCR-Trace", RequestId: "OCR-Request", CreatedAt: now, Seq: 1, Direction: model.TraceDirectionUpstreamRequest,
+			Url: "https://upstream.invalid/private", Headers: `{"User-Agent":["curl/9"]}`},
+		{TraceId: "dynamic-route", RequestId: "other-route", CreatedAt: now, Direction: model.TraceDirectionClientRequest,
+			Url: "/v1/files/secret/content", Headers: `{"X-Client-Name":["Private Name"]}`},
+	}))
+	require.NoError(t, model.LOG_DB.Table("logs").Create(map[string]any{"id": 20100, "created_at": now + 2,
+		"type": model.LogTypeConsume, "request_id": "OCR-Request", "other": `{"client_tool":"Previous label","admin_info":{"request_body":"secret"}}`}).Error)
+	for _, id := range []string{"OCR-Trace", "OCR-Request"} {
+		var result struct {
+			Success bool
+			Data    service.RequestSourceMatch
+		}
+		r := modelManagementRequest(t, LookupRequestSource, http.MethodGet, "/?id="+id, nil, &result)
+		require.Equal(t, http.StatusOK, r.Code)
+		require.True(t, result.Success)
+		assert.Equal(t, service.RequestSourceMatch{TraceID: "OCR-Trace", RequestID: "OCR-Request", CreatedAt: now,
+			Path: "/v1/tools/ocr", RecordedSource: "Previous label", CurrentSource: "Sub2-API"}, result.Data)
+		assert.NotContains(t, r.Body.String(), "secret")
+	}
+	for _, tc := range []struct {
+		id   string
+		code int
+	}{
+		{"ocr-trace", http.StatusNotFound}, {"Missing", http.StatusNotFound}, {"", http.StatusBadRequest}, {"a%2Fb", http.StatusBadRequest},
+	} {
+		r := modelManagementRequest(t, LookupRequestSource, http.MethodGet, "/?id="+tc.id, nil, nil)
+		assert.Equal(t, tc.code, r.Code, tc.id)
+	}
+	logOnly, err := service.LookupRequestSource(t.Context(), "identified")
+	require.NoError(t, err)
+	require.NotNil(t, logOnly)
+	assert.Equal(t, "Codex CLI", logOnly.RecordedSource)
+	assert.Empty(t, logOnly.CurrentSource)
+	assert.Empty(t, logOnly.TraceID)
+	restricted, err := service.LookupRequestSource(t.Context(), "other-route")
+	require.NoError(t, err)
+	require.NotNil(t, restricted)
+	assert.Empty(t, restricted.Path)
+	assert.Equal(t, "X-Client-Name", restricted.CurrentSource)
+
 }

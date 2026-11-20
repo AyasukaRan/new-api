@@ -54,14 +54,12 @@ function formatBytes(bytes: number): string {
 export function RequestTraceObject(props: {
   traceId: string
   leg: RequestTraceLeg
+  uploadedFile?: boolean
 }) {
   const { t } = useTranslation()
   const isAdmin = useIsAdmin()
   const user = useAuthStore((state) => state.auth.user)
   const [objectUrl, setObjectUrl] = useState<string | null>(null)
-  const contentType = props.leg.content_type ?? ''
-  const kind = previewKind(contentType)
-
   const objectQuery = useQuery({
     queryKey: [
       'usage-logs',
@@ -70,15 +68,42 @@ export function RequestTraceObject(props: {
       user?.role,
       props.traceId,
       props.leg.seq,
+      ...(props.uploadedFile ? ['file'] : []),
     ],
-    queryFn: ({ signal }) =>
-      getRequestTraceObject(props.traceId, props.leg.seq, signal),
+    queryFn: async ({ signal }) => {
+      const blob = await getRequestTraceObject(
+        props.traceId,
+        props.leg.seq,
+        signal
+      )
+      const type = props.leg.content_type || blob.type
+      if (props.uploadedFile && /^multipart\/form-data\s*;/i.test(type)) {
+        try {
+          const form = await new Response(blob, {
+            headers: { 'Content-Type': type },
+          }).formData()
+          const file = form.get('file')
+          if (file && typeof file !== 'string') return file
+        } catch {
+          // A partial envelope still has value as the original download.
+        }
+      }
+      return blob
+    },
     enabled: isAdmin && user != null,
     retry: false,
     staleTime: 5 * 60 * 1000,
     gcTime: 0,
     placeholderData: undefined,
   })
+  const contentType =
+    (props.uploadedFile && objectQuery.data?.type) ||
+    props.leg.content_type ||
+    ''
+  const fileSize = props.uploadedFile
+    ? (objectQuery.data?.size ?? props.leg.body_size)
+    : props.leg.body_size
+  const kind = previewKind(contentType)
 
   useEffect(() => {
     if (!objectQuery.data) return
@@ -105,9 +130,7 @@ export function RequestTraceObject(props: {
       <div className='text-muted-foreground flex flex-wrap items-center gap-2 text-xs'>
         <FileBox className='size-3.5' aria-hidden='true' />
         <span className='font-mono'>{contentType || t('Unknown type')}</span>
-        {props.leg.body_size > 0 && (
-          <span>{formatBytes(props.leg.body_size)}</span>
-        )}
+        {fileSize > 0 && <span>{formatBytes(fileSize)}</span>}
       </div>
 
       {objectQuery.isPending && (

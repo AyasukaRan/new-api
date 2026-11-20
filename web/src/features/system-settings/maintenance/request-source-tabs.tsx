@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 import { BuiltinRequestSources } from './request-source-builtins'
+import { RequestSourceLookup } from './request-source-lookup'
 import type { RequestSourceCondition } from './request-source-rules'
 import { UnidentifiedRequestSources } from './request-source-unidentified'
 
@@ -24,6 +25,7 @@ export function SourceRecognitionTabs(props: {
         <TabsTrigger value='unidentified'>
           {t('Unidentified requests')}
         </TabsTrigger>
+        <TabsTrigger value='lookup'>{t('Request lookup')}</TabsTrigger>
       </TabsList>
       <TabsContent value='custom' className='space-y-3'>
         <p className='text-muted-foreground text-sm'>
@@ -37,6 +39,9 @@ export function SourceRecognitionTabs(props: {
           )}
         </p>
         {props.children}
+      </TabsContent>
+      <TabsContent value='lookup'>
+        <RequestSourceLookup />
       </TabsContent>
       <TabsContent value='builtin'>
         <BuiltinRequestSources />

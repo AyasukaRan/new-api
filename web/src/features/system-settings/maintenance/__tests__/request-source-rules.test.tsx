@@ -626,3 +626,38 @@ test('lets an empty scan window continue to older records without claiming the f
     screen.queryByRole('button', { name: 'Review older requests' })
   ).not.toBeInTheDocument()
 })
+
+test('looks up a recognized tool request by trace ID independently of the unidentified list', async () => {
+  const user = userEvent.setup()
+  const traceId = '202611191825019655390488268d9d6CnEUv5zo'
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        request_id: 'request-ocr',
+        trace_id: traceId,
+        created_at: 1795112704,
+        path: '/v1/tools/ocr',
+        recorded_source: 'Sub2-API',
+        current_source: 'Sub2-API',
+      },
+    },
+  })
+  renderRules('[]')
+  await user.click(screen.getByRole('tab', { name: 'Request lookup' }))
+  const input = screen.getByRole('textbox', { name: 'Request ID or trace ID' })
+  await user.type(input, traceId)
+  expect(get).not.toHaveBeenCalled()
+  await user.keyboard('{Enter}')
+  expect(await screen.findByText('/v1/tools/ocr')).toBeVisible()
+  expect(screen.getAllByText('Sub2-API').length).toBeGreaterThan(0)
+  expect(get).toHaveBeenCalledWith('/api/option/request_source_rules/lookup', {
+    params: { id: traceId },
+    signal: expect.any(AbortSignal),
+  })
+  get.mockRejectedValueOnce({ response: { status: 404 } })
+  await user.clear(input)
+  await user.type(input, 'missing-id{Enter}')
+  expect(await screen.findByText('No results found')).toBeVisible()
+  expect(screen.queryByText('/v1/tools/ocr')).not.toBeInTheDocument()
+})

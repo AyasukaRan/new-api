@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import { useQuery } from '@tanstack/react-query'
-import { MessageSquare, Route } from 'lucide-react'
+import { MessageSquare, Route, ScanText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
@@ -31,11 +31,13 @@ import { useIsAdmin } from '@/hooks/use-admin'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getRequestTrace } from '../../api'
+import { isTraceOcr } from '../../lib/request-trace-ocr'
 import type { LogOtherData } from '../../types'
 import { RequestFailureSummary } from '../request-failure-summary'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { RequestTraceConversationLoader } from './request-trace-conversation-loader'
 import { RequestTraceExchange } from './request-trace-exchange'
+import { RequestTraceOcr } from './request-trace-ocr'
 
 export default function RequestTraceViewer(props: {
   traceId: string
@@ -121,14 +123,18 @@ export default function RequestTraceViewer(props: {
       .filter((leg) => leg.direction.startsWith('upstream_'))
       .map((leg) => leg.attempt)
   ).size
+  const input =
+    legs.find((leg) => leg.direction === 'client_request') ??
+    legs.find((leg) => leg.direction === 'upstream_request')
+  const ocr = input && isTraceOcr(input)
 
   return (
     <Tabs defaultValue='conversation' className='h-full min-h-0 gap-0'>
       <div className='flex shrink-0 flex-wrap items-center justify-between gap-2 border-b pb-3'>
         <TabsList aria-label={t('Request trace views')}>
           <TabsTrigger value='conversation'>
-            <MessageSquare aria-hidden='true' />
-            {t('Conversation')}
+            {ocr ? <ScanText aria-hidden /> : <MessageSquare aria-hidden />}
+            {ocr ? t('OCR result') : t('Conversation')}
           </TabsTrigger>
           <TabsTrigger value='exchange'>
             <Route aria-hidden='true' />
@@ -150,7 +156,11 @@ export default function RequestTraceViewer(props: {
         value='conversation'
         className='min-h-0 overflow-hidden pt-4'
       >
-        <RequestTraceConversationLoader traceId={props.traceId} legs={legs} />
+        {ocr ? (
+          <RequestTraceOcr traceId={props.traceId} legs={legs} />
+        ) : (
+          <RequestTraceConversationLoader traceId={props.traceId} legs={legs} />
+        )}
       </TabsContent>
       <TabsContent value='exchange' className='min-h-0 overflow-hidden pt-3'>
         <RequestTraceExchange traceId={props.traceId} legs={legs} />

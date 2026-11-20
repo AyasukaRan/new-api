@@ -61,6 +61,68 @@ func sourceReviewPage(db, groups *gorm.DB, window SourceReviewWindow, cursor Sou
 	return query.Order("last_seen DESC, " + rid + " DESC, " + tid + " DESC").Limit(limit + 1)
 }
 
+func recordedRequestSourceSQL() string {
+	switch {
+	case common.UsingLogDatabase(common.DatabaseTypeClickHouse):
+		return "JSONExtractString(logs.other, 'client_tool')"
+	case common.UsingLogDatabase(common.DatabaseTypeMySQL):
+		const value = "JSON_EXTRACT(logs.other, '$.client_tool')"
+		return "CASE WHEN JSON_VALID(logs.other) THEN CASE WHEN JSON_TYPE(" + value + ") = 'STRING' THEN JSON_UNQUOTE(" + value + ") END END"
+	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
+		return `CASE WHEN logs.other LIKE '%"client_tool"%' THEN CAST(logs.other AS json)->>'client_tool' END`
+	default:
+		return "CASE WHEN json_valid(logs.other) THEN json_extract(logs.other, '$.client_tool') END"
+	}
+}
+
+type RequestSourceEvidence struct {
+	RequestID, TraceID, Headers, URL, RecordedSource string
+	CreatedAt                                        int64
+}
+
+func LookupRequestSource(ctx context.Context, id string) (*RequestSourceEvidence, error) {
+	db := LOG_DB.WithContext(ctx)
+	var result RequestSourceEvidence
+	arg := "?"
+	if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
+		arg = "BINARY ?" // Request IDs remain case-sensitive on case-insensitive columns.
+	}
+	trace := db.Model(&RequestTrace{}).
+		Select("request_id, trace_id, created_at, url, conversation_client AS recorded_source, CASE WHEN length(headers) <= 65536 THEN headers ELSE '' END AS headers").
+		Where("direction = ?", TraceDirectionClientRequest).Where("(trace_id = "+arg+" OR request_id = "+arg+")", id, id).
+		Order("created_at DESC, seq ASC, trace_id DESC").Limit(1).Scan(&result)
+	if trace.Error != nil {
+		return nil, trace.Error
+	}
+	if trace.RowsAffected > 0 && (result.RecordedSource != "" || result.RequestID == "") {
+		return &result, nil
+	}
+	requestID := result.RequestID
+	if requestID == "" {
+		requestID = id
+	}
+	logs := applyLogSourceFilter(db.Model(&Log{})).Where("request_id = "+arg, requestID).Where("type IN ?", []int{LogTypeConsume, LogTypeError}).
+		Order("created_at DESC, id DESC").Limit(1)
+	var log RequestSourceEvidence
+	// Project only the source. Legacy metadata can contain request bodies.
+	read := logs.Session(&gorm.Session{}).Select("request_id, created_at, " + recordedRequestSourceSQL() + " AS recorded_source").Scan(&log)
+	var pgErr interface{ SQLState() string }
+	if errors.As(read.Error, &pgErr) && (pgErr.SQLState() == "22P02" || pgErr.SQLState() == "22P05" || pgErr.SQLState() == "22021") {
+		read = logs.Select("request_id, created_at").Scan(&log)
+	}
+	if read.Error != nil {
+		return nil, read.Error
+	}
+	if trace.RowsAffected > 0 {
+		result.RecordedSource = log.RecordedSource
+		return &result, nil
+	}
+	if read.RowsAffected > 0 {
+		return &log, nil
+	}
+	return nil, nil
+}
+
 func RecentUnidentifiedSourceRequests(ctx context.Context, bounds SourceReviewWindow, cursor SourceReviewPosition, limit int) ([]UnidentifiedSourceRequest, *SourceReviewPosition, error) {
 	db := LOG_DB.WithContext(ctx)
 	var captures []UnidentifiedSourceRequest
@@ -83,19 +145,10 @@ func RecentUnidentifiedSourceRequests(ctx context.Context, bounds SourceReviewWi
 	logs := applyLogSourceFilter(db.Model(&Log{})).Where("logs.created_at BETWEEN ? AND ? AND logs.type IN ?", bounds.Start, bounds.End, []int{LogTypeConsume, LogTypeError}).
 		Joins("LEFT JOIN (?) AS capture_index ON logs.request_id = capture_index.request_id", indexed)
 	emptyID := "''"
-	var client string
-	switch {
-	case common.UsingLogDatabase(common.DatabaseTypeClickHouse):
-		client = "JSONExtractString(logs.other, 'client_tool')"
-	case common.UsingLogDatabase(common.DatabaseTypeMySQL):
-		const value = "JSON_EXTRACT(logs.other, '$.client_tool')"
-		client = "CASE WHEN JSON_VALID(logs.other) THEN CASE WHEN JSON_TYPE(" + value + ") = 'STRING' THEN JSON_UNQUOTE(" + value + ") END END"
-	case common.UsingLogDatabase(common.DatabaseTypePostgreSQL):
-		emptyID = "CAST('' AS text)" // PostgreSQL 9.6 leaves an untyped literal in a derived table unresolved.
-		client = `CASE WHEN logs.other LIKE '%"client_tool"%' THEN CAST(logs.other AS json)->>'client_tool' END`
-	default:
-		client = "CASE WHEN json_valid(logs.other) THEN json_extract(logs.other, '$.client_tool') END"
+	if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
+		emptyID = "CAST('' AS text)" // An unresolved literal in a derived table is invalid on PostgreSQL 9.6.
 	}
+	client := recordedRequestSourceSQL()
 	const logRID = "COALESCE(logs.request_id, '')"
 	const anonTime = "CASE WHEN " + logRID + " = '' THEN logs.created_at ELSE 0 END"
 	logGroups := logs.Session(&gorm.Session{}).

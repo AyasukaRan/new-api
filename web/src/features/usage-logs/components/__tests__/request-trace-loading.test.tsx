@@ -17,6 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
+import { Blob as NodeBlob, File as NodeFile } from 'node:buffer'
+
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -127,6 +129,102 @@ afterEach(() => {
 })
 
 describe('streamed request trace loading', () => {
+  test('shows each retained OCR page and an explicit missing original for a standalone multipart upload', async () => {
+    const input = leg({
+      format: 'deepseek_tools',
+      url: '/v1/tools/ocr',
+      headers: { 'Content-Type': ['multipart/form-data; boundary=example'] },
+      has_body: false,
+      body_size: 0,
+    })
+    const output = leg({
+      ...input,
+      seq: 3,
+      direction: 'client_response',
+      has_body: true,
+    })
+    const requests: number[] = []
+    vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+      if (url === '/api/log/trace') {
+        return { data: { success: true, data: { legs: [input, output] } } }
+      }
+      requests.push(config?.params.seq)
+      return {
+        data: bodyStream(
+          JSON.stringify({
+            object: 'ocr.result',
+            page_count: 2,
+            pages: [
+              { index: 0, text: 'Recognized page one' },
+              { index: 1, text: '' },
+            ],
+          })
+        ),
+      }
+    })
+    renderTrace()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View request trace' })
+    )
+    expect(
+      await screen.findByRole('tab', { name: 'OCR result' })
+    ).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByText('Recognized page one')).toBeVisible()
+    expect(
+      screen.getByText('The original upload was not retained.')
+    ).toBeVisible()
+    expect(
+      screen.getByText('No text was recognized on this page.')
+    ).toBeVisible()
+    expect(requests).toEqual([3])
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  test('previews the image file from a retained OCR multipart upload and leaves an absent response explicit', async () => {
+    // The test environment supplies Node's fetch Response and jsdom's Blob.
+    // Use one realm for multipart decoding, as in a real browser.
+    vi.stubGlobal('Blob', NodeBlob)
+    vi.stubGlobal('File', NodeFile)
+    const contentType = 'multipart/form-data; boundary=fixture'
+    const capture = new Response(
+      '--fixture\r\nContent-Disposition: form-data; name="file"; filename="sample.png"\r\nContent-Type: image/png\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--fixture--\r\n',
+      { headers: { 'Content-Type': contentType } }
+    )
+    const input = leg({
+      format: 'deepseek_tools',
+      url: '/v1/tools/ocr',
+      has_body: false,
+      has_object: true,
+      content_type: contentType,
+    })
+    const createObjectURL = vi.fn(() => 'blob:fixture-ocr')
+    vi.stubGlobal(
+      'URL',
+      class extends URL {
+        static createObjectURL = createObjectURL
+        static revokeObjectURL = vi.fn()
+      }
+    )
+    vi.spyOn(api, 'get').mockImplementation(async (url) => {
+      if (url === '/api/log/trace') {
+        return { data: { success: true, data: { legs: [input] } } }
+      }
+      if (url === '/api/log/trace/object') return { data: await capture.blob() }
+      throw new Error('Unexpected payload read')
+    })
+    renderTrace()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View request trace' })
+    )
+    expect(
+      await screen.findByRole('img', { name: 'Captured payload' })
+    ).toHaveAttribute('src', 'blob:fixture-ocr')
+    expect(createObjectURL).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'image/png', size: 8 })
+    )
+    expect(screen.getByText('No OCR result was captured.')).toBeVisible()
+  })
+
   test('shows completed history and the final reply while the request stream is still open; other legs load only on selection', async () => {
     let input: ReadableStreamDefaultController<Uint8Array> | undefined
     const requests: { seq: number; view?: string }[] = []
