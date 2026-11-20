@@ -88,11 +88,6 @@ const LOG_STAT_CARD_FALLBACK_KEYS = [
   'average-rpm',
   'average-tpm',
 ] as const
-const LazyFinancialSummary = lazy(() =>
-  import('./components/models/financial-summary').then((m) => ({
-    default: m.FinancialSummary,
-  }))
-)
 
 const LazyLogStatCards = lazy(() =>
   import('./components/models/log-stat-cards').then((m) => ({
@@ -488,15 +483,6 @@ export function Dashboard() {
                       />
                     </Suspense>
                   )}
-                {isAdmin && (
-                  <Suspense fallback={<ModelChartsFallback />}>
-                    <LazyFinancialSummary
-                      data={modelData}
-                      loading={dataLoading}
-                      error={modelQuery.isError}
-                    />
-                  </Suspense>
-                )}
               </div>
               {isAdmin && !modelFilters.username?.trim() && (
                 <Suspense fallback={<ModelChartsFallback />}>

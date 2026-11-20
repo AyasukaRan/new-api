@@ -3196,7 +3196,7 @@ test('on wide screens the quick options move into the header as a compact toggle
   for (const toggle of all) expect(toggle).toBeChecked()
 })
 
-test('header passthrough quick option confirms before writing the wildcard rule and clears it without asking', async () => {
+test('header passthrough quick option confirms before writing the wildcard rule and disables it without asking', async () => {
   const put = vi
     .spyOn(api, 'put')
     .mockResolvedValue({ data: { success: true } })
@@ -3207,6 +3207,8 @@ test('header passthrough quick option confirms before writing the wildcard rule 
   const headers = quick.getByRole('switch', {
     name: 'Pass Through Request Headers',
   })
+  expect(headers).toBeChecked()
+  await user.click(headers)
   expect(headers).not.toBeChecked()
 
   await user.click(headers)

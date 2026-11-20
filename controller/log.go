@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strconv"
 
@@ -71,34 +69,11 @@ func GetAllLogs(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	model.FormatLogList(logs, c.GetInt("role"), c.Query("compact") == "1")
+	model.FormatLogList(logs, c.GetInt("role"))
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
 	common.ApiSuccess(c, pageInfo)
 	return
-}
-
-func GetLogRequestBody(c *gin.Context) {
-	createdAt, err := strconv.ParseInt(c.Query("created_at"), 10, 64)
-	ref := c.Query("ref")
-	if err != nil || createdAt <= 0 || len(ref) != sha256.Size*2 {
-		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
-		return
-	}
-	if _, err := hex.DecodeString(ref); err != nil {
-		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
-		return
-	}
-	body, err := model.GetLogRequestBody(c.Request.Context(), createdAt, c.Query("request_id"), ref)
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if body == "" {
-		common.ApiErrorStatus(c, http.StatusNotFound, common.NewMessage("No matching results"))
-		return
-	}
-	common.ApiSuccess(c, body)
 }
 
 func GetUserLogs(c *gin.Context) {
@@ -239,7 +214,7 @@ func GetLogsStat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return
 	}
-	stat, err := model.SumUsedQuota(c.Request.Context(), filter, nil, c.GetInt("role") >= common.RoleAdminUser)
+	stat, err := model.SumUsedQuota(c.Request.Context(), filter, nil)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -258,7 +233,7 @@ func GetLogsSelfStat(c *gin.Context) {
 		filter.StartTimestamp = start
 	}
 	userID := c.GetInt("id")
-	stat, err := model.SumUsedQuota(c.Request.Context(), filter, &userID, false)
+	stat, err := model.SumUsedQuota(c.Request.Context(), filter, &userID)
 	if err != nil {
 		common.ApiError(c, err)
 		return

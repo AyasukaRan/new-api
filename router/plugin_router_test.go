@@ -1136,11 +1136,20 @@ func TestWebFallbackDoesNotCacheMissingAPIOrAssets(t *testing.T) {
 func TestSecurityRoutesDisableCachingBeforeAuthentication(t *testing.T) {
 	outer := gin.New()
 	SetApiRouter(outer)
-	for _, path := range []string{"/api/user/access_tokens", "/api/user/access_tokens/catalog", "/api/user/access_tokens/scopes", "/api/audit/self", "/api/audit", "/api/log/request_body"} {
+	for _, path := range []string{"/api/user/access_tokens", "/api/user/access_tokens/catalog", "/api/user/access_tokens/scopes", "/api/audit/self", "/api/audit"} {
 		t.Run(path, func(t *testing.T) {
 			response := performPluginRequest(outer, http.MethodGet, path)
 			assert.Equal(t, http.StatusUnauthorized, response.Code)
 			assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
 		})
+	}
+}
+
+func TestRelayBuildOmitsRequestTraceAPIs(t *testing.T) {
+	engine := gin.New()
+	SetApiRouter(engine)
+	for _, path := range []string{"request_body", "trace", "trace/body", "trace/object", "conversations", "conversations/clients", "conversations/turns"} {
+		response := performPluginRequest(engine, http.MethodGet, "/api/log/"+path)
+		assert.Equal(t, http.StatusNotFound, response.Code, path)
 	}
 }

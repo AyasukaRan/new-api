@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { DashboardFinance, DashboardMetric, QuotaDataItem } from '../types'
+import type { DashboardMetric, QuotaDataItem } from '../types'
 
 export function getDashboardMetricValue(
   item: Pick<QuotaDataItem, 'quota' | 'count' | 'finance'>,
@@ -32,78 +32,4 @@ export function getDashboardMetricValue(
   const value =
     metric === 'cost' ? item.finance.cost_quota : item.finance.profit_quota
   return Number.isFinite(value) ? value : null
-}
-
-export function summarizeDashboardFinance(
-  data: Array<Pick<QuotaDataItem, 'quota' | 'count' | 'finance'>>
-) {
-  const summary: DashboardFinance & { revenue_quota: number; count: number } = {
-    revenue_quota: 0,
-    count: 0,
-    cost_quota: 0,
-    profit_quota: 0,
-    covered_revenue_quota: 0,
-    recorded_count: 0,
-    actual_count: 0,
-    estimated_count: 0,
-    unrecorded_count: 0,
-  }
-  for (const row of data) {
-    summary.revenue_quota += getDashboardMetricValue(row, 'quota') ?? 0
-    summary.count += Number(row.count) || 0
-    if (!row.finance) {
-      summary.unrecorded_count += Number(row.count) || 0
-      continue
-    }
-    for (const key of [
-      'cost_quota',
-      'profit_quota',
-      'covered_revenue_quota',
-      'recorded_count',
-      'actual_count',
-      'estimated_count',
-      'unrecorded_count',
-    ] as const) {
-      const value = row.finance[key]
-      if (Number.isFinite(value)) summary[key] += value
-    }
-  }
-  return summary
-}
-
-export function hourlyDashboardFinance(
-  rows: QuotaDataItem[],
-  start: number,
-  end: number
-) {
-  const byHour = new Map<number, QuotaDataItem[]>()
-  for (const row of rows) {
-    if (
-      !Number.isFinite(row.created_at) ||
-      row.created_at < start ||
-      row.created_at > end
-    ) {
-      continue
-    }
-    const time = row.created_at - (row.created_at % 3600)
-    const bucket = byHour.get(time)
-    if (bucket) bucket.push(row)
-    else byHour.set(time, [row])
-  }
-  return Array.from(
-    { length: Math.floor((end - start) / 3600) + 1 },
-    (_, i) => {
-      const time = start + i * 3600
-      const summary = summarizeDashboardFinance(byHour.get(time) ?? [])
-      const complete =
-        summary.unrecorded_count === 0 &&
-        summary.recorded_count >= summary.count
-      return {
-        time,
-        revenue: summary.revenue_quota,
-        cost: complete ? summary.cost_quota : null,
-        profit: complete ? summary.profit_quota : null,
-      }
-    }
-  )
 }

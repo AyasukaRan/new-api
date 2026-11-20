@@ -66,37 +66,10 @@ function renderLogs() {
     .getState()
     .auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
   let records = [entry(11), entry(10)]
-  const requestedTraces: string[] = []
-  vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
     let data: unknown = {}
     if (url.startsWith('/api/log/?')) {
       data = { items: records, total: records.length }
-    } else if (url === '/api/log/trace') {
-      const params = config?.params as { trace_id?: string } | undefined
-      const trace = params?.trace_id
-      if (!trace) throw new Error('Expected a trace ID')
-      requestedTraces.push(trace)
-      data = {
-        trace_id: trace,
-        legs: [
-          {
-            seq: 1,
-            attempt: 0,
-            direction: 'client_response',
-            channel_id: 1,
-            format: 'openai',
-            method: 'POST',
-            url: '',
-            status: 200,
-            headers: null,
-            body: '',
-            body_size: 0,
-            truncated: false,
-            has_object: false,
-            rendered: { content: `Reply for ${trace}`, stream: false },
-          },
-        ],
-      }
     } else if (
       url === '/api/subscription/admin/plans' ||
       url === '/api/group/'
@@ -106,7 +79,10 @@ function renderLogs() {
     return { data: { success: true, data } }
   })
   const root = createRootRoute()
-  const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
+  const auth = createRoute({
+    getParentRoute: () => root,
+    id: '_authenticated',
+  })
   const logs = createRoute({
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
@@ -126,7 +102,6 @@ function renderLogs() {
     </QueryClientProvider>
   )
   return {
-    requestedTraces,
     refresh: async (ids: number[]) => {
       records = ids.map(entry)
       await act(async () => {
@@ -140,7 +115,7 @@ function renderLogs() {
 }
 
 test.each(['desktop', 'mobile'] as const)(
-  'keeps the selected %s trace open as refreshed logs move it off the current page',
+  'keeps the selected %s log open as refreshed logs move it off the current page',
   async (layout) => {
     if (layout === 'mobile') {
       const previous = window.matchMedia
@@ -150,58 +125,36 @@ test.each(['desktop', 'mobile'] as const)(
       }))
     }
     const user = userEvent.setup()
-    const { refresh, requestedTraces } = renderLogs()
+    const { refresh } = renderLogs()
     await user.click(
       await screen.findByRole('button', { name: 'Summary for request 11' })
     )
-    await user.click(
-      await screen.findByRole('button', { name: 'View request trace' })
-    )
-    const trace = await screen.findByRole('dialog', { name: 'Request Trace' })
-    expect(await within(trace).findByText('Reply for trace-11')).toBeVisible()
-    await user.click(
-      within(trace).getByRole('tab', { name: 'Exchange details' })
-    )
-
     for (const ids of [
       [12, 11],
       [13, 12],
     ]) {
       await refresh(ids)
-      expect(requestedTraces).toEqual(['trace-11'])
-      const openTrace = within(
-        screen.getByRole('dialog', { name: 'Request Trace' })
+      const details = within(
+        await screen.findByRole('dialog', { name: /Log Details/ })
       )
-      expect(openTrace.getByText('trace-11')).toBeVisible()
-      expect(
-        openTrace.getByRole('tab', { name: 'Exchange details' })
-      ).toHaveAttribute('aria-selected', 'true')
+      expect(details.getByText('request-11')).toBeVisible()
+      expect(details.queryByText('View request trace')).not.toBeInTheDocument()
     }
-
-    await user.keyboard('{Escape}')
-    const details = await screen.findByRole('dialog', { name: /Log Details/ })
-    expect(within(details).getByText('request-11')).toBeVisible()
     await user.keyboard('{Escape}')
     await user.click(
       await screen.findByRole('button', { name: 'Summary for request 13' })
     )
-    await user.click(
-      await screen.findByRole('button', { name: 'View request trace' })
-    )
-    expect(await screen.findByText('Reply for trace-13')).toBeVisible()
+    expect(await screen.findByText('request-13')).toBeVisible()
   }
 )
 
-test('clears the selected trace and details when the signed-in account changes', async () => {
+test('clears the selected details when the signed-in account changes', async () => {
   const user = userEvent.setup()
   renderLogs()
   await user.click(
     await screen.findByRole('button', { name: 'Summary for request 11' })
   )
-  await user.click(
-    await screen.findByRole('button', { name: 'View request trace' })
-  )
-  expect(await screen.findByText('Reply for trace-11')).toBeVisible()
+  expect(await screen.findByText('request-11')).toBeVisible()
   await act(async () => {
     useAuthStore
       .getState()
@@ -209,5 +162,4 @@ test('clears the selected trace and details when the signed-in account changes',
   })
   await screen.findByRole('button', { name: 'Summary for request 11' })
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  expect(screen.queryByText('Reply for trace-11')).not.toBeInTheDocument()
 })

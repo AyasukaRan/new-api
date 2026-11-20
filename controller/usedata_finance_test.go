@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,289 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Exercise the public report handlers against separate real main/log databases.
-func TestDashboardFinanceDatabaseMatrix(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	for _, dialect := range []struct {
-		name, env string
-		kind      common.DatabaseType
-	}{
-		{"sqlite", "", common.DatabaseTypeSQLite},
-		{"mysql", "AUDIT_MYSQL_DSN", common.DatabaseTypeMySQL},
-		{"postgres", "AUDIT_POSTGRES_DSN", common.DatabaseTypePostgreSQL},
-		{"clickhouse", "AUDIT_CLICKHOUSE_DSN", common.DatabaseTypeClickHouse},
-	} {
-		t.Run(dialect.name, func(t *testing.T) {
-			if dialect.env != "" && os.Getenv(dialect.env) == "" {
-				t.Skip(dialect.env + " is not configured")
-			}
-			mainName, mainDSN, mainKind := dialect.name, os.Getenv(dialect.env), dialect.kind
-			if dialect.kind == common.DatabaseTypeClickHouse {
-				mainName, mainDSN, mainKind = "sqlite", "", common.DatabaseTypeSQLite
-			}
-			mainDB, _ := newAuditTestDatabase(t, mainName, mainDSN)
-			logDB, logDSN := newAuditTestDatabase(t, dialect.name, os.Getenv(dialect.env))
-			useLogExportDatabases(t, mainDB, logDB, mainKind, dialect.kind)
-			require.NoError(t, mainDB.AutoMigrate(&model.QuotaData{}, &model.Channel{}, &model.Token{}))
-			if dialect.kind == common.DatabaseTypeClickHouse {
-				previousMaster := common.IsMasterNode
-				common.IsMasterNode = true
-				t.Cleanup(func() { common.IsMasterNode = previousMaster })
-				t.Setenv("LOG_SQL_DSN", logDSN)
-				t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", "0")
-				require.NoError(t, model.InitLogDB())
-				logDB = model.LOG_DB
-				conn, err := logDB.DB()
-				require.NoError(t, err)
-				t.Cleanup(func() { _ = conn.Close() })
-			} else {
-				require.NoError(t, logDB.AutoMigrate(&model.Log{}))
-				require.NoError(t, model.MigrateDashboardFinance())
-			}
-			var version string
-			versionSQL := "SELECT version()"
-			if dialect.name == "sqlite" {
-				versionSQL = "SELECT sqlite_version()"
-			}
-			require.NoError(t, logDB.Raw(versionSQL).Scan(&version).Error)
-			t.Logf("log database: %s %s", dialect.name, version)
-			require.NoError(t, mainDB.Create(&model.Channel{Id: 1, Name: "primary"}).Error)
-			quotaRows := []model.QuotaData{
-				{UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 3600, UseGroup: "default", TokenID: 11, ChannelID: 1, NodeName: "node-a", ClientTool: "curl", Count: 4, Quota: 430},
-				{UserID: 1, Username: "alice", ModelName: "gpt-a", CreatedAt: 7200, UseGroup: "default", TokenID: 11, ChannelID: 1, NodeName: "node-a", ClientTool: "curl", Count: 1, Quota: 30},
-				{UserID: 2, Username: "bob", ModelName: "gpt-b", CreatedAt: 3600, UseGroup: "vip", TokenID: 22, ChannelID: 1, NodeName: "node-b", Count: 1, Quota: 70},
-				{UserID: 1, Username: "alice", ModelName: "invalid", CreatedAt: 3600, UseGroup: "default", TokenID: 11, ChannelID: 1, NodeName: "node-a", Count: 7, Quota: 70},
-			}
-			require.NoError(t, mainDB.Create(&quotaRows).Error)
-			actual := `{"client_tool":"curl","admin_info":{"cost":{"cost_ratio":1.3,"base_quota":50,"cost_quota":65.25,"revenue_quota":100,"profit_quota":34.75,"estimated":false,"source":"upstream_bill"}}}`
-			estimated := `{"client_tool":"curl","root_info":{"node_name":"node-a"},"admin_info":{"cost":{"cost_ratio":1.3,"base_quota":100,"cost_quota":130,"revenue_quota":200,"profit_quota":70,"estimated":true}}}`
-			loss := `{"client_tool":"curl","admin_info":{"cost":{"cost_ratio":2,"base_quota":25,"cost_quota":50,"revenue_quota":30,"profit_quota":-20,"estimated":true}}}`
-			bob := `{"admin_info":{"cost":{"cost_ratio":0,"base_quota":70,"cost_quota":0,"revenue_quota":70,"profit_quota":70,"estimated":true}}}`
-			logs := []model.Log{
-				{UserId: 1, Username: "alice", CreatedAt: 3610, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 1, TokenId: 11, Group: "default", Quota: 100, RequestId: "actual", Other: actual},
-				{UserId: 1, Username: "alice", CreatedAt: 3620, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 1, TokenId: 11, Group: "default", Quota: 200, RequestId: "estimated", Other: estimated},
-				{UserId: 1, Username: "alice", CreatedAt: 3630, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 1, TokenId: 11, Group: "default", Quota: 30, RequestId: "loss", Other: loss},
-				{UserId: 1, Username: "alice", CreatedAt: 3640, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 1, TokenId: 11, Group: "default", Quota: 100, RequestId: "unknown"},
-				{UserId: 1, Username: "alice", CreatedAt: 7210, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 1, TokenId: 11, Group: "default", Quota: 30, RequestId: "next-hour", Other: loss},
-				{UserId: 2, Username: "bob", CreatedAt: 3610, Type: model.LogTypeConsume, ModelName: "gpt-b", ChannelId: 1, TokenId: 22, Group: "vip", Quota: 70, RequestId: "zero-cost", Other: bob},
-				{UserId: 1, Username: "alice", CreatedAt: 3610, Type: model.LogTypeTestConsume, ModelName: "gpt-a", ChannelId: 1, TokenId: 11, Group: "default", Quota: 100, RequestId: "probe", Other: actual},
-				{UserId: 1, Username: "alice", CreatedAt: 3610, Type: model.LogTypeConsume, ModelName: "gpt-a", ChannelId: 1, Group: "default", Quota: 100, TokenName: "模型测试", Content: "模型测试", RequestId: "legacy-probe", Other: actual},
-			}
-			for i, invalid := range []string{
-				`{"admin_info":{"cost":`,
-				`{"admin_info":{"cost":{"cost_ratio":1,"base_quota":1,"cost_quota":5,"revenue_quota":10,"profit_quota":5,"estimated":false}}}`,
-				`{"admin_info":{"cost":{"cost_ratio":1,"base_quota":1,"cost_quota":-1,"revenue_quota":10,"profit_quota":11,"estimated":true}}}`,
-				`{"admin_info":{"cost":{"cost_ratio":1,"base_quota":1,"cost_quota":5,"revenue_quota":11,"profit_quota":6,"estimated":true}}}`,
-				`{"admin_info":{"cost":{"cost_ratio":1,"base_quota":1,"cost_quota":5,"revenue_quota":10,"profit_quota":8,"estimated":true}}}`,
-				`{"admin_info":{"cost":{"cost_ratio":1,"base_quota":1,"cost_quota":"5","revenue_quota":10,"profit_quota":5,"estimated":true}}}`,
-				`{"admin_info":{"cost":{"cost_ratio":1,"base_quota":1,"cost_quota":null,"revenue_quota":10,"profit_quota":5,"estimated":true}}}`,
-			} {
-				logs = append(logs, model.Log{UserId: 1, Username: "alice", CreatedAt: 3650, Type: model.LogTypeConsume, ModelName: "invalid", ChannelId: 1, TokenId: 11, Group: "default", Quota: 10, RequestId: fmt.Sprintf("invalid-%d", i), Other: invalid})
-			}
-			require.NoError(t, logDB.Create(&logs).Error)
-			wantFirst := model.DashboardFinance{CostQuota: 245.25, ProfitQuota: 84.75, CoveredRevenueQuota: 330, RecordedCount: 3, ActualCount: 1, EstimatedCount: 2, UnrecordedCount: 1}
-			for _, endpoint := range []struct {
-				name    string
-				handler gin.HandlerFunc
-				query   string
-				role    int
-				target  string
-				want    model.DashboardFinance
-			}{
-				{"model", GetAllQuotaDates, "", common.RoleAdminUser, "gpt-a", wantFirst},
-				{"model username", GetAllQuotaDates, "&username=alice", common.RoleRootUser, "gpt-a", wantFirst},
-				{"user", GetQuotaDatesByUser, "", common.RoleAdminUser, "alice", model.DashboardFinance{CostQuota: 245.25, ProfitQuota: 84.75, CoveredRevenueQuota: 330, RecordedCount: 3, ActualCount: 1, EstimatedCount: 2, UnrecordedCount: 8}},
-				{"source", GetAllSourceQuotaDates, "&time_series=true", common.RoleAdminUser, "curl", wantFirst},
-				{"source summary", GetAllSourceQuotaDates, "", common.RoleRootUser, "curl", wantFirst},
-				{"admin flow", GetAllFlowQuotaDates, "&username=alice", common.RoleAdminUser, "gpt-a", wantFirst},
-				{"root flow", GetAllFlowQuotaDates, "&username=alice", common.RoleRootUser, "gpt-a", wantFirst},
-			} {
-				t.Run(endpoint.name, func(t *testing.T) {
-					recorder := httptest.NewRecorder()
-					ctx, _ := gin.CreateTestContext(recorder)
-					ctx.Set("role", endpoint.role)
-					ctx.Set("id", 1)
-					ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data?start_timestamp=3600&end_timestamp=7199"+endpoint.query, nil)
-					endpoint.handler(ctx)
-					var payload struct {
-						Success bool   `json:"success"`
-						Message string `json:"message"`
-						Data    []struct {
-							ModelName  string                  `json:"model_name"`
-							Username   string                  `json:"username"`
-							ClientTool string                  `json:"client_tool"`
-							Finance    *model.DashboardFinance `json:"finance"`
-						} `json:"data"`
-					}
-					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-					require.True(t, payload.Success, payload.Message)
-					found := false
-					for _, row := range payload.Data {
-						if row.ModelName == endpoint.target || row.Username == endpoint.target || row.ClientTool == endpoint.target {
-							found = true
-							require.NotNil(t, row.Finance)
-							assert.Equal(t, endpoint.want, *row.Finance)
-						}
-						if row.ModelName == "invalid" {
-							require.NotNil(t, row.Finance)
-							assert.Equal(t, model.DashboardFinance{UnrecordedCount: 7}, *row.Finance)
-						}
-					}
-					assert.True(t, found)
-				})
-			}
-
-			later, err := model.GetAllQuotaDates(7200, 10799, "alice")
-			require.NoError(t, err)
-			require.NoError(t, model.AttachQuotaFinance(context.Background(), later, 7200, 10799, "alice", false))
-			require.Len(t, later, 1)
-			assert.Equal(t, model.DashboardFinance{CostQuota: 50, ProfitQuota: -20, CoveredRevenueQuota: 30, RecordedCount: 1, EstimatedCount: 1}, *later[0].Finance)
-
-			// Two historical users may share a username after deletion/recreation.
-			// Filtered model reports retain their distinct user_id rows.
-			for _, userID := range []int{3, 4} {
-				require.NoError(t, mainDB.Create(&model.QuotaData{UserID: userID, Username: "reused", ModelName: "same", CreatedAt: 3600, Count: 1, Quota: 100}).Error)
-				require.NoError(t, logDB.Create(&model.Log{UserId: userID, Username: "reused", ModelName: "same", CreatedAt: 3800, Type: model.LogTypeConsume, Quota: 100, Other: actual}).Error)
-			}
-			reused, err := model.GetAllQuotaDates(3600, 7199, "reused")
-			require.NoError(t, err)
-			require.NoError(t, model.AttachQuotaFinance(context.Background(), reused, 3600, 7199, "reused", false))
-			require.Len(t, reused, 2)
-			for _, row := range reused {
-				require.NotNil(t, row.Finance)
-				assert.Equal(t, model.DashboardFinance{CostQuota: 65.25, ProfitQuota: 34.75, CoveredRevenueQuota: 100, RecordedCount: 1, ActualCount: 1}, *row.Finance)
-			}
-
-			// Imported events can share both a timestamp and an empty request ID.
-			// Retain them all even if the hourly usage table lags one request.
-			batch := make([]model.Log, 129)
-			for i := range batch {
-				batch[i] = model.Log{UserId: 5, Username: "batch", ModelName: "batch", CreatedAt: 3900, Type: model.LogTypeConsume, Quota: 100, Other: actual}
-			}
-			require.NoError(t, logDB.Create(&batch).Error)
-			require.NoError(t, mainDB.Create(&model.QuotaData{UserID: 5, Username: "batch", ModelName: "batch", CreatedAt: 3600, Count: 128, Quota: 12800}).Error)
-			batchRows, err := model.GetAllQuotaDates(3600, 7199, "batch")
-			require.NoError(t, err)
-			require.NoError(t, model.AttachQuotaFinance(context.Background(), batchRows, 3600, 7199, "batch", false))
-			require.Len(t, batchRows, 1)
-			assert.Equal(t, model.DashboardFinance{CostQuota: 8417.25, ProfitQuota: 4482.75, CoveredRevenueQuota: 12900, RecordedCount: 129, ActualCount: 129}, *batchRows[0].Finance)
-
-			ambiguousLogs := []model.Log{
-				{UserId: 6, Username: "ambiguous", ModelName: "ambiguous", CreatedAt: 4000, Type: model.LogTypeConsume, Quota: 100, Group: "default", ChannelId: 1, Other: actual},
-				{UserId: 6, Username: "ambiguous", ModelName: "ambiguous", CreatedAt: 4001, Type: model.LogTypeConsume, Quota: 200, Group: "default", ChannelId: 1, Other: estimated},
-				{UserId: 6, Username: "ambiguous", ModelName: "ambiguous", CreatedAt: 4002, Type: model.LogTypeConsume, Quota: 100, Group: "default", ChannelId: 1, Other: `{"root_info":{"node_name":""},` + actual[1:]},
-			}
-			require.NoError(t, logDB.Create(&ambiguousLogs).Error)
-			for _, node := range []string{"node-a", "node-b", ""} {
-				require.NoError(t, mainDB.Create(&model.QuotaData{UserID: 6, Username: "ambiguous", ModelName: "ambiguous", CreatedAt: 3600, Count: 1, Quota: 200, UseGroup: "default", ChannelID: 1, NodeName: node}).Error)
-			}
-			flowRows, err := model.GetFlowQuotaData(3600, 7199, "ambiguous", 0, common.RoleRootUser)
-			require.NoError(t, err)
-			require.NoError(t, model.AttachFlowFinance(context.Background(), flowRows, 3600, 7199, "ambiguous", common.RoleRootUser))
-			require.Len(t, flowRows, 3)
-			for _, row := range flowRows {
-				switch row.NodeName {
-				case "node-a":
-					assert.Equal(t, int64(1), row.Finance.EstimatedCount)
-					assert.Equal(t, float64(130), row.Finance.CostQuota)
-				case "":
-					assert.Equal(t, int64(1), row.Finance.ActualCount)
-					assert.Equal(t, 65.25, row.Finance.CostQuota)
-				case "node-b":
-					assert.Equal(t, model.DashboardFinance{UnrecordedCount: 1}, *row.Finance)
-				}
-			}
-
-			for _, handler := range []gin.HandlerFunc{GetUserQuotaDates, GetUserFlowQuotaDates, GetUserSourceQuotaDates} {
-				recorder := httptest.NewRecorder()
-				ctx, _ := gin.CreateTestContext(recorder)
-				ctx.Set("role", common.RoleRootUser)
-				ctx.Set("id", 1)
-				ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/self?start_timestamp=3600&end_timestamp=7199&username=bob&finance=true", nil)
-				handler(ctx)
-				assert.NotContains(t, recorder.Body.String(), `"finance"`, "self APIs never expose finance even to an administrator")
-				assert.NotContains(t, recorder.Body.String(), "cost_quota")
-			}
-
-			for _, handler := range []gin.HandlerFunc{GetAllQuotaDates, GetQuotaDatesByUser, GetAllSourceQuotaDates, GetAllFlowQuotaDates} {
-				recorder := httptest.NewRecorder()
-				ctx, _ := gin.CreateTestContext(recorder)
-				ctx.Set("role", common.RoleCommonUser)
-				ctx.Set("id", 1)
-				ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data?start_timestamp=3600&end_timestamp=7199&finance=true", nil)
-				handler(ctx)
-				assert.NotContains(t, recorder.Body.String(), `"finance"`)
-			}
-
-			// The original usage is retained, while only the paid remainder is
-			// revenue. Missing cost must not turn an allowance into paid income.
-			const allowanceHour int64 = 14400
-			free := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"free_allowance","free_quota":100,"admin_info":{"cost":{"cost_ratio":0,"base_quota":100,"free_quota":100,"cost_quota":0,"revenue_quota":0,"profit_quota":0,"estimated":true}}}`
-			mixed := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"free_allowance","free_quota":60,"admin_info":{"cost":{"cost_ratio":0.1,"base_quota":100,"free_quota":60,"cost_quota":10,"revenue_quota":40,"profit_quota":30,"estimated":true}}}`
-			missingCost := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"free_allowance","free_quota":25}`
-			paid := `{"client_tool":"curl","root_info":{"node_name":"allowance-node"},"billing_source":"subscription","admin_info":{"cost":{"cost_ratio":0.1,"base_quota":100,"cost_quota":10,"revenue_quota":100,"profit_quota":90,"estimated":true}}}`
-			allowanceLogs := make([]model.Log, 0, 4)
-			for i, other := range []string{free, mixed, missingCost, paid} {
-				allowanceLogs = append(allowanceLogs, model.Log{UserId: 7, Username: "allowance", ModelName: "deepseek-flash", CreatedAt: allowanceHour + int64(i), Type: model.LogTypeConsume, Quota: 100, ChannelId: 1, TokenId: 11, Group: "deepseek", Other: other})
-			}
-			require.NoError(t, logDB.Create(&allowanceLogs).Error)
-			require.NoError(t, mainDB.Create(&model.QuotaData{UserID: 7, Username: "allowance", ModelName: "deepseek-flash", CreatedAt: allowanceHour, UseGroup: "deepseek", TokenID: 11, ChannelID: 1, NodeName: "allowance-node", ClientTool: "curl", Count: 4, Quota: 400}).Error)
-			wantAllowance := model.DashboardFinance{FreeQuota: 185, CostQuota: 20, CoveredRevenueQuota: 140, ProfitQuota: 120, RecordedCount: 3, EstimatedCount: 3, UnrecordedCount: 1}
-			filter := model.LogFilter{StartTimestamp: allowanceHour, EndTimestamp: allowanceHour + 3599}
-			pending, err := model.SumUsedQuota(t.Context(), filter, nil, true)
-			require.NoError(t, err)
-			assert.Equal(t, 400, pending.Quota)
-			assert.Equal(t, &wantAllowance, pending.Finance)
-			for _, handler := range []gin.HandlerFunc{GetAllQuotaDates, GetQuotaDatesByUser, GetAllSourceQuotaDates, GetAllFlowQuotaDates} {
-				recorder := httptest.NewRecorder()
-				ctx, _ := gin.CreateTestContext(recorder)
-				ctx.Set("role", common.RoleRootUser)
-				ctx.Set("id", 7)
-				ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data?start_timestamp=14400&end_timestamp=17999&username=allowance&time_series=true", nil)
-				handler(ctx)
-				var payload struct {
-					Success bool `json:"success"`
-					Data    []struct {
-						Quota   int                     `json:"quota"`
-						Finance *model.DashboardFinance `json:"finance"`
-					} `json:"data"`
-				}
-				require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
-				require.True(t, payload.Success, recorder.Body.String())
-				require.Len(t, payload.Data, 1)
-				assert.Equal(t, 400, payload.Data[0].Quota)
-				assert.Equal(t, &wantAllowance, payload.Data[0].Finance)
-			}
-			warmAllowance, err := model.SumUsedQuota(t.Context(), filter, nil, true)
-			require.NoError(t, err)
-			assert.Equal(t, pending, warmAllowance)
-			if dialect.kind != common.DatabaseTypeClickHouse {
-				lateAllowance := allowanceLogs[2]
-				lateAllowance.Id = 0
-				require.NoError(t, logDB.Create(&lateAllowance).Error)
-				wantAllowance.FreeQuota += 25
-				wantAllowance.UnrecordedCount++
-				mixedAllowance, err := model.SumUsedQuota(t.Context(), filter, nil, true)
-				require.NoError(t, err)
-				assert.Equal(t, 500, mixedAllowance.Quota)
-				assert.Equal(t, &wantAllowance, mixedAllowance.Finance)
-				require.NoError(t, logDB.Model(&allowanceLogs[0]).Update("other", paid).Error)
-				wantAllowance.FreeQuota -= 100
-				wantAllowance.CostQuota += 10
-				wantAllowance.CoveredRevenueQuota += 100
-				wantAllowance.ProfitQuota += 90
-				for range 2 {
-					updated, err := model.SumUsedQuota(t.Context(), filter, nil, true)
-					require.NoError(t, err)
-					assert.Equal(t, &wantAllowance, updated.Finance)
-					require.NoError(t, model.AttachQuotaFinance(t.Context(), nil, allowanceHour, allowanceHour+3599, "", false))
-				}
-			}
-		})
-	}
-}
-
-func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
+func TestLogStatDatabaseMatrix(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, dialect := range []struct {
 		name, env string
@@ -334,7 +51,6 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 			})
 			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}, &model.User{}))
 			require.NoError(t, logDB.AutoMigrate(&model.Log{}))
-			require.NoError(t, model.MigrateDashboardFinance())
 			now := common.GetTimestamp()
 			start := now - 600
 			actual := `{"admin_info":{"cost":{"cost_ratio":1.3,"base_quota":50,"cost_quota":65,"revenue_quota":100,"profit_quota":35,"estimated":false,"source":"upstream_bill"}}}`
@@ -357,30 +73,27 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 				{UserId: 1, Username: "alice", CreatedAt: now + 60, Type: model.LogTypeConsume, Quota: 20, PromptTokens: 90, RequestId: "future"},
 			}
 			require.NoError(t, logDB.Create(&logs).Error)
-			allFinance := &model.DashboardFinance{CostQuota: 325, ProfitQuota: 25, CoveredRevenueQuota: 350, RecordedCount: 3, ActualCount: 1, EstimatedCount: 2, UnrecordedCount: 2}
-			modelFinance := &model.DashboardFinance{CostQuota: 325, ProfitQuota: -25, CoveredRevenueQuota: 300, RecordedCount: 2, ActualCount: 1, EstimatedCount: 1, UnrecordedCount: 1}
 			query := fmt.Sprintf("start_timestamp=%d&end_timestamp=%d", start, start+4)
 			for _, tc := range []struct {
 				name, extra     string
 				quota, rpm, tpm int
-				finance         *model.DashboardFinance
 			}{
-				{"all results ignore pagination", "&p=2&page_size=1", 420, 2, 35, allFinance},
-				{"consume type", "&type=2", 420, 2, 35, allFinance},
-				{"error type", "&type=5", 0, 0, 0, &model.DashboardFinance{}},
-				{"exact model", "&model_name=model-a", 340, 1, 12, modelFinance},
-				{"model wildcard", "&model_name=model-%25", 420, 1, 12, allFinance},
-				{"username wildcard", "&username=bo%25", 50, 0, 0, &model.DashboardFinance{ProfitQuota: 50, CoveredRevenueQuota: 50, RecordedCount: 1, EstimatedCount: 1}},
-				{"exact username", "&username=alice", 370, 2, 35, &model.DashboardFinance{CostQuota: 325, ProfitQuota: -25, CoveredRevenueQuota: 300, RecordedCount: 2, ActualCount: 1, EstimatedCount: 1, UnrecordedCount: 2}},
-				{"token", "&token_name=token-a", 340, 1, 12, modelFinance},
-				{"channel", "&channel=1", 340, 1, 12, modelFinance},
-				{"group", "&group=default", 340, 1, 12, modelFinance},
-				{"request", "&request_id=actual", 100, 0, 0, &model.DashboardFinance{CostQuota: 65, ProfitQuota: 35, CoveredRevenueQuota: 100, RecordedCount: 1, ActualCount: 1}},
-				{"upstream request", "&upstream_request_id=up-b", 200, 0, 0, &model.DashboardFinance{CostQuota: 260, ProfitQuota: -60, CoveredRevenueQuota: 200, RecordedCount: 1, EstimatedCount: 1}},
-				{"combined", "&type=2&model_name=model-a&username=alice&channel=1&token_name=token-a&group=default&request_id=actual&upstream_request_id=up-a", 100, 0, 0, &model.DashboardFinance{CostQuota: 65, ProfitQuota: 35, CoveredRevenueQuota: 100, RecordedCount: 1, ActualCount: 1}},
-				{"test records", "&source=test&type=2", 200, 0, 0, nil},
-				{"rolling rates retain request filter", "&request_id=recent", 0, 1, 12, &model.DashboardFinance{}},
-				{"rolling rates retain upstream filter", "&upstream_request_id=up-recent", 0, 1, 12, &model.DashboardFinance{}},
+				{"all results ignore pagination", "&p=2&page_size=1", 420, 2, 35},
+				{"consume type", "&type=2", 420, 2, 35},
+				{"error type", "&type=5", 0, 0, 0},
+				{"exact model", "&model_name=model-a", 340, 1, 12},
+				{"model wildcard", "&model_name=model-%25", 420, 1, 12},
+				{"username wildcard", "&username=bo%25", 50, 0, 0},
+				{"exact username", "&username=alice", 370, 2, 35},
+				{"token", "&token_name=token-a", 340, 1, 12},
+				{"channel", "&channel=1", 340, 1, 12},
+				{"group", "&group=default", 340, 1, 12},
+				{"request", "&request_id=actual", 100, 0, 0},
+				{"upstream request", "&upstream_request_id=up-b", 200, 0, 0},
+				{"combined", "&type=2&model_name=model-a&username=alice&channel=1&token_name=token-a&group=default&request_id=actual&upstream_request_id=up-a", 100, 0, 0},
+				{"test records", "&source=test&type=2", 200, 0, 0},
+				{"rolling rates retain request filter", "&request_id=recent", 0, 1, 12},
+				{"rolling rates retain upstream filter", "&upstream_request_id=up-recent", 0, 1, 12},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					recorder := httptest.NewRecorder()
@@ -395,10 +108,8 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 					}
 					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
 					require.True(t, payload.Success, recorder.Body.String())
-					assert.Equal(t, model.Stat{Quota: tc.quota, Rpm: tc.rpm, Tpm: tc.tpm, Finance: tc.finance}, payload.Data)
-					if tc.finance == nil {
-						assert.NotContains(t, recorder.Body.String(), `"finance"`)
-					}
+					assert.Equal(t, model.Stat{Quota: tc.quota, Rpm: tc.rpm, Tpm: tc.tpm}, payload.Data)
+					assert.NotContains(t, recorder.Body.String(), `"finance"`)
 				})
 			}
 			for _, tc := range []struct {
@@ -428,32 +139,6 @@ func TestLogStatFinanceDatabaseMatrix(t *testing.T) {
 					assert.NotContains(t, recorder.Body.String(), `"finance"`)
 				})
 			}
-			// A report must include pending logs alongside already indexed ones. The
-			// same filter remains exact after an operator revises a historical bill.
-			hour := start - start%3600
-			require.NoError(t, model.AttachQuotaFinance(context.Background(), nil, hour, hour+7199, "", false))
-			filter := model.LogFilter{StartTimestamp: start, EndTimestamp: start + 4}
-			warm, err := model.SumUsedQuota(context.Background(), filter, nil, true)
-			require.NoError(t, err)
-			assert.Equal(t, allFinance, warm.Finance)
-			late := model.Log{CreatedAt: start + 2, Type: model.LogTypeConsume, Quota: 50, Other: zero}
-			require.NoError(t, logDB.Create(&late).Error)
-			require.NoError(t, logDB.Model(&model.Log{}).Where("request_id = ?", "loss").Update("other", "{}").Error)
-			mixed, err := model.SumUsedQuota(context.Background(), filter, nil, true)
-			require.NoError(t, err)
-			assert.Equal(t, 470, mixed.Quota)
-			assert.Equal(t, &model.DashboardFinance{CostQuota: 65, CoveredRevenueQuota: 200, ProfitQuota: 135, RecordedCount: 3, ActualCount: 1, EstimatedCount: 2, UnrecordedCount: 3}, mixed.Finance)
-			require.NoError(t, logDB.Delete(&late).Error)
-			require.NoError(t, model.AttachQuotaFinance(context.Background(), nil, hour, hour+7199, "", false))
-			repaired, err := model.SumUsedQuota(context.Background(), filter, nil, true)
-			require.NoError(t, err)
-			assert.Equal(t, 420, repaired.Quota)
-			assert.Equal(t, &model.DashboardFinance{CostQuota: 65, CoveredRevenueQuota: 150, ProfitQuota: 85, RecordedCount: 2, ActualCount: 1, EstimatedCount: 1, UnrecordedCount: 3}, repaired.Finance)
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			stat, err := model.SumUsedQuota(ctx, model.LogFilter{Source: model.LogSourceUsage, StartTimestamp: start, EndTimestamp: start + 4}, nil, true)
-			require.Error(t, err)
-			assert.Equal(t, model.Stat{}, stat, "failed queries must not return partial finance")
 		})
 	}
 }

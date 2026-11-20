@@ -36,7 +36,6 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 
 import {
-  SettingsControlGroup,
   SettingsForm,
   SettingsFormGrid,
   SettingsSwitchContent,
@@ -51,14 +50,6 @@ import { ServerLogFiles } from './server-log-files'
 
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
-  LogRequestBodyEnabled: z.boolean(),
-  RequestTraceEnabled: z.boolean(),
-  RequestTraceRetentionDays: z.number().int().min(1).max(365),
-  RequestTraceMaxBytes: z
-    .number()
-    .int()
-    .min(4096)
-    .max(32 * 1024 * 1024),
   log_setting: z.object({
     user_export_enabled: z.boolean(),
     max_range_days: z.number().int().min(1),
@@ -70,10 +61,6 @@ type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 type LogSettingsSectionProps = {
   defaultValues: {
     LogConsumeEnabled: boolean
-    LogRequestBodyEnabled: boolean
-    RequestTraceEnabled: boolean
-    RequestTraceRetentionDays: number
-    RequestTraceMaxBytes: number
     'log_setting.user_export_enabled': boolean
     'log_setting.max_range_days': number
   }
@@ -90,24 +77,12 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
   const formDefaults = useMemo<LogSettingsFormValues>(
     () => ({
       LogConsumeEnabled: props.defaultValues.LogConsumeEnabled,
-      LogRequestBodyEnabled: props.defaultValues.LogRequestBodyEnabled,
-      RequestTraceEnabled: props.defaultValues.RequestTraceEnabled,
-      RequestTraceRetentionDays: props.defaultValues.RequestTraceRetentionDays,
-      RequestTraceMaxBytes: props.defaultValues.RequestTraceMaxBytes,
       log_setting: {
         user_export_enabled: userExportEnabled,
         max_range_days: maxRangeDays,
       },
     }),
-    [
-      props.defaultValues.LogConsumeEnabled,
-      props.defaultValues.LogRequestBodyEnabled,
-      props.defaultValues.RequestTraceEnabled,
-      props.defaultValues.RequestTraceRetentionDays,
-      props.defaultValues.RequestTraceMaxBytes,
-      userExportEnabled,
-      maxRangeDays,
-    ]
+    [props.defaultValues.LogConsumeEnabled, userExportEnabled, maxRangeDays]
   )
   const form = useForm<LogSettingsFormValues>({
     resolver: zodResolver(logSettingsSchema),
@@ -118,15 +93,9 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
     form.reset(formDefaults)
   }, [formDefaults, form])
 
-  const requestTraceEnabled = form.watch('RequestTraceEnabled')
-
   const onSubmit = async (values: LogSettingsFormValues) => {
     const changes = [
       ['LogConsumeEnabled', values.LogConsumeEnabled],
-      ['LogRequestBodyEnabled', values.LogRequestBodyEnabled],
-      ['RequestTraceEnabled', values.RequestTraceEnabled],
-      ['RequestTraceRetentionDays', values.RequestTraceRetentionDays],
-      ['RequestTraceMaxBytes', values.RequestTraceMaxBytes],
 
       [
         'log_setting.user_export_enabled',
@@ -180,106 +149,6 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                 </SettingsSwitchItem>
               )}
             />
-            <FormField
-              control={form.control}
-              name='LogRequestBodyEnabled'
-              render={({ field }) => (
-                <SettingsSwitchItem>
-                  <SettingsSwitchContent>
-                    <FormLabel>{t('Record request content')}</FormLabel>
-                    <FormDescription>
-                      {t(
-                        'Store each request payload on its usage log so administrators can review what users sent. Logs then hold user content, and grow substantially.'
-                      )}
-                    </FormDescription>
-                  </SettingsSwitchContent>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </SettingsSwitchItem>
-              )}
-            />
-
-            <FormField
-              control={form.control}
-              name='RequestTraceEnabled'
-              render={({ field }) => (
-                <SettingsSwitchItem>
-                  <SettingsSwitchContent>
-                    <FormLabel>{t('Record the full request trace')}</FormLabel>
-                    <FormDescription>
-                      {t(
-                        'Capture the whole exchange behind each relay — the client request, what was forwarded upstream, the upstream reply and what was returned — with headers, credentials removed. Traces are stored separately and fetched on demand, but a single request can be megabytes.'
-                      )}
-                    </FormDescription>
-                  </SettingsSwitchContent>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </SettingsSwitchItem>
-              )}
-            />
-
-            <SettingsControlGroup className='grid gap-4 sm:grid-cols-2'>
-              <FormField
-                control={form.control}
-                name='RequestTraceRetentionDays'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Trace retention (days)')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        min={1}
-                        max={365}
-                        step={1}
-                        {...safeNumberFieldProps(field)}
-                        disabled={!requestTraceEnabled}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'Traces expire on their own schedule, independent of the usage logs they belong to.'
-                      )}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name='RequestTraceMaxBytes'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Max bytes per captured payload')}</FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        min={4096}
-                        max={32 * 1024 * 1024}
-                        step={1024}
-                        {...safeNumberFieldProps(field)}
-                        disabled={!requestTraceEnabled}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      {t(
-                        'Payloads within this limit are stored in full. Larger payloads retain only their beginning and end and are marked incomplete.'
-                      )}
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </SettingsControlGroup>
           </div>
 
           <Separator />

@@ -25,14 +25,15 @@ import {
 
 describe('getHeaderPassthroughState', () => {
   test.each([
-    ['undefined', undefined, 'disabled'],
-    ['empty string', '', 'disabled'],
-    ['whitespace only', '  \n', 'disabled'],
-    ['empty object', '{}', 'disabled'],
-    ['object without wildcard', '{"X-Foo":"bar"}', 'disabled'],
+    ['undefined', undefined, 'enabled'],
+    ['empty string', '', 'enabled'],
+    ['whitespace only', '  \n', 'enabled'],
+    ['empty object', '{}', 'enabled'],
+    ['object without wildcard', '{"X-Foo":"bar"}', 'enabled'],
     ['regex rule only', '{"re:^X-Trace-.*$": true}', 'disabled'],
     ['wildcard with boolean value', '{"*": true}', 'enabled'],
     ['wildcard with empty string value', '{"*": ""}', 'enabled'],
+    ['explicitly disabled', '{"*": false}', 'disabled'],
     ['padded wildcard key', '{" * ": true}', 'enabled'],
     ['wildcard among other rules', '{"X-Foo":"bar","*":true}', 'enabled'],
     ['invalid JSON', '{"*": tru', 'invalid'],
@@ -70,20 +71,23 @@ describe('setHeaderPassthrough', () => {
     })
   })
 
-  test('disabling removes only the wildcard rule and keeps other entries', () => {
+  test('disabling writes a false wildcard and keeps other entries', () => {
     const next = setHeaderPassthrough(
       '{"*": true, "re:^X-Trace-.*$": true, "X-Foo": "bar"}',
       false
     )
     expect(JSON.parse(next)).toEqual({
+      '*': false,
       're:^X-Trace-.*$': true,
       'X-Foo': 'bar',
     })
   })
 
-  test('disabling the last rule clears the field to an empty string', () => {
-    expect(setHeaderPassthrough('{"*": true}', false)).toBe('')
-    expect(setHeaderPassthrough('', false)).toBe('')
+  test('disabling persists an opt-out for existing and new channels', () => {
+    expect(JSON.parse(setHeaderPassthrough('{"*": true}', false))).toEqual({
+      '*': false,
+    })
+    expect(JSON.parse(setHeaderPassthrough('', false))).toEqual({ '*': false })
   })
 
   test('invalid JSON is returned unchanged in both directions', () => {

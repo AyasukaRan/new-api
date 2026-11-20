@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -221,18 +220,14 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	}
 
 	var quota int
-	var costBase float64
 	if tieredOk {
 		quota = tieredQuota
-		if tieredResult != nil {
-			costBase = tieredResult.ActualQuotaBeforeGroup
-		}
 	} else if relayInfo.PriceData.ChannelPricing && !usePrice {
 		summary := calculateTextQuotaSummary(ctx, relayInfo, tokenUsage)
-		quota, costBase = summary.Quota, summary.BaseQuota.InexactFloat64()
+		quota = summary.Quota
 	} else {
 		var clamp *common.QuotaClamp
-		quota, clamp, costBase = calculateAudioQuota(quotaInfo)
+		quota, clamp, _ = calculateAudioQuota(quotaInfo)
 		noteQuotaClamp(relayInfo, clamp)
 	}
 
@@ -277,9 +272,6 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 		completionRatio.InexactFloat64(), audioRatio.InexactFloat64(), audioCompletionRatio.InexactFloat64(), modelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
 	if tieredResult != nil {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
-	}
-	if settleErr == nil && totalTokens > 0 && (!tieredOk || tieredResult != nil) && !common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
-		appendUpstreamCostInfo(relayInfo, other, costBase, quota)
 	}
 	attachQuotaSaturation(ctx, relayInfo, other)
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
@@ -326,7 +318,6 @@ func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData)
 }
 
 func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message) {
-	hasUpstreamUsage := usage != nil && (usage.BillingUsage == nil || !usage.BillingUsage.Estimated)
 	if relayInfo.PriceData.ChannelPricing && !relayInfo.PriceData.UsePrice {
 		PostTextConsumeQuota(ctx, relayInfo, usage, extraContent)
 		return
@@ -386,13 +377,10 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		ChannelPricing:       relayInfo.PriceData.ChannelPricing,
 	}
 
-	quota, clamp, costBase := calculateAudioQuota(quotaInfo)
+	quota, clamp, _ := calculateAudioQuota(quotaInfo)
 	noteQuotaClamp(relayInfo, clamp)
 	if tieredOk {
 		quota = tieredQuota
-		if tieredResult != nil {
-			costBase = tieredResult.ActualQuotaBeforeGroup
-		}
 	}
 
 	totalTokens := usage.TotalTokens
@@ -436,9 +424,6 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 		completionRatio.InexactFloat64(), audioRatio.InexactFloat64(), audioCompletionRatio.InexactFloat64(), modelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
 	if tieredResult != nil {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
-	}
-	if settleErr == nil && hasUpstreamUsage && (totalTokens > 0 || fixedPriceBilling) && (!tieredOk || tieredResult != nil) && !common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
-		appendUpstreamCostInfo(relayInfo, other, costBase, quota)
 	}
 	attachQuotaSaturation(ctx, relayInfo, other)
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{

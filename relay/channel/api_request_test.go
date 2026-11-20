@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -291,7 +292,7 @@ func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
 		},
 	}
 
-	headers, err := processHeaderOverride(info, ctx)
+	headers, err := ResolveHeaderOverride(info, ctx)
 	require.NoError(t, err)
 	require.Empty(t, headers)
 }
@@ -314,7 +315,7 @@ func TestProcessHeaderOverride_ChannelTestSkipsClientHeaderPlaceholder(t *testin
 		},
 	}
 
-	headers, err := processHeaderOverride(info, ctx)
+	headers, err := ResolveHeaderOverride(info, ctx)
 	require.NoError(t, err)
 	_, ok := headers["x-upstream-trace"]
 	require.False(t, ok)
@@ -338,7 +339,7 @@ func TestProcessHeaderOverride_NonTestKeepsClientHeaderPlaceholder(t *testing.T)
 		},
 	}
 
-	headers, err := processHeaderOverride(info, ctx)
+	headers, err := ResolveHeaderOverride(info, ctx)
 	require.NoError(t, err)
 	require.Equal(t, "trace-123", headers["x-upstream-trace"])
 }
@@ -366,7 +367,7 @@ func TestProcessHeaderOverride_RuntimeOverrideIsFinalHeaderMap(t *testing.T) {
 		},
 	}
 
-	headers, err := processHeaderOverride(info, ctx)
+	headers, err := ResolveHeaderOverride(info, ctx)
 	require.NoError(t, err)
 	require.Equal(t, "runtime-value", headers["x-static"])
 	require.Equal(t, "runtime-only", headers["x-runtime"])
@@ -393,7 +394,7 @@ func TestProcessHeaderOverride_PassthroughSkipsAcceptEncoding(t *testing.T) {
 		},
 	}
 
-	headers, err := processHeaderOverride(info, ctx)
+	headers, err := ResolveHeaderOverride(info, ctx)
 	require.NoError(t, err)
 	require.Equal(t, "trace-123", headers["x-trace-id"])
 
@@ -441,7 +442,7 @@ func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.
 	require.False(t, exists)
 	require.Equal(t, "legacy-value", info.RuntimeHeadersOverride["x-static"])
 
-	headers, err := processHeaderOverride(info, ctx)
+	headers, err := ResolveHeaderOverride(info, ctx)
 	require.NoError(t, err)
 	require.Equal(t, "Codex CLI", headers["originator"])
 	require.Equal(t, "sess-123", headers["session_id"])
@@ -449,7 +450,7 @@ func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.
 	require.False(t, exists)
 
 	upstreamReq := httptest.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
-	applyHeaderOverrideToRequest(upstreamReq, headers)
+	require.NoError(t, ApplyHeaderOverride(info, ctx, upstreamReq))
 	require.Equal(t, "Codex CLI", upstreamReq.Header.Get("Originator"))
 	require.Equal(t, "sess-123", upstreamReq.Header.Get("Session_id"))
 	require.Empty(t, upstreamReq.Header.Get("X-Codex-Beta-Features"))
@@ -463,5 +464,91 @@ func TestToWebSocketURL(t *testing.T) {
 		"ws://127.0.0.1:3000/backend-api/codex/responses": "ws://127.0.0.1:3000/backend-api/codex/responses",
 	} {
 		assert.Equal(t, want, toWebSocketURL(input), input)
+	}
+}
+
+type headerRelayTestAdaptor struct {
+	Adaptor
+	upstream string
+}
+
+func (a headerRelayTestAdaptor) GetRequestURL(*relaycommon.RelayInfo) (string, error) {
+	return a.upstream, nil
+}
+
+func (a headerRelayTestAdaptor) SetupRequestHeader(_ *gin.Context, headers *http.Header, _ *relaycommon.RelayInfo) error {
+	headers.Set("Authorization", "Bearer upstream-test-key")
+	headers.Set("Content-Type", "application/json")
+	return nil
+}
+
+func TestUpstreamReceivesClientHeadersAndVerifiedIP(t *testing.T) {
+	service.InitHttpClient()
+	for _, tc := range []struct {
+		name      string
+		websocket bool
+		trusted   []string
+		overrides map[string]any
+		wantIP    string
+	}{
+		{name: "direct HTTP ignores claimed client address", wantIP: "192.0.2.1"},
+		{name: "WebSocket through trusted ingress", websocket: true, trusted: []string{"192.0.2.1"}, wantIP: "2001:db8::4"},
+		{name: "explicit wildcard opt-out", overrides: map[string]any{"*": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := make(chan http.Header, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured <- r.Header.Clone()
+				if tc.websocket {
+					upgrader := websocket.Upgrader{}
+					conn, err := upgrader.Upgrade(w, r, nil)
+					if err == nil {
+						_ = conn.Close()
+					}
+				}
+			}))
+			defer server.Close()
+
+			ctx, engine := gin.CreateTestContext(httptest.NewRecorder())
+			require.NoError(t, engine.SetTrustedProxies(tc.trusted))
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			ctx.Request.RemoteAddr = "192.0.2.1:7700"
+			h := ctx.Request.Header
+			h.Set("Connection", "keep-alive, X-Local-Only")
+			h.Set("X-Local-Only", "hop")
+			h.Set("X-Forwarded-For", "198.51.100.99, 2001:db8::4")
+			h.Set("X-Real-IP", "198.51.100.99")
+			h.Set("Cf-Connecting-Ip", "198.51.100.99")
+			h.Set("Forwarded", "for=198.51.100.99")
+			h.Set("Authorization", "Bearer downstream-test-key")
+			h.Set("Api-Key", "downstream-test-key")
+			h.Set("Cookie", "session=private")
+			h.Set("Sec-WebSocket-Protocol", "openai-insecure-api-key.downstream-test-key")
+			h.Add("X-Client-Feature", "one")
+			h.Add("X-Client-Feature", "two")
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{HeadersOverride: tc.overrides}}
+			adaptor := headerRelayTestAdaptor{upstream: server.URL}
+			if tc.websocket {
+				conn, err := DoWssRequest(adaptor, ctx, info, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = conn.Close() })
+			} else {
+				res, err := DoApiRequest(adaptor, ctx, info, strings.NewReader("{}"))
+				require.NoError(t, err)
+				require.NoError(t, res.Body.Close())
+			}
+			got := <-captured
+			assert.Equal(t, tc.wantIP, got.Get("X-Forwarded-For"))
+			assert.Equal(t, tc.wantIP, got.Get("X-Real-IP"))
+			assert.Equal(t, "Bearer upstream-test-key", got.Get("Authorization"))
+			for _, name := range []string{"X-Local-Only", "Forwarded", "Cf-Connecting-Ip", "Api-Key", "Cookie", "Sec-WebSocket-Protocol"} {
+				assert.Empty(t, got.Values(name), name)
+			}
+			if tc.wantIP == "" {
+				assert.Empty(t, got.Values("X-Client-Feature"))
+			} else {
+				assert.Equal(t, []string{"one", "two"}, got.Values("X-Client-Feature"))
+			}
+		})
 	}
 }

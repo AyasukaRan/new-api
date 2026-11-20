@@ -15,37 +15,7 @@ import (
 	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
-	"github.com/shopspring/decimal"
 )
-
-// appendUpstreamCostInfo records a configured cost estimate, never an upstream
-// invoice or a second user charge. Fractional quota preserves small-call costs.
-func appendUpstreamCostInfo(info *relaycommon.RelayInfo, other *model.LogOther, base float64, revenue int) {
-	if info == nil || other == nil || info.IsChannelTest || info.TaskRelayInfo != nil || info.UpstreamCostRatio == nil || info.QuotaClamp != nil {
-		return
-	}
-	ratio := *info.UpstreamCostRatio
-	if !(ratio >= 0 && ratio <= 10000) || !(base >= 0 && base <= common.MaxQuota) || revenue < 0 || revenue > common.MaxQuota || info.FreeQuotaConsumed < 0 || info.FreeQuotaConsumed > int64(revenue) {
-		return
-	}
-	cost := decimal.NewFromFloat(base).Mul(decimal.NewFromFloat(ratio))
-	if cost.GreaterThan(decimal.NewFromInt(common.MaxQuota)) {
-		return
-	}
-	revenue -= int(info.FreeQuotaConsumed)
-	snapshot := map[string]any{
-		"cost_ratio":    ratio,
-		"base_quota":    base,
-		"cost_quota":    cost.InexactFloat64(),
-		"revenue_quota": revenue,
-		"profit_quota":  decimal.NewFromInt(int64(revenue)).Sub(cost).InexactFloat64(),
-		"estimated":     true,
-	}
-	if info.FreeQuotaConsumed > 0 {
-		snapshot["free_quota"] = info.FreeQuotaConsumed
-	}
-	other.SetAdmin("cost", snapshot)
-}
 
 // attachQuotaSaturationToOther nests a quota saturation marker under
 // other.admin_info.quota_saturation. Nesting under admin_info makes it
@@ -101,11 +71,6 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		return
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
-	// The trace itself lives in its own table; the log row carries only the key
-	// that finds it, so the log list stays small.
-	if traceId := RequestTraceId(ctx); traceId != "" {
-		other.SetAdmin("trace_id", traceId)
-	}
 	if relayInfo != nil {
 		if billingModel := relayInfo.GetBillingModelName(); billingModel != "" && billingModel != relayInfo.OriginModelName {
 			other.SetAdmin("billing_model", billingModel)

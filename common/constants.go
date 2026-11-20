@@ -98,11 +98,6 @@ var MemoryCacheEnabled bool
 
 var LogConsumeEnabled = true
 
-// LogRequestBodyEnabled stores each relay request's JSON payload on its usage
-// log, visible to admins only. Off by default: it makes logs carry whatever
-// users send, which is both a privacy decision and a storage cost.
-var LogRequestBodyEnabled = false
-
 // RequestTraceEnabled records the whole exchange behind a relay — the client's
 // request, the request new-api sent upstream, the upstream's response and what
 // was written back to the client, each with its headers — into a side table

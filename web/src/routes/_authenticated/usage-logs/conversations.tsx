@@ -16,24 +16,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { createFileRoute, Navigate, redirect } from '@tanstack/react-router'
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
-import { ConversationRecordsPage } from '@/features/usage-logs/conversations'
-import { ROLE } from '@/lib/roles'
-import { useAuthStore } from '@/stores/auth-store'
+import { USAGE_LOGS_DEFAULT_SECTION } from '@/features/usage-logs/section-registry'
 
 export const Route = createFileRoute(
   '/_authenticated/usage-logs/conversations'
 )({
   beforeLoad: () => {
-    const user = useAuthStore.getState().auth.user
-    if (!user || user.role < ROLE.ADMIN) throw redirect({ to: '/403' })
+    throw redirect({
+      to: '/usage-logs/$section',
+      params: { section: USAGE_LOGS_DEFAULT_SECTION },
+    })
   },
-  component: ConversationRecordsRoute,
 })
-
-function ConversationRecordsRoute() {
-  const user = useAuthStore((state) => state.auth.user)
-  if (!user || user.role < ROLE.ADMIN) return <Navigate to='/403' replace />
-  return <ConversationRecordsPage key={user.id} />
-}

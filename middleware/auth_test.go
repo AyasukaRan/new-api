@@ -489,8 +489,6 @@ func TestForkMonitoringAccessTokenScopes(t *testing.T) {
 		auth                     gin.HandlerFunc
 	}{
 		{http.MethodGet, "/api/perf-metrics/admin", "/api/perf-metrics/admin", "log:read", AdminAuth()},
-		{http.MethodGet, "/api/log/trace", "/api/log/trace", "log:read", AdminAuth()},
-		{http.MethodGet, "/api/log/trace/object", "/api/log/trace/object", "log:read", AdminAuth()},
 		{http.MethodGet, "/api/data/sources", "/api/data/sources", "log:read", AdminAuth()},
 		{http.MethodGet, "/api/data/sources/self", "/api/data/sources/self", "usage:read", UserAuth()},
 		{http.MethodGet, "/api/performance/profiling/status", "/api/performance/profiling/status", "ops:read", RootAuth()},

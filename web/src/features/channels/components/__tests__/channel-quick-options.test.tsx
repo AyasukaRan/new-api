@@ -89,7 +89,7 @@ function QuickOptionsHarness(props: HarnessProps) {
               layout={props.layout}
               confirmEnablePassthrough={props.confirm}
             />
-            <button type='submit'>Save</button>
+            <button type="submit">Save</button>
           </form>
         </Form>
       </RouterContextProvider>
@@ -117,14 +117,14 @@ describe('header passthrough quick option', () => {
     expect(screen.getByRole('switch', HEADERS_SWITCH)).toBeChecked()
   })
 
-  test('is unchecked when the header override has no wildcard rule', () => {
+  test('is checked by default when the header override has no wildcard rule', () => {
     render(
       <QuickOptionsHarness
         values={{ header_override: '{"X-Foo": "bar"}' }}
         confirm={() => Promise.resolve(true)}
       />
     )
-    expect(screen.getByRole('switch', HEADERS_SWITCH)).not.toBeChecked()
+    expect(screen.getByRole('switch', HEADERS_SWITCH)).toBeChecked()
   })
 
   test('enabling asks for confirmation and merges the wildcard rule into existing overrides on approval', async () => {
@@ -133,7 +133,7 @@ describe('header passthrough quick option', () => {
     const saved: ChannelFormValues[] = []
     render(
       <QuickOptionsHarness
-        values={{ header_override: '{"X-Foo": "bar"}' }}
+        values={{ header_override: '{"*": false, "X-Foo": "bar"}' }}
         confirm={confirm}
         onSave={(values) => saved.push(values)}
       />
@@ -155,7 +155,7 @@ describe('header passthrough quick option', () => {
     const saved: ChannelFormValues[] = []
     render(
       <QuickOptionsHarness
-        values={{ header_override: '' }}
+        values={{ header_override: '{"*":false}' }}
         confirm={() => Promise.resolve(false)}
         onSave={(values) => saved.push(values)}
       />
@@ -165,10 +165,10 @@ describe('header passthrough quick option', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(saved).toHaveLength(1))
     expect(toggle).not.toBeChecked()
-    expect(saved[0].header_override).toBe('')
+    expect(saved[0].header_override).toBe('{"*":false}')
   })
 
-  test('disabling removes the wildcard rule immediately without asking', async () => {
+  test('disabling persists an explicit opt-out immediately without asking', async () => {
     const user = userEvent.setup()
     const confirm = vi.fn(() => Promise.resolve(true))
     const saved: ChannelFormValues[] = []
@@ -186,7 +186,7 @@ describe('header passthrough quick option', () => {
     expect(toggle).not.toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(saved).toHaveLength(1))
-    expect(saved[0].header_override).toBe('')
+    expect(JSON.parse(saved[0].header_override ?? '')).toEqual({ '*': false })
   })
 
   test('invalid header override JSON disables the switch and explains why', async () => {
@@ -211,7 +211,7 @@ describe('header passthrough quick option', () => {
   test('inline layout surfaces the warning as the toggle tooltip', () => {
     render(
       <QuickOptionsHarness
-        layout='inline'
+        layout="inline"
         confirm={() => Promise.resolve(true)}
       />
     )

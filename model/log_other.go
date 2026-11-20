@@ -1,7 +1,6 @@
 package model
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"slices"
@@ -250,21 +249,12 @@ func normalizeLegacyRejectReason(values map[string]json.RawMessage) bool {
 // values as RawMessage. This preserves integers larger than JavaScript's safe
 // range instead of round-tripping them through float64.
 func formatLogOtherJSON(value string, visibility logOtherVisibility) string {
-	return projectLogOtherJSON(value, visibility, false)
-}
-
-// projectLogOtherJSON can defer the captured request in interactive admin lists.
-// Exports and clients using the full representation keep the original payload.
-func projectLogOtherJSON(value string, visibility logOtherVisibility, deferBody bool) string {
 	if value == "" {
 		return ""
 	}
 
 	var values map[string]json.RawMessage
 	if err := common.UnmarshalJsonStr(value, &values); err != nil {
-		if visibility == logOtherVisibilityRoot {
-			return value
-		}
 		return "{}"
 	}
 
@@ -284,7 +274,7 @@ func projectLogOtherJSON(value string, visibility logOtherVisibility, deferBody 
 		}
 	} else {
 		changed = normalizeLegacyRejectReason(values)
-		if deferBody && deferLogRequestBody(values) {
+		if stripRetiredLogMetadata(values) {
 			changed = true
 		}
 		if visibility == logOtherVisibilityAdmin {
@@ -300,31 +290,33 @@ func projectLogOtherJSON(value string, visibility logOtherVisibility, deferBody 
 	}
 	formatted, err := common.Marshal(values)
 	if err != nil {
-		if visibility == logOtherVisibilityRoot {
-			return value
-		}
 		return "{}"
 	}
 	return string(formatted)
 }
 
-func deferLogRequestBody(values map[string]json.RawMessage) bool {
+// Older installations may already have written payloads or financial snapshots.
+func stripRetiredLogMetadata(values map[string]json.RawMessage) bool {
+	raw, ok := values[logOtherAdminInfoKey]
+	if !ok {
+		return false
+	}
 	var admin map[string]json.RawMessage
-	if raw := values[logOtherAdminInfoKey]; len(raw) == 0 || common.Unmarshal(raw, &admin) != nil {
+	if common.Unmarshal(raw, &admin) != nil {
+		delete(values, logOtherAdminInfoKey)
+		return true
+	}
+	size := len(admin)
+	for _, key := range []string{"trace_id", "request_body", "request_body_ref", "request_body_truncated", "cost", "cost_unconfirmed"} {
+		delete(admin, key)
+	}
+	if size == len(admin) {
 		return false
 	}
-	var body string
-	if raw := admin["request_body"]; len(raw) == 0 || common.Unmarshal(raw, &body) != nil || body == "" {
-		return false
+	if len(admin) == 0 {
+		delete(values, logOtherAdminInfoKey)
+	} else {
+		values[logOtherAdminInfoKey], _ = common.Marshal(admin)
 	}
-	delete(admin, "request_body")
-	admin["request_body_ref"], _ = common.Marshal(logRequestBodyRef(body))
-	values[logOtherAdminInfoKey], _ = common.Marshal(admin)
 	return true
-}
-
-// A request can produce multiple logs in the same second, and ClickHouse log IDs
-// are page positions. Match the captured content before returning a candidate.
-func logRequestBodyRef(body string) string {
-	return hex.EncodeToString(common.Sha256Raw([]byte(body)))
 }

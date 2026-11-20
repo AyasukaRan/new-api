@@ -1,7 +1,6 @@
 package model
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -57,11 +56,7 @@ func InitOptionMap() {
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
 	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
-	common.OptionMap["LogRequestBodyEnabled"] = strconv.FormatBool(common.LogRequestBodyEnabled)
 	common.OptionMap[operation_setting.RequestSourceRulesOptionKey] = operation_setting.RequestSourceRulesJSONString()
-	common.OptionMap["RequestTraceEnabled"] = strconv.FormatBool(common.RequestTraceEnabled)
-	common.OptionMap["RequestTraceRetentionDays"] = strconv.Itoa(common.RequestTraceRetentionDays)
-	common.OptionMap["RequestTraceMaxBytes"] = strconv.Itoa(common.RequestTraceMaxBytes)
 	common.OptionMap["DisplayInCurrencyEnabled"] = strconv.FormatBool(common.DisplayInCurrencyEnabled)
 	common.OptionMap["DisplayTokenStatEnabled"] = strconv.FormatBool(common.DisplayTokenStatEnabled)
 	common.OptionMap["DrawingEnabled"] = strconv.FormatBool(common.DrawingEnabled)
@@ -257,7 +252,18 @@ func updatesRequestSourceOptions(values map[string]string) bool {
 	return false
 }
 
+func isRetiredTraceOption(key string) bool {
+	switch key {
+	case "RequestTraceEnabled", "RequestTraceRetentionDays", "RequestTraceMaxBytes", "LogRequestBodyEnabled":
+		return true
+	}
+	return false
+}
+
 func validateOptionValue(key string, value string) error {
+	if isRetiredTraceOption(key) {
+		return common.NewMessage("Unsupported operation")
+	}
 	if strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 		_, err := operation_setting.ParseBuiltinRequestSourceOption(key, value)
 		return err
@@ -312,21 +318,6 @@ func validateOptionValue(key string, value string) error {
 	}
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
-	}
-	// Both bounds protect the log database rather than the caller: a retention
-	// of zero would purge traces as fast as they are written, and an unbounded
-	// payload cap would push single rows past MySQL's max_allowed_packet.
-	if key == "RequestTraceRetentionDays" {
-		days, err := strconv.Atoi(value)
-		if err != nil || days < 1 || days > 365 {
-			return errors.New("请求追踪保留天数必须在 1 到 365 之间")
-		}
-	}
-	if key == "RequestTraceMaxBytes" {
-		maxBytes, err := strconv.Atoi(value)
-		if err != nil || maxBytes < 4096 || maxBytes > 32<<20 {
-			return errors.New("单条追踪负载上限必须在 4KB 到 32MB 之间")
-		}
 	}
 	return nil
 }
@@ -447,7 +438,7 @@ func UpdateOptionsBulk(values map[string]string) error {
 }
 
 func updateOptionMap(key string, value string) (err error) {
-	if key == retiredThemeOptionKey || key == legacyAccessTokenRetireAtKey {
+	if key == retiredThemeOptionKey || key == legacyAccessTokenRetireAtKey || isRetiredTraceOption(key) {
 		common.OptionMapRWMutex.Lock()
 		delete(common.OptionMap, key)
 		common.OptionMapRWMutex.Unlock()
@@ -523,10 +514,7 @@ func updateOptionMap(key string, value string) (err error) {
 			common.QuotaRemindEnabled = boolValue
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
-		case "LogRequestBodyEnabled":
-			common.LogRequestBodyEnabled = boolValue
-		case "RequestTraceEnabled":
-			common.RequestTraceEnabled = boolValue
+
 		case "DisplayInCurrencyEnabled":
 			// 兼容旧字段：同步到新配置 general_setting.quota_display_type（运行时生效）
 			// true -> USD, false -> TOKENS
@@ -599,10 +587,7 @@ func updateOptionMap(key string, value string) (err error) {
 	case "SMTPPort":
 		intValue, _ := strconv.Atoi(value)
 		common.SMTPPort = intValue
-	case "RequestTraceRetentionDays":
-		common.RequestTraceRetentionDays, _ = strconv.Atoi(value)
-	case "RequestTraceMaxBytes":
-		common.RequestTraceMaxBytes, _ = strconv.Atoi(value)
+
 	case "SMTPAccount":
 		common.SMTPAccount = value
 	case "SMTPFrom":

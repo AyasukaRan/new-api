@@ -33,7 +33,7 @@ import { formatNumber, formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 
 import type { UsageLog } from '../data/schema'
-import type { LogCostEstimate, LogOtherData } from '../types'
+import type { LogOtherData } from '../types'
 import { buildQuotaAuditOperation } from './quota-audit-operation'
 
 export { normalizeTierLabel }
@@ -47,29 +47,6 @@ export function getLogFreeQuota(
   return typeof free === 'number' && Number.isFinite(free)
     ? Math.min(Math.max(0, quota), Math.max(0, free))
     : 0
-}
-
-/** Only recorded, finite costs with a known provenance can be displayed. */
-export function getLogCostEstimate(
-  other: LogOtherData | null
-): LogCostEstimate | null {
-  const cost = other?.admin_info?.cost
-  if (!cost) return null
-  const fromUpstreamBill =
-    cost.estimated === false && cost.source === 'upstream_bill'
-  if (cost.estimated !== true && !fromUpstreamBill) return null
-  if (!Number.isFinite(cost.profit_quota)) return null
-  if (
-    [
-      cost.cost_ratio,
-      cost.base_quota,
-      cost.cost_quota,
-      cost.revenue_quota,
-    ].some((value) => !Number.isFinite(value) || value < 0)
-  ) {
-    return null
-  }
-  return cost
 }
 
 const PARAM_OVERRIDE_ACTION_MAP: Record<string, string> = {

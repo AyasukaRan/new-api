@@ -108,15 +108,8 @@ func (a *Adaptor) newMantleRequest(c *gin.Context, info *relaycommon.RelayInfo, 
 	if len(parts) == 2 {
 		req.Header.Set("x-api-key", parts[0])
 	}
-	headerOverride, err := channel.ResolveHeaderOverride(info, c)
-	if err != nil {
+	if err := channel.ApplyHeaderOverride(info, c, req); err != nil {
 		return nil, err
-	}
-	for key, value := range headerOverride {
-		req.Header.Set(key, value)
-		if strings.EqualFold(key, "Host") {
-			req.Host = value
-		}
 	}
 	// HTTP/2 and intermediaries can remove hop-by-hop headers. Strip them
 	// after overrides, including fields named by Connection, so SigV4 covers

@@ -35,11 +35,7 @@ import {
 import { formatLogQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import {
-  getLogCostEstimate,
-  getLogFreeQuota,
-  hasToolSurcharge,
-} from '../lib/format'
+import { getLogFreeQuota, hasToolSurcharge } from '../lib/format'
 import type { LogOtherData } from '../types'
 
 interface LogCostDisplayProps {
@@ -86,7 +82,6 @@ function ToolSurchargeMarker() {
 
 export function LogCostDisplay(props: LogCostDisplayProps) {
   const { t } = useTranslation()
-  const cost = props.isAdmin ? getLogCostEstimate(props.other) : null
   const isSubscription = props.other?.billing_source === 'subscription'
   const freeQuota = getLogFreeQuota(props.other, props.quota)
   const showToolSurcharge = hasToolSurcharge(props.other)
@@ -116,9 +111,7 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
       <div
         className={cn(
           'inline-flex w-fit',
-          props.isAdmin || freeQuota > 0
-            ? 'flex-col items-start gap-1'
-            : 'items-center gap-1.5'
+          freeQuota > 0 ? 'flex-col items-start gap-1' : 'items-center gap-1.5'
         )}
       >
         <div className='inline-flex items-center gap-1.5'>
@@ -162,23 +155,6 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
               {formatLogQuota(freeQuota)}
             </span>
           </div>
-        )}
-        {props.isAdmin && (
-          <dl className='text-muted-foreground grid grid-cols-[auto_auto] gap-x-2 gap-y-0.5 text-[11px]'>
-            <dt>{t('Upstream cost')}</dt>
-            <dd className='text-right font-mono whitespace-nowrap tabular-nums'>
-              {cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
-            </dd>
-            <dt>{t('Gross profit')}</dt>
-            <dd
-              className={cn(
-                'text-right font-mono whitespace-nowrap tabular-nums',
-                cost && cost.profit_quota < 0 && 'text-destructive'
-              )}
-            >
-              {cost ? formatLogQuota(cost.profit_quota) : t('Not recorded')}
-            </dd>
-          </dl>
         )}
       </div>
     </TooltipProvider>

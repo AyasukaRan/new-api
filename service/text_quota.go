@@ -594,21 +594,6 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if engine := ctx.GetString("deepseek_file_pagination_engine"); engine != "" {
 		other.SetPublic("metered_usage_engine", engine)
 	}
-	if ctx.GetBool("deepseek_tts_cost_unconfirmed") || ctx.GetBool("deepseek_file_cost_unconfirmed") {
-		other.SetAdmin("cost_unconfirmed", true)
-		relayInfo.UpstreamCostRatio = nil
-	}
-	// Cost is explicitly an estimate, using the same usage basis as the charge
-	// even when a disconnected stream required local token estimation.
-	if settleErr == nil && (originUsage != nil || relayInfo.BillingMeteredUsage != nil) {
-		if snap == nil {
-			appendUpstreamCostInfo(relayInfo, other, summary.BaseQuota.InexactFloat64(), summary.Quota)
-		} else if tieredResult != nil {
-			base := tieredResult.ActualQuotaBeforeGroup + summary.ToolCallBaseQuota.InexactFloat64()
-			appendUpstreamCostInfo(relayInfo, other, base, summary.Quota)
-		}
-	}
-
 	attachQuotaSaturation(ctx, relayInfo, other)
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{

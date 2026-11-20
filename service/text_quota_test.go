@@ -418,11 +418,7 @@ func runMeteredAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 						assert.NotContains(t, admin, "cost", "failed evaluation has no confirmed cost basis")
 					} else {
 						assert.Equal(t, float64(tc.actual), measured["count"])
-						upstreamCost, ok := admin["cost"].(map[string]any)
-						require.True(t, ok)
-						assert.InDelta(t, tc.wantBase, upstreamCost["base_quota"], 1e-8)
-						assert.InDelta(t, tc.wantBase*tc.costRatio, upstreamCost["cost_quota"], 1e-8)
-						assert.InDelta(t, float64(tc.want)-tc.wantBase*tc.costRatio, upstreamCost["profit_quota"], 1e-8)
+						assert.NotContains(t, admin, "cost")
 					}
 				}
 			}
@@ -461,20 +457,6 @@ func TestUpstreamCostEstimateBounds(t *testing.T) {
 		assert.Error(t, channel.ValidateSettings())
 	}
 	for _, tc := range []struct {
-		base, ratio float64
-		revenue     int
-		free        int64
-	}{
-		{base: -1, ratio: 1.3}, {base: math.NaN(), ratio: 1.3}, {base: math.Inf(1), ratio: 1.3},
-		{base: common.MaxQuota + 1, ratio: 0}, {base: common.MaxQuota, ratio: 2},
-		{base: 1, ratio: math.NaN()}, {base: 1, ratio: -1}, {base: 1, ratio: 10001}, {base: 1, ratio: 1.3, revenue: -1},
-		{base: 100, ratio: 0, revenue: 100, free: -1}, {base: 100, ratio: 0, revenue: 100, free: 101},
-	} {
-		other := model.NewLogOther()
-		appendUpstreamCostInfo(&relaycommon.RelayInfo{UpstreamCostRatio: &tc.ratio, FreeQuotaConsumed: tc.free}, other, tc.base, tc.revenue)
-		assert.NotContains(t, other.JSONString(), "cost_quota", "invalid cost must remain unknown")
-	}
-	for _, tc := range []struct {
 		name, source  string
 		free, wallet  int64
 		ratio, profit float64
@@ -487,26 +469,14 @@ func TestUpstreamCostEstimateBounds(t *testing.T) {
 			info := &relaycommon.RelayInfo{BillingSource: tc.source, UpstreamCostRatio: &tc.ratio, FreeQuotaConsumed: tc.free, WalletQuotaDeducted: tc.wallet}
 			other := model.NewLogOther()
 			appendBillingInfo(info, other)
-			appendUpstreamCostInfo(info, other, 100, 100)
 			var stored struct {
 				FreeQuota   int64 `json:"free_quota"`
 				WalletQuota int64 `json:"wallet_quota_deducted"`
-				Admin       struct {
-					Cost struct {
-						FreeQuota int64   `json:"free_quota"`
-						Cost      float64 `json:"cost_quota"`
-						Revenue   int64   `json:"revenue_quota"`
-						Profit    float64 `json:"profit_quota"`
-					} `json:"cost"`
-				} `json:"admin_info"`
 			}
 			require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &stored))
 			assert.Equal(t, tc.free, stored.FreeQuota)
 			assert.Equal(t, tc.wallet, stored.WalletQuota)
-			assert.Equal(t, tc.free, stored.Admin.Cost.FreeQuota)
-			assert.Equal(t, tc.ratio*100, stored.Admin.Cost.Cost)
-			assert.Equal(t, 100-tc.free, stored.Admin.Cost.Revenue)
-			assert.Equal(t, tc.profit, stored.Admin.Cost.Profit)
+
 		})
 	}
 }
@@ -657,18 +627,7 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			var other map[string]any
 			require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
 			admin, _ := other["admin_info"].(map[string]any)
-			if tc.unknown {
-				assert.NotContains(t, admin, "cost")
-			} else {
-				cost, ok := admin["cost"].(map[string]any)
-				require.True(t, ok)
-				assert.InDelta(t, tc.base, cost["base_quota"], 1e-9)
-				assert.InDelta(t, tc.base*tc.ratio, cost["cost_quota"], 1e-9)
-				assert.InDelta(t, float64(tc.quota)-tc.base*tc.ratio, cost["profit_quota"], 1e-9)
-				assert.Equal(t, float64(tc.quota), cost["revenue_quota"])
-				assert.Equal(t, tc.ratio, cost["cost_ratio"])
-				assert.Equal(t, true, cost["estimated"])
-			}
+			assert.NotContains(t, admin, "cost")
 			userLogs, _, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 10)
 			require.NoError(t, err)
 			require.Len(t, userLogs, 1)

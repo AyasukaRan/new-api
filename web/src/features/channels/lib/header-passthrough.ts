@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 
 /**
  * The header override rule key the relay treats as "forward every client
- * request header" (see processHeaderOverride in relay/channel/api_request.go).
+ * request header" (see UpstreamRequestHeaders in relay/common/header_passthrough.go).
  * The quick "Pass Through Request Headers" switch is a shortcut for this rule.
  */
 export const HEADER_PASSTHROUGH_ALL_KEY = '*'
@@ -46,23 +46,24 @@ function isPassthroughAllKey(key: string): boolean {
   return key.trim() === HEADER_PASSTHROUGH_ALL_KEY
 }
 
-/**
- * Reports whether the header override JSON contains the wildcard passthrough
- * rule. `invalid` means the text is not a JSON object and cannot be toggled.
- */
 export function getHeaderPassthroughState(
   headerOverride: string | undefined
 ): HeaderPassthroughState {
   const parsed = parseHeaderOverrideObject(headerOverride)
   if (parsed === null) return 'invalid'
-  return Object.keys(parsed).some(isPassthroughAllKey) ? 'enabled' : 'disabled'
+  const wildcard = Object.entries(parsed).find(([key]) =>
+    isPassthroughAllKey(key)
+  )
+  if (wildcard) {
+    return String(wildcard[1]).toLowerCase() === 'false'
+      ? 'disabled'
+      : 'enabled'
+  }
+  return Object.keys(parsed).some((key) => /^(?:re|regex):/i.test(key.trim()))
+    ? 'disabled'
+    : 'enabled'
 }
 
-/**
- * Adds or removes the wildcard passthrough rule while preserving every other
- * header override entry. Invalid JSON is returned unchanged; removing the last
- * entry yields an empty string so the field reads as unconfigured.
- */
 export function setHeaderPassthrough(
   headerOverride: string | undefined,
   enabled: boolean
@@ -72,11 +73,8 @@ export function setHeaderPassthrough(
   const rest = Object.fromEntries(
     Object.entries(parsed).filter(([key]) => !isPassthroughAllKey(key))
   )
-  if (!enabled) {
-    return Object.keys(rest).length === 0 ? '' : JSON.stringify(rest, null, 2)
-  }
   return JSON.stringify(
-    { [HEADER_PASSTHROUGH_ALL_KEY]: true, ...rest },
+    { [HEADER_PASSTHROUGH_ALL_KEY]: enabled, ...rest },
     null,
     2
   )

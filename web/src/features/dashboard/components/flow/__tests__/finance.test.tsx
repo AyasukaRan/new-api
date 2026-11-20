@@ -18,7 +18,6 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -42,7 +41,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it('restricts cost controls and financial summary to administrators when the session role changes', async () => {
+it('omits finance controls in both administrator and personal flow views', async () => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
   const request = vi.spyOn(api, 'get').mockResolvedValue({
     data: {
@@ -73,7 +72,6 @@ it('restricts cost controls and financial summary to administrators when the ses
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'admin', role: 10, quota: 0 })
-  const user = userEvent.setup()
   render(
     <QueryClientProvider client={client}>
       <FlowCharts
@@ -89,13 +87,11 @@ it('restricts cost controls and financial summary to administrators when the ses
     expect(request).toHaveBeenCalledWith('/api/data/flow', expect.anything())
   )
   expect(
-    screen.getByRole('region', { name: 'Financial summary' })
-  ).toBeInTheDocument()
-  await user.click(screen.getByRole('tab', { name: 'Upstream cost' }))
-  expect(screen.getByRole('tab', { name: 'Upstream cost' })).toHaveAttribute(
-    'aria-selected',
-    'true'
-  )
+    screen.queryByRole('region', { name: 'Financial summary' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('tab', { name: 'Upstream cost' })
+  ).not.toBeInTheDocument()
 
   act(() =>
     useAuthStore

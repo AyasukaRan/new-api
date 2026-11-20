@@ -28,6 +28,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	bedrockruntimeTypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/aws/smithy-go/auth/bearer"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // getAwsErrorStatusCode extracts HTTP status code from AWS SDK error
@@ -61,41 +62,50 @@ func newAwsInvokeError(requestContext context.Context, err error, operation stri
 	)
 }
 
-func newAwsClient(c *gin.Context, info *relaycommon.RelayInfo) (*bedrockruntime.Client, error) {
+func newAwsClient(info *relaycommon.RelayInfo, headers http.Header) (*bedrockruntime.Client, error) {
 	httpClient, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
 
 	awsSecret := strings.Split(info.ApiKey, "|")
-	var client *bedrockruntime.Client
+	options := bedrockruntime.Options{HTTPClient: httpClient}
 	switch len(awsSecret) {
 	case 2:
-		apiKey := awsSecret[0]
-		region := awsSecret[1]
-		client = bedrockruntime.New(bedrockruntime.Options{
-			Region:                  region,
-			BearerAuthTokenProvider: bearer.StaticTokenProvider{Token: bearer.Token{Value: apiKey}},
-			HTTPClient:              httpClient,
-		})
+		options.Region = awsSecret[1]
+		options.BearerAuthTokenProvider = bearer.StaticTokenProvider{Token: bearer.Token{Value: awsSecret[0]}}
 	case 3:
-		ak := awsSecret[0]
-		sk := awsSecret[1]
-		region := awsSecret[2]
-		client = bedrockruntime.New(bedrockruntime.Options{
-			Region:      region,
-			Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(ak, sk, "")),
-			HTTPClient:  httpClient,
-		})
+		options.Region = awsSecret[2]
+		options.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(awsSecret[0], awsSecret[1], ""))
 	default:
 		return nil, errors.New("invalid aws secret key")
 	}
-
-	return client, nil
+	for name, values := range headers {
+		// Let the AWS SDK serialize and sign its own protocol and credentials.
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-amz") || lower == "authorization" || lower == "host" || lower == "content-type" || lower == "accept" {
+			continue
+		}
+		for i, value := range values {
+			if i == 0 {
+				options.APIOptions = append(options.APIOptions, smithyhttp.SetHeaderValue(name, value))
+			} else {
+				options.APIOptions = append(options.APIOptions, smithyhttp.AddHeaderValue(name, value))
+			}
+		}
+	}
+	return bedrockruntime.New(options), nil
 }
 
 func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor, requestBody io.Reader) (any, error) {
-	awsCli, err := newAwsClient(c, info)
+	headers := make(http.Header)
+	if err := a.SetupRequestHeader(c, &headers, info); err != nil {
+		return nil, err
+	}
+	if err := channel.ApplyHeaderOverride(info, c, &http.Request{Header: headers}); err != nil {
+		return nil, err
+	}
+	awsCli, err := newAwsClient(info, headers)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeChannelAwsClientError)
 	}
@@ -108,17 +118,6 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 	canCrossRegion := awsModelCanCrossRegion(awsModelId, awsRegionPrefix)
 	if canCrossRegion {
 		awsModelId = awsModelCrossRegion(awsModelId, awsRegionPrefix)
-	}
-
-	// init empty request.header
-	requestHeader := http.Header{}
-	a.SetupRequestHeader(c, &requestHeader, info)
-	headerOverride, err := channel.ResolveHeaderOverride(info, c)
-	if err != nil {
-		return nil, err
-	}
-	for key, value := range headerOverride {
-		requestHeader.Set(key, value)
 	}
 
 	if isNovaModel(awsModelId) {
@@ -143,7 +142,7 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 		a.AwsReq = awsReq
 		return nil, nil
 	} else {
-		awsClaudeReq, err := formatRequest(requestBody, requestHeader)
+		awsClaudeReq, err := formatRequest(requestBody, headers)
 		if err != nil {
 			return nil, types.NewError(errors.Wrap(err, "format aws request fail"), types.ErrorCodeBadRequestBody)
 		}

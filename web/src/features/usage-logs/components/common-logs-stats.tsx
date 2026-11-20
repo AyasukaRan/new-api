@@ -22,7 +22,6 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Skeleton } from '@/components/ui/skeleton'
-import { getDashboardMetricValue } from '@/features/dashboard/lib/finance'
 import { formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -60,7 +59,6 @@ export function CommonLogsStats() {
   const user = useAuthStore((state) => state.auth.user)
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
-  const showFinance = isAdmin && logSource === 'usage'
   const params = useMemo(() => {
     const filters = buildApiParams({
       source: logSource,
@@ -107,35 +105,11 @@ export function CommonLogsStats() {
         <Skeleton className='h-7 w-[150px] rounded-md' />
         <Skeleton className='h-7 w-[100px] rounded-md' />
         <Skeleton className='h-7 w-[120px] rounded-md' />
-        {showFinance && (
-          <>
-            <Skeleton className='h-7 w-[120px] rounded-md' />
-            <Skeleton className='h-7 w-[120px] rounded-md' />
-          </>
-        )}
       </div>
     )
   }
 
   const currentStats = isError ? null : stats
-  const finance = currentStats?.finance
-  let costValue = t('Not recorded')
-  let profitValue = t('Not recorded')
-  if (isError) {
-    costValue = t('Loading failed')
-    profitValue = t('Loading failed')
-  } else if (
-    finance &&
-    (finance.recorded_count > 0 ||
-      (finance.recorded_count === 0 && finance.unrecorded_count === 0))
-  ) {
-    if (Number.isFinite(finance.cost_quota)) {
-      costValue = formatLogQuota(finance.cost_quota)
-    }
-    if (Number.isFinite(finance.profit_quota)) {
-      profitValue = formatLogQuota(finance.profit_quota)
-    }
-  }
   let usageValue = '—'
   if (currentStats && Number.isFinite(currentStats.quota)) {
     usageValue = formatLogQuota(currentStats.quota)
@@ -158,50 +132,6 @@ export function CommonLogsStats() {
         value={currentStats?.tpm ?? '—'}
         accent='bg-slate-400/70'
       />
-      {showFinance && (
-        <>
-          {(finance?.free_quota ?? 0) > 0 && currentStats && (
-            <>
-              <StatBadge
-                label={t('Free allowance deduction')}
-                value={
-                  sensitiveVisible
-                    ? formatLogQuota(finance?.free_quota ?? 0)
-                    : '••••'
-                }
-                accent='bg-sky-500/70'
-              />
-              <StatBadge
-                label={t('Revenue')}
-                value={
-                  sensitiveVisible
-                    ? formatLogQuota(
-                        getDashboardMetricValue(currentStats, 'quota') ?? 0
-                      )
-                    : '••••'
-                }
-                accent='bg-emerald-500/70'
-              />
-            </>
-          )}
-
-          <StatBadge
-            label={t('Upstream cost')}
-            value={sensitiveVisible ? costValue : '••••'}
-            accent='bg-amber-500/70'
-          />
-          <StatBadge
-            label={t('Gross profit')}
-            value={sensitiveVisible ? profitValue : '••••'}
-            accent='bg-emerald-500/70'
-          />
-          {sensitiveVisible && finance && finance.unrecorded_count > 0 && (
-            <p className='text-muted-foreground w-full text-xs'>
-              {t('Cost and profit include only requests with recorded costs.')}
-            </p>
-          )}
-        </>
-      )}
     </div>
   )
 }

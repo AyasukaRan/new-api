@@ -116,18 +116,6 @@ func main() {
 
 	// 数据看板
 	go model.UpdateQuotaData()
-	if common.IsMasterNode && model.DashboardFinanceRollupEnabled() {
-		financeCtx, stopFinance := context.WithCancel(context.Background())
-		financeDone := make(chan struct{})
-		go func() {
-			defer close(financeDone)
-			model.WarmDashboardFinanceHours(financeCtx)
-		}()
-		defer func() {
-			stopFinance()
-			<-financeDone
-		}()
-	}
 
 	// Codex credential auto-refresh check every 10 minutes, refresh when expires within 1 day
 	service.StartCodexCredentialAutoRefreshTask()
@@ -239,9 +227,6 @@ func main() {
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()
-	}
-	if err := service.DrainRequestTraces(ctx); err != nil {
-		common.SysError("request trace writes did not finish before shutdown: " + err.Error())
 	}
 	common.SysLog(common.LogText("server exited"))
 }
@@ -375,14 +360,6 @@ func InitResources() error {
 	}
 
 	service.StartAuthArtifactCleanup()
-	service.StartRequestTraceCleanup()
-	if common.IsMasterNode {
-		go func() {
-			if err := service.BackfillTraceConversationFilters(context.Background()); err != nil {
-				common.SysError("failed to index historical conversation filters: " + err.Error())
-			}
-		}()
-	}
 
 	return nil
 }

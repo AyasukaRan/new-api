@@ -61,7 +61,6 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { getFlowQuotaDates } from '@/features/dashboard/api'
-import { FinancialSummary } from '@/features/dashboard/components/models/financial-summary'
 import {
   buildDashboardFlowData,
   buildFlowSankeySpec,
@@ -105,7 +104,6 @@ interface FlowChartsProps {
 
 const FLOW_METRIC_OPTIONS = [
   { value: 'quota', labelKey: 'By quota', icon: WalletCards },
-  { value: 'cost', labelKey: 'Upstream cost', icon: WalletCards },
   { value: 'tokens', labelKey: 'By tokens', icon: Hash },
   { value: 'requests', labelKey: 'By requests', icon: Activity },
 ] as const
@@ -272,8 +270,7 @@ export function FlowCharts(props: FlowChartsProps) {
     flowRole = 'admin'
   }
   const [selectedMetric, setMetric] = useState<FlowMetric>('quota')
-  const metric =
-    selectedMetric === 'cost' && !isAdmin ? 'quota' : selectedMetric
+  const metric = selectedMetric === 'cost' ? 'quota' : selectedMetric
   const [topNodeLimit, setTopNodeLimit] = useState(DEFAULT_FLOW_TOP_NODE_LIMIT)
   const [overflowMode, setOverflowMode] =
     useState<FlowOverflowMode>('aggregate')
@@ -403,9 +400,7 @@ export function FlowCharts(props: FlowChartsProps) {
   const metricLabel = t(FLOW_METRIC_LABEL_KEYS[metric])
   const formatNodeMetricValue = useCallback(
     (value: number) =>
-      metric === 'quota' || metric === 'cost'
-        ? formatQuota(value)
-        : formatFlowMetricNumber(value),
+      metric === 'quota' ? formatQuota(value) : formatFlowMetricNumber(value),
     [metric]
   )
   // Explicit filters (the chips/dropdown control) narrow the rows that feed the
@@ -474,18 +469,10 @@ export function FlowCharts(props: FlowChartsProps) {
           tokens: t('Tokens'),
           requests: t('Requests'),
           share: t('Share'),
-          ...(isAdmin
-            ? {
-                cost: t('Upstream cost'),
-                profit: t('Gross profit'),
-                coverage: t('Cost coverage'),
-                unrecorded: t('Not recorded'),
-              }
-            : {}),
         },
         textColor
       ),
-    [chartTitle, flowData.flow, isAdmin, t, textColor]
+    [chartTitle, flowData.flow, t, textColor]
   )
   const chartTheme = resolvedTheme === 'dark' ? 'dark' : 'light'
   const chartKey = [
@@ -557,19 +544,6 @@ export function FlowCharts(props: FlowChartsProps) {
 
   return (
     <div className='flex flex-col gap-3'>
-      {isAdmin && (
-        <FinancialSummary
-          data={[
-            {
-              quota: flowData.summary.quota,
-              count: flowData.summary.requests,
-              finance: flowData.summary.finance,
-            },
-          ]}
-          loading={isLoading}
-          error={isError}
-        />
-      )}
       <div className='flex flex-col gap-2 xl:flex-row xl:items-end xl:justify-between'>
         <div className='flex min-w-0 flex-wrap items-end gap-2'>
           <div className='flex min-w-0 flex-col gap-1.5'>
@@ -602,9 +576,7 @@ export function FlowCharts(props: FlowChartsProps) {
               className='shrink-0'
             >
               <TabsList aria-label={t('Flow width metric')}>
-                {FLOW_METRIC_OPTIONS.filter(
-                  (option) => isAdmin || option.value !== 'cost'
-                ).map((option) => {
+                {FLOW_METRIC_OPTIONS.map((option) => {
                   const Icon = option.icon
                   return (
                     <TabsTrigger

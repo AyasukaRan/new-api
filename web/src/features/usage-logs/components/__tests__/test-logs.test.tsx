@@ -76,7 +76,10 @@ function makeClient() {
 async function renderLogs(section: string, role = 100) {
   useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role })
   const root = createRootRoute()
-  const auth = createRoute({ getParentRoute: () => root, id: '_authenticated' })
+  const auth = createRoute({
+    getParentRoute: () => root,
+    id: '_authenticated',
+  })
   const logs = createRoute({
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
@@ -119,11 +122,11 @@ async function renderLogs(section: string, role = 100) {
   const titles: Record<string, string> = {
     test: 'Test Logs',
     audit: 'Audit Logs',
-    conversations: 'Conversation Records',
+    conversations: 'Common Logs',
     common: 'Common Logs',
   }
   let heading = titles[section]
-  if (role < 10 && ['test', 'audit', 'conversations'].includes(section)) {
+  if (role < 10 && ['test', 'audit'].includes(section)) {
     heading = 'Forbidden'
   }
   await screen.findByRole('heading', { name: heading })
@@ -218,7 +221,10 @@ it('does not show usage rows while the separate test page is loading', async () 
   const router = await renderLogs('common')
   await screen.findByText('real-request-model')
   await act(() =>
-    router.navigate({ to: '/usage-logs/$section', params: { section: 'test' } })
+    router.navigate({
+      to: '/usage-logs/$section',
+      params: { section: 'test' },
+    })
   )
   await screen.findByRole('heading', { name: 'Test Logs' })
   expect(screen.queryByText('real-request-model')).not.toBeInTheDocument()
@@ -254,7 +260,18 @@ it.each([2, 8])(
   }
 )
 
-it.each(['test', 'audit', 'conversations'])(
+it('redirects old conversation bookmarks to usage logs without loading conversations', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { items: [], total: 0 } },
+  })
+  const router = await renderLogs('conversations', 10)
+  expect(router.state.location.pathname).toBe('/usage-logs/common')
+  expect(get.mock.calls.some(([path]) => path.includes('/conversations'))).toBe(
+    false
+  )
+})
+
+it.each(['test', 'audit'])(
   'denies direct %s page access to regular users before any log API request',
   async (section) => {
     const get = vi.spyOn(api, 'get')
@@ -266,10 +283,7 @@ it.each(['test', 'audit', 'conversations'])(
   }
 )
 
-it.each([
-  ['audit', 'Audit Logs', '/api/audit/self'],
-  ['conversations', 'Conversation Records', '/api/log/conversations'],
-])(
+it.each([['audit', 'Audit Logs', '/api/audit/self']])(
   'closes the open %s page when the account loses administrator access',
   async (section, title, apiPath) => {
     const get = vi.spyOn(api, 'get').mockResolvedValue({

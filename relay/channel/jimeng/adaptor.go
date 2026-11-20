@@ -113,6 +113,9 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
 	channel.ApplyUpstreamBodyMetadata(req, requestBody)
+	if err := channel.ApplyHeaderOverride(info, c, req); err != nil {
+		return nil, err
+	}
 	err = Sign(c, req, info.ApiKey)
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)

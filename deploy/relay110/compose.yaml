@@ -1,0 +1,81 @@
+name: new-api-relay110
+
+services:
+  postgres:
+    image: newapi-home-pg:15.19-20261106
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_DB: relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "relay", "-d", "relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: newapi-home-redis:7.4.11-20261106
+    restart: unless-stopped
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?}"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    image: ${RELAY_IMAGE:?}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SQL_DSN: postgres://relay:${POSTGRES_PASSWORD:?}@postgres:5432/relay?sslmode=disable
+      REDIS_CONN_STRING: redis://:${REDIS_PASSWORD:?}@redis:6379/0
+      SESSION_SECRET: ${SESSION_SECRET:?}
+      CRYPTO_SECRET: ${CRYPTO_SECRET:?}
+      TRUSTED_PROXIES: 172.29.244.2/32
+      TZ: Asia/Shanghai
+    volumes:
+      - app-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  edge:
+    image: nginx:1.30.7-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "172.16.0.110:8443:8443"
+      - "172.16.0.110:18443:18443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      default:
+        ipv4_address: 172.29.244.2
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.244.0/27
+          ip_range: 172.29.244.16/28
+
+volumes:
+  postgres-data:
+  redis-data:
+  app-data:

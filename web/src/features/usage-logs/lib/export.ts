@@ -21,7 +21,6 @@ import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import type { UsageLog } from '../data/schema'
 import type { LogSource } from '../types'
 import {
-  getLogCostEstimate,
   getLogFreeQuota,
   isViolationFeeLog,
   logTokenName,
@@ -62,9 +61,6 @@ export function getLogCsvHeader(
     ...(source !== 'test'
       ? [t('Free allowance deduction'), t('Wallet charge')]
       : []),
-    ...(isAdmin && source !== 'test'
-      ? [t('Revenue'), t('Upstream cost'), t('Gross profit')]
-      : []),
     t('Duration'),
     t('IP'),
     t('Request ID'),
@@ -81,10 +77,8 @@ export function getLogCsvRow(
 ): string[] {
   const other = parseLogOther(log.other ?? '')
   const usage = isDisplayableLogType(log.type)
-  const showCost = isAdmin && source !== 'test'
   const billable = log.type === 2 && !isViolationFeeLog(other)
   const freeQuota = billable ? getLogFreeQuota(other, log.quota ?? 0) : 0
-  const cost = showCost && billable ? getLogCostEstimate(other) : null
   const cacheWrite =
     (other?.cache_creation_tokens_5m ?? 0) +
       (other?.cache_creation_tokens_1h ?? 0) ||
@@ -95,17 +89,6 @@ export function getLogCsvRow(
     channel = log.channel_name
       ? `#${log.channel} ${log.channel_name}`
       : `#${log.channel}`
-  }
-  let costCells: string[] = []
-  if (showCost) {
-    costCells = ['', '', '']
-    if (billable) {
-      costCells = [
-        formatLogQuota(Math.max(0, (log.quota ?? 0) - freeQuota)),
-        cost ? formatLogQuota(cost.cost_quota) : t('Not recorded'),
-        cost ? formatLogQuota(cost.profit_quota) : t('Not recorded'),
-      ]
-    }
   }
   return [
     formatTimestampToDate(log.created_at),
@@ -129,7 +112,6 @@ export function getLogCsvRow(
             : '',
         ]
       : []),
-    ...costCells,
     isTimingLogType(log.type) ? `${log.use_time ?? 0}s` : '',
     log.ip ?? '',
     log.request_id ?? '',

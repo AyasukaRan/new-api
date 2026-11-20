@@ -130,14 +130,14 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it('shows administrator cost and signed profit from the complete filtered statistics response', async () => {
+it('shows filtered usage to administrators and omits legacy finance', async () => {
   const get = vi.spyOn(api, 'get').mockResolvedValue(response())
   await renderStats({
     search:
       '?page=4&pageSize=20&model=model-a&channel=3&username=fp&requestId=req-1&upstreamRequestId=upstream-1&type=%5B%222%22%5D&token=main&group=default&startTime=1000000&endTime=2000000',
   })
-  expect(await screen.findByText('$1.3')).toBeVisible()
-  expect(screen.getByText('-$0.3')).toBeVisible()
+  expect(await screen.findByText('$1')).toBeVisible()
+  expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
   const url = new URL(get.mock.calls[0][0], 'http://localhost')
   expect(url.pathname).toBe('/api/log/stat')
   expect(Object.fromEntries(url.searchParams)).toMatchObject({
@@ -156,22 +156,14 @@ it('shows administrator cost and signed profit from the complete filtered statis
   expect(url.searchParams.has('page_size')).toBe(false)
 })
 
-it('masks cost and profit with the existing sensitive-value toggle', async () => {
+it('masks billed usage with the sensitive-value toggle', async () => {
   vi.spyOn(api, 'get').mockResolvedValue(response())
   await renderStats()
-  await screen.findByText('$1.3')
+  await screen.findByText('$1')
   await userEvent.click(screen.getByRole('button', { name: 'Toggle amounts' }))
-  expect(screen.queryByText('$1.3')).not.toBeInTheDocument()
-  expect(screen.queryByText('-$0.3')).not.toBeInTheDocument()
+  expect(screen.queryByText('$1')).not.toBeInTheDocument()
   expect(
-    within(screen.getByRole('group', { name: 'Upstream cost' })).getByText(
-      '••••'
-    )
-  ).toBeVisible()
-  expect(
-    within(screen.getByRole('group', { name: 'Gross profit' })).getByText(
-      '••••'
-    )
+    within(screen.getByRole('group', { name: 'Usage' })).getByText('••••')
   ).toBeVisible()
 })
 
@@ -186,20 +178,6 @@ it.each([{ role: 1 }, { role: 100, source: 'test' as const }])(
   }
 )
 
-it('immediately hides finance when an administrator switches to personal scope or is downgraded', async () => {
-  vi.spyOn(api, 'get').mockResolvedValue(response())
-  await renderStats()
-  await screen.findByText('$1.3')
-  await userEvent.click(screen.getByRole('button', { name: 'Toggle scope' }))
-  expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
-  await userEvent.click(screen.getByRole('button', { name: 'Toggle scope' }))
-  await screen.findByText('$1.3')
-  act(() =>
-    useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 1 })
-  )
-  expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
-})
-
 it.each(['filter', 'account'])(
   'does not present cached amounts as the new %s while loading or after failure',
   async (change) => {
@@ -212,7 +190,7 @@ it.each(['filter', 'account'])(
       .mockResolvedValueOnce(response())
       .mockImplementation(() => pending as never)
     const { router } = await renderStats()
-    await screen.findByText('$1.3')
+    await screen.findByText('$1')
     if (change === 'filter') {
       await act(() => router.navigate({ search: { model: 'other' } as never }))
     } else {
@@ -223,101 +201,18 @@ it.each(['filter', 'account'])(
       )
     }
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
-    expect(screen.queryByText('$1.3')).not.toBeInTheDocument()
+    expect(screen.queryByText('$1')).not.toBeInTheDocument()
     expect(screen.queryByText('$0')).not.toBeInTheDocument()
     expect(screen.getByRole('status', { name: 'Loading' })).toBeVisible()
     await act(async () =>
       finish?.({ data: { success: false, message: 'Statistics unavailable' } })
     )
-    expect(await screen.findAllByText('Loading failed')).toHaveLength(2)
-    expect(screen.queryByText('$1.3')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('status', { name: 'Loading' })
+      ).not.toBeInTheDocument()
+    )
+    expect(screen.queryByText('$1')).not.toBeInTheDocument()
     expect(screen.queryByText('$0')).not.toBeInTheDocument()
   }
 )
-
-it.each([
-  undefined,
-  {
-    ...stats.finance,
-    recorded_count: 0,
-    unrecorded_count: 10,
-    cost_quota: 0,
-    profit_quota: 0,
-  },
-])('shows missing cost as unrecorded rather than zero', async (finance) => {
-  vi.spyOn(api, 'get').mockResolvedValue(
-    response({ ...stats, finance } as typeof stats)
-  )
-  await renderStats()
-  expect(await screen.findAllByText('Not recorded')).toHaveLength(2)
-  expect(screen.queryByText('$0')).not.toBeInTheDocument()
-})
-
-it('retains recorded zero cost and explains partial cost coverage only when it exists', async () => {
-  vi.spyOn(api, 'get').mockResolvedValue(
-    response({
-      ...stats,
-      finance: {
-        ...stats.finance,
-        cost_quota: 0,
-        profit_quota: 500000,
-        unrecorded_count: 1,
-      },
-    })
-  )
-  await renderStats()
-  expect(await screen.findByText('$0')).toBeVisible()
-  expect(screen.queryByText('Not recorded')).not.toBeInTheDocument()
-  expect(
-    screen.getByText(
-      'Cost and profit include only requests with recorded costs.'
-    )
-  ).toBeVisible()
-})
-
-it('shows zero financial totals for an explicitly empty filtered result', async () => {
-  vi.spyOn(api, 'get').mockResolvedValue(
-    response({
-      quota: 0,
-      rpm: 0,
-      tpm: 0,
-      finance: {
-        cost_quota: 0,
-        profit_quota: 0,
-        covered_revenue_quota: 0,
-        recorded_count: 0,
-        actual_count: 0,
-        estimated_count: 0,
-        unrecorded_count: 0,
-      },
-    })
-  )
-  await renderStats()
-  const cost = await screen.findByRole('group', { name: 'Upstream cost' })
-  expect(within(cost).getByText('$0')).toBeVisible()
-  expect(
-    within(screen.getByRole('group', { name: 'Gross profit' })).getByText('$0')
-  ).toBeVisible()
-  expect(screen.queryByText('Not recorded')).not.toBeInTheDocument()
-})
-
-it('keeps full usage while showing the free deduction and net revenue to administrators', async () => {
-  const data = {
-    ...stats,
-    finance: { ...stats.finance, free_quota: 100000, profit_quota: -250000 },
-  }
-  vi.spyOn(api, 'get').mockResolvedValue(response(data))
-  await renderStats()
-  const free = await screen.findByRole('group', {
-    name: 'Free allowance deduction',
-  })
-  expect(within(free).getByText('$0.2')).toBeVisible()
-  expect(
-    within(screen.getByRole('group', { name: 'Revenue' })).getByText('$0.8')
-  ).toBeVisible()
-  expect(
-    within(screen.getByRole('group', { name: 'Usage' })).getByText('$1')
-  ).toBeVisible()
-  await userEvent.click(screen.getByRole('button', { name: 'Toggle amounts' }))
-  expect(within(free).getByText('••••')).toBeVisible()
-})

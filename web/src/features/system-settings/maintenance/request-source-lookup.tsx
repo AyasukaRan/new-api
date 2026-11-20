@@ -7,7 +7,6 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { RequestTraceSection } from '@/features/usage-logs/components/dialogs/request-trace-section'
 import { api } from '@/lib/api'
 import { formatTimestampToDate } from '@/lib/format'
 import {
@@ -19,7 +18,6 @@ import { useAuthStore } from '@/stores/auth-store'
 
 type SourceLookup = {
   request_id: string
-  trace_id: string
   created_at: number
   path: string
   recorded_source: string
@@ -65,8 +63,8 @@ export function RequestSourceLookup() {
         }}
       >
         <Input
-          aria-label={t('Request ID or trace ID')}
-          placeholder={t('Request ID or trace ID')}
+          aria-label={t('Request ID')}
+          placeholder={t('Request ID')}
           value={input}
           maxLength={64}
           autoComplete='off'
@@ -105,16 +103,6 @@ export function RequestSourceLookup() {
             <dt>{t('Current recognition')}</dt>
             <dd>{result.current_source || '—'}</dd>
           </dl>
-          {result.trace_id && (
-            <RequestTraceSection
-              key={result.trace_id}
-              traceId={result.trace_id}
-              metadata={{
-                client_tool: result.recorded_source || result.current_source,
-              }}
-              enabled
-            />
-          )}
         </div>
       )}
     </div>

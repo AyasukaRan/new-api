@@ -33,9 +33,6 @@ func GetAllQuotaDates(c *gin.Context) {
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	username := c.Query("username")
 	dates, err := model.GetAllQuotaDates(startTimestamp, endTimestamp, username)
-	if err == nil && c.GetInt("role") >= common.RoleAdminUser {
-		err = model.AttachQuotaFinance(c.Request.Context(), dates, startTimestamp, endTimestamp, username, false)
-	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -52,9 +49,6 @@ func GetQuotaDatesByUser(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	dates, err := model.GetQuotaDataGroupByUser(startTimestamp, endTimestamp)
-	if err == nil && c.GetInt("role") >= common.RoleAdminUser {
-		err = model.AttachQuotaFinance(c.Request.Context(), dates, startTimestamp, endTimestamp, "", true)
-	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -95,9 +89,6 @@ func GetAllFlowQuotaDates(c *gin.Context) {
 	}
 	username := c.Query("username")
 	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, username, 0, c.GetInt("role"))
-	if err == nil && c.GetInt("role") >= common.RoleAdminUser {
-		err = model.AttachFlowFinance(c.Request.Context(), dates, startTimestamp, endTimestamp, username, c.GetInt("role"))
-	}
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -143,9 +134,6 @@ func GetAllSourceQuotaDates(c *gin.Context) {
 		return
 	}
 	rows, err := model.GetSourceQuotaData(startTimestamp, endTimestamp, c.Query("username"), c.GetInt("id"), c.GetInt("role"), timeSeries)
-	if err == nil && c.GetInt("role") >= common.RoleAdminUser {
-		err = model.AttachSourceFinance(c.Request.Context(), rows, startTimestamp, endTimestamp, c.Query("username"), timeSeries)
-	}
 	if err != nil {
 		common.ApiError(c, err)
 		return

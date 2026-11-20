@@ -240,7 +240,7 @@ func InitLogDB() (err error) {
 		if common.IsMasterNode {
 			return migrateLogSideTables()
 		}
-		detectDashboardFinanceRollup()
+
 		return
 	}
 	db, dbType, err := chooseDB("LOG_SQL_DSN", true)
@@ -266,7 +266,7 @@ func InitLogDB() (err error) {
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
 		if !common.IsMasterNode {
-			detectDashboardFinanceRollup()
+
 			return nil
 		}
 		common.SysLog(common.LogText("database migration started"))
@@ -414,13 +414,7 @@ func migrateDB() error {
 // reaching that function when LOG_SQL_DSN is unset, and these tables must exist
 // in that default deployment too.
 func migrateLogSideTables() error {
-	if err := MigrateAuditLogs(); err != nil {
-		return err
-	}
-	if err := MigrateRequestTraces(); err != nil {
-		return err
-	}
-	return MigrateDashboardFinance()
+	return MigrateAuditLogs()
 }
 
 func migrateLOGDB() error {

@@ -627,7 +627,7 @@ test('lets an empty scan window continue to older records without claiming the f
   ).not.toBeInTheDocument()
 })
 
-test('looks up a recognized tool request by trace ID independently of the unidentified list', async () => {
+test('looks up a recognized tool request by request ID independently of the unidentified list', async () => {
   const user = userEvent.setup()
   const traceId = '202611191825019655390488268d9d6CnEUv5zo'
   const get = vi.spyOn(api, 'get').mockResolvedValue({
@@ -645,7 +645,7 @@ test('looks up a recognized tool request by trace ID independently of the uniden
   })
   renderRules('[]')
   await user.click(screen.getByRole('tab', { name: 'Request lookup' }))
-  const input = screen.getByRole('textbox', { name: 'Request ID or trace ID' })
+  const input = screen.getByRole('textbox', { name: 'Request ID' })
   await user.type(input, traceId)
   expect(get).not.toHaveBeenCalled()
   await user.keyboard('{Enter}')

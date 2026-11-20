@@ -77,7 +77,8 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 	// Capture credentials before channel selection or header overrides. Resolve
 	// the peer once with the public router's trusted-proxy configuration.
 	headers := c.Request.Header.Clone()
-	for _, name := range []string{"Connection", "Upgrade", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol", "Content-Length", "Content-Encoding"} {
+	common.RemoveConnectionHeaders(headers)
+	for _, name := range []string{"Upgrade", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol", "Content-Length", "Content-Encoding"} {
 		headers.Del(name)
 	}
 	remoteAddr := net.JoinHostPort(c.ClientIP(), "0")

@@ -335,6 +335,15 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 	if err != nil {
 		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "create_request_failed", http.StatusInternalServerError), nullBytes, err
 	}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+		ApiKey:          common.GetContextKeyString(c, constant.ContextKeyChannelKey),
+		HeadersOverride: common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride),
+	}}
+	headers, err := relaycommon.UpstreamRequestHeaders(info, c)
+	if err != nil {
+		return MidjourneyErrorWithStatusCodeWrapper(constant.MjErrorUnknown, "create_request_failed", http.StatusInternalServerError), nullBytes, err
+	}
+	req.Header = headers
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	// 使用带有超时的 context 创建新的请求
 	req = req.WithContext(ctx)

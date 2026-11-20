@@ -28,7 +28,6 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTheme } from '@/context/theme-provider'
 import { getUserQuotaDataByUsers } from '@/features/dashboard/api'
 import {
-  FINANCE_METRICS,
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
 } from '@/features/dashboard/constants'
@@ -39,7 +38,6 @@ import {
 } from '@/features/dashboard/lib'
 import type {
   ProcessedUserChartData,
-  DashboardMetric,
   UserChartsFilters,
 } from '@/features/dashboard/types'
 import { ROLE } from '@/lib/roles'
@@ -47,9 +45,6 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
 import { VCHART_OPTION } from '@/lib/vchart'
 import { useAuthStore } from '@/stores/auth-store'
-
-import { DashboardMetricSelector } from '../models/dashboard-metric-selector'
-import { FinancialSummary } from '../models/financial-summary'
 
 let themeManagerPromise: Promise<
   (typeof import('@visactor/vchart'))['ThemeManager']
@@ -84,7 +79,6 @@ export function UserCharts(props: UserChartsProps) {
   const user = useAuthStore((state) => state.auth.user)
   const isAdmin = Boolean(user && user.role >= ROLE.ADMIN)
   const { resolvedTheme } = useTheme()
-  const [metric, setMetric] = useState<DashboardMetric>('quota')
   const [themeReady, setThemeReady] = useState(false)
   const themeManagerRef = useRef<
     (typeof import('@visactor/vchart'))['ThemeManager'] | null
@@ -147,11 +141,7 @@ export function UserCharts(props: UserChartsProps) {
     updateTheme()
   }, [resolvedTheme])
 
-  const {
-    data: userData,
-    isLoading,
-    isError,
-  } = useQuery({
+  const { data: userData, isLoading } = useQuery({
     queryKey: ['dashboard', 'user-quota', user?.id, user?.role, timeRange],
     queryFn: async () =>
       requireServerSuccess(await getUserQuotaDataByUsers(timeRange)),
@@ -166,26 +156,15 @@ export function UserCharts(props: UserChartsProps) {
         isLoading ? [] : (userData ?? []),
         timeGranularity,
         t,
-        topUserLimit,
-        metric
+        topUserLimit
       ),
-    [userData, isLoading, timeGranularity, t, topUserLimit, metric]
+    [userData, isLoading, timeGranularity, t, topUserLimit]
   )
 
   if (!isAdmin) return null
 
   return (
     <div className='space-y-3'>
-      <FinancialSummary
-        data={userData ?? []}
-        loading={isLoading}
-        error={isError}
-      />
-      <DashboardMetricSelector
-        value={metric}
-        options={FINANCE_METRICS}
-        onChange={setMetric}
-      />
       <div className='flex items-center gap-1.5 overflow-x-auto pb-1 sm:gap-2'>
         <Tabs
           value={String(selectedRange)}
@@ -254,15 +233,7 @@ export function UserCharts(props: UserChartsProps) {
       <div className='grid gap-3'>
         {USER_CHARTS.map((chart) => {
           const spec = chartData[chart.specKey]
-          let title = t(chart.labelKey)
-          if (metric !== 'quota') {
-            const metricLabel =
-              metric === 'cost' ? t('Upstream cost') : t('Gross profit')
-            const chartLabel =
-              chart.value === 'rank' ? t('Ranking') : t('Trend')
-            title = `${metricLabel} · ${chartLabel}`
-          }
-
+          const title = t(chart.labelKey)
           return (
             <div
               key={chart.value}
@@ -282,7 +253,7 @@ export function UserCharts(props: UserChartsProps) {
                   themeReady &&
                   spec && (
                     <VChart
-                      key={`user-${chart.value}-${metric}-${topUserLimit}-${resolvedTheme}`}
+                      key={`user-${chart.value}-${topUserLimit}-${resolvedTheme}`}
                       spec={{
                         ...spec,
                         theme: resolvedTheme === 'dark' ? 'dark' : 'light',

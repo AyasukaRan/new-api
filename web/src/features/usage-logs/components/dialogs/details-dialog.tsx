@@ -35,13 +35,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
 import type { TFunction } from 'i18next'
 import {
   Copy,
   Check,
-  FileJson,
-  ChevronDown,
   Route,
   Settings2,
   AlertTriangle,
@@ -54,20 +51,11 @@ import {
   Info,
   LogIn,
 } from 'lucide-react'
-import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { CopyButton } from '@/components/copy-button'
 import { Dialog } from '@/components/dialog'
-import { ErrorState } from '@/components/error-state'
-import { LoadingState } from '@/components/loading-state'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
 import { Label } from '@/components/ui/label'
 import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-pricing-breakdown'
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
@@ -83,12 +71,9 @@ import {
   formatUseTime,
   formatNumber,
 } from '@/lib/format'
-import { ROLE } from '@/lib/roles'
 import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/stores/auth-store'
 
-import { getLogRequestBody } from '../../api'
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import type { UsageLog } from '../../data/schema'
 import {
@@ -97,7 +82,6 @@ import {
   parseAuditLine,
   decodeBillingExprB64,
   getTieredBillingSummary,
-  getLogCostEstimate,
   getLogFreeQuota,
   hasAnyCacheTokens,
   isViolationFeeLog,
@@ -126,7 +110,6 @@ import { PluginAuthorLink } from '../plugin-author-link'
 import { RequestFailureSummary } from '../request-failure-summary'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { DetailRow, DetailSection } from './log-detail-layout'
-import { RequestTraceSection } from './request-trace-section'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
 // to its i18n label key for display in the audit details.
@@ -202,12 +185,9 @@ function BillingBreakdown(props: {
   log: UsageLog
   other: LogOtherData
   isAdmin: boolean
-  showCostEstimate: boolean
 }) {
   const { t } = useTranslation()
   const { log, other, isAdmin } = props
-  const cost =
-    isAdmin && props.showCostEstimate ? getLogCostEstimate(other) : null
   const isPerCall = isPerCallBilling(other.model_price)
   const isClaude = other.claude === true
   // OpenAI 12-hour cache writes have their own price, listed like Claude's.
@@ -452,39 +432,6 @@ function BillingBreakdown(props: {
           />
         </>
       )}
-      {isAdmin && props.showCostEstimate && (
-        <>
-          {cost && (
-            <>
-              <DetailRow
-                label={t('Base model amount')}
-                value={formatLogQuota(cost.base_quota)}
-                mono
-              />
-              <DetailRow
-                label={t('Upstream cost multiplier')}
-                value={`${formatRatio(cost.cost_ratio)}x`}
-                mono
-              />
-            </>
-          )}
-          <DetailRow
-            label={t('Upstream cost')}
-            value={cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
-            mono
-          />
-          <DetailRow
-            label={t('Gross profit')}
-            value={cost ? formatLogQuota(cost.profit_quota) : t('Not recorded')}
-            mono
-          />
-          <p className='text-muted-foreground text-xs'>
-            {t(
-              'Gross profit excludes free allowance deductions and subtracts upstream cost. Subscription usage is not cash revenue.'
-            )}
-          </p>
-        </>
-      )}
     </DetailSection>
   )
 }
@@ -605,100 +552,6 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
         </div>
       )}
     </DetailSection>
-  )
-}
-
-/** Historical logs without a trace keep their sole payload behind an explicit disclosure. */
-function CapturedRequestBody(props: {
-  log: UsageLog
-  adminInfo: NonNullable<LogOtherData['admin_info']>
-}) {
-  const { t } = useTranslation()
-  const user = useAuthStore((state) => state.auth.user)
-  const [expanded, setExpanded] = useState(false)
-  if ((user?.role ?? 0) < ROLE.ADMIN) return null
-  return (
-    <Collapsible
-      open={expanded}
-      onOpenChange={setExpanded}
-      className='min-w-0 rounded-md border'
-    >
-      <CollapsibleTrigger className='group flex w-full items-center justify-between gap-3 p-2.5 text-left text-xs font-semibold'>
-        <span className='flex items-center gap-1.5'>
-          <FileJson className='size-3.5' aria-hidden='true' />
-          {t('Request Content')}
-        </span>
-        <ChevronDown
-          className='size-3.5 transition-transform group-data-[panel-open]:rotate-180'
-          aria-hidden='true'
-        />
-      </CollapsibleTrigger>
-      <CollapsibleContent className='min-w-0 px-2.5 pb-2.5'>
-        {expanded && <LegacyCapturedRequestBody {...props} />}
-      </CollapsibleContent>
-    </Collapsible>
-  )
-}
-
-function LegacyCapturedRequestBody(props: {
-  log: UsageLog
-  adminInfo: NonNullable<LogOtherData['admin_info']>
-}) {
-  const { t } = useTranslation()
-  const user = useAuthStore((state) => state.auth.user)
-  const {
-    request_body: inlineBody,
-    request_body_ref: ref,
-    request_body_truncated,
-  } = props.adminInfo
-  const { created_at, request_id = '' } = props.log
-  const canLoad = (user?.role ?? 0) >= ROLE.ADMIN
-  const query = useQuery({
-    queryKey: [
-      'log-request-body',
-      user?.id,
-      user?.role,
-      created_at,
-      request_id,
-      ref,
-    ],
-    queryFn: ({ signal }) =>
-      getLogRequestBody(created_at, request_id, ref ?? '', signal),
-    enabled: canLoad && !inlineBody && !!ref,
-    retry: false,
-    gcTime: 0,
-  })
-  if (!canLoad) return null
-  const body = inlineBody ?? query.data
-  return (
-    <>
-      {body != null && (
-        <div className='bg-muted/50 relative rounded-md border p-3'>
-          <CopyButton value={body} className='absolute top-2 right-2 size-8' />
-          <pre className='max-h-72 overflow-auto pr-10 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap'>
-            {body}
-          </pre>
-        </div>
-      )}
-      {body == null && query.isError && (
-        <ErrorState
-          className='min-h-0'
-          title={t('Failed to load logs')}
-          onRetry={() => void query.refetch()}
-        />
-      )}
-      {body == null && !query.isError && (
-        <LoadingState inline message={t('Loading...')} />
-      )}
-      {request_body_truncated != null && (
-        <p className='text-muted-foreground mt-2 text-xs'>
-          {t(
-            'Truncated for storage. The original request was {{bytes}} bytes.',
-            { bytes: request_body_truncated }
-          )}
-        </p>
-      )}
-    </>
   )
 }
 
@@ -895,15 +748,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
           expanded
         />
 
-        {/* Full request/response exchange (admin only) */}
-        {props.isAdmin && adminInfo?.trace_id && (
-          <RequestTraceSection
-            traceId={adminInfo.trace_id}
-            enabled={props.open}
-            metadata={other}
-          />
-        )}
-
         {/* Overview section - key identifiers */}
         <div className='min-w-0 space-y-1'>
           {props.log.request_id && (
@@ -1098,18 +942,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           </DetailSection>
         )}
-
-        {/* Trace-backed requests are inspected through the dedicated trace viewer above. */}
-        {props.open &&
-          props.isAdmin &&
-          !adminInfo?.trace_id?.trim() &&
-          (adminInfo?.request_body || adminInfo?.request_body_ref) && (
-            <CapturedRequestBody
-              key={`${props.log.id}:${props.log.created_at}:${props.log.request_id ?? ''}:${adminInfo.request_body_ref ?? ''}`}
-              log={props.log}
-              adminInfo={adminInfo}
-            />
-          )}
 
         {/* Reject reason (admin only) */}
         {props.isAdmin && adminInfo?.reject_reason && (
@@ -1429,7 +1261,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
             log={props.log}
             other={other}
             isAdmin={props.isAdmin}
-            showCostEstimate={props.source !== 'test' && props.log.type === 2}
           />
         )}
 
@@ -1464,12 +1295,6 @@ export function DetailsDialog(props: DetailsDialogProps) {
               />
             )}
           </DetailSection>
-        )}
-        {props.isAdmin && other?.admin_info?.cost_unconfirmed && (
-          <DetailRow
-            label={t('Upstream cost')}
-            value={t('Unconfirmed after interruption')}
-          />
         )}
 
         {/* Tiered pricing breakdown (when billing_mode is tiered_expr) */}

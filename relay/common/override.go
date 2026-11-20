@@ -543,7 +543,7 @@ func sanitizeHeaderOverrideMap(source map[string]any) map[string]any {
 		}
 		normalizedValue := strings.TrimSpace(fmt.Sprintf("%v", value))
 		if normalizedValue == "" {
-			if isHeaderPassthroughRuleKeyForOverride(normalizedKey) {
+			if IsHeaderPassthroughRuleKey(normalizedKey) {
 				target[normalizedKey] = ""
 			}
 			continue
@@ -553,7 +553,7 @@ func sanitizeHeaderOverrideMap(source map[string]any) map[string]any {
 	return target
 }
 
-func isHeaderPassthroughRuleKeyForOverride(key string) bool {
+func IsHeaderPassthroughRuleKey(key string) bool {
 	key = strings.TrimSpace(strings.ToLower(key))
 	if key == "" {
 		return false

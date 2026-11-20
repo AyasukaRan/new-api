@@ -242,112 +242,19 @@ describe('log cost display', () => {
     estimated: true as const,
   }
 
-  test('administrator sees the recorded estimated upstream cost and gross profit', () => {
-    renderCost({
-      quota: 10000,
-      other: { admin_info: { cost: costSnapshot } },
-      isAdmin: true,
-    })
-    expect(screen.getByText('Upstream cost')).toBeVisible()
-    expect(screen.getByText('$0.013')).toBeVisible()
-    expect(screen.getByText('Gross profit')).toBeVisible()
-    expect(screen.getByText('$0.007')).toBeVisible()
-  })
-
-  test('regular view hides cost estimates even when a response contains admin metadata', () => {
-    renderCost({ quota: 10000, other: { admin_info: { cost: costSnapshot } } })
-    expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
-    expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
-    expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
-  })
-
   test.each([true, false])(
-    'upstream bill cost and gross profit require administrator view: %s',
+    'legacy costs are omitted while billed usage remains visible (admin=%s)',
     (isAdmin) => {
       renderCost({
         quota: 10000,
-        other: {
-          admin_info: {
-            cost: {
-              ...costSnapshot,
-              estimated: false,
-              source: 'upstream_bill',
-            },
-          },
-        },
+        other: { admin_info: { cost: costSnapshot } },
         isAdmin,
       })
-      if (isAdmin) {
-        expect(screen.getByText('Upstream cost')).toBeVisible()
-        expect(screen.getByText('Gross profit')).toBeVisible()
-        expect(screen.getByText('$0.013')).toBeVisible()
-        expect(screen.getByText('$0.007')).toBeVisible()
-      } else {
-        expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
-        expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
-        expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
-      }
+      expect(screen.getByText('$0.02')).toBeVisible()
+      expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
+      expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
     }
   )
-
-  test.each([
-    null,
-    { admin_info: { cost: { ...costSnapshot, cost_quota: Number.NaN } } },
-    { admin_info: { cost: { ...costSnapshot, estimated: false } } },
-  ])(
-    'administrator sees missing cost as unrecorded instead of zero',
-    (other) => {
-      renderCost({ quota: 10000, other, isAdmin: true })
-      expect(screen.getAllByText('Not recorded')).toHaveLength(2)
-      expect(screen.queryByText('$0')).not.toBeInTheDocument()
-    }
-  )
-
-  test('administrator sees a negative gross profit and an explicit zero cost correctly', () => {
-    const { rerender } = renderCost({
-      quota: 5000,
-      other: {
-        admin_info: {
-          cost: { ...costSnapshot, revenue_quota: 5000, profit_quota: -1500 },
-        },
-      },
-      isAdmin: true,
-    })
-    expect(screen.getByText('-$0.003')).toBeVisible()
-    rerender(
-      <LogCostDisplay
-        quota={10000}
-        other={{
-          admin_info: {
-            cost: {
-              ...costSnapshot,
-              cost_ratio: 0,
-              cost_quota: 0,
-              profit_quota: 10000,
-            },
-          },
-        }}
-        isAdmin
-      />
-    )
-    expect(screen.getByText('$0')).toBeVisible()
-    expect(screen.queryByText('Not recorded')).not.toBeInTheDocument()
-  })
-
-  test('subscription cost estimate remains based on the recorded billed usage', () => {
-    renderCost({
-      quota: 10000,
-      other: {
-        billing_source: 'subscription',
-        subscription_consumed: 10000,
-        admin_info: { cost: costSnapshot },
-      },
-      isAdmin: true,
-    })
-    expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
-    expect(screen.getByText('$0.007')).toBeVisible()
-    expect(screen.queryByText('Revenue')).not.toBeInTheDocument()
-  })
 
   test('shows the wallet remainder and free deduction separately for a mixed allowance call', () => {
     renderCost({

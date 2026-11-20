@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"io"
 	"slices"
 	"strconv"
 	"strings"
@@ -111,60 +110,6 @@ func applyLogSourceFilter(tx *gorm.DB, sources ...LogSource) *gorm.DB {
 	return tx.Where("NOT ("+condition+")", LogTypeTestConsume, LogTypeConsume, 0, "模型测试", "模型测试")
 }
 
-// maxLoggedRequestBodyBytes caps a single captured request body. Bodies are
-// stored inline in logs.other, which GetAllLogs returns for every row of a
-// page, so an uncapped payload would make the admin log list unloadable.
-//
-// ponytail: oversized bodies are head-truncated rather than paged; add a
-// single-log detail endpoint if admins need the tail of long conversations.
-const maxLoggedRequestBodyBytes = 64 * 1024
-
-// attachRequestBody records the client's request payload under
-// other.admin_info.request_body when the operator has enabled capture.
-// admin_info is stripped from every non-admin projection by formatUserLogs, so
-// nesting is what makes the content admin-only.
-//
-// It only reads the body storage the relay already populated; it never calls
-// GetRequestBody, which would try to drain an http.Request body that is long
-// since consumed by the time a log is written.
-func attachRequestBody(c *gin.Context, other *LogOther) {
-	if !common.LogRequestBodyEnabled || other == nil || c == nil || c.Request == nil {
-		return
-	}
-	// Non-JSON bodies are uploads (audio, images, multipart forms); capturing
-	// them would put binary in the log and blow the cap for no audit value.
-	if !strings.HasPrefix(c.GetHeader("Content-Type"), "application/json") {
-		return
-	}
-	cached, exists := c.Get(common.KeyBodyStorage)
-	if !exists || cached == nil {
-		return
-	}
-	storage, ok := cached.(common.BodyStorage)
-	if !ok {
-		return
-	}
-	size := storage.Size()
-	if size <= 0 {
-		return
-	}
-	// An independent reader keeps the shared seek cursor untouched, and reading
-	// at most the cap avoids materializing a disk-backed body into the heap.
-	reader, err := storage.NewReader()
-	if err != nil {
-		return
-	}
-	defer reader.Close()
-	body, err := io.ReadAll(io.LimitReader(reader, maxLoggedRequestBodyBytes))
-	if err != nil || len(body) == 0 {
-		return
-	}
-	if size > int64(len(body)) {
-		other.SetAdmin("request_body_truncated", size)
-	}
-	other.SetAdmin("request_body", string(body))
-}
-
 func ensureLogRequestId(log *Log) {
 	if log != nil && log.RequestId == "" {
 		log.RequestId = common.NewRequestId()
@@ -198,18 +143,17 @@ func formatUserLogs(logs []*Log, startIdx int) {
 // FormatAdminLogs removes root-only diagnostics while retaining operational
 // admin_info. Root callers must not pass their results through this formatter.
 func FormatAdminLogs(logs []*Log) {
-	FormatLogList(logs, common.RoleAdminUser, false)
+	FormatLogList(logs, common.RoleAdminUser)
 }
 
 // FormatRootLogs normalizes legacy metadata into the current scoped shape
 // without removing root-only diagnostics.
 func FormatRootLogs(logs []*Log) {
-	FormatLogList(logs, common.RoleRootUser, false)
+	FormatLogList(logs, common.RoleRootUser)
 }
 
-// FormatLogList applies the administrator's existing visibility before sending
-// a full list or a summary whose captured request bodies can be fetched later.
-func FormatLogList(logs []*Log, role int, deferBody bool) {
+// FormatLogList filters private metadata before sending usage logs.
+func FormatLogList(logs []*Log, role int) {
 	visibility := logOtherVisibilityUser
 	if role >= common.RoleRootUser {
 		visibility = logOtherVisibilityRoot
@@ -220,45 +164,8 @@ func FormatLogList(logs []*Log, role int, deferBody bool) {
 		if visibility == logOtherVisibilityUser {
 			log.UpstreamRequestId = ""
 		}
-		log.Other = projectLogOtherJSON(log.Other, visibility, deferBody && log.CreatedAt > 0)
+		log.Other = formatLogOtherJSON(log.Other, visibility)
 	}
-}
-
-// GetLogRequestBody reads only the captured body, never the other privileged
-// metadata from the same row.
-func GetLogRequestBody(ctx context.Context, createdAt int64, requestID, ref string) (string, error) {
-	query := LOG_DB.WithContext(ctx).Model(&Log{}).Select("other").Where("created_at = ?", createdAt)
-	if requestID == "" {
-		query = query.Where("request_id = '' OR request_id IS NULL")
-	} else {
-		query = query.Where("request_id = ?", requestID)
-	}
-	rows, err := query.Rows()
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var other *string
-		if err := rows.Scan(&other); err != nil {
-			return "", err
-		}
-		if other == nil {
-			continue
-		}
-		var capture struct {
-			AdminInfo struct {
-				RequestBody string `json:"request_body"`
-			} `json:"admin_info"`
-		}
-		if common.UnmarshalJsonStr(*other, &capture) == nil {
-			body := capture.AdminInfo.RequestBody
-			if body != "" && logRequestBodyRef(body) == ref {
-				return body, nil
-			}
-		}
-	}
-	return "", rows.Err()
 }
 
 // Records predating the dedicated audit table can still occur in the usage
@@ -417,10 +324,6 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
-	if other == nil && common.LogRequestBodyEnabled {
-		other = NewLogOther()
-	}
-	attachRequestBody(c, other)
 	otherStr := other.JSONString()
 	log := &Log{
 		UserId:            userId,
@@ -479,13 +382,12 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		logType = LogTypeTestConsume
 	}
 	other := params.Other
-	if other == nil && (common.LogRequestBodyEnabled || len(params.Content) > 0) {
+	if other == nil && len(params.Content) > 0 {
 		other = NewLogOther()
 	}
 	if other != nil && (other.adminInfo["cost"] != nil || other.public["free_quota"] != nil) {
 		other.SetRoot("node_name", common.NodeName)
 	}
-	attachRequestBody(c, other)
 	content := other.setContent(params.Content)
 	otherStr := other.JSONString()
 	log := &Log{
@@ -949,15 +851,14 @@ func streamLogs(tx *gorm.DB, order string, fn func(*Log) error) error {
 }
 
 type Stat struct {
-	Quota   int               `json:"quota"`
-	Rpm     int               `json:"rpm"`
-	Tpm     int               `json:"tpm"`
-	Finance *DashboardFinance `json:"finance,omitempty" gorm:"-"`
+	Quota int `json:"quota"`
+	Rpm   int `json:"rpm"`
+	Tpm   int `json:"tpm"`
 }
 
 // SumUsedQuota uses the same search as the log list. Rates keep their rolling
 // sixty-second window; quota and finance use the exact selected time range.
-func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFinance bool) (Stat, error) {
+func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int) (Stat, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	stat := Stat{}
@@ -973,11 +874,7 @@ func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFin
 	if err != nil {
 		return stat, err
 	}
-	if includeFinance && filter.Source != LogSourceTest {
-		stat, err = logFinanceStat(tx)
-	} else {
-		err = tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error
-	}
+	err = tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error
 	if err != nil {
 		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
 		return Stat{}, common.NewMessage("Failed to query statistics")

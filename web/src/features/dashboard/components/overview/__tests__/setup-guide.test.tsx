@@ -210,7 +210,7 @@ describe('overview setup guide', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('keeps gateway diagnostics and finance on the same window even when the admin has no personal usage', async () => {
+  it('keeps gateway diagnostics independent of personal usage without fetching financial reports', async () => {
     useAuthStore
       .getState()
       .auth.setUser({ id: 42, username: 'admin', role: 10, quota: 0 })
@@ -222,8 +222,11 @@ describe('overview setup guide', () => {
       await site.findByRole('region', { name: 'Monitored model hotspots' })
     ).toBeVisible()
     expect(
-      await site.findByRole('region', { name: 'Financial summary' })
-    ).toBeVisible()
+      site.queryByRole('region', { name: 'Financial summary' })
+    ).not.toBeInTheDocument()
+    expect(
+      vi.mocked(api.get).mock.calls.some(([url]) => url === '/api/data/')
+    ).toBe(false)
     const week = site.getByRole('button', { name: 'Last 7 days' })
     await userEvent.click(week)
     expect(week).toHaveAttribute('aria-pressed', 'true')
@@ -233,26 +236,6 @@ describe('overview setup guide', () => {
         expect.objectContaining({
           params: expect.objectContaining({ hours: 168, diagnostics: true }),
         })
-      )
-      const siteQuery = vi
-        .mocked(api.get)
-        .mock.calls.filter(([url]) => url === '/api/data/')
-        .at(-1)?.[1]?.params
-      if (
-        !siteQuery ||
-        typeof siteQuery !== 'object' ||
-        !('end_timestamp' in siteQuery) ||
-        typeof siteQuery.end_timestamp !== 'number' ||
-        !('start_timestamp' in siteQuery) ||
-        typeof siteQuery.start_timestamp !== 'number'
-      ) {
-        throw new Error('Expected a numeric sitewide reporting window')
-      }
-      expect(
-        siteQuery.end_timestamp - siteQuery.start_timestamp
-      ).toBeGreaterThanOrEqual(167 * 3600)
-      expect(siteQuery.end_timestamp - siteQuery.start_timestamp).toBeLessThan(
-        168 * 3600
       )
     })
     expect(

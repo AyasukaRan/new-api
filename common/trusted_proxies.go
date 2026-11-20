@@ -3,6 +3,7 @@ package common
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -60,4 +61,14 @@ func RequestClientIP(c *gin.Context) string {
 		return ""
 	}
 	return c.ClientIP()
+}
+
+// RemoveConnectionHeaders strips fields explicitly scoped to the incoming connection.
+func RemoveConnectionHeaders(headers http.Header) {
+	for _, value := range headers.Values("Connection") {
+		for name := range strings.SplitSeq(value, ",") {
+			headers.Del(strings.TrimSpace(name))
+		}
+	}
+	headers.Del("Connection")
 }

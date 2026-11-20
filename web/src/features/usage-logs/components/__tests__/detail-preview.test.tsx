@@ -22,32 +22,15 @@ import {
   getCoreRowModel,
   useReactTable,
 } from '@tanstack/react-table'
-import {
-  act,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
 import { useState } from 'react'
 import { I18nextProvider } from 'react-i18next'
-import {
-  afterAll,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  test,
-  vi,
-} from 'vitest'
+import { afterAll, afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import en from '@/i18n/locales/en.json'
 import zh from '@/i18n/locales/zh.json'
-import { api } from '@/lib/api'
-import { useAuthStore } from '@/stores/auth-store'
 import {
   DEFAULT_CURRENCY_CONFIG,
   useSystemConfigStore,
@@ -642,7 +625,7 @@ test.each(['missing schema', 'unsupported expression', 'unknown tier'])(
 )
 
 test.each([true, false])(
-  'recorded cost and gross profit in log details require administrator view: %s',
+  'legacy estimated costs are omitted from log details for every role: %s',
   async (isAdmin) => {
     const other: LogOtherData = {
       model_price: 0.25,
@@ -659,15 +642,8 @@ test.each([true, false])(
     }
     fireEvent.click(renderPreview(other, isAdmin))
     const dialog = within(await screen.findByRole('dialog'))
-    if (isAdmin) {
-      expect(dialog.getByText('Upstream cost')).toBeVisible()
-      expect(dialog.getByText('$0.013')).toBeVisible()
-      expect(dialog.getByText('-$0.003')).toBeVisible()
-      expect(dialog.getByText('1.3000x')).toBeVisible()
-    } else {
-      expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
-      expect(dialog.queryByText('-$0.003')).not.toBeInTheDocument()
-    }
+    expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
+    expect(dialog.queryByText('-$0.003')).not.toBeInTheDocument()
   }
 )
 
@@ -716,246 +692,30 @@ test.each([true, false])(
     }
     fireEvent.click(renderPreview(other, isAdmin))
     const dialog = within(await screen.findByRole('dialog'))
-    if (isAdmin) {
-      expect(dialog.getByText('Upstream cost')).toBeVisible()
-      expect(dialog.getByText('$0.013')).toBeVisible()
-      expect(dialog.getByText('Gross profit')).toBeVisible()
-      expect(dialog.getByText('-$0.003')).toBeVisible()
-    } else {
-      expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
-      expect(dialog.queryByText('$0.013')).not.toBeInTheDocument()
-      expect(dialog.queryByText('Gross profit')).not.toBeInTheDocument()
-    }
+    expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
+    expect(dialog.queryByText('$0.013')).not.toBeInTheDocument()
+    expect(dialog.queryByText('Gross profit')).not.toBeInTheDocument()
   }
 )
 
-test('an admin loads the captured request only when opening the row and can retry a failed fetch', async () => {
-  useAuthStore.getState().auth.setUser({ id: 77, role: 10, username: 'admin' })
-  const ref = 'a'.repeat(64)
-  const get = vi
-    .spyOn(api, 'get')
-    .mockRejectedValueOnce(new Error('unavailable'))
-    .mockResolvedValue({
-      data: { success: true, data: 'captured request text' },
-    })
-  try {
-    const open = renderPreview({
-      model_price: 1,
-      admin_info: { request_body_ref: ref, request_body_truncated: 123456 },
-    })
-    expect(get).not.toHaveBeenCalledWith(
-      '/api/log/request_body',
-      expect.anything()
-    )
-    fireEvent.click(open)
-    expect(get).not.toHaveBeenCalled()
-    fireEvent.click(
-      await screen.findByRole('button', { name: 'Request Content' })
-    )
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
-    const dialog = await screen.findByRole('dialog')
-    expect(
-      await within(dialog).findByText('captured request text')
-    ).toBeVisible()
-    expect(within(dialog).getByText(/123456 bytes/)).toBeVisible()
-    expect(get).toHaveBeenCalledWith(
-      '/api/log/request_body',
-      expect.objectContaining({
-        params: { request_id: 'req-1', created_at: 1, ref },
-      })
-    )
-  } finally {
-    get.mockRestore()
-    useAuthStore.getState().auth.reset()
-  }
-})
-
-describe('request content disclosure in log details', () => {
-  beforeEach(() => {
-    useAuthStore
-      .getState()
-      .auth.setUser({ id: 77, role: 10, username: 'admin' })
-  })
-  afterEach(() => {
-    vi.restoreAllMocks()
-    useAuthStore.getState().auth.reset()
-  })
-
-  test('trace-backed details omit duplicated JSON and truncation warnings without loading the trace until requested', async () => {
-    const get = vi
-      .spyOn(api, 'get')
-      .mockResolvedValue({ data: { success: true, data: { legs: [] } } })
-    fireEvent.click(
-      renderPreview({
+test('administrator usage details omit legacy conversation content and trace links', async () => {
+  fireEvent.click(
+    renderPreview(
+      {
         model_price: 1,
         admin_info: {
-          trace_id: 'complete-original',
-          request_body: 'Legacy summary',
+          request_body: 'Private history',
           request_body_ref: 'a'.repeat(64),
-          request_body_truncated: 3312033,
+          trace_id: 'legacy-trace',
         },
-      })
+      },
+      true
     )
-    expect(await screen.findByRole('dialog')).toBeVisible()
-    expect(
-      screen.queryByRole('button', { name: 'Request Content' })
-    ).not.toBeInTheDocument()
-    expect(screen.queryByText('Legacy summary')).not.toBeInTheDocument()
-    expect(screen.queryByText(/Truncated for storage/)).not.toBeInTheDocument()
-    expect(get).not.toHaveBeenCalled()
-    await userEvent.click(
-      screen.getByRole('button', { name: 'View request trace' })
-    )
-    expect(
-      await screen.findByText('No trace records are available.')
-    ).toBeVisible()
-    expect(get).toHaveBeenCalledWith(
-      '/api/log/trace',
-      expect.objectContaining({
-        params: { trace_id: 'complete-original', metadata_only: true },
-      })
-    )
-    expect(get).not.toHaveBeenCalledWith(
-      '/api/log/request_body',
-      expect.anything()
-    )
-  })
-
-  test.each([undefined, '   '])(
-    'historical inline content starts collapsed with trace ID %s and preserves its storage warning only when expanded',
-    async (traceId) => {
-      const get = vi.spyOn(api, 'get')
-      fireEvent.click(
-        renderPreview({
-          model_price: 1,
-          admin_info: {
-            request_body: 'Only historical original',
-            trace_id: traceId,
-            request_body_truncated: 123456,
-          },
-        })
-      )
-      const disclosure = await screen.findByRole('button', {
-        name: 'Request Content',
-      })
-      expect(disclosure).toHaveAttribute('aria-expanded', 'false')
-      expect(
-        screen.queryByText('Only historical original')
-      ).not.toBeInTheDocument()
-      expect(
-        screen.queryByText(/Truncated for storage/)
-      ).not.toBeInTheDocument()
-      await userEvent.click(disclosure)
-      expect(disclosure).toHaveAttribute('aria-expanded', 'true')
-      expect(screen.getByText('Only historical original')).toBeVisible()
-      expect(screen.getByText(/Truncated for storage/)).toHaveTextContent(
-        '123456'
-      )
-      await userEvent.click(disclosure)
-      expect(
-        screen.queryByText('Only historical original')
-      ).not.toBeInTheDocument()
-      expect(get).not.toHaveBeenCalled()
-    }
   )
-
-  test('collapsing or closing historical content cancels its on-demand request', async () => {
-    const signals: AbortSignal[] = []
-    const get = vi
-      .spyOn(api, 'get')
-      .mockImplementation(async (_url, config) => {
-        signals.push(config?.signal as AbortSignal)
-        return new Promise(() => undefined)
-      })
-    fireEvent.click(
-      renderPreview({
-        model_price: 1,
-        admin_info: { request_body_ref: 'b'.repeat(64) },
-      })
-    )
-    const disclosure = await screen.findByRole('button', {
-      name: 'Request Content',
-    })
-    expect(get).not.toHaveBeenCalled()
-    await userEvent.click(disclosure)
-    await waitFor(() => expect(signals).toHaveLength(1))
-    await userEvent.click(disclosure)
-    await waitFor(() => expect(signals[0].aborted).toBe(true))
-    await userEvent.click(disclosure)
-    await waitFor(() => expect(signals).toHaveLength(2))
-    await userEvent.keyboard('{Escape}')
-    await waitFor(() => expect(signals[1].aborted).toBe(true))
-  })
-
-  test('changing historical records with a reused row ID resets the disclosure before loading the next reference', async () => {
-    const get = vi
-      .spyOn(api, 'get')
-      .mockResolvedValue({ data: { success: true, data: 'First row summary' } })
-    const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <I18nextProvider i18n={i18n}>
-        <QueryClientProvider client={client}>{children}</QueryClientProvider>
-      </I18nextProvider>
-    )
-    const first = makeLog({ admin_info: { request_body_ref: 'a'.repeat(64) } })
-    const second = makeLog({ admin_info: { request_body_ref: 'b'.repeat(64) } })
-    const { rerender } = render(
-      <DetailsDialog
-        log={first}
-        isAdmin
-        isRoot={false}
-        open
-        onOpenChange={() => undefined}
-      />,
-      { wrapper }
-    )
-    await userEvent.click(
-      await screen.findByRole('button', { name: 'Request Content' })
-    )
-    expect(await screen.findByText('First row summary')).toBeVisible()
-    expect(get).toHaveBeenCalledTimes(1)
-    rerender(
-      <DetailsDialog
-        log={second}
-        isAdmin
-        isRoot={false}
-        open
-        onOpenChange={() => undefined}
-      />
-    )
-    expect(
-      screen.getByRole('button', { name: 'Request Content' })
-    ).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('First row summary')).not.toBeInTheDocument()
-    expect(get).toHaveBeenCalledTimes(1)
-  })
-
-  test.each([true, false])(
-    'non-administrators have no historical content entry even with isAdmin prop %s',
-    async (isAdmin) => {
-      useAuthStore
-        .getState()
-        .auth.setUser({ id: 88, role: 1, username: 'user' })
-      const get = vi.spyOn(api, 'get')
-      fireEvent.click(
-        renderPreview(
-          {
-            model_price: 1,
-            admin_info: {
-              request_body: 'Private history',
-              request_body_ref: 'c'.repeat(64),
-            },
-          },
-          isAdmin
-        )
-      )
-      expect(await screen.findByRole('dialog')).toBeVisible()
-      expect(
-        screen.queryByRole('button', { name: 'Request Content' })
-      ).not.toBeInTheDocument()
-      expect(screen.queryByText('Private history')).not.toBeInTheDocument()
-      expect(get).not.toHaveBeenCalled()
-    }
-  )
+  const dialog = within(await screen.findByRole('dialog'))
+  expect(dialog.queryByText('Private history')).not.toBeInTheDocument()
+  expect(dialog.queryByText('Request Content')).not.toBeInTheDocument()
+  expect(dialog.queryByText('View request trace')).not.toBeInTheDocument()
 })
 
 test('failed request previews retain the safe error and the retry stop reason', () => {

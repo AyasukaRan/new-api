@@ -95,15 +95,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}()
 	}
 
-	// Registered before every other defer so it runs last, after the error
-	// response below has been written. Realtime is excluded: it hijacks the
-	// connection, so nothing of the exchange reaches the response writer.
-	if relayFormat != types.RelayFormatOpenAIRealtime && !ttsWebSocket {
-		if service.BeginRequestTrace(c, string(relayFormat)) != "" {
-			defer service.FinishRequestTrace(c)
-		}
-	}
-
 	if relayFormat == types.RelayFormatOpenAIRealtime {
 		var err error
 		ws, err = upgrader.Upgrade(c.Writer, c.Request, nil)

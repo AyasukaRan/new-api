@@ -163,7 +163,7 @@ export function processChartData(
   const metricLabel = {
     requests: tt('Requests'),
     tokens: tt('Tokens'),
-    quota: tt('Revenue'),
+    quota: tt('Usage'),
     cost: tt('Upstream cost'),
     profit: tt('Gross profit'),
   }[metric]
@@ -859,7 +859,7 @@ export function processUserChartData(
     })
   const metricLabel = {
     requests: tt('Requests'),
-    quota: tt('Revenue'),
+    quota: tt('Usage'),
     cost: tt('Upstream cost'),
     profit: tt('Gross profit'),
   }[metric]

@@ -480,7 +480,7 @@ it('switches a personal call trend to tokens without exposing client names or fe
   expect(get).toHaveBeenCalledTimes(1)
 })
 
-it('does not fetch or expose user financial charts after administrator access is removed', async () => {
+it('restricts user usage charts to administrators', async () => {
   const get = vi.spyOn(api, 'get').mockResolvedValue({
     data: {
       success: true,
@@ -514,7 +514,9 @@ it('does not fetch or expose user financial charts after administrator access is
       <UserCharts filters={filters} onFiltersChange={() => {}} />
     </QueryClientProvider>
   )
-  await screen.findByRole('tab', { name: 'Gross profit' })
+  expect(
+    screen.queryByRole('tab', { name: 'Gross profit' })
+  ).not.toBeInTheDocument()
   await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
   act(() =>
     useAuthStore

@@ -21,7 +21,6 @@ import { useTranslation } from 'react-i18next'
 
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 
-import { OverviewFinancialSummary } from '../models/financial-summary'
 import {
   GatewayModelHotspotsPanel,
   PerformanceHealthPanel,
@@ -57,8 +56,9 @@ export default function GatewayDiagnostics(props: { overview?: boolean }) {
       <div className='grid grid-cols-1 items-stretch gap-3 lg:grid-cols-2'>
         <PerformanceHealthPanel hours={hours} timelineOnly={props.overview} />
         {props.overview && <GatewayModelHotspotsPanel hours={hours} />}
-        <ResponsePerformancePanel hours={hours} />
-        {props.overview && <OverviewFinancialSummary hours={hours} />}
+        <div className={props.overview ? 'lg:col-span-2' : undefined}>
+          <ResponsePerformancePanel hours={hours} />
+        </div>
       </div>
     </section>
   )
