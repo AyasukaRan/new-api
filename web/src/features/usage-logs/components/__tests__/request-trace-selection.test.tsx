@@ -27,6 +27,7 @@ import {
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -45,8 +46,9 @@ import { usageLogSchema } from '../../data/schema'
 function entry(id: number) {
   return usageLogSchema.parse({
     id,
+    live_key: `key-${id}`,
     user_id: 1,
-    created_at: 1788840000 + id,
+    created_at: 1788840000 + Math.floor(id / 10),
     type: 2,
     content: `Summary for request ${id}`,
     model_name: `model-${id}`,
@@ -61,16 +63,39 @@ afterEach(() => {
   localStorage.clear()
 })
 
-function renderLogs() {
+function renderLogs(live = false, path = '/usage-logs/common') {
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
   let records = [entry(11), entry(10)]
+  let liveTotal = 0
+  const selfRecords = [entry(100)]
+  const initialTotal = path.includes('page=2') ? 205 : 2
   const requestedTraces: string[] = []
+  let stream: ReadableStreamDefaultController<Uint8Array> | undefined
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     let data: unknown = {}
     if (url.startsWith('/api/log/?')) {
-      data = { items: records, total: records.length }
+      data = {
+        items: records,
+        total: initialTotal,
+        ...(live && { live_cursor: 'initial' }),
+      }
+    } else if (url.startsWith('/api/log/self?')) {
+      data = { items: selfRecords, total: 1, live_cursor: 'self-initial' }
+    } else if (url === '/api/log/stream' || url === '/api/log/self/stream') {
+      return {
+        data: new ReadableStream({
+          start(controller) {
+            stream = controller
+          },
+        }),
+      }
+    } else if (
+      url.startsWith('/api/log/stat?') &&
+      url.includes('live_total=1')
+    ) {
+      data = { live_total: liveTotal, quota: 0, rpm: 0, tpm: 0 }
     } else if (url === '/api/log/trace') {
       const params = config?.params as { trace_id?: string } | undefined
       const trace = params?.trace_id
@@ -115,7 +140,7 @@ function renderLogs() {
   })
   const router = createRouter({
     routeTree: root.addChildren([auth.addChildren([logs])]),
-    history: createMemoryHistory({ initialEntries: ['/usage-logs/common'] }),
+    history: createMemoryHistory({ initialEntries: [path] }),
   })
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -125,8 +150,33 @@ function renderLogs() {
       <RouterProvider router={router} />
     </QueryClientProvider>
   )
+  const batch = async (ids: number[], omitted = 0) => {
+    await waitFor(() => expect(stream).toBeDefined())
+    const wire = new TextEncoder().encode(
+      `event: logs\r\ndata: ${JSON.stringify({ items: ids.map(entry), omitted, cursor: String(ids[0]) })}\r\n\r\n`
+    )
+    await act(async () => {
+      stream?.enqueue(wire.slice(0, 12))
+      stream?.enqueue(wire.slice(12))
+    })
+  }
   return {
+    router,
     requestedTraces,
+    reset: async (ids: number[]) => {
+      records = ids.map(entry)
+      await act(async () => {
+        stream?.enqueue(new TextEncoder().encode('event: reset\ndata: {}\n\n'))
+      })
+    },
+    batch,
+    append: (...ids: number[]) => batch(ids),
+    refreshStats: async (total: number) => {
+      liveTotal = total
+      await act(async () => {
+        await client.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+      })
+    },
     refresh: async (ids: number[]) => {
       records = ids.map(entry)
       await act(async () => {
@@ -210,4 +260,151 @@ test('clears the selected trace and details when the signed-in account changes',
   await screen.findByRole('button', { name: 'Summary for request 11' })
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(screen.queryByText('Reply for trace-11')).not.toBeInTheDocument()
+})
+
+test('follows new logs once, and keeps the table and selected details still until requested', async () => {
+  const user = userEvent.setup()
+  const { append } = renderLogs(true)
+  await screen.findByText('model-11')
+  await append(12, 11)
+  expect(await screen.findByText('model-12')).toBeVisible()
+  expect(screen.getAllByText('model-11')).toHaveLength(1)
+  await user.click(
+    screen.getByRole('button', { name: 'Summary for request 12' })
+  )
+  await append(13)
+  expect(screen.queryByText('model-13')).not.toBeInTheDocument()
+  const details = screen.getByRole('dialog', { name: /Log Details/ })
+  expect(within(details).getByText('request-12')).toBeVisible()
+  await user.keyboard('{Escape}')
+  expect(screen.queryByText('model-13')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Show new logs (1)' }))
+  expect(await screen.findByText('model-13')).toBeVisible()
+})
+
+test('preserves the server order for same-second rows with page-relative display IDs', async () => {
+  const { append } = renderLogs(true)
+  await screen.findByText('model-11')
+  await append(30, 31)
+  const first = await screen.findByText('model-30')
+  const second = screen.getByText('model-31')
+  expect(first.compareDocumentPosition(second)).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+})
+
+test('uses the next filtered stats count when truncated backlog overlaps the snapshot', async () => {
+  const { batch, refreshStats } = renderLogs(true)
+  const scrollArea = (await screen.findByText('model-11')).closest(
+    'table'
+  )?.parentElement
+  if (!scrollArea) throw new Error('Missing scroll container')
+  scrollArea.scrollTop = 90
+  fireEvent.scroll(scrollArea)
+  await batch([12, 11], 80)
+  expect(screen.getByRole('button', { name: 'Show latest logs' })).toBeVisible()
+  await refreshStats(83)
+  expect(
+    vi
+      .mocked(api.get)
+      .mock.calls.some(
+        ([url]) =>
+          url.startsWith('/api/log/stat?') && url.includes('live_total=1')
+      )
+  ).toBe(true)
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+  expect(scrollArea.scrollTop).toBe(90)
+  const footer = screen.getByText('Rows per page').parentElement?.parentElement
+  if (!footer) throw new Error('Expected pagination total')
+  expect(within(footer).getByText('2')).toBeVisible()
+  expect(within(footer).queryByText('83')).not.toBeInTheDocument()
+  await userEvent
+    .setup()
+    .click(screen.getByRole('button', { name: 'Show latest logs' }))
+  expect(await screen.findByText('model-12')).toBeVisible()
+  expect(within(footer).getByText('83')).toBeVisible()
+  expect(
+    vi
+      .mocked(api.get)
+      .mock.calls.filter(([url]) => url.startsWith('/api/log/?'))
+  ).toHaveLength(1)
+})
+
+test('buffers offscreen rows and recovers a stale cursor only when the reader accepts the latest logs', async () => {
+  const user = userEvent.setup()
+  const { append, reset } = renderLogs(true)
+  const scrollArea = (await screen.findByText('model-11')).closest(
+    'table'
+  )?.parentElement
+  if (!scrollArea) throw new Error('Missing table scroll area')
+  scrollArea.scrollTop = 160
+  fireEvent.scroll(scrollArea)
+  await append(12)
+  expect(
+    screen.getByRole('button', { name: 'Show new logs (1)' })
+  ).toBeVisible()
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+  await reset([30, 29])
+  expect(screen.queryByText('model-30')).not.toBeInTheDocument()
+  expect(scrollArea.scrollTop).toBe(160)
+  await user.click(screen.getByRole('button', { name: 'Show latest logs' }))
+  expect(await screen.findByText('model-30')).toBeVisible()
+  expect(scrollArea.scrollTop).toBe(0)
+})
+
+test('resumes with the applied filters and cursor then drops the old stream on a scope change', async () => {
+  const user = userEvent.setup()
+  const { append } = renderLogs(true, '/usage-logs/common?model=model')
+  await screen.findByText('model-11')
+  await append(20)
+  const calls = () =>
+    vi.mocked(api.get).mock.calls.filter(([url]) => url.endsWith('/stream'))
+  const first = calls()[0][1]
+  if (!first) throw new Error('Expected initial stream')
+  expect(first.params).toMatchObject({ model_name: 'model', cursor: 'initial' })
+  expect(first.params).not.toHaveProperty('end_timestamp')
+  const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+  try {
+    fireEvent(document, new Event('visibilitychange'))
+    expect(first.signal?.aborted).toBe(true)
+    hidden.mockReturnValue(false)
+    fireEvent(document, new Event('visibilitychange'))
+    await waitFor(() =>
+      expect(calls()[1]?.[1]?.params).toMatchObject({ cursor: '20' })
+    )
+    await user.click(screen.getByRole('tab', { name: 'Only Mine' }))
+    expect(await screen.findByText('model-100')).toBeVisible()
+    expect(screen.queryByText('model-20')).not.toBeInTheDocument()
+    expect(calls()[1][1]?.signal?.aborted).toBe(true)
+    expect(calls().at(-1)?.[0]).toBe('/api/log/self/stream')
+    expect(calls().at(-1)?.[1]?.params).toMatchObject({
+      cursor: 'self-initial',
+    })
+  } finally {
+    hidden.mockRestore()
+  }
+})
+
+test('keeps the historical page still as new logs arrive and never streams a fixed range', async () => {
+  const { append, router } = renderLogs(true, '/usage-logs/common?page=2')
+  await screen.findByText('model-11')
+  await append(12)
+  expect(screen.getByRole('button', { name: 'Show latest logs' })).toBeVisible()
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+  expect(router.state.location.search.page).toBe(2)
+  await act(async () => {
+    await router.navigate({
+      to: '/usage-logs/$section',
+      params: { section: 'common' },
+      search: { startTime: 1_700_000_000_000, endTime: 1_700_086_400_000 },
+    })
+  })
+  expect(
+    screen.queryByRole('button', { name: 'Show latest logs' })
+  ).not.toBeInTheDocument()
+  const calls = vi
+    .mocked(api.get)
+    .mock.calls.filter(([url]) => url.endsWith('/stream'))
+  expect(calls).toHaveLength(1)
+  expect(calls[0][1]?.signal?.aborted).toBe(true)
 })

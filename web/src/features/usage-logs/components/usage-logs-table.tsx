@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -27,12 +27,13 @@ import {
   DataTableRow,
   useDataTable,
 } from '@/components/data-table'
+import { Button } from '@/components/ui/button'
 import {
   getAdminPlans,
   getSelfSubscriptionFull,
 } from '@/features/subscriptions/api'
 import { useMediaQuery } from '@/hooks'
-import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { useTableUrlState, type NavigateFn } from '@/hooks/use-table-url-state'
 import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -43,9 +44,11 @@ import {
   LOG_TYPE_ENUM,
 } from '../constants'
 import type { UsageLog } from '../data/schema'
+import { useLiveUsageLogs } from '../hooks/use-live-usage-logs'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
 import { parseLogOther } from '../lib/format'
+import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
@@ -101,6 +104,33 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
+  const navigate = route.useNavigate()
+  const scrollArea = useRef<HTMLElement | null>(null)
+  const commonUsage = logCategory === 'common' && logSource === 'usage'
+  const preset =
+    commonUsage && searchParams.autoRefresh !== false
+      ? getLogTimePreset(searchParams)
+      : undefined
+  const navigateTable: NavigateFn = (options) => {
+    const update = options.search
+    if (typeof update !== 'function') return void navigate(options)
+    void navigate({
+      ...options,
+      search: (previous) => {
+        const next = update(previous)
+        if (preset && (previous.page ?? 1) === 1 && Number(next.page) > 1) {
+          const { start, end } = getRelativeLogTimeRange(preset)
+          return {
+            ...next,
+            timeRange: preset,
+            startTime: start.getTime(),
+            endTime: end.getTime(),
+          }
+        }
+        return next
+      },
+    })
+  }
   const user = useAuthStore((state) => state.auth.user)
   const { data: showBillingSource = false } = useQuery({
     queryKey: ['usage-log-billing-source', isAdmin, user?.id],
@@ -134,7 +164,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ensurePageInRange,
   } = useTableUrlState({
     search: route.useSearch(),
-    navigate: route.useNavigate(),
+    navigate: navigateTable,
     pagination: { defaultPage: 1, defaultPageSize: isMobile ? 20 : 100 },
     globalFilter: { enabled: false },
     columnFilters: [
@@ -164,7 +194,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, refetch, isPlaceholderData } = useQuery({
+    ...(commonUsage && {
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+    }),
     queryKey: [
       'logs',
       logCategory,
@@ -180,6 +214,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
     queryFn: async () => {
       const result = await fetchLogsByCategory({
+        livePreset: preset,
         source: logSource,
         logCategory,
         isAdmin,
@@ -188,12 +223,10 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         searchParams,
         columnFilters,
       })
-
       if (!result?.success) {
         throw createServerError(result, t('Failed to load logs'))
       }
-
-      return result.data || DEFAULT_LOGS_DATA
+      return { ...(result.data ?? DEFAULT_LOGS_DATA), live: result.live }
     },
     placeholderData: (previousData, previousQuery) => {
       if (
@@ -209,7 +242,21 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     },
   })
 
-  const logs = data?.items || []
+  const { view, showLatest } = useLiveUsageLogs({
+    snapshot: isPlaceholderData ? undefined : data?.live,
+    preset,
+    pageSize: pagination.pageSize,
+    isAdmin,
+    refetch,
+    isReading: () =>
+      pagination.pageIndex > 0 ||
+      !!selectedLog ||
+      (scrollArea.current?.isConnected && scrollArea.current.scrollTop > 0) ||
+      !!document.querySelector(
+        '[role="dialog"]:not([hidden]),[role="alertdialog"]:not([hidden])'
+      ),
+  })
+  const logs = view?.items ?? data?.items ?? []
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,
@@ -225,7 +272,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     columns: columns as ColumnDef<Record<string, unknown>>[],
     getRowId:
       logCategory === 'common'
-        ? (log) => `${log.request_id ?? ''}:${log.id}`
+        ? (log) => String(log.live_key ?? `${log.request_id ?? ''}:${log.id}`)
         : undefined,
     columnFilters,
     columnVisibilityStorageKey: getColumnVisibilityStorageKey(
@@ -238,7 +285,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     onColumnFiltersChange,
     manualPagination: true,
     manualFiltering: true,
-    totalCount: data?.total || 0,
+    totalCount: view?.total ?? data?.total ?? 0,
     ensurePageInRange,
   })
 
@@ -246,67 +293,105 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
 
   return (
     <>
-      <DataTablePage
-        table={table}
-        compactPagination={isMobile && isCommon}
-        columns={columns as ColumnDef<Record<string, unknown>>[]}
-        isLoading={isLoadingData}
-        isFetching={isFetching}
-        emptyTitle={t('No Logs Found')}
-        emptyDescription={
-          logSource === 'test'
-            ? t(
-                'No test logs available. Successful model tests with usage data will appear here.'
-              )
-            : t(
-                'No usage logs available. Logs will appear here once API calls are made.'
-              )
-        }
-        skeletonKeyPrefix='usage-log-skeleton'
-        applyHeaderSize
-        tableClassName={cn(
-          '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
-        )}
-        mobile={
-          <UsageLogsMobileList
-            table={table}
-            isLoading={isLoadingData}
-            logCategory={logCategory}
-          />
-        }
-        toolbar={
-          isCommon ? (
-            <CommonLogsFilterBar table={table} />
-          ) : (
-            <TaskLogsFilterBar table={table} logCategory={logCategory} />
-          )
-        }
-        renderRow={(row) => {
-          const logType = (row.original as Record<string, unknown>).type as
-            | number
-            | undefined
-          let tintClass =
-            isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
-          if (isCommon && isAdmin) {
-            const other = parseLogOther(
-              ((row.original as Record<string, unknown>).other as string) ?? ''
-            )
-            if (other?.admin_info?.quota_saturation) {
-              tintClass = quotaSaturationRowTint
-            }
+      <div
+        className='relative h-full min-h-0'
+        onScrollCapture={(event) => {
+          const target = event.target
+          if (
+            target instanceof HTMLElement &&
+            event.currentTarget.contains(target) &&
+            (target.scrollTop > 0 || target === scrollArea.current)
+          ) {
+            scrollArea.current = target
           }
-
-          return (
-            <DataTableRow
-              key={row.id}
-              row={row}
-              className={cn('transition-colors', tintClass)}
-              getColumnClassName={getColumnClassName}
-              cellRenderColumns={table.options.columns}
-            />
-          )
         }}
-      />
+      >
+        <DataTablePage
+          table={table}
+          compactPagination={isMobile && isCommon}
+          columns={columns as ColumnDef<Record<string, unknown>>[]}
+          isLoading={isLoadingData}
+          isFetching={isFetching}
+          emptyTitle={t('No Logs Found')}
+          emptyDescription={
+            logSource === 'test'
+              ? t(
+                  'No test logs available. Successful model tests with usage data will appear here.'
+                )
+              : t(
+                  'No usage logs available. Logs will appear here once API calls are made.'
+                )
+          }
+          skeletonKeyPrefix='usage-log-skeleton'
+          applyHeaderSize
+          tableClassName={cn(
+            '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
+          )}
+          mobile={
+            <UsageLogsMobileList
+              table={table}
+              isLoading={isLoadingData}
+              logCategory={logCategory}
+            />
+          }
+          toolbar={
+            isCommon ? (
+              <CommonLogsFilterBar
+                table={table}
+                onLiveTotal={view?.exactTotal}
+              />
+            ) : (
+              <TaskLogsFilterBar table={table} logCategory={logCategory} />
+            )
+          }
+          renderRow={(row) => {
+            const logType = (row.original as Record<string, unknown>).type as
+              | number
+              | undefined
+            let tintClass =
+              isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
+            if (isCommon && isAdmin) {
+              const other = parseLogOther(
+                ((row.original as Record<string, unknown>).other as string) ??
+                  ''
+              )
+              if (other?.admin_info?.quota_saturation) {
+                tintClass = quotaSaturationRowTint
+              }
+            }
+
+            return (
+              <DataTableRow
+                key={row.id}
+                row={row}
+                className={cn('transition-colors', tintClass)}
+                getColumnClassName={getColumnClassName}
+                cellRenderColumns={table.options.columns}
+              />
+            )
+          }}
+        />
+        {view?.pending || view?.reset ? (
+          <div className='pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-center'>
+            <Button
+              size='sm'
+              className='pointer-events-auto shadow-md'
+              onClick={() => {
+                if (scrollArea.current) scrollArea.current.scrollTop = 0
+                if (pagination.pageIndex > 0) {
+                  table.setPageIndex(0)
+                } else {
+                  showLatest()
+                }
+              }}
+            >
+              {view.reset || view.pendingUncertain
+                ? t('Show latest logs')
+                : t('Show new logs ({{count}})', { count: view.pending })}
+            </Button>
+          </div>
+        ) : null}
+      </div>
       {selectedLog && (
         <DetailsDialog
           log={selectedLog}

@@ -159,9 +159,10 @@ it('selects Today as a live range from local midnight through now and preserves 
       group: 'default',
     })
   )
-  expect(
-    screen.getByRole('button', { name: 'Auto refresh (30s)' })
-  ).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByRole('button', { name: 'Auto refresh' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
   await user.click(screen.getByRole('button', { name: /^2026/ }))
   expect(screen.getByRole('button', { name: 'Today' })).toHaveAttribute(
     'aria-pressed',
@@ -169,10 +170,13 @@ it('selects Today as a live range from local midnight through now and preserves 
   )
 })
 
-it('preserves unsubmitted model and username drafts across live URL updates while statistics use saved filters', async () => {
+it('updates the displayed time and statistics without changing the URL or unsubmitted drafts', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+  vi.setSystemTime(now)
   const { router, client } = await renderFilter(
     '?timeRange=today&model=saved-model&username=saved-user&group=default'
   )
+  const originalHref = router.state.location.href
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: /^Expand/ }))
   const model = screen.getByPlaceholderText('Model Name')
@@ -183,25 +187,11 @@ it('preserves unsubmitted model and username drafts across live URL updates whil
   await user.type(username, 'draft-user')
   await user.tab()
   const next = new Date(2026, 10, 12, 12, 35, 26)
-  vi.setSystemTime(next)
-  await act(() =>
-    router.navigate({
-      from: '/usage-logs/$section',
-      to: '/usage-logs/$section',
-      params: { section: 'common' },
-      search: { ...router.state.location.search, endTime: next.getTime() },
-      replace: true,
-      resetScroll: false,
-    })
-  )
+  await act(() => vi.advanceTimersByTimeAsync(30_000))
   await waitFor(() => expect(client.isFetching()).toBe(0))
   expect(model).toHaveValue('draft-model')
   expect(username).toHaveValue('draft-user')
-  expect(router.state.location.search).toMatchObject({
-    model: 'saved-model',
-    username: 'saved-user',
-    endTime: next.getTime(),
-  })
+  expect(router.state.location.href).toBe(originalHref)
   expect(latestStatsParams()).toMatchObject({
     model_name: 'saved-model',
     username: 'saved-user',
@@ -249,7 +239,7 @@ it('disables automatic ranges after applying manually chosen fixed dates', async
     })
   )
   expect(router.state.location.search).not.toHaveProperty('timeRange')
-  const toggle = screen.getByRole('button', { name: 'Auto refresh (30s)' })
+  const toggle = screen.getByRole('button', { name: 'Auto refresh' })
   expect(toggle).toBeDisabled()
   expect(toggle).toHaveAttribute('aria-pressed', 'false')
 })
@@ -262,7 +252,7 @@ it('keeps saved filters and a pending model draft when automatic refresh is paus
   const model = screen.getByPlaceholderText('Model Name')
   await user.clear(model)
   await user.type(model, 'draft-model')
-  const toggle = screen.getByRole('button', { name: 'Auto refresh (30s)' })
+  const toggle = screen.getByRole('button', { name: 'Auto refresh' })
   await user.click(toggle)
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
@@ -307,7 +297,8 @@ it('advances a paused relative range to now when Search is pressed without resum
       autoRefresh: false,
     })
   )
-  expect(
-    screen.getByRole('button', { name: 'Auto refresh (30s)' })
-  ).toHaveAttribute('aria-pressed', 'false')
+  expect(screen.getByRole('button', { name: 'Auto refresh' })).toHaveAttribute(
+    'aria-pressed',
+    'false'
+  )
 })

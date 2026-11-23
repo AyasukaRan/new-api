@@ -330,6 +330,7 @@ export interface LogOtherData {
  * Log statistics data
  */
 export interface LogStatistics {
+  live_total?: number
   quota: number
   rpm: number
   tpm: number
@@ -474,6 +475,7 @@ export interface TaskArtifactsResponse {
 // ============================================================================
 
 export interface GetLogsParams {
+  live?: 1
   source?: LogSource
   p?: number
   page_size?: number
@@ -489,10 +491,18 @@ export interface GetLogsParams {
   upstream_request_id?: string
 }
 
+export interface LiveLogSnapshot {
+  cursor: string
+  filters: GetLogsParams
+  items: UsageLog[]
+  total: number
+}
+
 export interface GetLogsResponse {
   success: boolean
   message?: string
   data?: {
+    live_cursor?: string
     items: UsageLog[] | MidjourneyLog[] | TaskLog[]
     total: number
     page: number
@@ -501,6 +511,7 @@ export interface GetLogsResponse {
 }
 
 export interface GetLogStatsParams {
+  live_total?: 1
   source?: LogSource
   type?: number
   username?: string
@@ -554,6 +565,7 @@ export interface GetTaskLogsParams {
  * Configuration for fetching logs by category
  */
 export interface FetchLogsConfig {
+  livePreset?: LogTimePreset
   source?: LogSource
   logCategory: LogCategory
   isAdmin: boolean

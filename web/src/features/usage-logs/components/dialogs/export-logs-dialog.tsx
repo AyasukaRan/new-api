@@ -35,6 +35,10 @@ import {
   getLogCsvRow,
   toCsvLine,
 } from '../../lib/export'
+import {
+  getRelativeLogTimeRange,
+  type LogTimePreset,
+} from '../../lib/time-range'
 import { buildApiParams, getDefaultTimeRange } from '../../lib/utils'
 import { CompactDateTimeRangePicker } from '../compact-date-time-range-picker'
 import { useLogsViewScope } from '../usage-logs-provider'
@@ -48,7 +52,11 @@ const DEFAULT_MAX_RANGE_DAYS = 365
  * downloads the logs of the current view with the page's other filters as a
  * CSV file. Administrators in the all-users view export every user's logs.
  */
-export function ExportLogsDialog() {
+export function ExportLogsDialog({
+  livePreset,
+}: {
+  livePreset?: LogTimePreset
+}) {
   const { t } = useTranslation()
   const searchParams = route.useSearch()
   const { canManageScope, isAdminView, logSource } = useLogsViewScope()
@@ -80,7 +88,9 @@ export function ExportLogsDialog() {
     startMs !== undefined && endMs !== undefined && !rangeError && !exporting
 
   const handleOpenChange = (nextOpen: boolean) => {
-    if (nextOpen) {
+    if (nextOpen && livePreset) {
+      setRange(getRelativeLogTimeRange(livePreset))
+    } else if (nextOpen) {
       const defaults = getDefaultTimeRange()
       setRange({
         start: searchParams.startTime

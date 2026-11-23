@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getLogStats, getUserLogStats } from '../api'
+import { getRelativeLogTimeRange, type LogTimePreset } from '../lib/time-range'
 import { buildApiParams } from '../lib/utils'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
@@ -54,7 +55,13 @@ function StatBadge(props: {
   )
 }
 
-export function CommonLogsStats() {
+export function CommonLogsStats({
+  livePreset,
+  onLiveTotal,
+}: {
+  onLiveTotal?: (total: number) => void
+  livePreset?: LogTimePreset
+}) {
   const { t } = useTranslation()
   const { isAdminView: isAdmin, logSource } = useLogsViewScope()
   const user = useAuthStore((state) => state.auth.user)
@@ -86,13 +93,27 @@ export function CommonLogsStats() {
       user?.role,
       isAdmin,
       logSource,
+      livePreset,
       params,
     ],
+    refetchInterval: livePreset ? 30_000 : false,
     queryFn: async () => {
+      const range = livePreset && getRelativeLogTimeRange(livePreset)
+      const request = range
+        ? {
+            ...params,
+            ...(onLiveTotal && { live_total: 1 as const }),
+            start_timestamp: Math.floor(range.start.getTime() / 1000),
+            end_timestamp: Math.floor(range.end.getTime() / 1000),
+          }
+        : params
       const result = isAdmin
-        ? requireServerSuccess(await getLogStats(params))
-        : requireServerSuccess(await getUserLogStats(params))
+        ? requireServerSuccess(await getLogStats(request))
+        : requireServerSuccess(await getUserLogStats(request))
 
+      if (range && typeof result.data?.live_total === 'number') {
+        onLiveTotal?.(result.data.live_total)
+      }
       return result.data ?? null
     },
   })

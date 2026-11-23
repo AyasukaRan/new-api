@@ -17,6 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
+import { createParser, type EventSourceMessage } from 'eventsource-parser'
+
 import { api, getFreshAuthHeaders, type ApiRequestConfig } from '@/lib/api'
 import { withBasePath } from '@/lib/base-path'
 import { createServerError } from '@/lib/server-error-message'
@@ -103,6 +105,43 @@ export async function getLogRequestBody(
 export const getUserLogs = (
   params: Omit<GetLogsParams, 'username' | 'channel'> = {}
 ) => fetchLogs('/api/log', params, false)
+
+/** Read a resumable stream using the same authenticated client as the initial list. */
+export async function streamUsageLogs(
+  params: GetLogsParams,
+  isAdmin: boolean,
+  cursor: string,
+  signal: AbortSignal,
+  onEvent: (event: EventSourceMessage) => void
+) {
+  const response = await api.get<ReadableStream<Uint8Array>>(
+    `${buildApiPath('/api/log', isAdmin)}/stream`,
+    {
+      params: { ...params, cursor, compact: isAdmin ? 1 : undefined },
+      headers: { Accept: 'text/event-stream' },
+      // The server rotates this stream every 45 seconds. Recover a stalled hop.
+      timeout: 75_000,
+      adapter: 'fetch',
+      responseType: 'stream',
+      signal,
+      disableDuplicate: true,
+      skipErrorHandler: true,
+    }
+  )
+  const reader = response.data.getReader()
+  const decoder = new TextDecoder()
+  const parser = createParser({ onEvent })
+  try {
+    while (!signal.aborted) {
+      const { done, value } = await reader.read()
+      if (done || signal.aborted) break
+      parser.feed(decoder.decode(value, { stream: true }))
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+}
 
 export const getLogStats = (params: GetLogStatsParams = {}) =>
   fetchLogStats('/api/log', params, true)

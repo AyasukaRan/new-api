@@ -23,6 +23,7 @@ import { Eye, EyeOff, RefreshCw } from 'lucide-react'
 import {
   useState,
   useCallback,
+  useEffect,
   useMemo,
   type KeyboardEventHandler,
 } from 'react'
@@ -123,6 +124,7 @@ function buildSearchSourceKey(values: {
 }
 
 interface CommonLogsFilterBarProps<TData> {
+  onLiveTotal?: (total: number) => void
   table: Table<TData>
 }
 
@@ -168,10 +170,34 @@ export function CommonLogsFilterBar<TData>(
   const searchParams = route.useSearch()
   const livePreset = getLogTimePreset(searchParams)
   const autoRefresh = searchParams.autoRefresh !== false
-  useLiveLogRange(livePreset, autoRefresh)
   const { isAdminView: isAdmin, canManageScope, logSource } = useLogsViewScope()
   const isTest = logSource === 'test'
   const section = isTest ? 'test' : 'common'
+  useLiveLogRange(livePreset, isTest && autoRefresh)
+  const streamPreset =
+    !isTest && autoRefresh && (searchParams.page ?? 1) === 1
+      ? livePreset
+      : undefined
+  const [clock, setClock] = useState(Date.now)
+  useEffect(() => {
+    if (!streamPreset) return
+    const tick = () => {
+      if (!document.hidden) setClock(Date.now())
+    }
+    tick()
+    const timer = window.setInterval(tick, 30_000)
+    document.addEventListener('visibilitychange', tick)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', tick)
+    }
+  }, [streamPreset])
+  const displayedRange = useMemo(
+    () =>
+      streamPreset && getRelativeLogTimeRange(streamPreset, new Date(clock)),
+    [clock, streamPreset]
+  )
+  const refreshLabel = isTest ? t('Auto refresh (30s)') : t('Auto refresh')
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
   const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
   const { data: adminGroups, isLoading: loadingAdminGroups } = useQuery({
@@ -390,7 +416,12 @@ export function CommonLogsFilterBar<TData>(
     'Only used to find historical logs. New records are available in Audit Logs.'
   )
 
-  const statsBar = <CommonLogsStats />
+  const statsBar = (
+    <CommonLogsStats
+      livePreset={streamPreset}
+      onLiveTotal={props.onLiveTotal}
+    />
+  )
   const sensitiveToggle = (
     <Tooltip>
       <TooltipTrigger
@@ -415,8 +446,10 @@ export function CommonLogsFilterBar<TData>(
   const dateRangeFilter = (
     <LogsFilterField wide className='flex items-center gap-1.5'>
       <CompactDateTimeRangePicker
-        start={filters.startTime}
-        end={filters.endTime}
+        start={
+          (filters.timeRange && displayedRange?.start) || filters.startTime
+        }
+        end={(filters.timeRange && displayedRange?.end) || filters.endTime}
         preset={filters.timeRange}
         className='min-w-0 flex-1'
         onPresetSelect={(timeRange) => handleApply({ ...filters, timeRange })}
@@ -446,16 +479,25 @@ export function CommonLogsFilterBar<TData>(
               variant={livePreset && autoRefresh ? 'secondary' : 'ghost'}
               className='size-8 shrink-0'
               disabled={!livePreset}
-              aria-label={t('Auto refresh (30s)')}
+              aria-label={refreshLabel}
               aria-pressed={Boolean(livePreset && autoRefresh)}
               onClick={() =>
                 void navigate({
                   to: '/usage-logs/$section',
                   params: { section },
-                  search: (previous) => ({
-                    ...previous,
-                    autoRefresh: !autoRefresh,
-                  }),
+                  search: (previous) => {
+                    if (isTest || !livePreset || (previous.page ?? 1) > 1) {
+                      return { ...previous, autoRefresh: !autoRefresh }
+                    }
+                    const { start, end } = getRelativeLogTimeRange(livePreset)
+                    return {
+                      ...previous,
+                      timeRange: livePreset,
+                      startTime: start.getTime(),
+                      endTime: end.getTime(),
+                      autoRefresh: !autoRefresh,
+                    }
+                  },
                   replace: true,
                   resetScroll: false,
                 })
@@ -468,7 +510,7 @@ export function CommonLogsFilterBar<TData>(
         <TooltipContent>
           {(searchParams.page ?? 1) > 1
             ? t('Auto refresh pauses after the first page')
-            : t('Auto refresh (30s)')}
+            : refreshLabel}
         </TooltipContent>
       </Tooltip>
     </LogsFilterField>
@@ -629,7 +671,7 @@ export function CommonLogsFilterBar<TData>(
       compactMobile
       stats={statsBar}
       actionStart={sensitiveToggle}
-      actionEnd={<ExportLogsDialog />}
+      actionEnd={<ExportLogsDialog livePreset={streamPreset} />}
       primaryFilters={
         <>
           {dateRangeFilter}

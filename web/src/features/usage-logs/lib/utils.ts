@@ -33,14 +33,17 @@ import {
   LOG_TYPE_ENUM,
   TIMING_LOG_TYPES,
 } from '../constants'
+import type { UsageLog } from '../data/schema'
 import type {
   GetLogsParams,
   GetLogsResponse,
   FetchLogsConfig,
+  LiveLogSnapshot,
   LogSource,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
 } from '../types'
+import { getRelativeLogTimeRange } from './time-range'
 
 export { buildQueryParams } from './query-params'
 
@@ -251,20 +254,33 @@ export function buildApiParams(config: {
  */
 export async function fetchLogsByCategory(
   config: FetchLogsConfig
-): Promise<GetLogsResponse> {
-  const { logCategory, isAdmin, page, pageSize, searchParams, columnFilters } =
-    config
+): Promise<GetLogsResponse & { live?: LiveLogSnapshot }> {
+  const { logCategory, isAdmin, page, pageSize, searchParams } = config
 
   if (logCategory === 'common') {
-    const params = buildApiParams({
-      source: config.source,
-      page,
-      pageSize,
-      searchParams,
-      columnFilters,
-      isAdmin,
-    })
-    return isAdmin ? await getAllLogs(params) : await getUserLogs(params)
+    const params = buildApiParams(config)
+    if (config.livePreset) {
+      params.live = 1
+      if (page === 1) {
+        const { start } = getRelativeLogTimeRange(config.livePreset)
+        params.start_timestamp = Math.floor(start.getTime() / 1000)
+        // Include rows committed up to the cursor even if the client clock lags.
+        delete params.end_timestamp
+      }
+    }
+    const result = await (isAdmin ? getAllLogs : getUserLogs)(params)
+    if (!config.livePreset || !result.data?.live_cursor) return result
+    delete params.live
+    delete params.end_timestamp
+    return {
+      ...result,
+      live: {
+        cursor: result.data.live_cursor,
+        items: result.data.items as UsageLog[],
+        total: result.data.total,
+        filters: params,
+      },
+    }
   }
 
   // For drawing and task logs
