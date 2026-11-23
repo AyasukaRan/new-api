@@ -701,14 +701,10 @@ export function useCommonLogsColumns(
               {visibility.response_transport !== false &&
                 isTimingLogType(log.type) && (
                   <StreamModeCell
+                    logType={log.type}
                     isStream={log.is_stream}
-                    isTask={other?.is_task === true}
-                    isSyncTask={other?.task_sync === true}
-                    streamStatus={other?.stream_status}
-                    transport={
-                      other?.response_transport ??
-                      (other?.ws ? 'ws' : undefined)
-                    }
+                    metadata={other}
+                    showEndpoint={isAdmin && visibility.request_path !== false}
                   />
                 )}
               {isAdmin &&

@@ -25,9 +25,119 @@ import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema } from '../../data/schema'
+import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
-import { TimingMetricsCell } from '../timing-metrics-cell'
+import { StreamModeCell, TimingMetricsCell } from '../timing-metrics-cell'
 import { TokenPerformanceCell } from '../token-performance-cell'
+
+const messagesStream: LogOtherData = {
+  request_path: '/v1/messages?beta=true',
+  stream_status: {
+    status: 'ok',
+    end_reason: 'eof',
+    response_status: 'completed',
+  },
+}
+
+test.each([
+  [true, 'Identified from the Messages endpoint and recorded stream output.'],
+  [false, 'Identified from recorded stream output.'],
+] as const)(
+  'explains inferred SSE on focus, respecting endpoint visibility (%s)',
+  async (showEndpoint, explanation) => {
+    render(
+      <StreamModeCell
+        logType={2}
+        isStream
+        metadata={messagesStream}
+        showEndpoint={showEndpoint}
+      />
+    )
+    expect(screen.getByText('SSE')).toBeVisible()
+    await userEvent.tab()
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(explanation)
+  }
+)
+
+test.each([
+  [
+    'observed first token',
+    2,
+    { stream_status: { status: 'ok', end_reason: 'eof' }, frt: 51 },
+    'SSE',
+  ],
+  [
+    'empty EOF',
+    2,
+    { stream_status: { status: 'ok', end_reason: 'eof' }, frt: -1000 },
+    'Protocol not recorded',
+  ],
+  ['failed request', 5, {}, 'Protocol not recorded'],
+  [
+    'early disconnect',
+    2,
+    { stream_status: { status: 'error', end_reason: 'client_gone' }, frt: 25 },
+    'Protocol not recorded',
+  ],
+  [
+    'soft stop',
+    2,
+    { stream_status: { status: 'ok', end_reason: 'handler_stop' }, frt: 25 },
+    'Protocol not recorded',
+  ],
+  [
+    'incomplete response',
+    2,
+    {
+      stream_status: {
+        status: 'ok',
+        end_reason: 'eof',
+        response_status: 'incomplete',
+      },
+      frt: 25,
+    },
+    'Protocol not recorded',
+  ],
+  [
+    'different Messages path',
+    2,
+    { request_path: '/v1/messages/count_tokens' },
+    'Protocol not recorded',
+  ],
+  [
+    'ambiguous Responses path',
+    2,
+    { request_path: '/v1/responses' },
+    'Protocol not recorded',
+  ],
+  ['legacy WebSocket evidence', 2, { ws: true }, 'WS'],
+  ['recorded HTTP before inference', 2, { response_transport: 'http' }, 'HTTP'],
+  ['negotiated WebSocket on error', 5, { response_transport: 'ws' }, 'WS'],
+  ['async task', 2, { is_task: true }, 'Async'],
+] satisfies [string, number, Partial<LogOtherData>, string][])(
+  'renders transport for %s',
+  (_, logType, patch, expected) => {
+    render(
+      <StreamModeCell
+        logType={logType}
+        isStream
+        metadata={{ ...messagesStream, ...patch }}
+        showEndpoint
+      />
+    )
+    expect(screen.getByText(expected)).toBeVisible()
+  }
+)
+
+test('explains a missing protocol without calling an unknown stream a failure', async () => {
+  render(<StreamModeCell logType={2} isStream metadata={null} showEndpoint />)
+  expect(screen.getByText('Protocol not recorded')).toBeVisible()
+  await userEvent.tab()
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(
+    'The log records streaming mode but does not identify the response protocol.'
+  )
+  expect(screen.queryByLabelText('Stream Status')).not.toBeInTheDocument()
+})
 
 test.each([
   [1, '1ms'],

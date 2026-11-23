@@ -40,6 +40,7 @@ import {
   getFirstResponseTimeColor,
   getResponseTimeColor,
 } from '../lib/format'
+import { isConsumeLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 
 /**
@@ -150,58 +151,133 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
 }
 
 interface StreamModeCellProps {
-  transport?: LogOtherData['response_transport']
+  logType: number
   isStream: boolean
-  /** Task logs are asynchronous jobs; stream vs non-stream does not apply. */
-  isTask?: boolean
-  /** The task request returned its result inline, so it is a synchronous call. */
-  isSyncTask?: boolean
-  streamStatus?: LogOtherData['stream_status']
-  className?: string
+  metadata: LogOtherData | null
+  showEndpoint: boolean
 }
 
-export function StreamModeCell(props: StreamModeCellProps) {
+export function StreamModeCell({
+  logType,
+  isStream,
+  metadata,
+  showEndpoint,
+}: StreamModeCellProps) {
   const { t } = useTranslation()
-  const showStreamError =
-    props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
-  let streamLabel = props.isStream
-    ? t('Streamed response')
-    : t('Non-streamed response')
-  if (props.transport) streamLabel = props.transport.toUpperCase()
-  if (props.isTask) {
-    streamLabel = props.isSyncTask ? t('Sync') : t('Async')
+  const status = metadata?.stream_status
+  const showStreamError = isStream && status?.status === 'error'
+  const observed = metadata?.response_transport
+  let transport: LogOtherData['response_transport']
+  if (observed === 'ws' || observed === 'sse' || observed === 'http') {
+    transport = observed
+  } else if (metadata?.ws === true) {
+    transport = 'ws'
   }
 
+  let explanation: string | undefined
+  const path = metadata?.request_path
+  const firstToken = metadata?.frt
+  const sawOutput =
+    status?.response_status === 'completed' ||
+    (!status?.response_status &&
+      typeof firstToken === 'number' &&
+      firstToken > 0)
+  const normalEnd =
+    status?.status === 'ok' &&
+    !status.end_error &&
+    !status.error_count &&
+    (!status.end_reason ||
+      status.end_reason === 'done' ||
+      status.end_reason === 'eof')
+  if (
+    !transport &&
+    !metadata?.is_task &&
+    isStream &&
+    isConsumeLogType(logType) &&
+    typeof path === 'string' &&
+    path.split('?', 1)[0] === '/v1/messages' &&
+    normalEnd &&
+    sawOutput
+  ) {
+    transport = 'sse'
+    explanation = showEndpoint
+      ? t('Identified from the Messages endpoint and recorded stream output.')
+      : t('Identified from recorded stream output.')
+  }
+
+  let label: string
+  if (metadata?.is_task) {
+    label = metadata.task_sync ? t('Sync') : t('Async')
+  } else if (transport) {
+    label = transport.toUpperCase()
+  } else if (isStream) {
+    label = t('Protocol not recorded')
+    explanation = t(
+      'The log records streaming mode but does not identify the response protocol.'
+    )
+  } else {
+    label = t('Non-streamed response')
+  }
+  const badge = (
+    <StatusBadge
+      label={label}
+      copyable={false}
+      className={cn(
+        'h-5 justify-center rounded-md px-1.5 font-mono text-[11px] font-semibold',
+        !metadata?.is_task &&
+          transport === 'sse' &&
+          'bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200',
+        !metadata?.is_task &&
+          transport === 'ws' &&
+          'bg-sky-100 text-sky-800 dark:bg-sky-400/15 dark:text-sky-200',
+        (metadata?.is_task || !transport || transport === 'http') &&
+          'bg-muted text-muted-foreground'
+      )}
+    />
+  )
   return (
-    <div className={cn('inline-flex items-center gap-1', props.className)}>
-      <StatusBadge
-        label={streamLabel}
-        copyable={false}
-        className={cn(
-          'h-5 justify-center rounded-[5px] px-1.5 font-mono text-[11px] font-semibold',
-          props.transport === 'sse' &&
-            'bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200',
-          props.transport === 'ws' &&
-            'bg-sky-100 text-sky-800 dark:bg-sky-400/15 dark:text-sky-200',
-          (!props.transport || props.transport === 'http') &&
-            'bg-muted text-muted-foreground'
-        )}
-      />
+    <div className='inline-flex max-w-full items-center gap-1'>
+      {explanation ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                tabIndex={0}
+                aria-description={explanation}
+                className='focus-visible:ring-ring inline-flex min-w-0 cursor-help rounded-md focus-visible:ring-2 focus-visible:outline-none'
+              />
+            }
+          >
+            {badge}
+          </TooltipTrigger>
+          <TooltipContent role='tooltip'>{explanation}</TooltipContent>
+        </Tooltip>
+      ) : (
+        badge
+      )}
       {showStreamError && (
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger
-              render={<CircleAlert className='text-destructive size-3' />}
-            />
+              render={
+                <span
+                  tabIndex={0}
+                  aria-label={t('Stream Status')}
+                  className='focus-visible:ring-ring rounded-sm focus-visible:ring-2'
+                />
+              }
+            >
+              <CircleAlert aria-hidden className='text-destructive size-3' />
+            </TooltipTrigger>
             <TooltipContent>
               <div className='space-y-0.5 text-xs'>
                 <p>
                   {t('Stream Status')}: {t('Error')}
                 </p>
-                <p>{props.streamStatus?.end_reason || 'unknown'}</p>
-                {(props.streamStatus?.error_count ?? 0) > 0 && (
+                <p>{status?.end_reason || 'unknown'}</p>
+                {(status?.error_count ?? 0) > 0 && (
                   <p>
-                    {t('Soft Errors')}: {props.streamStatus?.error_count}
+                    {t('Soft Errors')}: {status?.error_count}
                   </p>
                 )}
               </div>
