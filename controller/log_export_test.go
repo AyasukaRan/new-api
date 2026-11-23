@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
@@ -324,6 +325,72 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, false, callLogHandler(t, GetLogRequestBody, 3, common.RoleAdminUser, wrongTime)[0]["success"])
 
 			})
+			t.Run("live changes", func(t *testing.T) {
+				first := model.Log{Id: 88001, UserId: 81, CreatedAt: now - 1, ModelName: "live-test", Type: model.LogTypeError, RequestId: "multi-attempt", ChannelId: 9, UpstreamRequestId: "private-upstream", Other: `{"admin_info":{"request_body":"sensitive input"},"root_info":{"secret":"root-only"}}`}
+				retry := first
+				retry.Id++
+				retry.CreatedAt++
+				retry.Type = model.LogTypeConsume
+				another := retry
+				another.Id++
+				another.UserId++
+				another.RequestId = "someone-else"
+				probe := first
+				probe.Id += 3
+				probe.Type = model.LogTypeTestConsume
+				audit := first
+				audit.Id += 4
+				audit.Type = model.LogTypeManage
+				var refs []model.LiveLogRef
+				for _, log := range []model.Log{first, retry, another, probe, audit} {
+					require.NoError(t, model.LOG_DB.Create(&log).Error)
+					refs = append(refs, model.LiveLogRef{ID: log.Id, UserID: log.UserId, CreatedAt: log.CreatedAt, RequestID: log.RequestId})
+				}
+				filter := model.LogFilter{Source: model.LogSourceUsage, ModelName: "live-test"}
+				userRows, omitted, err := model.GetChangedLogs(t.Context(), filter, 81, common.RoleCommonUser, true, 10, append(refs, refs[0]))
+				require.NoError(t, err)
+				require.Len(t, userRows, 2)
+				assert.Zero(t, omitted)
+				for i, row := range userRows {
+					assert.Equal(t, 81, row.UserId)
+					assert.Equal(t, i+1, row.Id)
+					assert.Empty(t, row.UpstreamRequestId)
+					assert.NotContains(t, row.Other, "sensitive input")
+					assert.NotContains(t, row.Other, "root-only")
+				}
+				assert.Equal(t, model.LogTypeConsume, userRows[0].Type)
+				assert.NotEqual(t, userRows[0].LiveKey, userRows[1].LiveKey)
+				// Only the newly committed attempt is sent, even when its request
+				// has other attempts in the same ClickHouse partition.
+				exact, _, err := model.GetChangedLogs(t.Context(), filter, 81, common.RoleCommonUser, true, 10, refs[:1])
+				require.NoError(t, err)
+				require.Len(t, exact, 1)
+				assert.Equal(t, userRows[1].LiveKey, exact[0].LiveKey)
+				adminRows, omitted, err := model.GetChangedLogs(t.Context(), filter, 0, common.RoleAdminUser, true, 1, refs)
+				require.NoError(t, err)
+				require.Len(t, adminRows, 1)
+				assert.Equal(t, 3, omitted)
+				filter.UpstreamRequestId = "private-upstream"
+				adminRows, _, err = model.GetChangedLogs(t.Context(), filter, 0, common.RoleAdminUser, true, 10, refs[:1])
+				require.NoError(t, err)
+				require.Len(t, adminRows, 1)
+				assert.Equal(t, "primary", adminRows[0].ChannelName)
+				assert.Contains(t, adminRows[0].Other, "request_body_ref")
+				assert.NotContains(t, adminRows[0].Other, "sensitive input")
+				assert.NotContains(t, adminRows[0].Other, "root-only")
+				// Self snapshots and streamed rows have the same key on every
+				// page, independent of privacy-preserving display IDs.
+				page := callLogHandler(t, GetUserLogs, 81, common.RoleCommonUser, query+"&live=1&p=2&page_size=1&model_name=live-test")[0]["data"].(map[string]any)
+				require.NotEmpty(t, page["live_cursor"])
+				items := page["items"].([]any)
+				require.Len(t, items, 1)
+				assert.Equal(t, exact[0].LiveKey, items[0].(map[string]any)["live_key"])
+				stat := callLogHandler(t, GetLogsSelfStat, 81, common.RoleCommonUser, query+"&live_total=1&model_name=live-test")[0]["data"].(map[string]any)
+				assert.EqualValues(t, 2, stat["live_total"])
+				empty := callLogHandler(t, GetLogsSelfStat, 81, common.RoleCommonUser, query+"&live_total=1&model_name=absent-live-model")[0]["data"].(map[string]any)
+				assert.EqualValues(t, 0, empty["live_total"])
+			})
+
 		})
 	}
 }
@@ -553,4 +620,83 @@ func TestUsageLogClientIPDatabaseMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Exercise the snapshot/stream handoff and replay through the actual log
+// writer, including local delivery and resynchronization across a Redis outage.
+func TestLiveLogStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := newAuditTestDatabase(t, "sqlite", "")
+	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Log{}, &model.User{}))
+	require.NoError(t, db.Create(&model.User{Id: 81, Username: "stream-reader", AffCode: "stream1"}).Error)
+	redisServer := miniredis.RunT(t)
+	oldClient := common.RDB
+	defer func() { common.RDB = oldClient }()
+	client := redis.NewClient(&redis.Options{Addr: redisServer.Addr(), MaxRetries: -1})
+	defer client.Close()
+	common.RedisEnabled = true
+	common.RDB = client
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	model.StartLiveLogFeed(ctx)
+	engine := gin.New()
+	engine.GET("/api/log/self/stream", func(c *gin.Context) { c.Set("id", 81); c.Set("role", common.RoleCommonUser); StreamUserLogChanges(c) })
+	server := httptest.NewServer(engine)
+	defer server.Close()
+	type packet struct {
+		Items  []model.Log
+		Cursor string
+	}
+	// Open (or resume) an HTTP stream, verify immediate flushing, read a
+	// single named event and disconnect. Only the user's visible rows count.
+	read := func(cursor, want string) packet {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/log/self/stream?compact=1&cursor="+cursor, nil)
+		require.NoError(t, err)
+		resp, err := server.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
+		s := bufio.NewScanner(resp.Body)
+		for _, line := range []string{"event: ready", "data: {}", "", "event: " + want} {
+			require.True(t, s.Scan(), "missing %q: %v", line, s.Err())
+			require.Equal(t, line, s.Text())
+		}
+		require.True(t, s.Scan())
+		payload, ok := strings.CutPrefix(s.Text(), "data: ")
+		require.True(t, ok)
+		var value packet
+		require.NoError(t, common.UnmarshalJsonStr(payload, &value))
+		return value
+	}
+	record := func(id int, message string) { model.RecordLog(id, model.LogTypeTopup, common.NewMessage(message)) }
+	cursor := model.LiveLogCursor()
+	record(82, "another account")
+	record(81, "first")
+	first := read(cursor, "logs")
+	require.Len(t, first.Items, 1)
+	assert.Contains(t, first.Items[0].Content, "first")
+	assert.NotEmpty(t, first.Items[0].LiveKey)
+	replay := read(cursor, "logs")
+	require.Len(t, replay.Items, 1)
+	assert.Equal(t, first.Cursor, replay.Cursor)
+	assert.Equal(t, first.Items[0].LiveKey, replay.Items[0].LiveKey)
+	read("expired", "reset")
+
+	redisServer.Close()
+	record(81, "boundary")
+	read(first.Cursor, "reset")
+	cursor = model.LiveLogCursor()
+	record(81, "offline")
+	offline := read(cursor, "logs")
+	require.Len(t, offline.Items, 1)
+	assert.Contains(t, offline.Items[0].Content, "offline")
+	require.NoError(t, redisServer.Restart())
+	read(offline.Cursor, "reset")
+	cursor = model.LiveLogCursor()
+	record(81, "recovered")
+	restored := read(cursor, "logs")
+	require.Len(t, restored.Items, 1)
+	assert.Contains(t, restored.Items[0].Content, "recovered")
 }

@@ -2,7 +2,10 @@ package model
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -58,6 +61,7 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
+	LiveKey           string `json:"live_key,omitempty" gorm:"-"`
 	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
 	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
 	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
@@ -173,7 +177,20 @@ func ensureLogRequestId(log *Log) {
 
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
-	return LOG_DB.Create(log).Error
+	// ClickHouse has no generated row ID. Distinguish separate attempts even
+	// when a request produces multiple identical entries in the same second.
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) && log.Id == 0 {
+		var b [8]byte
+		for log.Id == 0 {
+			rand.Read(b[:])
+			log.Id = int(binary.BigEndian.Uint64(b[:])) & math.MaxInt
+		}
+	}
+	if err := LOG_DB.Create(log).Error; err != nil {
+		return err
+	}
+	usageLiveFeed.committed(log)
+	return nil
 }
 
 func clickHouseLogOrder(prefix string) string {
@@ -608,6 +625,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 // LogFilter is the usage-log search shared by the log list and the log export.
 // Username and Channel are administrator filters.
 type LogFilter struct {
+	Live          bool // Opt into stable list keys or the corresponding exact statistics count.
 	AdminSelfView bool // set by the dashboard from the authenticated account; never bound from the query
 
 	Source            LogSource
@@ -772,10 +790,20 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	if err != nil {
 		return nil, 0, err
 	}
+	if filter.Live {
+		keyLiveLogs(logs)
+	}
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		assignDisplayLogIds(logs, startIdx)
 	}
 
+	if err := resolveLogChannels(logs); err != nil {
+		return nil, 0, err
+	}
+	return logs, total, resolveLogUsernames(logs)
+}
+
+func resolveLogChannels(logs []*Log) error {
 	channelIds := types.NewSet[int]()
 	for _, log := range logs {
 		if log.ChannelId != 0 {
@@ -803,8 +831,8 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 			}
 		} else {
 			// Bulk query channels from DB
-			if err = DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
-				return logs, total, err
+			if err := DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
+				return err
 			}
 		}
 		channelMap := make(map[int]string, len(channels))
@@ -816,7 +844,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 		}
 	}
 
-	return logs, total, resolveLogUsernames(logs)
+	return nil
 }
 
 const logSearchCountLimit = 10000
@@ -849,6 +877,9 @@ func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*L
 		return nil, 0, common.NewMessage("Failed to query logs")
 	}
 
+	if filter.Live {
+		keyLiveLogs(logs)
+	}
 	formatUserLogs(logs, startIdx)
 	return logs, total, resolveLogUsernames(logs)
 }
@@ -949,10 +980,11 @@ func streamLogs(tx *gorm.DB, order string, fn func(*Log) error) error {
 }
 
 type Stat struct {
-	Quota   int               `json:"quota"`
-	Rpm     int               `json:"rpm"`
-	Tpm     int               `json:"tpm"`
-	Finance *DashboardFinance `json:"finance,omitempty" gorm:"-"`
+	LiveTotal *int64            `json:"live_total,omitempty" gorm:"-"`
+	Quota     int               `json:"quota"`
+	Rpm       int               `json:"rpm"`
+	Tpm       int               `json:"tpm"`
+	Finance   *DashboardFinance `json:"finance,omitempty" gorm:"-"`
 }
 
 // SumUsedQuota uses the same search as the log list. Rates keep their rolling
@@ -997,6 +1029,24 @@ func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFin
 	if err != nil {
 		common.SysError(common.LogText("failed to query rpm/tpm stat: %s", err.Error()))
 		return Stat{}, common.NewMessage("Failed to query statistics")
+	}
+	if filter.Live {
+		// Rates and spending cover consumption only. A live table includes
+		// errors and other visible types as well, just like its snapshot.
+		q := LOG_DB.WithContext(ctx).Model(&Log{})
+		if userID == nil {
+			q, err = filter.apply(q)
+		} else {
+			q, err = filter.forUser(q, *userID)
+		}
+		if err != nil {
+			return Stat{}, err
+		}
+		var count int64
+		if err := q.Count(&count).Error; err != nil {
+			return Stat{}, err
+		}
+		stat.LiveTotal = &count
 	}
 	stat.Rpm, stat.Tpm = rates.Rpm, rates.Tpm
 	return stat, nil

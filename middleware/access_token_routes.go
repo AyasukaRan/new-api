@@ -242,6 +242,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	// AdminAuth also requires an administrator; this scope keeps administrators’ existing access to their own records.
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),
 	"GET /api/log/":                             accessTokenScopeRule("log:read"),
+	"GET /api/log/stream":                       accessTokenScopeRule("log:read"),
+	"GET /api/log/self/stream":                  accessTokenScopeRule("usage:read"),
 	"GET /api/log/stat":                         accessTokenScopeRule("log:read"),
 	"GET /api/log/self/stat":                    accessTokenScopeRule("usage:read"),
 	"GET /api/log/channel_affinity_usage_cache": accessTokenScopeRule("log:read"),

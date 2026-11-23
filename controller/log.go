@@ -66,6 +66,11 @@ func GetAllLogs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return
 	}
+	liveCursor := ""
+	if c.Query("live") == "1" && filter.Source == model.LogSourceUsage {
+		filter.Live = true
+		liveCursor = model.LiveLogCursor()
+	}
 	logs, total, err := model.GetAllLogs(filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
@@ -74,8 +79,7 @@ func GetAllLogs(c *gin.Context) {
 	model.FormatLogList(logs, c.GetInt("role"), c.Query("compact") == "1")
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
-	common.ApiSuccess(c, pageInfo)
-	return
+	common.ApiSuccess(c, liveLogPage{pageInfo, liveCursor})
 }
 
 func GetLogRequestBody(c *gin.Context) {
@@ -112,6 +116,11 @@ func GetUserLogs(c *gin.Context) {
 		}
 		filter.StartTimestamp = startTimestamp
 	}
+	liveCursor := ""
+	if c.Query("live") == "1" {
+		filter.Live = true
+		liveCursor = model.LiveLogCursor()
+	}
 	logs, total, err := model.GetUserLogs(c.GetInt("id"), filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
 	if err != nil {
 		common.ApiError(c, err)
@@ -119,8 +128,7 @@ func GetUserLogs(c *gin.Context) {
 	}
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(logs)
-	common.ApiSuccess(c, pageInfo)
-	return
+	common.ApiSuccess(c, liveLogPage{pageInfo, liveCursor})
 }
 
 // ExportAllLogs streams every user's logs matching the search.
@@ -239,6 +247,7 @@ func GetLogsStat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return
 	}
+	filter.Live = c.Query("live_total") == "1" && filter.Source == model.LogSourceUsage
 	stat, err := model.SumUsedQuota(c.Request.Context(), filter, nil, c.GetInt("role") >= common.RoleAdminUser)
 	if err != nil {
 		common.ApiError(c, err)
@@ -258,6 +267,7 @@ func GetLogsSelfStat(c *gin.Context) {
 		filter.StartTimestamp = start
 	}
 	userID := c.GetInt("id")
+	filter.Live = c.Query("live_total") == "1" && filter.Source == model.LogSourceUsage
 	stat, err := model.SumUsedQuota(c.Request.Context(), filter, &userID, false)
 	if err != nil {
 		common.ApiError(c, err)
