@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 )
@@ -19,7 +21,14 @@ func StreamAllLogChanges(c *gin.Context)  { streamLogChanges(c, true) }
 func StreamUserLogChanges(c *gin.Context) { streamLogChanges(c, false) }
 
 func streamLogChanges(c *gin.Context, all bool) {
-	ctx := c.Request.Context()
+	// A fresh connection checks role and token scopes again. Bound the
+	// database query lifetime too, so rolling deployments can drain.
+	lifetime := 45 * time.Second
+	if expires := middleware.DashboardAccessTokenExpiry(c); expires > 0 {
+		lifetime = min(lifetime, time.Until(time.Unix(expires, 0)))
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), lifetime)
+	defer cancel()
 	filter := logFilterFromQuery(c, all)
 	if filter.Source != model.LogSourceUsage {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
@@ -53,6 +62,9 @@ func streamLogChanges(c *gin.Context, all bool) {
 	c.Header("X-Accel-Buffering", "no")
 	writer := http.NewResponseController(c.Writer)
 	write := func(event string, data any) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		encoded, err := common.Marshal(data)
 		if err != nil {
 			return false
@@ -72,10 +84,6 @@ func streamLogChanges(c *gin.Context, all bool) {
 	defer check.Stop()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
-	// A fresh HTTP request must pass the dashboard role and token-scope
-	// middleware again; bounded connections also let rolling updates drain.
-	lifetime := time.NewTimer(45 * time.Second)
-	defer lifetime.Stop()
 	for {
 		refs, next, reset := model.LiveLogChanges(cursor, ownUserID)
 		if reset {
@@ -95,8 +103,6 @@ func streamLogChanges(c *gin.Context, all bool) {
 		cursor = next
 		select {
 		case <-ctx.Done():
-			return
-		case <-lifetime.C:
 			return
 		case <-check.C:
 		case <-heartbeat.C:

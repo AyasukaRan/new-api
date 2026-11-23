@@ -283,6 +283,16 @@ func requestAccessTokenLookup(c *gin.Context) *accessTokenLookup {
 	return lookup
 }
 
+// DashboardAccessTokenExpiry returns the expiry already verified during PAT
+// authentication. The lifetime of other dashboard credentials is rechecked
+// by the ordinary authentication middleware when a short stream reconnects.
+func DashboardAccessTokenExpiry(c *gin.Context) int64 {
+	if lookup := requestAccessTokenLookup(c); lookup != nil && lookup.token != nil {
+		return lookup.token.ExpiresAt
+	}
+	return 0
+}
+
 // enforceAccessTokenRoute applies the route's access token rule (fail closed:
 // scoped tokens cannot call undeclared routes). With abort set it writes the
 // 403 response and records the reason in the access audit.
