@@ -65,8 +65,9 @@ function UpstreamTiming(props: { traceId: string; totalMs: number }) {
       break
     }
   }
-  if (lastUpstream?.direction !== 'upstream_response' || !lastUpstream.headers)
-    {return null}
+  if (lastUpstream?.direction !== 'upstream_response' || !lastUpstream.headers) {
+    return null
+  }
   const measurements = []
   for (const [name, values] of Object.entries(lastUpstream.headers)) {
     const key = name.toLowerCase()

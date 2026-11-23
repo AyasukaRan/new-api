@@ -102,12 +102,13 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         'invoked_tools',
         'is_stream',
       ].includes(id)
-      if (kind === 'header')
+      if (kind === 'header') {
         return cn(
           (centered || id === 'prompt_tokens') &&
             'text-center [&>div]:justify-center',
           id === 'quota' && 'text-right [&>div]:justify-end'
         )
+      }
       return cn(
         'align-middle py-2',
         centered && 'text-center [&>div]:mx-auto',
