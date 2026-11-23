@@ -185,8 +185,9 @@ export function useLiveUsageLogs({
             // Count and page reads can straddle the same commits. A truncated
             // first batch also hides its overlap beyond the snapshot page.
             // Once ambiguous, use absolute counts from the ordinary stats clock.
-            if (uncertainBatch || overlaps || outsideSnapshot)
+            if (uncertainBatch || overlaps || outsideSnapshot) {
               needsExactTotal = true
+            }
             const added = incoming.length + omitted
             if (!added) {
               if (needsExactTotal) publish()
