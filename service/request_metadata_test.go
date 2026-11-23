@@ -149,14 +149,18 @@ func TestRequestMetadataObservesOnlyCurrentResponseTools(t *testing.T) {
 
 func TestRequestMetadataRecordsObservedTransportAndAdminUserAgent(t *testing.T) {
 	for _, tc := range []struct {
-		name, contentType, transport string
-		written, stream, socket      bool
+		name, contentType, transport                      string
+		written, stream, socket, prepared, upstreamStream bool
 	}{
 		{name: "SSE response", contentType: "text/event-stream; charset=utf-8", written: true, transport: "sse"},
 		{name: "ordinary HTTP response", contentType: "application/json", written: true, transport: "http"},
-		{name: "negotiated socket", socket: true, transport: "ws"},
+		{name: "negotiated socket", contentType: "text/event-stream", stream: true, socket: true, transport: "ws"},
 		{name: "unknown stream", written: true, stream: true},
-		{name: "uncommitted headers", contentType: "text/event-stream"},
+		{name: "pending SSE for a streaming request", contentType: "Text/Event-Stream; charset=utf-8", stream: true, prepared: true},
+		{name: "uncommitted headers with streaming disabled", contentType: "text/event-stream", upstreamStream: true},
+		{name: "accept header alone", stream: true},
+		{name: "stream request with pending JSON error", contentType: "application/json", stream: true},
+		{name: "stream request with committed JSON error", contentType: "application/json", stream: true, written: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -168,6 +172,9 @@ func TestRequestMetadataRecordsObservedTransportAndAdminUserAgent(t *testing.T) 
 				info.ClientWs = &websocket.Conn{}
 			}
 			defer BeginRequestMetadata(c, info)()
+			if tc.upstreamStream {
+				info.IsStream = true
+			}
 			c.Request.Header.Set("User-Agent", "outbound-override")
 			c.Writer.Header().Set("Content-Type", tc.contentType)
 			if tc.written {
@@ -179,6 +186,11 @@ func TestRequestMetadataRecordsObservedTransportAndAdminUserAgent(t *testing.T) 
 			assert.NotContains(t, values, "user_agent")
 			require.Contains(t, values, "admin_info")
 			assert.Equal(t, strings.Repeat("a", 511), values["admin_info"].(map[string]any)["user_agent"])
+			if tc.prepared {
+				assert.Equal(t, "sse", values["prepared_response_transport"])
+			} else {
+				assert.NotContains(t, values, "prepared_response_transport")
+			}
 			if tc.transport == "" {
 				assert.NotContains(t, values, "response_transport")
 			} else {

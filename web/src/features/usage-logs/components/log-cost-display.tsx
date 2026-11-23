@@ -43,6 +43,7 @@ import {
 import { getLogCostEstimate, getLogFreeQuota } from '../lib/format'
 import { getLogToolIcon } from '../lib/tool-icon'
 import type { LogOtherData } from '../types'
+import { renderLogMetricTerm } from './log-metric-icons'
 
 interface LogCostDisplayProps {
   quota: number
@@ -314,20 +315,20 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
           </Dialog>
         </div>
         {(free > 0 || props.isAdmin) && (
-          <dl className='text-muted-foreground grid w-full grid-cols-[1fr_auto] items-baseline gap-x-2 gap-y-0.5 text-[11px] leading-tight [&_dd]:text-end [&_dd]:font-mono [&_dd]:whitespace-nowrap [&_dd]:tabular-nums [&_dt]:text-start'>
+          <dl className='text-muted-foreground grid w-full max-w-28 grid-cols-[auto_1fr] items-center gap-x-2 gap-y-0.5 text-[11px] leading-tight [&_dd]:text-end [&_dd]:font-mono [&_dd]:whitespace-nowrap [&_dd]:tabular-nums [&_dt]:text-start'>
             {free > 0 && (
               <>
-                <dt>{t('Free allowance deduction')}</dt>
+                {renderLogMetricTerm('Free allowance deduction', t)}
                 <dd>{formatLogQuota(free)}</dd>
               </>
             )}
             {props.isAdmin && (
               <>
-                <dt>{t('Upstream cost')}</dt>
+                {renderLogMetricTerm('Upstream cost', t)}
                 <dd>
                   {cost ? formatLogQuota(cost.cost_quota) : t('Not recorded')}
                 </dd>
-                <dt>{t('Gross profit')}</dt>
+                {renderLogMetricTerm('Gross profit', t)}
                 <dd
                   className={cn(
                     cost && cost.profit_quota < 0 && 'text-destructive'

@@ -210,6 +210,7 @@ export interface LogOtherData {
   request_path?: string
   request_conversion?: string[]
   response_transport?: 'ws' | 'sse' | 'http'
+  prepared_response_transport?: 'sse'
   ws?: boolean
   audio?: boolean
   audio_input?: number

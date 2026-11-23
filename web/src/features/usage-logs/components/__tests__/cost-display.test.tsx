@@ -270,9 +270,9 @@ describe('log cost display', () => {
       other: { admin_info: { cost: costSnapshot } },
       isAdmin: true,
     })
-    expect(screen.getByText('Upstream cost')).toBeVisible()
+    expect(screen.getByRole('term', { name: 'Upstream cost' })).toBeVisible()
     expect(screen.getByText('$0.013')).toBeVisible()
-    expect(screen.getByText('Gross profit')).toBeVisible()
+    expect(screen.getByRole('term', { name: 'Gross profit' })).toBeVisible()
     expect(screen.getByText('$0.007')).toBeVisible()
   })
 
@@ -284,9 +284,13 @@ describe('log cost display', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent(
       'A reconciled itemized breakdown is unavailable'
     )
-    expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('term', { name: 'Upstream cost' })
+    ).not.toBeInTheDocument()
     expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
-    expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('term', { name: 'Gross profit' })
+    ).not.toBeInTheDocument()
   })
 
   test.each([true, false])(
@@ -306,13 +310,19 @@ describe('log cost display', () => {
         isAdmin,
       })
       if (isAdmin) {
-        expect(screen.getByText('Upstream cost')).toBeVisible()
-        expect(screen.getByText('Gross profit')).toBeVisible()
+        expect(
+          screen.getByRole('term', { name: 'Upstream cost' })
+        ).toBeVisible()
+        expect(screen.getByRole('term', { name: 'Gross profit' })).toBeVisible()
         expect(screen.getByText('$0.013')).toBeVisible()
         expect(screen.getByText('$0.007')).toBeVisible()
       } else {
-        expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
-        expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
+        expect(
+          screen.queryByRole('term', { name: 'Upstream cost' })
+        ).not.toBeInTheDocument()
+        expect(
+          screen.queryByRole('term', { name: 'Gross profit' })
+        ).not.toBeInTheDocument()
         expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
       }
     }
@@ -387,8 +397,12 @@ describe('log cost display', () => {
       },
     })
     expect(screen.getByText('$1')).toBeVisible()
-    expect(screen.getByText('Free allowance deduction')).toBeVisible()
+    expect(
+      screen.getByRole('term', { name: 'Free allowance deduction' })
+    ).toBeVisible()
     expect(screen.getByText('$2')).toBeVisible()
-    expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('term', { name: 'Gross profit' })
+    ).not.toBeInTheDocument()
   })
 })

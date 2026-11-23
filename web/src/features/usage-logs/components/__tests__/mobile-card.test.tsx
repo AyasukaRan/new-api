@@ -260,16 +260,16 @@ it('respects hidden columns and omits admin fields in the self view', () => {
 
 it('keeps input, output and cache quantities readable without empty metric cells', () => {
   renderLogs()
-  expect(screen.getByText('Total input').nextElementSibling).toHaveTextContent(
-    '1,700'
-  )
-  expect(screen.getByText('Output')).toBeVisible()
-  expect(screen.getByText('Read cache').nextElementSibling).toHaveTextContent(
-    '300'
-  )
-  expect(screen.getByText('Write cache').nextElementSibling).toHaveTextContent(
-    '200'
-  )
+  expect(
+    screen.getByRole('term', { name: 'Total input tokens' }).nextElementSibling
+  ).toHaveTextContent('1,700')
+  expect(screen.getByRole('term', { name: 'Output Tokens' })).toBeVisible()
+  expect(
+    screen.getByRole('term', { name: 'Cache read tokens' }).nextElementSibling
+  ).toHaveTextContent('300')
+  expect(
+    screen.getByRole('term', { name: 'Cache write tokens' }).nextElementSibling
+  ).toHaveTextContent('200')
 })
 
 it('shows the established empty state when no logs exist', () => {
@@ -290,18 +290,23 @@ it.each([false, true])(
         },
       ],
     })
-    const metrics = screen.getByText('Duration').closest('dl')
+    const metrics = screen
+      .getByRole('term', { name: 'Total time' })
+      .closest('dl')
     if (!metrics) {
       throw new Error('The duration must appear with the request metrics')
     }
     expect(
-      within(metrics).getByText('First token').nextElementSibling
+      within(metrics).getByRole('term', { name: 'Time to first token' })
+        .nextElementSibling
     ).toHaveTextContent(streaming ? '58.0s' : '—')
     expect(
-      within(metrics).getByText('Duration').nextElementSibling
+      within(metrics).getByRole('term', { name: 'Total time' })
+        .nextElementSibling
     ).toHaveTextContent('58.0s')
     expect(
-      within(metrics).getByText('Speed').nextElementSibling
+      within(metrics).getByRole('term', { name: 'Output speed' })
+        .nextElementSibling
     ).toHaveTextContent('14 t/s')
   }
 )
@@ -325,12 +330,18 @@ it('omits unused token and throughput placeholders for async jobs', () => {
     ],
   })
   expect(screen.getByText('Async')).toBeVisible()
-  expect(screen.queryByText('Total input')).not.toBeInTheDocument()
-  expect(screen.queryByText('Output')).not.toBeInTheDocument()
-  expect(screen.queryByText('Speed')).not.toBeInTheDocument()
-  expect(screen.getByText('Duration').nextElementSibling).toHaveTextContent(
-    '1.5s'
-  )
+  expect(
+    screen.queryByRole('term', { name: 'Total input tokens' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('term', { name: 'Output Tokens' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('term', { name: 'Output speed' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.getByRole('term', { name: 'Total time' }).nextElementSibling
+  ).toHaveTextContent('1.5s')
 })
 
 it('labels a task whose result was returned in the response as synchronous', () => {

@@ -34,6 +34,7 @@ import { isDisplayableLogType, isTimingLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { CacheHitRing } from './cache-hit-rate'
 import { LogDurationPopover } from './log-duration-popover'
+import { renderLogMetricTerm } from './log-metric-icons'
 
 const metricGroup =
   'grid content-center items-center gap-x-1.5 [grid-template-columns:max-content_minmax(max-content,1fr)] auto-rows-[1.15rem] [&>dt]:text-muted-foreground [&>dd]:justify-self-end [&>dd]:text-right [&>dd]:font-mono [&>dd]:text-xs [&>dd]:font-semibold'
@@ -115,11 +116,11 @@ export function TokenPerformanceCell(props: {
       ) : (
         !tokenlessTask && (
           <dl className={metricGroup}>
-            <dt>{t('Total input')}</dt>
+            {renderLogMetricTerm('Total input tokens', t)}
             <dd className='text-emerald-700 dark:text-emerald-300'>
               {hasTokens ? formatCount(cache.total) : '—'}
             </dd>
-            <dt>{t('Output')}</dt>
+            {renderLogMetricTerm('Output Tokens', t)}
             <dd className='text-blue-700 dark:text-blue-300'>
               {hasTokens ? formatCount(log.completion_tokens) : '—'}
             </dd>
@@ -128,9 +129,9 @@ export function TokenPerformanceCell(props: {
       )}
       {!metered && !tokenlessTask && (
         <dl className={cn(metricGroup, 'border-s ps-2.5')}>
-          <dt>{t('Read cache')}</dt>
+          {renderLogMetricTerm('Cache read tokens', t)}
           <dd>{formatCount(cache.read)}</dd>
-          <dt>{t('Write cache')}</dt>
+          {renderLogMetricTerm('Cache write tokens', t)}
           <dd>
             {writesByDuration.length && cache.write != null ? (
               <QuotaDetailsPopover
@@ -145,7 +146,7 @@ export function TokenPerformanceCell(props: {
               formatCount(cache.write)
             )}
           </dd>
-          <dt>{t('Hit Rate')}</dt>
+          {renderLogMetricTerm('Cache hit rate', t)}
           <dd>
             <CacheHitRing percent={cache.percent} />
           </dd>
@@ -162,7 +163,7 @@ export function TokenPerformanceCell(props: {
         >
           {(!tokenlessTask || first != null) && (
             <>
-              <dt>{t('First token')}</dt>
+              {renderLogMetricTerm('Time to first token', t)}
               <dd
                 className={
                   first != null
@@ -174,7 +175,7 @@ export function TokenPerformanceCell(props: {
               </dd>
             </>
           )}
-          <dt>{t('Duration')}</dt>
+          {renderLogMetricTerm('Total time', t)}
           <dd>
             {log.use_time >= 0 ? (
               <LogDurationPopover
@@ -190,7 +191,7 @@ export function TokenPerformanceCell(props: {
           </dd>
           {!tokenlessTask && (
             <>
-              <dt>{t('Speed')}</dt>
+              {renderLogMetricTerm('Output speed', t)}
               <dd className='text-sky-700 dark:text-sky-300'>
                 {speed != null ? `${formatCount(speed)} t/s` : '—'}
               </dd>

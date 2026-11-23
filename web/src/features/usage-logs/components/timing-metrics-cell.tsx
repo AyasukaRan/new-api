@@ -205,11 +205,20 @@ export function StreamModeCell({
       : t('Identified from recorded stream output.')
   }
 
+  const preparedSse =
+    !metadata?.is_task &&
+    !transport &&
+    metadata?.prepared_response_transport === 'sse'
   let label: string
   if (metadata?.is_task) {
     label = metadata.task_sync ? t('Sync') : t('Async')
   } else if (transport) {
     label = transport.toUpperCase()
+  } else if (preparedSse) {
+    label = 'SSE'
+    explanation = t(
+      'The gateway prepared SSE headers. No response body was recorded, so delivery to the client could not be confirmed.'
+    )
   } else if (isStream) {
     label = t('Protocol not recorded')
     explanation = t(
@@ -231,7 +240,9 @@ export function StreamModeCell({
           transport === 'ws' &&
           'bg-sky-100 text-sky-800 dark:bg-sky-400/15 dark:text-sky-200',
         (metadata?.is_task || !transport || transport === 'http') &&
-          'bg-muted text-muted-foreground'
+          'bg-muted text-muted-foreground',
+        preparedSse &&
+          'border-muted-foreground/55 border border-dashed bg-transparent'
       )}
     />
   )

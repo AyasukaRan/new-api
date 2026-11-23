@@ -271,9 +271,9 @@ test('keeps pure cached Claude input visible in the desktop Token column', () =>
       </QueryClientProvider>
     </I18nextProvider>
   )
-  expect(screen.getByText('Read cache').nextElementSibling).toHaveTextContent(
-    '1,000'
-  )
+  expect(
+    screen.getByRole('term', { name: 'Cache read tokens' }).nextElementSibling
+  ).toHaveTextContent('1,000')
   expect(
     screen.getByRole('progressbar', { name: 'Cache hit rate' })
   ).toHaveAttribute('aria-valuenow', '100')

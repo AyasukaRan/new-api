@@ -278,7 +278,8 @@ test('groups the account, request source, transport and token metrics into disti
   expect(transport.getByText('/v1/responses')).toBeVisible()
   expect(transport.getByText('SSE')).toBeVisible()
   const performance = within(cell('prompt_tokens'))
-  for (const text of ['Output', '450ms', '4.0s', '25 t/s']) {
+  expect(performance.getByRole('term', { name: 'Output Tokens' })).toBeVisible()
+  for (const text of ['450ms', '4.0s', '25 t/s']) {
     expect(performance.getByText(text)).toBeVisible()
   }
   expect(cell('is_stream')).not.toHaveTextContent('t/s')

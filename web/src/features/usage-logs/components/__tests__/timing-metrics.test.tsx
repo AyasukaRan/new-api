@@ -27,6 +27,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import { usageLogSchema } from '../../data/schema'
 import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
+import { LogMetricLegend } from '../log-metric-legend'
 import { StreamModeCell, TimingMetricsCell } from '../timing-metrics-cell'
 import { TokenPerformanceCell } from '../token-performance-cell'
 
@@ -128,6 +129,49 @@ test.each([
     expect(screen.getByText(expected)).toBeVisible()
   }
 )
+
+test('distinguishes prepared SSE headers on an interrupted attempt without asserting delivery or disclosing the path', async () => {
+  render(
+    <StreamModeCell
+      logType={5}
+      isStream
+      showEndpoint={false}
+      metadata={{
+        request_path: '/v1/messages',
+        prepared_response_transport: 'sse',
+        stream_status: { status: 'error', end_reason: 'client_gone' },
+      }}
+    />
+  )
+  expect(screen.getByText('SSE')).toBeVisible()
+  expect(screen.getByLabelText('Stream Status')).toBeVisible()
+  await userEvent.tab()
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(
+    'The gateway prepared SSE headers. No response body was recorded, so delivery to the client could not be confirmed.'
+  )
+  expect(screen.queryByText('/v1/messages')).not.toBeInTheDocument()
+})
+
+test('uses the observed transport or confirmed stream output ahead of prepared headers', async () => {
+  const props = { logType: 2, isStream: true, showEndpoint: true }
+  const prepared = {
+    ...messagesStream,
+    prepared_response_transport: 'sse' as const,
+  }
+  const { rerender } = render(
+    <StreamModeCell
+      {...props}
+      metadata={{ ...prepared, response_transport: 'http' }}
+    />
+  )
+  expect(screen.getByText('HTTP')).toBeVisible()
+  expect(screen.queryByText('SSE')).not.toBeInTheDocument()
+  rerender(<StreamModeCell {...props} metadata={prepared} />)
+  await userEvent.tab()
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(
+    'Identified from the Messages endpoint and recorded stream output.'
+  )
+})
 
 test('explains a missing protocol without calling an unknown stream a failure', async () => {
   render(<StreamModeCell logType={2} isStream metadata={null} showEndpoint />)
@@ -387,14 +431,37 @@ test('a page-metered task shows the page count and duration without empty token 
   expect(screen.getByText('3 page')).toBeVisible()
   expect(screen.getByText('4.0s')).toBeVisible()
   for (const label of [
-    'Total input',
-    'Output',
-    'Read cache',
-    'Write cache',
-    'Hit Rate',
-    'First token',
-    'Speed',
+    'Total input tokens',
+    'Output Tokens',
+    'Cache read tokens',
+    'Cache write tokens',
+    'Cache hit rate',
+    'Time to first token',
+    'Output speed',
   ]) {
-    expect(screen.queryByText(label)).not.toBeInTheDocument()
+    expect(screen.queryByRole('term', { name: label })).not.toBeInTheDocument()
   }
 })
+
+test.each([true, false])(
+  'metric icons have one keyboard-accessible guide for the current view (admin: %s)',
+  async (isAdmin) => {
+    render(<LogMetricLegend isAdmin={isAdmin} />)
+    const trigger = screen.getByRole('button', { name: 'Metric icons' })
+    await userEvent.tab()
+    expect(trigger).toHaveFocus()
+    await userEvent.keyboard('{Enter}')
+    const guide = within(
+      await screen.findByRole('dialog', { name: 'Metric icons' })
+    )
+    expect(guide.getByText('Cache read tokens')).toBeVisible()
+    expect(guide.getByText('Cache write tokens')).toBeVisible()
+    expect(guide.getByText('Free allowance deduction')).toBeVisible()
+    for (const name of ['Upstream cost', 'Gross profit']) {
+      if (isAdmin) expect(guide.getByText(name)).toBeVisible()
+      else expect(guide.queryByText(name)).not.toBeInTheDocument()
+    }
+    await userEvent.keyboard('{Escape}')
+    expect(trigger).toHaveFocus()
+  }
+)

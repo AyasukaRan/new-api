@@ -34,6 +34,7 @@ const requestMetadataMaxUserAgentBytes = 512
 type requestMetadata struct {
 	mu               sync.Mutex
 	format           types.RelayFormat
+	requestedStream  bool
 	stream           bool
 	clientTool       string
 	userAgent        string
@@ -59,11 +60,12 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 	}
 	ua := c.Request.UserAgent()
 	metadata := &requestMetadata{
-		format:         info.RelayFormat,
-		stream:         info.IsStream,
-		clientTool:     IdentifyRequestClient(c.Request.Header),
-		userAgent:      strings.Clone(strings.ToValidUTF8(ua[:min(len(ua), requestMetadataMaxUserAgentBytes)], "")),
-		reasoningLabel: strings.Clone(requestReasoningLabel(info)),
+		format:          info.RelayFormat,
+		requestedStream: info.IsStream,
+		stream:          info.IsStream,
+		clientTool:      IdentifyRequestClient(c.Request.Header),
+		userAgent:       strings.Clone(strings.ToValidUTF8(ua[:min(len(ua), requestMetadataMaxUserAgentBytes)], "")),
+		reasoningLabel:  strings.Clone(requestReasoningLabel(info)),
 	}
 	c.Set(requestMetadataContextKey, metadata)
 	supported := info.RelayFormat == types.RelayFormatClaude ||
@@ -397,21 +399,25 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 	if other == nil || c == nil {
 		return
 	}
+	value, _ := c.Get(requestMetadataContextKey)
+	metadata, _ := value.(*requestMetadata)
 	if info != nil && info.ClientWs != nil {
 		other.SetPublic("response_transport", "ws")
-	} else if c.Writer != nil && c.Writer.Written() {
-		// Request headers only describe the client's preference. Use the format
-		// actually written, leaving unclassified streams for the generic label.
+	} else if c.Writer != nil {
+		written := c.Writer.Written()
 		contentType, _, _ := strings.Cut(c.Writer.Header().Get("Content-Type"), ";")
+		sse := strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream")
 		switch {
-		case strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream"):
+		case written && sse:
 			other.SetPublic("response_transport", "sse")
-		case info != nil && !info.IsStream:
+		case !written && sse && metadata != nil && metadata.requestedStream:
+			// The request declared streaming, but a retry or disconnect can
+			// still replace these pending headers before anything is written.
+			other.SetPublic("prepared_response_transport", "sse")
+		case written && info != nil && !info.IsStream:
 			other.SetPublic("response_transport", "http")
 		}
 	}
-	value, _ := c.Get(requestMetadataContextKey)
-	metadata, _ := value.(*requestMetadata)
 	if metadata == nil {
 		if effort := requestReasoningLabel(info); effort != "" {
 			other.SetPublic("reasoning_effort", effort)
