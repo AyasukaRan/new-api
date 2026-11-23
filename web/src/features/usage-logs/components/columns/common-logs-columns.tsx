@@ -17,13 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { ChevronRight, GitBranch, KeyRound, Sparkles } from 'lucide-react'
+import { FileSearch, GitBranch, KeyRound, Sparkles } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { Action } from '@/components/ai-elements/actions'
 import { TruncatedCell } from '@/components/data-table'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
-import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -780,7 +780,7 @@ export function useCommonLogsColumns(
 
       {
         accessorKey: 'content',
-        header: t('Details'),
+        header: t('Event'),
         cell: function DetailsCell({ row }) {
           const { t, i18n } = useTranslation()
           const log = row.original
@@ -922,24 +922,29 @@ export function useCommonLogsColumns(
       },
       {
         id: 'request_details',
-        header: t('Actions'),
+        header: t('Details'),
         enableSorting: false,
         enableHiding: false,
         cell: ({ row }) => {
           const log = row.original
           return (
-            <Button
-              type='button'
-              variant='ghost'
-              size='sm'
+            <Action
+              size='icon-sm'
+              label={`${t('Details')} · ${log.request_id || `#${log.id}`}`}
+              tooltip={t('View details')}
               aria-haspopup='dialog'
-              aria-label={`${t('Details')} · ${log.request_id || formatTimestampToDate(log.created_at)}`}
               onClick={() => onShowDetails(log)}
-              className='text-primary h-8 justify-start gap-0.5 rounded-sm px-0 text-xs font-medium hover:bg-transparent hover:underline'
+              className='size-8 rounded-sm border-0 p-0 hover:bg-transparent dark:hover:bg-transparent pointer-coarse:size-11'
             >
-              {t('Details')}
-              <ChevronRight className='size-3.5 rtl:rotate-180' aria-hidden />
-            </Button>
+              <FileSearch aria-hidden='true' className='size-4' />
+              <span
+                data-request-detail-caption
+                aria-hidden='true'
+                className='hidden text-[11px] leading-3 font-normal'
+              >
+                {t('Details')}
+              </span>
+            </Action>
           )
         },
       }

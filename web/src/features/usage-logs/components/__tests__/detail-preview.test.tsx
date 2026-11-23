@@ -99,7 +99,7 @@ function DetailPreview(props: {
   isAdmin: boolean
   type?: number
   source?: LogSource
-  columnId?: 'content' | 'prompt_tokens' | 'created_at'
+  columnId?: 'content' | 'prompt_tokens' | 'created_at' | 'request_details'
   createdAt?: number
 }) {
   const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
@@ -224,6 +224,30 @@ test.each([
       `${date}T${time}`
     )
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  }
+)
+
+test.each(['hover', 'keyboard'])(
+  'explains the request details icon on %s',
+  async (interaction) => {
+    const user = userEvent.setup()
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueryClientProvider client={client}>
+          <DetailPreview isAdmin other={{}} columnId='request_details' />
+        </QueryClientProvider>
+      </I18nextProvider>
+    )
+    const trigger = screen.getByRole('button', { name: 'Details · req-1' })
+    expect(trigger).toHaveAttribute('aria-haspopup', 'dialog')
+    if (interaction === 'hover') {
+      await user.hover(trigger)
+    } else {
+      await user.tab()
+      expect(trigger).toHaveFocus()
+    }
+    expect(await screen.findByText('View details')).toBeVisible()
+    expect(trigger).toHaveAccessibleName('Details · req-1')
   }
 )
 

@@ -81,12 +81,21 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
       variant='ghost'
       onClick={(event) => event.stopPropagation()}
       aria-label={`${t('Billing Details')} · ${formatLogQuota(quota)}`}
-      className='col-start-2 row-start-1 h-auto min-h-5 min-w-max flex-nowrap justify-end gap-1 justify-self-end rounded-sm border-0 p-0 font-sans text-[13px] leading-5'
+      className={cn(
+        'col-start-2 row-start-1 h-auto min-h-5 gap-0 rounded-sm border-0 p-0 font-sans text-[13px] leading-5',
+        toolCounts.size > 0
+          ? 'col-end-4 grid grid-cols-subgrid'
+          : 'justify-self-end'
+      )}
     >
+      <span className='justify-self-end font-semibold whitespace-nowrap tabular-nums underline decoration-current/40 decoration-dotted underline-offset-4'>
+        {formatLogQuota(quota)}
+      </span>
       {toolCounts.size > 0 && (
         <span
+          data-fee-tool-lanes={Math.min(toolCounts.size, 3)}
           className={cn(
-            'grid shrink-0 items-center gap-0.5',
+            'ms-1 grid shrink-0 items-center justify-self-start gap-0.5',
             toolCounts.size > 3 ? 'grid-cols-3' : 'grid-flow-col'
           )}
         >
@@ -119,20 +128,17 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
           })}
         </span>
       )}
-      <span className='font-semibold whitespace-nowrap tabular-nums underline decoration-current/40 decoration-dotted underline-offset-4'>
-        {formatLogQuota(quota)}
-      </span>
     </Button>
   )
   return (
     <TooltipProvider>
-      <div className='grid w-full grid-cols-[0.875rem_minmax(min-content,1fr)] items-center gap-x-1.5 gap-y-0.5 self-center font-sans tabular-nums'>
+      <div className='grid w-full grid-cols-[1.1875rem_minmax(max-content,1fr)_var(--log-fee-tool-track,max-content)] items-center gap-y-0.5 self-center font-sans tabular-nums'>
         {source && (
           <Tooltip>
             <TooltipTrigger
               render={
                 <span
-                  className='text-muted-foreground col-start-1 row-start-1 inline-flex shrink-0 cursor-help items-center justify-center'
+                  className='text-muted-foreground col-start-1 row-start-1 inline-flex w-3.5 shrink-0 cursor-help items-center justify-center'
                   role='img'
                   aria-label={source}
                   tabIndex={0}
@@ -169,7 +175,7 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
           </Dialog>
         )}
         {(free > 0 || props.isAdmin) && (
-          <dl className='text-muted-foreground col-span-full grid grid-cols-subgrid items-center gap-y-0.5 text-end text-xs leading-4 font-normal [&_dd]:whitespace-nowrap [&_dt]:justify-center'>
+          <dl className='text-muted-foreground col-span-2 col-start-1 grid grid-cols-subgrid items-center gap-y-0.5 text-end text-xs leading-4 font-normal [&_dd]:whitespace-nowrap [&_dt]:justify-start'>
             {free > 0 && (
               <>
                 {renderLogMetricTerm('Free allowance deduction', t)}

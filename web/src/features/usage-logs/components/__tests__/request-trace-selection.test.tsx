@@ -422,6 +422,10 @@ test('opens the chosen request from its named details action when there is no su
   const button = await screen.findByRole('button', {
     name: 'Details · request-10',
   })
+  expect(screen.getByRole('columnheader', { name: 'Details' })).toHaveAttribute(
+    'data-column-id',
+    'request_details'
+  )
   button.focus()
   await user.keyboard('{Enter}')
   const details = await screen.findByRole('dialog', { name: /Log Details/ })

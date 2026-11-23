@@ -30,14 +30,16 @@
 .grid
   :is(th, td):is(
     [data-column-id='reasoning_effort'],
-    [data-column-id='invoked_tools']
+    [data-column-id='invoked_tools'],
+    [data-column-id='request_details']
   ) {
   text-align: center;
 }
 .grid
   :is(th, td):is(
     [data-column-id='reasoning_effort'],
-    [data-column-id='invoked_tools']
+    [data-column-id='invoked_tools'],
+    [data-column-id='request_details']
   )
   > div {
   margin-inline: auto;
@@ -54,10 +56,19 @@
 }
 .grid th[data-column-id='quota'] > div {
   justify-content: end;
+  padding-inline-end: var(--log-fee-tool-track, 0px);
 }
 .grid td[data-column-id='quota'] {
-  min-inline-size: 9.5rem;
-  padding-inline-start: clamp(12px, 1.1vw, 24px);
+  padding-inline-start: 0.5rem;
+}
+.grid table:has([data-fee-tool-lanes]) {
+  --log-fee-tool-track: 1.25rem;
+}
+.grid table:has([data-fee-tool-lanes='2'], [data-fee-tool-lanes='3']) {
+  --log-fee-tool-track: 2.375rem;
+}
+.grid table:has([data-fee-tool-lanes='3']) {
+  --log-fee-tool-track: 3.5rem;
 }
 .grid td[data-column-id='content'] button {
   max-width: clamp(6rem, 8vw, 12.5rem);

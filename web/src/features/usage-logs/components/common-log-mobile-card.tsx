@@ -137,7 +137,7 @@ export function CommonLogMobileCard<TData>(props: {
           )}
         </div>
         {props.detailsCell && (
-          <div className='[&_button]:min-h-11 [&_button]:min-w-11'>
+          <div className='[&_[data-request-detail-caption]]:block [&_button]:min-h-11 [&_button]:min-w-11 [&_button]:flex-col [&_button]:gap-1'>
             {flexRender(
               props.detailsCell.column.columnDef.cell,
               props.detailsCell.getContext()

@@ -368,12 +368,36 @@ describe('log cost display', () => {
     const details = screen
       .getByRole('term', { name: 'Upstream cost' })
       .closest('dl')
-    expect(charge).toContainElement(
-      screen.getByRole('img', { name: 'Tool: web_search' })
+    const marker = screen.getByRole('img', { name: 'Tool: web_search' })
+    const amount = screen.getByText('$0.02')
+    expect(charge).toContainElement(marker)
+    expect(
+      amount.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(marker.closest('[data-fee-tool-lanes]')).toHaveAttribute(
+      'data-fee-tool-lanes',
+      '1'
     )
     expect(wallet.parentElement).toBe(details?.parentElement)
-    expect(charge).toHaveClass('col-start-2', 'justify-self-end', 'flex-nowrap')
+    expect(charge).toHaveClass('col-start-2', 'grid-cols-subgrid')
     expect(details).toHaveClass('grid-cols-subgrid', 'text-end')
+  })
+
+  test('an observed tool with no positive surcharge leaves no trailing tool slot', () => {
+    renderCost({
+      quota: 10000,
+      other: {
+        invoked_tools: ['web_search'],
+        tool_surcharges: [{ name: 'web_search', count: 1, price: 0 }],
+      },
+    })
+
+    const charge = screen.getByRole('button', { name: /Billing Details/ })
+    expect(charge).toHaveClass('col-start-2', 'justify-self-end')
+    expect(charge.querySelector('[data-fee-tool-lanes]')).toBeNull()
+    expect(
+      screen.queryByRole('img', { name: 'Tool: web_search' })
+    ).not.toBeInTheDocument()
   })
 
   test('administrator sees the recorded estimated upstream cost and gross profit', () => {
