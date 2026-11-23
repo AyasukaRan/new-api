@@ -164,7 +164,9 @@ export function StreamModeCell(props: StreamModeCellProps) {
   const { t } = useTranslation()
   const showStreamError =
     props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
-  let streamLabel = props.isStream ? t('Stream') : t('Non-stream')
+  let streamLabel = props.isStream
+    ? t('Streamed response')
+    : t('Non-streamed response')
   if (props.transport) streamLabel = props.transport.toUpperCase()
   if (props.isTask) {
     streamLabel = props.isSyncTask ? t('Sync') : t('Async')
@@ -174,8 +176,16 @@ export function StreamModeCell(props: StreamModeCellProps) {
     <div className={cn('inline-flex items-center gap-1', props.className)}>
       <StatusBadge
         label={streamLabel}
-        variant={props.isStream ? 'info' : 'neutral'}
         copyable={false}
+        className={cn(
+          'h-5 justify-center rounded-[5px] px-1.5 font-mono text-[11px] font-semibold',
+          props.transport === 'sse' &&
+            'bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200',
+          props.transport === 'ws' &&
+            'bg-sky-100 text-sky-800 dark:bg-sky-400/15 dark:text-sky-200',
+          (!props.transport || props.transport === 'http') &&
+            'bg-muted text-muted-foreground'
+        )}
       />
       {showStreamError && (
         <TooltipProvider>

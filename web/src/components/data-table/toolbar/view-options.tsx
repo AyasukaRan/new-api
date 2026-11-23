@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { Table } from '@tanstack/react-table'
+import { Columns3 } from 'lucide-react'
 import { Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -29,15 +30,21 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { cn } from '@/lib/utils'
+
+import styles from './view-options.module.css'
 
 type DataTableViewOptionsProps<TData> = {
   table: Table<TData>
+  columnSwitches?: boolean
 }
 
 export function DataTableViewOptions<TData>({
   table,
+  columnSwitches = false,
 }: DataTableViewOptionsProps<TData>) {
   const { t } = useTranslation()
+  const label = columnSwitches ? t('Column settings') : t('View')
 
   const hideableColumns = table
     .getAllColumns()
@@ -47,18 +54,18 @@ export function DataTableViewOptions<TData>({
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger
         render={
-          <Button
-            variant='outline'
-            className='shrink-0'
-            aria-label={t('View')}
-          />
+          <Button variant='outline' className='shrink-0' aria-label={label} />
         }
       >
-        {t('View')}
+        {columnSwitches && <Columns3 aria-hidden className='size-3.5' />}
+        {label}
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align='end'
-        className='max-h-[65vh] w-52 overflow-y-auto'
+        className={cn(
+          'max-h-[65vh] w-52 overflow-y-auto',
+          columnSwitches && styles.switches
+        )}
       >
         <DropdownMenuGroup>
           <DropdownMenuLabel>{t('Toggle columns')}</DropdownMenuLabel>
@@ -66,7 +73,8 @@ export function DataTableViewOptions<TData>({
             return (
               <Fragment key={column.id}>
                 <DropdownMenuCheckboxItem
-                  className='capitalize'
+                  className={columnSwitches ? undefined : 'capitalize'}
+                  closeOnClick={columnSwitches ? false : undefined}
                   checked={column.getIsVisible()}
                   onCheckedChange={(value) => column.toggleVisibility(!!value)}
                 >
@@ -79,7 +87,10 @@ export function DataTableViewOptions<TData>({
                     (field: { id: string; label: string }) => (
                       <DropdownMenuCheckboxItem
                         key={field.id}
-                        className='pl-10 text-xs'
+                        className={
+                          columnSwitches ? styles.field : 'pl-10 text-xs'
+                        }
+                        closeOnClick={columnSwitches ? false : undefined}
                         checked={
                           table.getState().columnVisibility[field.id] !== false
                         }

@@ -173,14 +173,20 @@ it('applies mobile drawer filters only when Search is pressed', async () => {
 it('keeps all quick actions visible without opening a menu', async () => {
   await renderMobileFilter()
   const user = userEvent.setup()
-  for (const name of ['Hide', 'Filter', 'Search', 'Export', 'View']) {
+  for (const name of [
+    'Hide',
+    'Filter',
+    'Search',
+    'Export',
+    'Column settings',
+  ]) {
     expect(screen.getByRole('button', { name })).toBeVisible()
   }
   expect(screen.queryByRole('button', { name: 'More' })).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Hide' }))
   expect(screen.getByRole('button', { name: 'Show' })).toBeVisible()
   screen.getByRole('button', { name: 'Show' }).focus()
-  for (const name of ['Filter', 'Search', 'Export', 'View']) {
+  for (const name of ['Filter', 'Search', 'Export', 'Column settings']) {
     await user.tab()
     expect(screen.getByRole('button', { name })).toHaveFocus()
   }
@@ -252,6 +258,56 @@ it('places the end action between Search and View on desktop', () => {
   expect(names.slice(-4)).toEqual(['Reset', 'Search', 'Export', 'View'])
 })
 
+it('keeps the common-log column menu open for keyboard edits and restores field preferences when a column is shown again', async () => {
+  function ColumnFixture() {
+    const table = useReactTable({
+      data: [{ ip: '192.0.2.1' }],
+      columns: [
+        {
+          id: 'request_source',
+          accessorKey: 'ip',
+          header: 'Request source',
+          meta: { displayFields: [{ id: 'ip', label: 'IP Address' }] },
+        },
+      ],
+      getCoreRowModel: getCoreRowModel(),
+    })
+    return (
+      <LogsFilterToolbar
+        commonUsage
+        table={table}
+        primaryFilters={null}
+        hasActiveFilters={false}
+        onReset={() => {}}
+        onSearch={() => {}}
+      />
+    )
+  }
+  render(<ColumnFixture />)
+  const user = userEvent.setup()
+  const trigger = screen.getByRole('button', { name: 'Column settings' })
+  trigger.focus()
+  await user.keyboard('{Enter}')
+  const parent = screen.getByRole('menuitemcheckbox', {
+    name: 'Request source',
+  })
+  const field = screen.getByRole('menuitemcheckbox', { name: 'IP Address' })
+  await waitFor(() => expect(parent).toHaveFocus())
+  await user.keyboard('{ArrowDown}{Enter}')
+  expect(field).not.toBeChecked()
+  await user.keyboard('{ArrowUp}{Enter}')
+  expect(parent).not.toBeChecked()
+  expect(
+    screen.queryByRole('menuitemcheckbox', { name: 'IP Address' })
+  ).toBeNull()
+  await user.keyboard('{Enter}')
+  expect(
+    screen.getByRole('menuitemcheckbox', { name: 'IP Address' })
+  ).not.toBeChecked()
+  await user.keyboard('{Escape}')
+  expect(trigger).toHaveFocus()
+})
+
 it('collapses only date and statistics while keeping the right-hand quick actions visible', async () => {
   await renderMobileFilter()
   const user = userEvent.setup()
@@ -268,7 +324,13 @@ it('collapses only date and statistics while keeping the right-hand quick action
   expect(screen.queryByRole('button', { name: date })).not.toBeInTheDocument()
   expect(screen.queryByText('Usage')).not.toBeInTheDocument()
   const actions = screen.getByRole('group', { name: 'Actions' })
-  for (const name of ['Hide', 'Filter', 'Search', 'Export', 'View']) {
+  for (const name of [
+    'Hide',
+    'Filter',
+    'Search',
+    'Export',
+    'Column settings',
+  ]) {
     expect(within(actions).getByRole('button', { name })).toBeVisible()
   }
   expect(

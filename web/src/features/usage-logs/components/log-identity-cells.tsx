@@ -18,8 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { VisibilityState } from '@tanstack/react-table'
 import {
-  Fingerprint,
-  Globe,
+  Braces,
+  Link,
+  Monitor,
+  Network,
   KeyRound,
   Tags,
   Terminal,
@@ -61,7 +63,7 @@ export function LogGroupLabel({
           group={visible ? group : '••••'}
           type='text'
           size='sm'
-          className='max-w-36 truncate'
+          className='text-muted-foreground dark:text-muted-foreground max-w-36 truncate text-xs font-normal'
         />
       )}
       {ratio != null && (
@@ -100,11 +102,11 @@ export function LogAccountCell({
   const displayable = isDisplayableLogType(log.type)
   const token = displayable && logTokenName(log, t)
   return (
-    <div className='flex max-w-56 flex-col items-start justify-center gap-1 text-xs leading-tight'>
+    <div className='flex max-w-full min-w-0 flex-col items-start justify-center gap-[3px] text-xs leading-snug'>
       {isAdmin && log.username && (
         <button
           type='button'
-          className='hover:text-primary inline-flex max-w-full items-center gap-1.5 font-medium'
+          className='hover:text-primary inline-flex max-w-full items-center gap-1.5 font-semibold'
           onClick={(e) => {
             e.stopPropagation()
             setSelectedUserId(log.user_id)
@@ -128,6 +130,7 @@ export function LogAccountCell({
             size='sm'
             showDot={false}
             variant='neutral'
+            className='text-muted-foreground dark:text-muted-foreground font-mono text-[11px]'
             copyable={sensitiveVisible && !!log.token_name}
             copyText={sensitiveVisible ? log.token_name : undefined}
             label={sensitiveVisible ? token : '••••'}
@@ -145,6 +148,13 @@ export function LogAccountCell({
   )
 }
 
+const clientIcons = new Map([
+  ['Claude Code', Braces],
+  ['Codex Desktop', Monitor],
+  ['Sub2API', Network],
+  ['Go HTTP Client', Link],
+])
+
 export function LogSourceCell({
   log,
   isAdmin,
@@ -157,40 +167,66 @@ export function LogSourceCell({
   const { t } = useTranslation()
   const { sensitiveVisible } = useUsageLogsContext()
   const other = getLogMetadata(log)
-  const fields = [
-    {
-      id: 'client_tool',
-      label: t('Client'),
-      icon: Terminal,
-      value: isAdmin && other?.client_tool,
-    },
+  const client =
+    typeof other?.client_tool === 'string' ? other.client_tool.trim() : ''
+  const ClientIcon = (sensitiveVisible && clientIcons.get(client)) || Terminal
+  const hasClient = isAdmin && isDisplayableLogType(log.type)
+  const details = [
     {
       id: 'user_agent',
+      short: 'UA',
       label: t('User Agent'),
-      icon: Fingerprint,
-      value: isAdmin && (other?.admin_info?.user_agent || other?.user_agent),
+      value: other?.admin_info?.user_agent || other?.user_agent,
+      allowed: hasClient,
     },
-    { id: 'ip', label: t('IP Address'), icon: Globe, value: log.ip },
+    {
+      id: 'ip',
+      short: 'IP',
+      label: t('IP Address'),
+      value: log.ip,
+      allowed: true,
+    },
   ]
   return (
-    <div className='flex max-w-48 min-w-0 flex-col justify-center gap-1 text-xs leading-tight'>
-      {fields.map(({ id, label, icon: Icon, value }) =>
-        typeof value === 'string' &&
-        value.trim() &&
-        visibility[id] !== false ? (
-          <div
-            key={id}
-            className='text-muted-foreground flex min-w-0 items-center gap-1.5'
-          >
-            <Icon aria-label={label} className='size-3.5 shrink-0' />
-            <TruncatedCell
-              tabIndex={0}
-              cellClassName={cn(id !== 'client_tool' && 'font-mono')}
+    <div className='flex max-w-full min-w-0 flex-col justify-center gap-0.5 text-xs leading-snug'>
+      {hasClient && visibility.client_tool !== false && (
+        <div className='flex min-w-0 items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300'>
+          <ClientIcon aria-label={t('Client')} className='size-3.5 shrink-0' />
+          <TruncatedCell tabIndex={0}>
+            {sensitiveVisible ? client || t('Unidentified source') : '••••'}
+          </TruncatedCell>
+        </div>
+      )}
+      {details.map(
+        ({ id, short, label, value, allowed }) =>
+          allowed &&
+          visibility[id] !== false && (
+            <div
+              key={id}
+              className='grid min-w-0 grid-cols-[2ch_minmax(0,1fr)] items-baseline gap-x-1.5 font-mono text-[11px]'
             >
-              {sensitiveVisible ? value : '••••'}
-            </TruncatedCell>
-          </div>
-        ) : null
+              <span aria-label={label} className='text-muted-foreground'>
+                {short}
+              </span>
+              {typeof value === 'string' && value.trim() ? (
+                <TruncatedCell
+                  tabIndex={0}
+                  cellClassName={cn(
+                    id === 'user_agent' && 'text-muted-foreground'
+                  )}
+                >
+                  {sensitiveVisible ? value : '••••'}
+                </TruncatedCell>
+              ) : (
+                <span
+                  className='text-muted-foreground/70'
+                  title={t('Not recorded')}
+                >
+                  —
+                </span>
+              )}
+            </div>
+          )
       )}
     </div>
   )

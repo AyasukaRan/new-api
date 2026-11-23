@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -57,9 +57,11 @@ import { TaskLogsFilterBar } from './task-logs-filter-bar'
 import { UsageLogsMobileList } from './usage-logs-mobile-card'
 import { useLogsViewScope, type LogsViewAccess } from './usage-logs-provider'
 
+import styles from './common-logs-table.module.css'
+
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 
-const commonColumnVisibility = { request_path: false }
+const commonColumnVisibility = { request_path: true }
 
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
@@ -94,28 +96,29 @@ interface UsageLogsTableProps {
 export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   const { t } = useTranslation()
   const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
+  const isCommon = logCategory === 'common'
+  const tableArea = useRef<HTMLDivElement>(null)
+  const [layout, setLayout] = useState<'cards' | 'compact' | 'wide'>('wide')
+  useLayoutEffect(() => {
+    const node = tableArea.current
+    if (!isCommon || !node) return
+    const update = () => {
+      const width = node.clientWidth
+      if (!width) return
+      if (width < 1250) setLayout('cards')
+      else if (width < 1640) setLayout('compact')
+      else setLayout('wide')
+    }
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(update)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [isCommon])
   const getColumnClassName = useCallback(
-    (id: string, kind: 'header' | 'cell') => {
-      if (logCategory !== 'common') return kind === 'cell' ? 'py-3.5' : ''
-      const centered = [
-        'reasoning_effort',
-        'invoked_tools',
-        'is_stream',
-      ].includes(id)
-      if (kind === 'header') {
-        return cn(
-          (centered || id === 'prompt_tokens') &&
-            'text-center [&>div]:justify-center',
-          id === 'quota' && 'text-right [&>div]:justify-end'
-        )
-      }
-      return cn(
-        'align-middle py-2',
-        centered && 'text-center [&>div]:mx-auto',
-        id === 'quota' && 'text-right'
-      )
-    },
-    [logCategory]
+    (_id: string, kind: 'header' | 'cell') =>
+      kind === 'cell' && !isCommon ? 'py-3.5' : undefined,
+    [isCommon]
   )
   const {
     isAdminView: isAdmin,
@@ -284,7 +287,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     isRoot,
     setSelectedLog,
     logSource,
-    showBillingSource
+    showBillingSource,
+    layout === 'compact'
   )
   const isLoadingData = isLoading || (isFetching && !data)
 
@@ -312,11 +316,10 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ensurePageInRange,
   })
 
-  const isCommon = logCategory === 'common'
-
   return (
     <>
       <div
+        ref={tableArea}
         className='relative h-full min-h-0'
         onScrollCapture={(event) => {
           const target = event.target
@@ -331,7 +334,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       >
         <DataTablePage
           table={table}
-          compactPagination={isMobile && isCommon}
+          compactPagination={isCommon && (isMobile || layout === 'cards')}
+          mobileLayout={isCommon ? isMobile || layout === 'cards' : undefined}
           columns={columns as ColumnDef<Record<string, unknown>>[]}
           isLoading={isLoadingData}
           isFetching={isFetching}
@@ -346,16 +350,18 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
                 )
           }
           skeletonKeyPrefix='usage-log-skeleton'
-          applyHeaderSize
+          applyHeaderSize={!isCommon}
           getColumnClassName={getColumnClassName}
-          tableClassName={cn(
-            '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_th]:text-[13px]',
-            isCommon &&
-              table.getColumn('model_name')?.getIsVisible() &&
-              'min-[641px]:max-[1300px]:[&_[data-column-id=reasoning_effort]]:hidden min-[641px]:max-[1300px]:[&_[data-column-id=invoked_tools]]:hidden',
-            !isCommon &&
-              '[&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
-          )}
+          tableClassName={
+            isCommon
+              ? cn(
+                  styles.grid,
+                  layout === 'compact' &&
+                    table.getColumn('model_name')?.getIsVisible() &&
+                    styles.compact
+                )
+              : '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
+          }
           mobile={
             <UsageLogsMobileList
               table={table}

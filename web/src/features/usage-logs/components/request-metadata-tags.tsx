@@ -76,6 +76,27 @@ export function RequestMetadataTags(props: {
     Array.isArray(adminMetadata.invoked_tools) &&
     adminMetadata.invoked_tools.length === 0
 
+  if (props.field === 'reasoning_effort' && effort) {
+    const variant = getReasoningEffortVariant(effort)
+    return (
+      <StatusBadge
+        label={effort}
+        title={t('Reasoning: {{effort}}', { effort })}
+        copyable={false}
+        className={cn(
+          'h-5 min-w-[7.5ch] max-w-full justify-center rounded-sm px-1.5 font-mono text-[11px] font-semibold',
+          variant === 'orange' &&
+            'bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-200',
+          variant === 'yellow' &&
+            'bg-violet-100 text-violet-800 dark:bg-violet-300/15 dark:text-violet-200',
+          variant === 'green' &&
+            'bg-emerald-100 text-emerald-800 dark:bg-emerald-300/15 dark:text-emerald-200',
+          variant === 'grey' && 'bg-muted text-muted-foreground'
+        )}
+      />
+    )
+  }
+
   if (!effort && !client && tools.length === 0 && !partial && !noTools) {
     return null
   }
@@ -86,17 +107,20 @@ export function RequestMetadataTags(props: {
       return (
         <span
           key={name}
+          tabIndex={0}
           title={name}
-          className='bg-muted text-muted-foreground inline-flex size-6 items-center justify-center rounded'
+          className='bg-muted text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex size-[26px] shrink-0 items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none [[data-slot=popover-content]_&]:w-auto [[data-slot=popover-content]_&]:gap-1.5 [[data-slot=popover-content]_&]:px-2'
         >
-          <Icon aria-hidden className='size-3.5' />
-          <span className='sr-only'>{name}</span>
+          <Icon aria-hidden className='size-[15px]' />
+          <span className='sr-only [[data-slot=popover-content]_&]:not-sr-only'>
+            {name}
+          </span>
         </span>
       )
     })
     return (
       <div
-        className='flex items-center justify-center gap-1'
+        className='flex items-center justify-center gap-1 [&>div]:ml-0'
         aria-label={t('Tools')}
       >
         <BadgeListCell

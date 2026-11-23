@@ -35,7 +35,7 @@ import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 
-function StatBadge(props: {
+function LogStat(props: {
   label: string
   value: string | number
   accent: string
@@ -44,9 +44,13 @@ function StatBadge(props: {
     <span
       role='group'
       aria-label={props.label}
-      className='border-border/60 bg-muted/25 inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs shadow-xs'
+      className='inline-flex items-center gap-1.5 text-xs whitespace-nowrap'
     >
-      <span className={cn('h-3.5 w-0.5 rounded-full', props.accent)} />
+      <span
+        aria-hidden
+        data-slot='log-stat-accent'
+        className={cn('h-3 w-0.5 shrink-0 rounded-full', props.accent)}
+      />
       <span className='text-muted-foreground'>{props.label}</span>
       <span className='text-foreground/85 font-mono font-semibold tabular-nums'>
         {props.value}
@@ -163,18 +167,25 @@ export function CommonLogsStats({
   }
 
   return (
-    <div className='flex flex-wrap items-center gap-2'>
-      <StatBadge
+    <div
+      className={cn(
+        'flex min-w-0 flex-wrap items-center',
+        logSource === 'test'
+          ? 'gap-2 [&>[role=group]]:h-7 [&>[role=group]]:rounded-md [&>[role=group]]:border [&>[role=group]]:border-border/60 [&>[role=group]]:bg-muted/25 [&>[role=group]]:px-2.5'
+          : 'gap-x-4 gap-y-1.5 py-1 [&_[data-slot=log-stat-accent]]:hidden'
+      )}
+    >
+      <LogStat
         label={logSource === 'test' ? t('Estimated test cost') : t('Usage')}
         value={sensitiveVisible ? usageValue : '••••'}
         accent='bg-sky-500/70'
       />
-      <StatBadge
+      <LogStat
         label={t('RPM')}
         value={currentStats?.rpm ?? '—'}
         accent='bg-rose-500/65'
       />
-      <StatBadge
+      <LogStat
         label={t('TPM')}
         value={currentStats?.tpm ?? '—'}
         accent='bg-slate-400/70'
@@ -183,7 +194,7 @@ export function CommonLogsStats({
         <>
           {(finance?.free_quota ?? 0) > 0 && currentStats && (
             <>
-              <StatBadge
+              <LogStat
                 label={t('Free allowance deduction')}
                 value={
                   sensitiveVisible
@@ -192,7 +203,7 @@ export function CommonLogsStats({
                 }
                 accent='bg-sky-500/70'
               />
-              <StatBadge
+              <LogStat
                 label={t('Revenue')}
                 value={
                   sensitiveVisible
@@ -206,12 +217,12 @@ export function CommonLogsStats({
             </>
           )}
 
-          <StatBadge
+          <LogStat
             label={t('Upstream cost')}
             value={sensitiveVisible ? costValue : '••••'}
             accent='bg-amber-500/70'
           />
-          <StatBadge
+          <LogStat
             label={t('Gross profit')}
             value={sensitiveVisible ? profitValue : '••••'}
             accent='bg-emerald-500/70'

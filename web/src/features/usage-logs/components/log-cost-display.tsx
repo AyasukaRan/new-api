@@ -275,13 +275,14 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
                 variant='ghost'
                 onClick={(event) => event.stopPropagation()}
                 aria-label={`${t('Billing Details')} · ${formatLogQuota(quota)}`}
-                className='h-auto min-h-6 max-w-full gap-1.5 rounded-sm px-0.5 py-0.5 text-sm'
+                className='h-auto min-h-6 max-w-full gap-1.5 rounded-sm px-0 py-0.5 text-sm'
               >
                 {Array.from(toolCounts, ([name, count]) => {
                   const Icon = getLogToolIcon(name)
                   return (
                     <span
                       key={name}
+                      data-billed-tool={name}
                       data-tool-surcharge-indicator='true'
                       role='img'
                       aria-label={t('Tool: {{name}}', { name })}
@@ -313,7 +314,7 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
           </Dialog>
         </div>
         {(free > 0 || props.isAdmin) && (
-          <dl className='text-muted-foreground grid grid-cols-[auto_auto] items-baseline gap-x-2 gap-y-0.5 text-[11px] leading-tight [&_dd]:text-end [&_dd]:font-mono [&_dd]:whitespace-nowrap [&_dd]:tabular-nums'>
+          <dl className='text-muted-foreground grid w-full grid-cols-[1fr_auto] items-baseline gap-x-2 gap-y-0.5 text-[11px] leading-tight [&_dd]:text-end [&_dd]:font-mono [&_dd]:whitespace-nowrap [&_dd]:tabular-nums [&_dt]:text-start'>
             {free > 0 && (
               <>
                 <dt>{t('Free allowance deduction')}</dt>

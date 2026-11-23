@@ -154,6 +154,8 @@ export type DataTablePageProps<TData> = {
    * Useful for pages where the table is read-only and short.
    */
   hideMobile?: boolean
+  /** Explicit content-width decision for pages with a custom mobile list. */
+  mobileLayout?: boolean
 
   /**
    * Row className resolver — applied to both desktop `TableRow` and mobile card.
@@ -316,7 +318,7 @@ export type DataTablePageProps<TData> = {
  */
 export function DataTablePage<TData>(props: DataTablePageProps<TData>) {
   const isMobile = useMediaQuery('(max-width: 640px)')
-  const showMobile = isMobile && !props.hideMobile
+  const showMobile = (props.mobileLayout ?? isMobile) && !props.hideMobile
 
   const [internalViewMode, setInternalViewMode] = useDataTableViewMode({
     storageKey: props.viewModeStorageKey,

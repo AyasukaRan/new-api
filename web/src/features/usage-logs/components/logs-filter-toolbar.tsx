@@ -45,6 +45,7 @@ interface LogsFilterToolbarProps<TData> {
   primaryFilters: ReactNode
   advancedFilters?: ReactNode
   compactMobile?: boolean
+  commonUsage?: boolean
   mobilePinnedFilters?: ReactNode
   mobileFilters?: ReactNode
   mobileFilterCount?: number
@@ -183,7 +184,10 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
                 {t('Search')}
               </Button>
               {props.actionEnd}
-              <DataTableViewOptions table={props.table} />
+              <DataTableViewOptions
+                table={props.table}
+                columnSwitches={props.commonUsage}
+              />
             </>
           }
         >
@@ -244,8 +248,9 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
 
   return (
     <div
+      data-slot={props.commonUsage ? 'logs-filters' : undefined}
       className={cn(
-        'bg-card/50 rounded-lg border p-2.5 sm:p-3',
+        !props.commonUsage && 'bg-card/50 rounded-lg border p-2.5 sm:p-3',
         props.className
       )}
     >
@@ -287,7 +292,10 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
             {t('Search')}
           </Button>
           {props.actionEnd}
-          <DataTableViewOptions table={props.table} />
+          <DataTableViewOptions
+            table={props.table}
+            columnSwitches={props.commonUsage}
+          />
         </div>
       </div>
     </div>

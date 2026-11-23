@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { GitBranch, Sparkles } from 'lucide-react'
+import { GitBranch, KeyRound, Sparkles } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -46,7 +46,6 @@ import {
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
-import { useMediaQuery } from '@/hooks'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -78,10 +77,7 @@ import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { LogCostDisplay } from '../log-cost-display'
 import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
 import { ModelBadge } from '../model-badge'
-import {
-  RequestMetadataTags,
-  type RequestMetadataField,
-} from '../request-metadata-tags'
+import { RequestMetadataTags } from '../request-metadata-tags'
 import { StreamModeCell } from '../timing-metrics-cell'
 import { TokenPerformanceCell } from '../token-performance-cell'
 import { useUsageLogsContext } from '../usage-logs-provider'
@@ -362,10 +358,10 @@ export function useCommonLogsColumns(
   isAdmin: boolean,
   onShowDetails: (log: UsageLog) => void,
   source: LogSource = 'usage',
-  showBillingSource = false
+  showBillingSource = false,
+  compact = false
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
-  const compact = useMediaQuery('(min-width: 641px) and (max-width: 1299px)')
   const currency = useSystemConfigStore((state) => state.config.currency)
   return useMemo(() => {
     const columns: ColumnDef<UsageLog>[] = [
@@ -376,19 +372,32 @@ export function useCommonLogsColumns(
           const log = row.original
           const timestamp = row.getValue('created_at') as number
           const config = getLogTypeConfig(log.type, source)
+          const dateTime = formatTimestampToDate(timestamp)
+          const [date, time] = dateTime.split(' ')
 
           return (
-            <div className='flex min-w-0 flex-col gap-0.5'>
-              <span className='truncate font-mono text-xs tabular-nums'>
-                {formatTimestampToDate(timestamp)}
+            <div
+              className='flex min-w-0 flex-col items-start gap-0.5 leading-tight'
+              title={dateTime}
+            >
+              <span className='font-mono text-[13px] font-semibold tabular-nums'>
+                {time || date}
               </span>
-              <StatusBadge
-                label={t(config.label)}
-                variant={config.color as StatusBadgeProps['variant']}
-                size='sm'
-                copyable={false}
-                className='-ml-1.5 !text-xs [&_span]:!text-xs'
-              />
+              <div className='text-muted-foreground flex items-center gap-1.5 text-[11px] whitespace-nowrap'>
+                <StatusBadge
+                  label={t(config.label)}
+                  variant={config.color as StatusBadgeProps['variant']}
+                  type='text'
+                  showDot
+                  copyable={false}
+                  className='text-muted-foreground dark:text-muted-foreground gap-1 text-[11px] font-normal'
+                />
+                {time && (
+                  <span className='font-mono text-[10px] tabular-nums'>
+                    {date.slice(5)}
+                  </span>
+                )}
+              </div>
             </div>
           )
         },
@@ -440,17 +449,17 @@ export function useCommonLogsColumns(
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <div className='flex max-w-[160px] flex-col gap-0.5' />
+                    <div className='flex max-w-full min-w-0 flex-col gap-0.5' />
                   }
                 >
-                  <div className='relative inline-flex w-fit items-center gap-1'>
+                  <div className='inline-flex w-fit max-w-full items-center gap-1.5'>
                     <StatusBadge
                       label={channelIdDisplay}
-                      autoColor={String(log.channel)}
+                      type='text'
                       copyText={String(log.channel)}
                       size='sm'
                       showDot={false}
-                      className='font-mono'
+                      className='text-foreground dark:text-foreground font-mono text-xs font-semibold'
                     />
                     {showMultiKeyIndex && (
                       <StatusBadge
@@ -459,7 +468,8 @@ export function useCommonLogsColumns(
                         showDot={false}
                         copyable={false}
                         variant='neutral'
-                        className='h-5 min-w-5 justify-center rounded-full px-1 font-mono text-xs'
+                        className='border-border/70 text-muted-foreground h-4 gap-1 rounded border px-1 font-mono text-[10px]'
+                        icon={KeyRound}
                         aria-label={`${t('Key')} ${multiKeyIndex}`}
                       />
                     )}
@@ -497,7 +507,8 @@ export function useCommonLogsColumns(
                     {affinity && (
                       <button
                         type='button'
-                        className='absolute -top-1 -right-1 leading-none text-amber-500'
+                        aria-label={t('Channel Affinity')}
+                        className='text-muted-foreground hover:text-foreground inline-flex size-4 shrink-0 items-center justify-center'
                         onClick={(e) => {
                           e.stopPropagation()
                           setAffinityTarget({
@@ -512,12 +523,12 @@ export function useCommonLogsColumns(
                           setAffinityDialogOpen(true)
                         }}
                       >
-                        <Sparkles className='size-3 fill-current' />
+                        <Sparkles className='size-3' />
                       </button>
                     )}
                   </div>
                   {log.channel_name && (
-                    <span className='text-muted-foreground/70 truncate [font-family:var(--font-body)] !text-xs'>
+                    <span className='text-muted-foreground truncate text-[11px]'>
                       {channelName}
                     </span>
                   )}
@@ -577,7 +588,7 @@ export function useCommonLogsColumns(
         if (!isDisplayableLogType(row.original.type)) return null
         const model = formatModelName(row.original)
         return (
-          <div className='flex w-fit max-w-64 flex-col items-start gap-1'>
+          <div className='flex max-w-full min-w-0 flex-col items-start gap-1'>
             <ModelBadge
               modelName={model.name}
               actualModel={model.actualModel}
@@ -608,27 +619,29 @@ export function useCommonLogsColumns(
       },
       meta: { mobileTitle: true },
     })
-    const attributes: { field: RequestMetadataField; label: string }[] = [
-      { field: 'reasoning_effort', label: t('Reasoning Effort') },
-    ]
-    if (isAdmin) {
-      attributes.push({ field: 'invoked_tools', label: t('Tools') })
-    }
-    for (const { field, label } of attributes) {
-      columns.push({
-        id: field,
-        header: label,
-        accessorFn: (log) => getLogMetadata(log)?.[field],
-        cell: ({ row }) =>
+    columns.push({
+      id: 'reasoning_effort',
+      header: t('Reasoning Effort'),
+      accessorFn: (log) => getLogMetadata(log)?.reasoning_effort,
+      cell: ({ row }) => {
+        const metadata = getLogMetadata(row.original)
+        return (
           isDisplayableLogType(row.original.type) && (
-            <RequestMetadataTags
-              field={field}
-              isAdmin={isAdmin}
-              metadata={getLogMetadata(row.original)}
-            />
-          ),
-      })
-    }
+            <div className='flex w-full min-w-0 justify-center'>
+              {metadata?.reasoning_effort ? (
+                <RequestMetadataTags
+                  field='reasoning_effort'
+                  isAdmin={isAdmin}
+                  metadata={metadata}
+                />
+              ) : (
+                <span className='text-muted-foreground/65'>—</span>
+              )}
+            </div>
+          )
+        )
+      },
+    })
     columns.push({
       id: 'request_source',
       accessorFn: (log) => log.ip,
@@ -652,6 +665,23 @@ export function useCommonLogsColumns(
         />
       ),
     })
+    if (isAdmin) {
+      columns.push({
+        id: 'invoked_tools',
+        header: t('Tools'),
+        accessorFn: (log) => getLogMetadata(log)?.invoked_tools,
+        cell: ({ row }) =>
+          isDisplayableLogType(row.original.type) && (
+            <div className='text-muted-foreground/65 flex w-full min-w-0 justify-center empty:after:content-["—"]'>
+              <RequestMetadataTags
+                field='invoked_tools'
+                isAdmin
+                metadata={getLogMetadata(row.original)}
+              />
+            </div>
+          ),
+      })
+    }
     columns.push(
       {
         accessorKey: 'is_stream',
@@ -667,16 +697,7 @@ export function useCommonLogsColumns(
           const other = getLogMetadata(log)
           const visibility = table.getState().columnVisibility
           return (
-            <div className='flex max-w-48 flex-col items-center justify-center gap-1'>
-              {isAdmin &&
-                visibility.request_path !== false &&
-                isDisplayableLogType(log.type) &&
-                log.type !== LOG_TYPE_ENUM.REFUND &&
-                other?.request_path && (
-                  <TruncatedCell cellClassName='max-w-full font-mono text-xs'>
-                    {other.request_path}
-                  </TruncatedCell>
-                )}
+            <div className='flex w-full min-w-0 flex-col items-center justify-center gap-1'>
               {visibility.response_transport !== false &&
                 isTimingLogType(log.type) && (
                   <StreamModeCell
@@ -689,6 +710,15 @@ export function useCommonLogsColumns(
                       (other?.ws ? 'ws' : undefined)
                     }
                   />
+                )}
+              {isAdmin &&
+                visibility.request_path !== false &&
+                isDisplayableLogType(log.type) &&
+                log.type !== LOG_TYPE_ENUM.REFUND &&
+                other?.request_path && (
+                  <TruncatedCell cellClassName='text-muted-foreground max-w-full font-mono text-[11px]'>
+                    {other.request_path}
+                  </TruncatedCell>
                 )}
             </div>
           )

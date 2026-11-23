@@ -669,6 +669,7 @@ export function CommonLogsFilterBar<TData>(
     <LogsFilterToolbar
       table={props.table}
       compactMobile
+      commonUsage={!isTest}
       stats={statsBar}
       actionStart={sensitiveToggle}
       actionEnd={<ExportLogsDialog livePreset={streamPreset} />}

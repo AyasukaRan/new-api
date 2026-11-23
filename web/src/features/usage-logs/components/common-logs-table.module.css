@@ -1,0 +1,137 @@
+.grid table {
+  width: 100%;
+  border-spacing: 0;
+  line-height: 1.35;
+  font-size: 13px;
+}
+.grid th,
+.grid td {
+  vertical-align: middle;
+  padding-inline: clamp(7px, 0.6vw, 14px);
+}
+.grid th {
+  height: 38px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+.grid td {
+  height: 72px;
+  padding-block: 7px;
+}
+.grid
+  th:is(
+    [data-column-id='created_at'],
+    [data-column-id='channel'],
+    [data-column-id='reasoning_effort'],
+    [data-column-id='invoked_tools'],
+    [data-column-id='is_stream'],
+    [data-column-id='quota'],
+    [data-column-id='content']
+  ) {
+  width: 1%;
+}
+.grid th[data-column-id='model_name'] {
+  width: 15%;
+}
+.grid th[data-column-id='request_source'] {
+  width: 14%;
+}
+.grid th[data-column-id='prompt_tokens'] {
+  width: 25%;
+}
+.grid
+  :is(th, td):is(
+    [data-column-id='reasoning_effort'],
+    [data-column-id='invoked_tools'],
+    [data-column-id='is_stream']
+  ) {
+  text-align: center;
+}
+.grid
+  :is(th, td):is(
+    [data-column-id='reasoning_effort'],
+    [data-column-id='invoked_tools'],
+    [data-column-id='is_stream']
+  )
+  > div {
+  margin-inline: auto;
+  justify-content: center;
+}
+.grid th[data-column-id='prompt_tokens'] {
+  text-align: center;
+}
+.grid th[data-column-id='prompt_tokens'] > div {
+  justify-content: center;
+}
+.grid :is(th, td)[data-column-id='quota'] {
+  text-align: end;
+}
+.grid th[data-column-id='quota'] > div {
+  justify-content: end;
+}
+.grid td[data-column-id='quota'] {
+  padding-inline-start: clamp(12px, 1.1vw, 24px);
+}
+.grid td[data-column-id='content'] button {
+  max-width: clamp(6rem, 8vw, 12.5rem);
+}
+.grid td[data-column-id='request_source'] {
+  max-width: 14rem;
+}
+.grid td[data-column-id='is_stream'] {
+  max-width: 10rem;
+}
+.grid td[data-column-id='model_name'] {
+  max-width: 16rem;
+}
+.grid td[data-column-id='token_name'] {
+  max-width: 13rem;
+}
+
+.compact
+  :is(th, td):is(
+    [data-column-id='reasoning_effort'],
+    [data-column-id='invoked_tools']
+  ) {
+  display: none;
+}
+.compact th,
+.compact td {
+  padding-inline: 5px;
+}
+.compact td[data-column-id='content'] button {
+  max-width: 5.5rem;
+}
+.compact td[data-column-id='is_stream'] {
+  max-width: 7rem;
+}
+.compact td[data-column-id='request_source'] {
+  max-width: 9rem;
+}
+.compact td[data-column-id='model_name'] {
+  max-width: 12rem;
+}
+
+.grid td[data-column-id='prompt_tokens'] dl {
+  font-size: 11.5px;
+}
+.grid
+  :is([data-billed-tool='file_search'], [data-billed-tool='document_parse']) {
+  color: var(--chart-4);
+}
+.grid [data-billed-tool*='image'] {
+  color: var(--chart-3);
+}
+.compact td[data-column-id='prompt_tokens'] > div {
+  min-width: 19rem;
+  column-gap: 6px;
+}
+@media (min-width: 1580px) {
+  .grid td[data-column-id='prompt_tokens'] dd {
+    font-size: 13px;
+  }
+  .grid td {
+    height: 78px;
+  }
+}

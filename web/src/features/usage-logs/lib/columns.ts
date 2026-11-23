@@ -37,14 +37,16 @@ export function useColumnsByCategory(
   isRoot: boolean,
   onShowDetails: (log: UsageLog) => void,
   source: LogSource = 'usage',
-  showBillingSource = false
+  showBillingSource = false,
+  compact = false
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): ColumnDef<any>[] {
   const commonColumns = useCommonLogsColumns(
     isAdmin,
     onShowDetails,
     source,
-    showBillingSource
+    showBillingSource,
+    compact
   )
   const drawingColumns = useDrawingLogsColumns(isAdmin)
   const taskColumns = useTaskLogsColumns(isAdmin, isRoot)
