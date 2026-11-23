@@ -17,12 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { ColumnDef } from '@tanstack/react-table'
-import { GitBranch, KeyRound, Sparkles } from 'lucide-react'
+import { ChevronRight, GitBranch, KeyRound, Sparkles } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { TruncatedCell } from '@/components/data-table'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -392,31 +393,29 @@ export function useCommonLogsColumns(
 
           return (
             <div
-              className='flex min-w-0 flex-col items-start gap-0.5 leading-tight'
+              className='grid w-fit gap-1 whitespace-nowrap'
               title={dateTime}
             >
-              <button
-                type='button'
-                title={t('Click to view full details')}
-                onClick={() => onShowDetails(log)}
-                className='cursor-pointer rounded-sm font-mono text-[13px] font-semibold tabular-nums hover:underline focus-visible:outline'
-              >
-                {time || date}
-              </button>
-              <div className='text-muted-foreground flex items-center gap-1.5 text-[11px] whitespace-nowrap'>
+              {time ? (
+                <time
+                  dateTime={`${date}T${time}`}
+                  className='font-mono text-[13px] leading-4 font-medium tabular-nums'
+                >
+                  {time}
+                </time>
+              ) : (
+                <span>{date}</span>
+              )}
+              <div className='text-muted-foreground flex items-center gap-2 text-[11px] leading-4 font-normal'>
+                {time && <span className='tabular-nums'>{date}</span>}
                 <StatusBadge
                   label={t(config.label)}
                   variant={config.color as StatusBadgeProps['variant']}
                   type='text'
                   showDot
                   copyable={false}
-                  className='text-muted-foreground dark:text-muted-foreground gap-1 text-[11px] font-normal'
+                  className='text-muted-foreground gap-1 text-[11px] font-normal'
                 />
-                {time && (
-                  <span className='font-mono text-[10px] tabular-nums'>
-                    {date.slice(5)}
-                  </span>
-                )}
               </div>
             </div>
           )
@@ -718,7 +717,7 @@ export function useCommonLogsColumns(
           const other = getLogMetadata(log)
           const visibility = table.getState().columnVisibility
           return (
-            <div className='flex w-full min-w-0 flex-col items-center justify-center gap-1'>
+            <div className='flex w-full min-w-0 flex-col items-start justify-center gap-1'>
               {visibility.response_transport !== false &&
                 isTimingLogType(log.type) && (
                   <StreamModeCell
@@ -733,7 +732,7 @@ export function useCommonLogsColumns(
                 isDisplayableLogType(log.type) &&
                 log.type !== LOG_TYPE_ENUM.REFUND &&
                 other?.request_path && (
-                  <TruncatedCell cellClassName='text-muted-foreground max-w-full font-mono text-[11px]'>
+                  <TruncatedCell cellClassName='text-muted-foreground max-w-full font-mono text-xs'>
                     {other.request_path}
                   </TruncatedCell>
                 )}
@@ -920,6 +919,29 @@ export function useCommonLogsColumns(
         },
         size: 180,
         maxSize: 200,
+      },
+      {
+        id: 'request_details',
+        header: t('Actions'),
+        enableSorting: false,
+        enableHiding: false,
+        cell: ({ row }) => {
+          const log = row.original
+          return (
+            <Button
+              type='button'
+              variant='ghost'
+              size='sm'
+              aria-haspopup='dialog'
+              aria-label={`${t('Details')} · ${log.request_id || formatTimestampToDate(log.created_at)}`}
+              onClick={() => onShowDetails(log)}
+              className='text-primary h-8 justify-start gap-0.5 rounded-sm px-0 text-xs font-medium hover:bg-transparent hover:underline'
+            >
+              {t('Details')}
+              <ChevronRight className='size-3.5 rtl:rotate-180' aria-hidden />
+            </Button>
+          )
+        },
       }
     )
 

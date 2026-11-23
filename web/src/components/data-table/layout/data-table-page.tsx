@@ -197,6 +197,8 @@ export type DataTablePageProps<TData> = {
    * which would unintentionally constrain layouts that don't define sizes).
    */
   applyHeaderSize?: boolean
+  /** Set to false when individual cells define their own type hierarchy. */
+  uniformCellText?: boolean
 
   /**
    * Optional skeleton key prefix for stable React keys across re-renders.
@@ -443,6 +445,7 @@ function renderMobile<TData>(
           skeletonKeyPrefix={props.skeletonKeyPrefix}
           renderRow={props.renderRow}
           applyHeaderSize={props.applyHeaderSize}
+          uniformCellText={props.uniformCellText}
           tableHeaderClassName={cn(
             '[background-color:var(--table-header)]',
             props.tableHeaderClassName
@@ -542,6 +545,7 @@ function renderDesktop<TData>(
       skeletonKeyPrefix={props.skeletonKeyPrefix}
       renderRow={props.renderRow}
       applyHeaderSize={props.applyHeaderSize}
+      uniformCellText={props.uniformCellText}
       splitHeader={fixedHeight}
       tableContainerClassName={fixedHeight ? 'h-full min-h-0' : undefined}
       tableHeaderClassName={cn(

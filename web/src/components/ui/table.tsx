@@ -25,13 +25,19 @@ import { cn } from '@/lib/utils'
 function Table({
   className,
   withContainer = true,
+  uniformCellText = true,
   ...props
-}: React.ComponentProps<'table'> & { withContainer?: boolean }) {
+}: React.ComponentProps<'table'> & {
+  withContainer?: boolean
+  uniformCellText?: boolean
+}) {
   const table = (
     <table
       data-slot='table'
       className={cn(
-        'w-full caption-bottom text-sm tabular-nums [font-family:var(--font-body)] [&_td]:text-sm [&_td]:font-medium [&_th]:text-sm [&_:is(th,td)_*]:[font-family:inherit] [&_:is(th,td)_*]:[font-size:inherit] [&_:is(th,td)_*]:[font-weight:inherit]',
+        'w-full caption-bottom text-sm tabular-nums [font-family:var(--font-body)]',
+        uniformCellText &&
+          '[&_td]:text-sm [&_td]:font-medium [&_th]:text-sm [&_:is(th,td)_*]:[font-family:inherit] [&_:is(th,td)_*]:[font-size:inherit] [&_:is(th,td)_*]:[font-weight:inherit]',
         '[&_[data-table-text=secondary]]:text-xs [&_[data-table-text=secondary]]:font-normal',
         className
       )}

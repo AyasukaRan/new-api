@@ -124,18 +124,56 @@ function renderLogs(
     username: 'viewer',
     role: props.admin === false ? 1 : 10,
   })
-  return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
-      <UsageLogsProvider source={props.source}>
-        <Fixture {...props} />
-      </UsageLogsProvider>
-    </QueryClientProvider>
-  )
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  return render(<Fixture {...props} />, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>
+        <UsageLogsProvider source={props.source}>{children}</UsageLogsProvider>
+      </QueryClientProvider>
+    ),
+  })
 }
+
+it('keeps the selected personal request open from Details when a newer request arrives with the event column hidden', async () => {
+  const user = userEvent.setup()
+  const clipboard = vi
+    .spyOn(navigator.clipboard, 'writeText')
+    .mockResolvedValue()
+  const stamp = '2025-12-31 23:59:59'
+  const entry = {
+    ...log,
+    created_at: new Date('2025-12-31T23:59:59').valueOf() / 1000,
+    request_id: 'personal-request',
+    upstream_request_id: 'admin-only-upstream-id',
+  }
+  const opts = { admin: false, visibility: { content: false } }
+  const view = renderLogs({ ...opts, logs: [entry] })
+  const details = screen.getByRole('button', {
+    name: /Details.*personal-request/,
+  })
+  expect(details).toHaveTextContent('Details')
+  expect(screen.getByText('23:59:59').closest('button')).toBeNull()
+  await user.click(details)
+  const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+  const newer = {
+    ...entry,
+    id: 2,
+    request_id: 'newer-request',
+    created_at: entry.created_at + 10,
+  }
+  view.rerender(<Fixture {...opts} logs={[newer, entry]} />)
+  expect(within(dialog).getByText('personal-request')).toBeVisible()
+  expect(within(dialog).queryByText('newer-request')).not.toBeInTheDocument()
+  expect(
+    within(dialog).queryByText('admin-only-upstream-id')
+  ).not.toBeInTheDocument()
+  await user.click(
+    within(dialog).getByRole('button', { name: /Copy to clipboard.*Time/ })
+  )
+  expect(clipboard).toHaveBeenCalledWith(stamp)
+})
 
 it('shows model mismatch evidence when tapping the mobile model badge', async () => {
   const user = userEvent.setup()

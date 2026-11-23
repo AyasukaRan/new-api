@@ -23,34 +23,22 @@ import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
 import { Dialog } from '@/components/dialog'
-import { StatusBadge, type StatusVariant } from '@/components/status-badge'
+import { StatusBadge } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
-import dayjs from '@/lib/dayjs'
-import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
+import { formatLogQuota } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
 import { formatModelName, getLogMetadata, logTokenName } from '../lib/format'
-import {
-  getLogTypeConfig,
-  isDisplayableLogType,
-  isTimingLogType,
-} from '../lib/utils'
+import { isDisplayableLogType, isTimingLogType } from '../lib/utils'
 import { LogGroupLabel } from './log-identity-cells'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { RequestMetadataTags } from './request-metadata-tags'
 import { TokenPerformanceCell } from './token-performance-cell'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
-type FieldName =
-  | 'model'
-  | 'cost'
-  | 'user'
-  | 'channel'
-  | 'token'
-  | 'group'
-  | 'time'
+type FieldName = 'model' | 'cost' | 'user' | 'channel' | 'token' | 'group'
 type LogField = {
   label: string
   value: string
@@ -62,6 +50,7 @@ type LogField = {
 export function CommonLogMobileCard<TData>(props: {
   log: UsageLog
   cells: Map<string, Cell<TData, unknown>>
+  detailsCell?: Cell<TData, unknown>
 }) {
   const { t } = useTranslation()
   const context = useUsageLogsContext()
@@ -72,7 +61,6 @@ export function CommonLogMobileCard<TData>(props: {
   const displayable = isDisplayableLogType(log.type)
   const timing = isTimingLogType(log.type)
   const model = formatModelName(log)
-  const config = getLogTypeConfig(log.type, context.logSource)
   const group = log.group || other?.group || ''
   const fields: Record<FieldName, LogField> = {
     model: {
@@ -84,11 +72,6 @@ export function CommonLogMobileCard<TData>(props: {
       label: t('Cost'),
       value: formatLogQuota(log.quota),
       visible: displayable && props.cells.has('quota'),
-    },
-    time: {
-      label: t('Time'),
-      value: formatTimestampToDate(log.created_at),
-      visible: props.cells.has('created_at'),
     },
     user: {
       label: t('User'),
@@ -122,6 +105,7 @@ export function CommonLogMobileCard<TData>(props: {
       : undefined
   const metadata: FieldName[] = ['user', 'channel', 'token', 'group']
   const visibleMetadata = metadata.filter((id) => fields[id].visible)
+  const timeCell = props.cells.get('created_at')
   const costCell = props.cells.get('quota')
   const contentCell = props.cells.get('content')
   const channelCell = props.cells.get('channel')
@@ -130,21 +114,34 @@ export function CommonLogMobileCard<TData>(props: {
 
   return (
     <div className='min-w-0 space-y-2.5 text-sm leading-5'>
-      <div className='flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2'>
-        {fields.model.visible && (
-          <div className='min-w-0 flex-[1_1_10rem]'>
-            <ModelBadge
-              modelName={model.name}
-              actualModel={model.actualModel}
-              responseModel={model.responseModel}
-              wrapText
-              onInspect={() => setSelectedField('model')}
-            />
-          </div>
-        )}
-        {fields.cost.visible && costCell && (
-          <div className='ml-auto max-w-full min-w-0 self-center'>
-            {flexRender(costCell.column.columnDef.cell, costCell.getContext())}
+      <div className='grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2'>
+        <div className='flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2'>
+          {fields.model.visible && (
+            <div className='min-w-0 flex-[1_1_10rem]'>
+              <ModelBadge
+                modelName={model.name}
+                actualModel={model.actualModel}
+                responseModel={model.responseModel}
+                wrapText
+                onInspect={() => setSelectedField('model')}
+              />
+            </div>
+          )}
+          {fields.cost.visible && costCell && (
+            <div className='ml-auto max-w-full min-w-0 self-center'>
+              {flexRender(
+                costCell.column.columnDef.cell,
+                costCell.getContext()
+              )}
+            </div>
+          )}
+        </div>
+        {props.detailsCell && (
+          <div className='[&_button]:min-h-11 [&_button]:min-w-11'>
+            {flexRender(
+              props.detailsCell.column.columnDef.cell,
+              props.detailsCell.getContext()
+            )}
           </div>
         )}
       </div>
@@ -172,24 +169,9 @@ export function CommonLogMobileCard<TData>(props: {
         className='grid min-w-0 grid-cols-2 items-stretch gap-x-3'
         data-slot='log-time-and-timing'
       >
-        {fields.time.visible && (
-          <div className='flex min-w-0 flex-col items-start justify-between gap-1'>
-            <StatusBadge
-              label={t(config.label)}
-              variant={config.color as StatusVariant}
-              copyable={false}
-              showDot
-              className='h-5 px-0 text-xs'
-            />
-            <Button
-              variant='ghost'
-              aria-label={`${t('Time')}: ${fields.time.value}`}
-              aria-haspopup='dialog'
-              onClick={() => setSelectedField('time')}
-              className='text-muted-foreground h-auto min-h-6 px-0 py-0 text-xs font-normal whitespace-normal tabular-nums'
-            >
-              {dayjs.unix(log.created_at).format('MM-DD HH:mm:ss')}
-            </Button>
+        {timeCell && (
+          <div className='min-w-0'>
+            {flexRender(timeCell.column.columnDef.cell, timeCell.getContext())}
           </div>
         )}
         {timing && transportCell && (

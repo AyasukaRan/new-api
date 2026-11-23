@@ -81,88 +81,95 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
       variant='ghost'
       onClick={(event) => event.stopPropagation()}
       aria-label={`${t('Billing Details')} · ${formatLogQuota(quota)}`}
-      className='h-auto min-h-6 max-w-full gap-1.5 rounded-sm px-0 py-0.5 text-sm'
+      className='col-start-2 row-start-1 h-auto min-h-5 min-w-max flex-nowrap justify-end gap-1 justify-self-end rounded-sm border-0 p-0 font-sans text-[13px] leading-5'
     >
-      {Array.from(toolCounts, ([name, count]) => {
-        const Icon = getLogToolIcon(name)
-        return (
-          <span
-            key={name}
-            data-billed-tool={name}
-            data-tool-surcharge-indicator='true'
-            role='img'
-            aria-label={t('Tool: {{name}}', { name })}
-            className='relative inline-grid size-4 shrink-0 place-content-center text-teal-700 dark:text-teal-300'
-          >
-            {count > 1 && (
-              <Icon
-                aria-hidden='true'
-                className='absolute top-0 left-0 size-3 opacity-50'
-              />
-            )}
-            <Icon
-              aria-hidden='true'
-              className={cn(
-                'size-3.5',
-                count > 1 && 'translate-x-0.5 translate-y-0.5'
-              )}
-            />
-          </span>
-        )
-      })}
-      <span className='font-mono font-semibold whitespace-nowrap tabular-nums underline decoration-current/40 decoration-dotted underline-offset-4'>
+      {toolCounts.size > 0 && (
+        <span
+          className={cn(
+            'grid shrink-0 items-center gap-0.5',
+            toolCounts.size > 3 ? 'grid-cols-3' : 'grid-flow-col'
+          )}
+        >
+          {Array.from(toolCounts, ([name, count]) => {
+            const Icon = getLogToolIcon(name)
+            return (
+              <span
+                key={name}
+                data-billed-tool={name}
+                data-tool-surcharge-indicator='true'
+                role='img'
+                aria-label={t('Tool: {{name}}', { name })}
+                className='relative inline-grid size-4 shrink-0 place-content-center text-teal-700 dark:text-teal-300'
+              >
+                {count > 1 && (
+                  <Icon
+                    aria-hidden='true'
+                    className='absolute top-0 left-0 size-3 opacity-50'
+                  />
+                )}
+                <Icon
+                  aria-hidden='true'
+                  className={cn(
+                    'size-3.5',
+                    count > 1 && 'translate-x-0.5 translate-y-0.5'
+                  )}
+                />
+              </span>
+            )
+          })}
+        </span>
+      )}
+      <span className='font-semibold whitespace-nowrap tabular-nums underline decoration-current/40 decoration-dotted underline-offset-4'>
         {formatLogQuota(quota)}
       </span>
     </Button>
   )
   return (
     <TooltipProvider>
-      <div className='flex w-full flex-col items-end justify-center gap-0.5 self-center align-middle'>
-        <div className='flex max-w-full items-center justify-end gap-1.5'>
-          {source && (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    className='text-muted-foreground inline-flex shrink-0 cursor-help items-center'
-                    role='img'
-                    aria-label={source}
-                    tabIndex={0}
-                  >
-                    <HugeiconsIcon
-                      icon={isSubscription ? CrownIcon : Wallet01Icon}
-                      className='size-3.5'
-                      strokeWidth={2}
-                      aria-hidden='true'
-                    />
-                  </span>
-                }
-              />
-              <TooltipContent>{source}</TooltipContent>
-            </Tooltip>
-          )}
-          {props.log ? (
-            <LogMetricsDetailDialog
-              log={props.log}
-              other={props.other}
-              isAdmin={Boolean(props.isAdmin)}
-              initialTab='cost'
-              trigger={amountButton}
+      <div className='grid w-full grid-cols-[0.875rem_minmax(min-content,1fr)] items-center gap-x-1.5 gap-y-0.5 self-center font-sans tabular-nums'>
+        {source && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  className='text-muted-foreground col-start-1 row-start-1 inline-flex shrink-0 cursor-help items-center justify-center'
+                  role='img'
+                  aria-label={source}
+                  tabIndex={0}
+                >
+                  <HugeiconsIcon
+                    icon={isSubscription ? CrownIcon : Wallet01Icon}
+                    className='size-3.5'
+                    strokeWidth={2}
+                    aria-hidden='true'
+                  />
+                </span>
+              }
             />
-          ) : (
-            <Dialog
-              open={open}
-              onOpenChange={setOpen}
-              title={t('Billing Details')}
-              contentClassName='sm:max-w-md'
-              trigger={amountButton}
-            >
-              {open && <LogChargeDetails {...props} />}
-            </Dialog>
-          )}
-        </div>
+            <TooltipContent>{source}</TooltipContent>
+          </Tooltip>
+        )}
+        {props.log ? (
+          <LogMetricsDetailDialog
+            log={props.log}
+            other={props.other}
+            isAdmin={Boolean(props.isAdmin)}
+            initialTab='cost'
+            trigger={amountButton}
+          />
+        ) : (
+          <Dialog
+            open={open}
+            onOpenChange={setOpen}
+            title={t('Billing Details')}
+            contentClassName='sm:max-w-md'
+            trigger={amountButton}
+          >
+            {open && <LogChargeDetails {...props} />}
+          </Dialog>
+        )}
         {(free > 0 || props.isAdmin) && (
-          <dl className='text-muted-foreground grid w-max max-w-full grid-cols-[max-content_max-content] items-center gap-x-[5px] gap-y-0.5 text-[11px] leading-tight [&_dd]:text-start [&_dd]:font-mono [&_dd]:whitespace-nowrap [&_dd]:tabular-nums [&_dt]:text-start'>
+          <dl className='text-muted-foreground col-span-full grid grid-cols-subgrid items-center gap-y-0.5 text-end text-xs leading-4 font-normal [&_dd]:whitespace-nowrap [&_dt]:justify-center'>
             {free > 0 && (
               <>
                 {renderLogMetricTerm('Free allowance deduction', t)}

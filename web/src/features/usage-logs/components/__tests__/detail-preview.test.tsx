@@ -99,11 +99,14 @@ function DetailPreview(props: {
   isAdmin: boolean
   type?: number
   source?: LogSource
-  columnId?: 'content' | 'prompt_tokens'
+  columnId?: 'content' | 'prompt_tokens' | 'created_at'
+  createdAt?: number
 }) {
   const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
   const table = useReactTable({
-    data: [makeLog(props.other, props.type)],
+    data: [
+      { ...makeLog(props.other, props.type), created_at: props.createdAt ?? 1 },
+    ],
     columns: useCommonLogsColumns(props.isAdmin, setSelectedLog, props.source),
     getCoreRowModel: getCoreRowModel(),
   })
@@ -194,6 +197,33 @@ test.each([true, false])(
     } else {
       expect(screen.queryByText('private-upstream-id')).not.toBeInTheDocument()
     }
+  }
+)
+
+test.each([
+  ['2025-12-31', '23:59:59'],
+  ['2026-01-01', '00:00:01'],
+])(
+  'shows the full local date and time for %s at %s without an action',
+  (date, time) => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueryClientProvider client={client}>
+          <DetailPreview
+            isAdmin
+            other={{}}
+            columnId='created_at'
+            createdAt={new Date(`${date}T${time}`).valueOf() / 1000}
+          />
+        </QueryClientProvider>
+      </I18nextProvider>
+    )
+    expect(screen.getByText(date)).toBeVisible()
+    expect(screen.getByText(time)).toHaveAttribute(
+      'datetime',
+      `${date}T${time}`
+    )
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
   }
 )
 

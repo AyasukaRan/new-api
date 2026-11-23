@@ -63,11 +63,18 @@ afterEach(() => {
   localStorage.clear()
 })
 
-function renderLogs(live = false, path = '/usage-logs/common') {
+function renderLogs(
+  live = false,
+  path = '/usage-logs/common',
+  content?: string
+) {
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
-  let records = [entry(11), entry(10)]
+  let records = [entry(11), entry(10)].map((record) => ({
+    ...record,
+    content: content ?? record.content,
+  }))
   let liveTotal = 0
   const selfRecords = [entry(100)]
   const initialTotal = path.includes('page=2') ? 205 : 2
@@ -407,4 +414,16 @@ test('keeps the historical page still as new logs arrive and never streams a fix
     .mock.calls.filter(([url]) => url.endsWith('/stream'))
   expect(calls).toHaveLength(1)
   expect(calls[0][1]?.signal?.aborted).toBe(true)
+})
+
+test('opens the chosen request from its named details action when there is no summary', async () => {
+  const user = userEvent.setup()
+  renderLogs(false, '/usage-logs/common', '')
+  const button = await screen.findByRole('button', {
+    name: 'Details · request-10',
+  })
+  button.focus()
+  await user.keyboard('{Enter}')
+  const details = await screen.findByRole('dialog', { name: /Log Details/ })
+  expect(within(details).getByText('request-10')).toBeVisible()
 })

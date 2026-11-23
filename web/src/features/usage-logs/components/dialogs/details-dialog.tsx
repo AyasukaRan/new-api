@@ -79,6 +79,7 @@ import { toIntlLocale } from '@/i18n/languages'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import {
   formatLogQuota,
+  formatTimestampToDate,
   formatTokens,
   formatUseTime,
   formatNumber,
@@ -717,6 +718,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const other = parseLogOther(props.log.other)
   const typeConfig = getLogTypeConfig(props.log.type, props.source)
+  const createdAt = formatTimestampToDate(props.log.created_at)
 
   const isViolation = isViolationFeeLog(other)
   const isRefund = props.log.type === 6
@@ -906,6 +908,23 @@ export function DetailsDialog(props: DetailsDialogProps) {
 
         {/* Overview section - key identifiers */}
         <div className='min-w-0 space-y-1'>
+          {props.log.created_at > 0 && (
+            <DetailRow
+              label={t('Time')}
+              value={
+                <span className='inline-flex items-center gap-1.5 tabular-nums'>
+                  {createdAt}
+                  <CopyButton
+                    value={createdAt}
+                    aria-label={`${t('Copy to clipboard')} · ${t('Time')}`}
+                    className='size-6'
+                    iconClassName='size-3'
+                  />
+                </span>
+              }
+              mono
+            />
+          )}
           {props.log.request_id && (
             <DetailRow
               label={t('Request ID')}

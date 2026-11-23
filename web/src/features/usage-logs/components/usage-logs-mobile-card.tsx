@@ -303,6 +303,9 @@ export function UsageLogsMobileList<TData>({
             {logCategory === 'common' && (
               <CommonLogMobileCard
                 log={row.original as UsageLog}
+                detailsCell={row
+                  .getAllCells()
+                  .find((cell) => cell.column.id === 'request_details')}
                 cells={cells}
               />
             )}

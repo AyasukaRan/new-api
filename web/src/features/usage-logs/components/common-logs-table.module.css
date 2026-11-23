@@ -16,25 +16,28 @@
   color: var(--muted-foreground);
 }
 .grid td {
-  height: 72px;
-  padding-block: 7px;
+  height: 64px;
+  padding-block: 6px;
 }
-.grid th[data-column-id='model_name'] {
+.grid
+  th:is(
+    [data-column-id='model_name'],
+    [data-column-id='quota'],
+    [data-column-id='request_details']
+  ) {
   width: 1%;
 }
 .grid
   :is(th, td):is(
     [data-column-id='reasoning_effort'],
-    [data-column-id='invoked_tools'],
-    [data-column-id='is_stream']
+    [data-column-id='invoked_tools']
   ) {
   text-align: center;
 }
 .grid
   :is(th, td):is(
     [data-column-id='reasoning_effort'],
-    [data-column-id='invoked_tools'],
-    [data-column-id='is_stream']
+    [data-column-id='invoked_tools']
   )
   > div {
   margin-inline: auto;
@@ -53,6 +56,7 @@
   justify-content: end;
 }
 .grid td[data-column-id='quota'] {
+  min-inline-size: 9.5rem;
   padding-inline-start: clamp(12px, 1.1vw, 24px);
 }
 .grid td[data-column-id='content'] button {
@@ -85,9 +89,6 @@
 .compact td[data-column-id='content'] button {
   max-width: 5.5rem;
 }
-.compact td[data-column-id='is_stream'] {
-  max-width: 7rem;
-}
 .compact td[data-column-id='request_source'] {
   max-width: 9rem;
 }
@@ -111,6 +112,6 @@
     font-size: 13px;
   }
   .grid td {
-    height: 78px;
+    height: 68px;
   }
 }

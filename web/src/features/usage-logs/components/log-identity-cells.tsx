@@ -106,7 +106,7 @@ export function LogAccountCell({
       {isAdmin && log.username && (
         <button
           type='button'
-          className='hover:text-primary inline-flex max-w-full items-center gap-1.5 font-semibold'
+          className='hover:text-primary inline-flex max-w-full items-center gap-1.5 text-[13px] font-semibold'
           onClick={(e) => {
             e.stopPropagation()
             setSelectedUserId(log.user_id)
@@ -130,7 +130,7 @@ export function LogAccountCell({
             size='sm'
             showDot={false}
             variant='neutral'
-            className='text-muted-foreground dark:text-muted-foreground font-mono text-[11px]'
+            className='text-muted-foreground dark:text-muted-foreground text-xs font-normal'
             copyable={sensitiveVisible && !!log.token_name}
             copyText={sensitiveVisible ? log.token_name : undefined}
             label={sensitiveVisible ? token : '••••'}
@@ -190,8 +190,8 @@ export function LogSourceCell({
   return (
     <div className='flex max-w-full min-w-0 flex-col justify-center gap-0.5 text-xs leading-snug'>
       {hasClient && visibility.client_tool !== false && (
-        <div className='flex min-w-0 items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-300'>
-          <ClientIcon aria-label={t('Client')} className='size-3.5 shrink-0' />
+        <div className='flex min-w-0 items-center gap-1.5 text-[13px] font-medium'>
+          <ClientIcon aria-label={t('Client')} className='size-4 shrink-0' />
           <TruncatedCell tabIndex={0}>
             {sensitiveVisible ? client || t('Unidentified source') : '••••'}
           </TruncatedCell>
@@ -203,9 +203,12 @@ export function LogSourceCell({
           visibility[id] !== false && (
             <div
               key={id}
-              className='grid min-w-0 grid-cols-[2ch_minmax(0,1fr)] items-baseline gap-x-1.5 font-mono text-[11px]'
+              className='grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-baseline gap-x-1.5 font-mono text-xs font-normal'
             >
-              <span aria-label={label} className='text-muted-foreground'>
+              <span
+                aria-label={label}
+                className='text-muted-foreground font-sans text-[10px] font-medium'
+              >
                 {short}
               </span>
               {typeof value === 'string' && value.trim() ? (

@@ -351,6 +351,31 @@ describe('log cost display', () => {
     estimated: true as const,
   }
 
+  test('wallet charges and their accounting lines share icon and right-aligned amount tracks', () => {
+    renderCost({
+      quota: 10000,
+      other: {
+        billing_source: 'wallet',
+        tool_surcharges: [{ name: 'web_search', count: 2, price: 1 }],
+        admin_info: { cost: costSnapshot },
+      },
+      showBillingSource: true,
+      isAdmin: true,
+    })
+
+    const wallet = screen.getByRole('img', { name: 'Wallet' })
+    const charge = screen.getByRole('button', { name: /Billing Details/ })
+    const details = screen
+      .getByRole('term', { name: 'Upstream cost' })
+      .closest('dl')
+    expect(charge).toContainElement(
+      screen.getByRole('img', { name: 'Tool: web_search' })
+    )
+    expect(wallet.parentElement).toBe(details?.parentElement)
+    expect(charge).toHaveClass('col-start-2', 'justify-self-end', 'flex-nowrap')
+    expect(details).toHaveClass('grid-cols-subgrid', 'text-end')
+  })
+
   test('administrator sees the recorded estimated upstream cost and gross profit', () => {
     renderCost({
       quota: 10000,

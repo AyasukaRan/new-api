@@ -56,6 +56,7 @@ export type DataTableViewProps<TData> = {
   getColumnClassName?: DataTableColumnClassName
   pinnedColumns?: DataTablePinnedColumn[]
   applyHeaderSize?: boolean
+  uniformCellText?: boolean
   tableClassName?: string
   tableHeaderClassName?: string
   tableHeaderRowClassName?: string

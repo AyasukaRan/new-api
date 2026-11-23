@@ -101,7 +101,11 @@ function UnifiedTableView<TData>({
 
   return (
     <div className={props.tableContainerClassName}>
-      <Table className={props.tableClassName} style={tableSizing.style}>
+      <Table
+        className={props.tableClassName}
+        uniformCellText={props.uniformCellText}
+        style={tableSizing.style}
+      >
         {tableSizing.colgroup}
         <DataTableHeader
           table={props.table}
@@ -147,6 +151,7 @@ function SplitHeaderTableView<TData>({
       >
         <Table
           withContainer={false}
+          uniformCellText={props.uniformCellText}
           className={props.tableClassName}
           style={tableSizing.style}
         >

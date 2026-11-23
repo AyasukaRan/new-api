@@ -356,10 +356,12 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           }
           skeletonKeyPrefix='usage-log-skeleton'
           applyHeaderSize={!isCommon}
+          uniformCellText={!isCommon}
           getColumnClassName={getColumnClassName}
           tableClassName={
             isCommon
               ? cn(
+                  'rounded-none border-0',
                   styles.grid,
                   layout === 'compact' &&
                     table.getColumn('model_name')?.getIsVisible() &&
