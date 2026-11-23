@@ -23,30 +23,24 @@ import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
 import { Dialog } from '@/components/dialog'
-import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge, type StatusVariant } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
-import { toIntlLocale } from '@/i18n/languages'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import dayjs from '@/lib/dayjs'
-import {
-  formatLogQuota,
-  formatTimestampToDate,
-  formatNumber,
-} from '@/lib/format'
+import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
-import { formatModelName, logTokenName, parseLogOther } from '../lib/format'
+import { formatModelName, getLogMetadata, logTokenName } from '../lib/format'
 import {
   getLogTypeConfig,
   isDisplayableLogType,
   isTimingLogType,
 } from '../lib/utils'
-import { CacheHitRate } from './cache-hit-rate'
+import { LogGroupLabel } from './log-identity-cells'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { RequestMetadataTags } from './request-metadata-tags'
-import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
+import { TokenPerformanceCell } from './token-performance-cell'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 type FieldName =
@@ -69,22 +63,17 @@ export function CommonLogMobileCard<TData>(props: {
   log: UsageLog
   cells: Map<string, Cell<TData, unknown>>
 }) {
-  const { t, i18n } = useTranslation()
-  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const { t } = useTranslation()
   const context = useUsageLogsContext()
   const { isAdminView } = useLogsViewScope()
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
-  const other = parseLogOther(log.other)
+  const other = getLogMetadata(log)
   const displayable = isDisplayableLogType(log.type)
   const timing = isTimingLogType(log.type)
   const model = formatModelName(log)
   const config = getLogTypeConfig(log.type, context.logSource)
   const group = log.group || other?.group || ''
-  const groupRatio =
-    other?.user_group_ratio != null && other.user_group_ratio !== -1
-      ? other.user_group_ratio
-      : other?.group_ratio
   const fields: Record<FieldName, LogField> = {
     model: {
       label: t('Model'),
@@ -104,7 +93,7 @@ export function CommonLogMobileCard<TData>(props: {
     user: {
       label: t('User'),
       value: log.username,
-      visible: props.cells.has('user') && !!log.username,
+      visible: isAdminView && props.cells.has('token_name') && !!log.username,
       sensitive: true,
     },
     channel: {
@@ -136,26 +125,14 @@ export function CommonLogMobileCard<TData>(props: {
   const costCell = props.cells.get('quota')
   const contentCell = props.cells.get('content')
   const channelCell = props.cells.get('channel')
-  const cacheRead = other?.cache_tokens || 0
-  const cacheWrite = Math.max(
-    other?.cache_write_tokens || 0,
-    other?.cache_creation_tokens || 0,
-    (other?.cache_creation_tokens_5m || 0) +
-      (other?.cache_creation_tokens_1h || 0)
-  )
-  const showTokens =
-    displayable &&
-    props.cells.has('prompt_tokens') &&
-    (log.prompt_tokens > 0 ||
-      log.completion_tokens > 0 ||
-      cacheRead > 0 ||
-      cacheWrite > 0)
+  const sourceCell = props.cells.get('request_source')
+  const transportCell = props.cells.get('is_stream')
 
   return (
     <div className='min-w-0 space-y-2.5 text-sm leading-5'>
       <div className='flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2'>
         {fields.model.visible && (
-          <div className='flex min-w-0 flex-[1_1_10rem] flex-col gap-1'>
+          <div className='min-w-0 flex-[1_1_10rem]'>
             <ModelBadge
               modelName={model.name}
               actualModel={model.actualModel}
@@ -163,15 +140,34 @@ export function CommonLogMobileCard<TData>(props: {
               wrapText
               onInspect={() => setSelectedField('model')}
             />
-            <RequestMetadataTags isAdmin={isAdminView} metadata={other} />
           </div>
         )}
         {fields.cost.visible && costCell && (
-          <div className='ml-auto max-w-full min-w-0 self-center [overflow-wrap:anywhere] [&_.inline-flex]:h-auto [&_.inline-flex]:min-h-6 [&_.inline-flex]:max-w-full [&_.inline-flex]:flex-wrap'>
+          <div className='ml-auto max-w-full min-w-0 self-center'>
             {flexRender(costCell.column.columnDef.cell, costCell.getContext())}
           </div>
         )}
       </div>
+      {displayable && (
+        <div className='flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 empty:hidden'>
+          {(['reasoning_effort', 'invoked_tools'] as const).map(
+            (field) =>
+              props.cells.has(field) && (
+                <RequestMetadataTags
+                  key={field}
+                  field={field}
+                  isAdmin={isAdminView}
+                  metadata={other}
+                />
+              )
+          )}
+          {sourceCell &&
+            flexRender(
+              sourceCell.column.columnDef.cell,
+              sourceCell.getContext()
+            )}
+        </div>
+      )}
       <div
         className='grid min-w-0 grid-cols-2 items-stretch gap-x-3'
         data-slot='log-time-and-timing'
@@ -196,37 +192,14 @@ export function CommonLogMobileCard<TData>(props: {
             </Button>
           </div>
         )}
-        {timing &&
-          (props.cells.has('use_time') || props.cells.has('is_stream')) && (
-            <div className='col-start-2 flex min-w-0 flex-col items-end gap-1 [overflow-wrap:anywhere]'>
-              {props.cells.has('is_stream') && (
-                <StreamTpsCell
-                  compact
-                  className='min-h-5 max-w-full min-w-0 justify-end'
-                  isStream={log.is_stream}
-                  isTask={other?.is_task === true}
-                  isSyncTask={other?.task_sync === true}
-                  tokensPerSecond={
-                    log.use_time > 0 && log.completion_tokens > 0
-                      ? log.completion_tokens / log.use_time
-                      : null
-                  }
-                  streamStatus={other?.stream_status}
-                />
-              )}
-              {props.cells.has('use_time') && (
-                <TimingMetricsCell
-                  useTimeSec={log.use_time}
-                  completionTokens={log.completion_tokens}
-                  frtMs={other?.frt}
-                  isStream={log.is_stream}
-                  indicator='dot'
-                  compact
-                  className='min-h-6 max-w-full min-w-0 items-center justify-end [&>div]:justify-end'
-                />
-              )}
-            </div>
-          )}
+        {timing && transportCell && (
+          <div className='flex items-center justify-end'>
+            {flexRender(
+              transportCell.column.columnDef.cell,
+              transportCell.getContext()
+            )}
+          </div>
+        )}
       </div>
       {visibleMetadata.length > 0 && (
         <div className='grid min-w-0 grid-cols-2 gap-x-4 gap-y-0.5'>
@@ -235,10 +208,10 @@ export function CommonLogMobileCard<TData>(props: {
             let fieldContent = <span className='truncate'>{field.value}</span>
             if (id === 'group') {
               fieldContent = (
-                <GroupBadge
+                <LogGroupLabel
                   group={field.value}
-                  type='text'
-                  className='max-w-full text-sm'
+                  other={other}
+                  visible={context.sensitiveVisible}
                 />
               )
             } else if (id === 'token') {
@@ -289,60 +262,15 @@ export function CommonLogMobileCard<TData>(props: {
               </div>
             )
           })}
-          {groupRatio != null &&
-            groupRatio !== 1 &&
-            Number.isFinite(groupRatio) &&
-            props.cells.has('token_name') && (
-              <div className='text-muted-foreground col-span-2 [overflow-wrap:anywhere]'>
-                {t('Group Ratio')}: {groupRatio}×
-              </div>
-            )}
         </div>
       )}
-      {displayable &&
-        props.cells.has('prompt_tokens') &&
-        other?.metered_usage && (
-          <div className='text-muted-foreground text-xs'>
-            {t(
-              other.metered_usage_estimated
-                ? 'Estimated usage'
-                : 'Billable usage'
-            )}
-            :{' '}
-            <span className='text-foreground tabular-nums'>
-              {formatNumber(other.metered_usage.count, locale)}{' '}
-              {t(other.metered_usage.unit)}
-            </span>
-          </div>
-        )}
-      {showTokens && (
-        <div className='text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-xs [overflow-wrap:anywhere]'>
-          <span>
-            {t('Input')}{' '}
-            <span className='text-foreground tabular-nums'>
-              {log.prompt_tokens.toLocaleString()}
-            </span>
-          </span>
-          <span>
-            {t('Output')}{' '}
-            <span className='text-foreground tabular-nums'>
-              {log.completion_tokens.toLocaleString()}
-            </span>
-          </span>
-          {cacheRead > 0 && (
-            <span>
-              {t('Cache')} ↓ {cacheRead.toLocaleString()}
-            </span>
-          )}
-          {cacheWrite > 0 && (
-            <span>
-              {t('Cache')} ↑ {cacheWrite.toLocaleString()}
-            </span>
-          )}
-        </div>
-      )}
-      {showTokens && (
-        <CacheHitRate promptTokens={log.prompt_tokens} other={other} />
+      {props.cells.has('prompt_tokens') && (
+        <TokenPerformanceCell
+          log={log}
+          other={other}
+          isAdmin={isAdminView}
+          compact
+        />
       )}
       {contentCell && (
         <div className='relative min-w-0 border-t pt-2 [&_button]:min-h-8 [&_button]:w-full [&_button]:max-w-full [&_button]:pr-5 [&_button]:text-sm [&_button>span]:line-clamp-2 [&_button>span]:[overflow-wrap:anywhere] [&_button>span]:whitespace-normal'>

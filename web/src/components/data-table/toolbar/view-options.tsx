@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import type { Table } from '@tanstack/react-table'
-import * as React from 'react'
+import { Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -39,16 +39,9 @@ export function DataTableViewOptions<TData>({
 }: DataTableViewOptionsProps<TData>) {
   const { t } = useTranslation()
 
-  const hideableColumns = React.useMemo(
-    () =>
-      table
-        .getAllColumns()
-        .filter(
-          (column) =>
-            typeof column.accessorFn !== 'undefined' && column.getCanHide()
-        ),
-    [table]
-  )
+  const hideableColumns = table
+    .getAllColumns()
+    .filter((column) => column.accessorFn && column.getCanHide())
 
   return (
     <DropdownMenu modal={false}>
@@ -63,21 +56,45 @@ export function DataTableViewOptions<TData>({
       >
         {t('View')}
       </DropdownMenuTrigger>
-      <DropdownMenuContent align='end' className='w-[150px]'>
+      <DropdownMenuContent
+        align='end'
+        className='max-h-[65vh] w-52 overflow-y-auto'
+      >
         <DropdownMenuGroup>
           <DropdownMenuLabel>{t('Toggle columns')}</DropdownMenuLabel>
           {hideableColumns.map((column) => {
             return (
-              <DropdownMenuCheckboxItem
-                key={column.id}
-                className='capitalize'
-                checked={column.getIsVisible()}
-                onCheckedChange={(value) => column.toggleVisibility(!!value)}
-              >
-                {typeof column.columnDef.header === 'string'
-                  ? column.columnDef.header
-                  : (column.columnDef.meta?.label ?? column.id)}
-              </DropdownMenuCheckboxItem>
+              <Fragment key={column.id}>
+                <DropdownMenuCheckboxItem
+                  className='capitalize'
+                  checked={column.getIsVisible()}
+                  onCheckedChange={(value) => column.toggleVisibility(!!value)}
+                >
+                  {typeof column.columnDef.header === 'string'
+                    ? column.columnDef.header
+                    : (column.columnDef.meta?.label ?? column.id)}
+                </DropdownMenuCheckboxItem>
+                {column.getIsVisible() &&
+                  column.columnDef.meta?.displayFields?.map(
+                    (field: { id: string; label: string }) => (
+                      <DropdownMenuCheckboxItem
+                        key={field.id}
+                        className='pl-10 text-xs'
+                        checked={
+                          table.getState().columnVisibility[field.id] !== false
+                        }
+                        onCheckedChange={(checked) =>
+                          table.setColumnVisibility((old) => ({
+                            ...old,
+                            [field.id]: !!checked,
+                          }))
+                        }
+                      >
+                        {field.label}
+                      </DropdownMenuCheckboxItem>
+                    )
+                  )}
+              </Fragment>
             )
           })}
         </DropdownMenuGroup>

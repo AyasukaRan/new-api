@@ -21,14 +21,16 @@ import {
   flexRender,
   getCoreRowModel,
   useReactTable,
+  type VisibilityState,
 } from '@tanstack/react-table'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { I18nextProvider } from 'react-i18next'
 import { afterEach, expect, test } from 'vitest'
 
+import { DataTableViewOptions } from '@/components/data-table'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema } from '../../data/schema'
@@ -42,6 +44,9 @@ import { UsageLogsProvider } from '../usage-logs-provider'
 
 const metadata: LogOtherData = {
   reasoning_effort: 'high',
+  request_path: '/v1/responses',
+  response_transport: 'sse',
+  user_agent: 'codex-tui/1.0',
   client_tool: 'Codex CLI',
   invoked_tools: ['exec_command', 'apply_patch', 'read_resource'],
   tool_observation: 'complete',
@@ -53,7 +58,14 @@ const log = usageLogSchema.parse({
   type: 2,
   content: '',
   model_name: 'deepseek-v4-pro',
-  other: JSON.stringify(metadata),
+  username: 'account-user',
+  token_name: 'token-1',
+  group: 'DeepSeek',
+  ip: '192.0.2.25',
+  is_stream: true,
+  use_time: 4,
+  completion_tokens: 100,
+  other: JSON.stringify({ ...metadata, frt: 450 }),
 })
 const clients: QueryClient[] = []
 
@@ -77,24 +89,39 @@ function renderWithQueries(element: ReactNode, client?: QueryClient) {
   )
 }
 
-function LogSurface(props: { mobile: boolean; isAdmin: boolean }) {
+function LogSurface(props: {
+  mobile: boolean
+  isAdmin: boolean
+  visibility?: VisibilityState
+  showViewMenu?: boolean
+}) {
   const columns = useCommonLogsColumns(props.isAdmin, onShowDetails)
   const table = useReactTable({
     data: [log],
     columns,
+    state: { columnVisibility: props.visibility ?? {} },
     getCoreRowModel: getCoreRowModel(),
   })
+  if (props.showViewMenu) return <DataTableViewOptions table={table} />
   if (props.mobile) {
     return <UsageLogsMobileList table={table} logCategory='common' />
   }
-  const cell = table
-    .getRowModel()
-    .rows[0].getAllCells()
-    .find((item) => item.column.id === 'model_name')
-  if (!cell) {
-    throw new Error('Model column is missing')
-  }
-  return <>{flexRender(cell.column.columnDef.cell, cell.getContext())}</>
+  return (
+    <table>
+      <tbody>
+        <tr>
+          {table
+            .getRowModel()
+            .rows[0].getVisibleCells()
+            .map((cell) => (
+              <td key={cell.id} aria-label={cell.column.id}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </td>
+            ))}
+        </tr>
+      </tbody>
+    </table>
+  )
 }
 
 afterEach(() => {
@@ -223,30 +250,154 @@ test('wraps complete long tool names in details and ignores malformed or duplica
   expect(screen.queryByText(/Reasoning:/)).not.toBeInTheDocument()
 })
 
+test('groups the account, request source, transport and token metrics into distinct cells', () => {
+  useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
+  renderWithQueries(<LogSurface mobile={false} isAdmin />)
+  const cell = (name: string) => screen.getByRole('cell', { name })
+  expect(cell('model_name')).toHaveTextContent(log.model_name)
+  expect(cell('model_name')).not.toHaveTextContent(
+    /Codex CLI|high|exec_command/
+  )
+  expect(cell('reasoning_effort')).toHaveTextContent('high')
+  const account = within(cell('token_name'))
+  for (const text of [log.username, log.token_name, log.group]) {
+    expect(account.getByText(text)).toBeVisible()
+  }
+  const source = within(cell('request_source'))
+  for (const text of ['Codex CLI', 'codex-tui/1.0', log.ip]) {
+    expect(source.getByText(text)).toBeVisible()
+  }
+  const tools = within(cell('invoked_tools'))
+  for (const name of ['exec_command', 'apply_patch', 'read_resource']) {
+    expect(tools.getByText(name)).toHaveClass('sr-only')
+  }
+  expect(
+    tools.queryByRole('button', { name: 'Show all invoked tools' })
+  ).not.toBeInTheDocument()
+  const transport = within(cell('is_stream'))
+  expect(transport.getByText('/v1/responses')).toBeVisible()
+  expect(transport.getByText('SSE')).toBeVisible()
+  const performance = within(cell('prompt_tokens'))
+  for (const text of ['Output', '450ms', '4.0s', '25 t/s']) {
+    expect(performance.getByText(text)).toBeVisible()
+  }
+  expect(cell('is_stream')).not.toHaveTextContent('t/s')
+})
+
+test('opens a fourth tool with the keyboard when using compact tool icons', async () => {
+  const user = userEvent.setup()
+  render(
+    <RequestMetadataTags
+      field='invoked_tools'
+      isAdmin
+      metadata={{
+        invoked_tools: ['bash', 'read', 'web_search', 'file_search'],
+      }}
+    />
+  )
+  expect(screen.getByText('web_search')).toHaveClass('sr-only')
+  expect(screen.queryByText('file_search')).not.toBeInTheDocument()
+  const more = screen.getByRole('button', { name: 'Show all invoked tools' })
+  more.focus()
+  await user.keyboard('{Enter}')
+  expect(await screen.findByTitle('file_search')).toHaveTextContent(
+    'file_search'
+  )
+  await user.keyboard('{Escape}')
+  await waitFor(() => expect(more).toHaveAttribute('aria-expanded', 'false'))
+  expect(more).toHaveFocus()
+})
+
 test.each([false, true])(
-  'shows the same request tags in the model summary when mobile is %s',
+  'allows hiding model and client independently of reasoning and tools (mobile: %s)',
   (mobile) => {
     useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
-    renderWithQueries(<LogSurface mobile={mobile} isAdmin />)
-    const group = screen.getByRole('group', { name: 'Request attributes' })
-    expect(within(group).getByText('Reasoning: high')).toBeInTheDocument()
-    expect(within(group).getByText('Codex CLI')).toBeInTheDocument()
-    expect(within(group).getByText('Tool: exec_command')).toBeInTheDocument()
-    expect(
-      within(group).getByRole('button', { name: 'Show all invoked tools' })
-    ).toBeInTheDocument()
+    renderWithQueries(
+      <LogSurface
+        mobile={mobile}
+        isAdmin
+        visibility={{
+          model_name: false,
+          client_tool: false,
+          request_path: false,
+        }}
+      />
+    )
+    expect(screen.queryByText(log.model_name)).not.toBeInTheDocument()
+    expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
+    expect(screen.queryByText('/v1/responses')).not.toBeInTheDocument()
+    expect(screen.getByText('codex-tui/1.0')).toBeVisible()
+    expect(screen.getByText(log.ip)).toBeVisible()
+    expect(screen.getByText('SSE')).toBeVisible()
+    expect(screen.getByText(/^(Reasoning: )?high$/)).toBeVisible()
+    expect(screen.getByText(/^(Tool: )?exec_command$/)).toBeVisible()
   }
 )
 
 test.each([false, true])(
-  'hides the request source and tool tags in personal logs when mobile is %s',
+  'allows hiding the IP and response mode while keeping the other details (mobile: %s)',
   (mobile) => {
-    renderWithQueries(<LogSurface mobile={mobile} isAdmin={false} />)
-    expect(screen.getByText('Reasoning: high')).toBeInTheDocument()
-    expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
-    expect(screen.queryByText(/Tool:/)).not.toBeInTheDocument()
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
+    renderWithQueries(
+      <LogSurface
+        mobile={mobile}
+        isAdmin
+        visibility={{ ip: false, response_transport: false }}
+      />
+    )
+    expect(screen.queryByText(log.ip)).not.toBeInTheDocument()
+    expect(screen.queryByText('SSE')).not.toBeInTheDocument()
+    expect(screen.getByText('Codex CLI')).toBeVisible()
+    expect(screen.getByText('codex-tui/1.0')).toBeVisible()
+    expect(screen.getByText('/v1/responses')).toBeVisible()
   }
 )
+
+test.each([false, true])(
+  'hides admin metadata from personal logs even if the row contains it (mobile: %s)',
+  (mobile) => {
+    renderWithQueries(<LogSurface mobile={mobile} isAdmin={false} />)
+    expect(screen.getByText(/^(Reasoning: )?high$/)).toBeVisible()
+    expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
+    expect(screen.queryByText(/exec_command/)).not.toBeInTheDocument()
+    expect(screen.queryByText('codex-tui/1.0')).not.toBeInTheDocument()
+    expect(screen.queryByText(log.username)).not.toBeInTheDocument()
+    expect(screen.getByText(log.ip)).toBeVisible()
+    expect(screen.getByText(log.token_name)).toBeVisible()
+    expect(screen.getByText('SSE')).toBeVisible()
+    expect(screen.queryByText('/v1/responses')).not.toBeInTheDocument()
+  }
+)
+
+test('updates the column picker when an admin switches from all logs to personal logs', async () => {
+  const user = userEvent.setup()
+  function SwitchScope() {
+    const [isAdmin, setIsAdmin] = useState(true)
+    return (
+      <>
+        <button type='button' onClick={() => setIsAdmin(false)}>
+          Personal logs
+        </button>
+        <LogSurface mobile={false} isAdmin={isAdmin} showViewMenu />
+      </>
+    )
+  }
+  renderWithQueries(<SwitchScope />)
+  await user.click(screen.getByRole('button', { name: 'View' }))
+  expect(screen.getByRole('menuitemcheckbox', { name: 'Tools' })).toBeVisible()
+  await user.keyboard('{Escape}')
+  await user.click(screen.getByRole('button', { name: 'Personal logs' }))
+  await user.click(screen.getByRole('button', { name: 'View' }))
+  expect(
+    screen.getByRole('menuitemcheckbox', { name: 'Reasoning Effort' })
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('menuitemcheckbox', { name: 'Tools' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('menuitemcheckbox', { name: 'Client' })
+  ).not.toBeInTheDocument()
+})
 
 test('shows only reasoning in owner details even when cached data contains admin tags', () => {
   renderWithQueries(

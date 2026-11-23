@@ -21,6 +21,7 @@ import '@tanstack/react-table'
 declare module '@tanstack/react-table' {
   interface ColumnMeta<_TData, _TValue> {
     label?: string
+    displayFields?: { id: string; label: string }[]
     description?: string
     className?: string
     pinned?: 'left' | 'right'

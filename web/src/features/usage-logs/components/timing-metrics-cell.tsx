@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 
 import {
   dotColorMap,
+  StatusBadge,
   textColorMap,
   type StatusVariant,
 } from '@/components/status-badge'
@@ -30,7 +31,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { formatUseTime } from '@/lib/format'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber, formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import {
@@ -71,163 +73,131 @@ interface TimingMetricsCellProps {
 }
 
 export function TimingMetricsCell(props: TimingMetricsCellProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const indicator = props.indicator ?? 'bar'
-  const showFirstToken = props.isStream
-  const firstTokenMs =
-    props.frtMs != null && props.frtMs > 0 ? props.frtMs : null
-  const firstTokenVariant: StatusVariant =
-    firstTokenMs == null
-      ? 'neutral'
-      : getFirstResponseTimeColor(firstTokenMs / 1000)
-  const totalTimeVariant = getResponseTimeColor(
-    props.useTimeSec,
-    props.completionTokens
-  )
-  const firstTokenLabel =
-    firstTokenMs == null ? t('N/A') : formatFirstResponseTime(firstTokenMs)
-  const totalTimeLabel = formatUseTime(props.useTimeSec)
-
-  const labels = (
-    <div
-      className={cn(
-        'flex min-h-8 min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight',
-        props.compact &&
-          'min-h-0 flex-row flex-wrap items-center gap-x-2.5 gap-y-1'
-      )}
-    >
-      {showFirstToken && (
-        <div className='flex items-baseline gap-1.5'>
-          {indicator === 'dot' && (
-            <span
-              aria-hidden
-              className={cn(
-                'size-1.5 shrink-0 rounded-full',
-                dotColorMap[firstTokenVariant]
-              )}
-            />
-          )}
-          <span className='text-muted-foreground shrink-0'>
-            {t('First token')}
-          </span>
-          <span className={cn('tabular-nums', textColorMap[firstTokenVariant])}>
-            {firstTokenLabel}
-          </span>
-        </div>
-      )}
-      <div className='flex items-baseline gap-1.5'>
-        {indicator === 'dot' && (
-          <span
-            aria-hidden
-            className={cn(
-              'size-1.5 shrink-0 rounded-full',
-              dotColorMap[totalTimeVariant]
-            )}
-          />
-        )}
-        <span className='text-muted-foreground shrink-0'>{t('Duration')}</span>
-        <span className={cn('tabular-nums', textColorMap[totalTimeVariant])}>
-          {totalTimeLabel}
-        </span>
-      </div>
-    </div>
-  )
-
-  if (indicator === 'dot') {
-    return (
-      <div className={cn('flex items-stretch', props.className)}>{labels}</div>
-    )
+  const metrics: { label: string; value: string; variant: StatusVariant }[] = []
+  if (props.isStream) {
+    const ms = props.frtMs
+    const recorded = ms != null && ms > 0
+    metrics.push({
+      label: t('First token'),
+      value: recorded ? formatFirstResponseTime(ms) : t('N/A'),
+      variant: recorded ? getFirstResponseTimeColor(ms / 1000) : 'neutral',
+    })
+  }
+  metrics.push({
+    label: t('Duration'),
+    value: formatUseTime(props.useTimeSec),
+    variant: getResponseTimeColor(props.useTimeSec, props.completionTokens),
+  })
+  if (props.useTimeSec > 0 && props.completionTokens > 0) {
+    const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+    const rate = Math.round(props.completionTokens / props.useTimeSec)
+    metrics.push({
+      label: t('Output speed'),
+      value: `${formatNumber(rate, locale)} t/s`,
+      variant: 'neutral',
+    })
   }
 
   return (
     <div className={cn('flex items-stretch gap-2', props.className)}>
-      <span
-        aria-hidden
+      {indicator === 'bar' && (
+        <span
+          aria-hidden
+          className='flex w-1 shrink-0 flex-col overflow-hidden rounded-full'
+        >
+          {metrics.map((metric) => (
+            <span
+              key={metric.label}
+              className={cn('flex-1', barColorMap[metric.variant])}
+            />
+          ))}
+        </span>
+      )}
+      <div
         className={cn(
-          'flex w-1 shrink-0 flex-col overflow-hidden rounded-full',
-          !showFirstToken && barColorMap[totalTimeVariant]
+          'flex min-h-8 min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight',
+          props.compact &&
+            'min-h-0 flex-row flex-wrap items-center gap-x-2.5 gap-y-1'
         )}
       >
-        {showFirstToken && (
-          <>
-            <span className={cn('flex-1', barColorMap[firstTokenVariant])} />
-            <span className={cn('flex-1', barColorMap[totalTimeVariant])} />
-          </>
-        )}
-      </span>
-      {labels}
+        {metrics.map((metric) => (
+          <div key={metric.label} className='flex items-baseline gap-1.5'>
+            {indicator === 'dot' && (
+              <span
+                aria-hidden
+                className={cn(
+                  'size-1.5 shrink-0 rounded-full',
+                  dotColorMap[metric.variant]
+                )}
+              />
+            )}
+            <span className='text-muted-foreground'>{metric.label}</span>
+            <span
+              className={cn(
+                'whitespace-nowrap tabular-nums',
+                textColorMap[metric.variant]
+              )}
+            >
+              {metric.value}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
 
-interface StreamTpsCellProps {
+interface StreamModeCellProps {
+  transport?: LogOtherData['response_transport']
   isStream: boolean
-  compact?: boolean
   /** Task logs are asynchronous jobs; stream vs non-stream does not apply. */
   isTask?: boolean
   /** The task request returned its result inline, so it is a synchronous call. */
   isSyncTask?: boolean
-  tokensPerSecond?: number | null
   streamStatus?: LogOtherData['stream_status']
   className?: string
 }
 
-export function StreamTpsCell(props: StreamTpsCellProps) {
+export function StreamModeCell(props: StreamModeCellProps) {
   const { t } = useTranslation()
   const showStreamError =
     props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
-  const tpsLabel =
-    props.tokensPerSecond != null
-      ? `${Math.round(props.tokensPerSecond)} t/s`
-      : '—'
   let streamLabel = props.isStream ? t('Stream') : t('Non-stream')
+  if (props.transport) streamLabel = props.transport.toUpperCase()
   if (props.isTask) {
     streamLabel = props.isSyncTask ? t('Sync') : t('Async')
   }
 
   return (
-    <div
-      className={cn(
-        'flex shrink-0 flex-col items-start justify-center gap-0.5 text-xs leading-tight',
-        props.compact && 'flex-row flex-wrap items-center gap-1.5',
-        props.className
-      )}
-    >
-      <span
-        className={cn(
-          'inline-flex items-center gap-1 font-medium',
-          props.isStream ? 'text-info' : 'text-muted-foreground'
-        )}
-      >
-        {streamLabel}
-        {showStreamError && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger
-                render={<CircleAlert className='text-destructive size-3' />}
-              />
-              <TooltipContent>
-                <div className='space-y-0.5 text-xs'>
+    <div className={cn('inline-flex items-center gap-1', props.className)}>
+      <StatusBadge
+        label={streamLabel}
+        variant={props.isStream ? 'info' : 'neutral'}
+        copyable={false}
+      />
+      {showStreamError && (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger
+              render={<CircleAlert className='text-destructive size-3' />}
+            />
+            <TooltipContent>
+              <div className='space-y-0.5 text-xs'>
+                <p>
+                  {t('Stream Status')}: {t('Error')}
+                </p>
+                <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                {(props.streamStatus?.error_count ?? 0) > 0 && (
                   <p>
-                    {t('Stream Status')}: {t('Error')}
+                    {t('Soft Errors')}: {props.streamStatus?.error_count}
                   </p>
-                  <p>{props.streamStatus?.end_reason || 'unknown'}</p>
-                  {(props.streamStatus?.error_count ?? 0) > 0 && (
-                    <p>
-                      {t('Soft Errors')}: {props.streamStatus?.error_count}
-                    </p>
-                  )}
-                </div>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
-      </span>
-      {(!props.compact ||
-        (props.isStream && props.tokensPerSecond != null)) && (
-        <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
-          {tpsLabel}
-        </span>
+                )}
+              </div>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       )}
     </div>
   )

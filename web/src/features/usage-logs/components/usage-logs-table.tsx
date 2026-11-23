@@ -47,7 +47,7 @@ import type { UsageLog } from '../data/schema'
 import { useLiveUsageLogs } from '../hooks/use-live-usage-logs'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
-import { parseLogOther } from '../lib/format'
+import { getLogMetadata } from '../lib/format'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
@@ -58,6 +58,8 @@ import { UsageLogsMobileList } from './usage-logs-mobile-card'
 import { useLogsViewScope, type LogsViewAccess } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
+
+const commonColumnVisibility = { request_path: false }
 
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
@@ -93,7 +95,25 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   const { t } = useTranslation()
   const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
   const getColumnClassName = useCallback(
-    () => (logCategory === 'common' ? 'py-2' : 'py-3.5'),
+    (id: string, kind: 'header' | 'cell') => {
+      if (logCategory !== 'common') return kind === 'cell' ? 'py-3.5' : ''
+      const centered = [
+        'reasoning_effort',
+        'invoked_tools',
+        'is_stream',
+      ].includes(id)
+      if (kind === 'header')
+        return cn(
+          (centered || id === 'prompt_tokens') &&
+            'text-center [&>div]:justify-center',
+          id === 'quota' && 'text-right [&>div]:justify-end'
+        )
+      return cn(
+        'align-middle py-2',
+        centered && 'text-center [&>div]:mx-auto',
+        id === 'quota' && 'text-right'
+      )
+    },
     [logCategory]
   )
   const {
@@ -275,6 +295,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         ? (log) => String(log.live_key ?? `${log.request_id ?? ''}:${log.id}`)
         : undefined,
     columnFilters,
+    initialColumnVisibility:
+      logCategory === 'common' ? commonColumnVisibility : undefined,
     columnVisibilityStorageKey: getColumnVisibilityStorageKey(
       logCategory,
       viewAccess
@@ -324,8 +346,14 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           }
           skeletonKeyPrefix='usage-log-skeleton'
           applyHeaderSize
+          getColumnClassName={getColumnClassName}
           tableClassName={cn(
-            '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
+            '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_th]:text-[13px]',
+            isCommon &&
+              table.getColumn('model_name')?.getIsVisible() &&
+              'min-[641px]:max-[1300px]:[&_[data-column-id=reasoning_effort]]:hidden min-[641px]:max-[1300px]:[&_[data-column-id=invoked_tools]]:hidden',
+            !isCommon &&
+              '[&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
           )}
           mobile={
             <UsageLogsMobileList
@@ -351,10 +379,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
             let tintClass =
               isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
             if (isCommon && isAdmin) {
-              const other = parseLogOther(
-                ((row.original as Record<string, unknown>).other as string) ??
-                  ''
-              )
+              const other = getLogMetadata(row.original as UsageLog)
               if (other?.admin_info?.quota_saturation) {
                 tintClass = quotaSaturationRowTint
               }

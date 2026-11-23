@@ -112,7 +112,17 @@ const MemoizedDataTableRow = React.memo(DataTableRowInner, (prev, next) => {
 export function DataTableRow<TData>(props: DataTableRowProps<TData>) {
   const visibleColumnIds = props.row
     .getVisibleCells()
-    .map((cell) => cell.column.id)
+    .map((cell) => {
+      const fields = cell.column.columnDef.meta?.displayFields
+      if (!fields?.length) return cell.column.id
+      const visibility = cell.getContext().table.getState().columnVisibility
+      return [
+        cell.column.id,
+        ...fields
+          .filter((f: { id: string }) => visibility[f.id] !== false)
+          .map((f: { id: string }) => f.id),
+      ].join(':')
+    })
     .join('\0')
 
   return (

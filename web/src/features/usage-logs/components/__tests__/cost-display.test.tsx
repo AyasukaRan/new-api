@@ -130,7 +130,7 @@ describe('log cost display', () => {
   })
 
   test('keeps a large amount unabridged in a single-line cost bubble', () => {
-    const rendered = renderCost({
+    renderCost({
       quota: 2147483647,
       other: { billing_source: 'subscription' },
       showBillingSource: true,
@@ -139,13 +139,9 @@ describe('log cost display', () => {
     const amount = screen.getByText('$4,294.9673')
     expect(amount).toBeVisible()
     expect(amount).toHaveClass('whitespace-nowrap')
-    expect(amount.closest('[data-slot="status-badge"]')).toHaveClass(
-      'border',
-      'rounded-md',
-      'tabular-nums'
-    )
-    expect(rendered.container.firstElementChild).toHaveClass('inline-flex')
-    expect(rendered.container.firstElementChild).not.toHaveClass('flex-col')
+    expect(
+      screen.getByRole('button', { name: /Billing Details/ })
+    ).toContainElement(amount)
     expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
   })
 
@@ -198,20 +194,26 @@ describe('log cost display', () => {
     }
   )
 
-  test('keeps the regular cost visible and adds an accessible surcharge marker', () => {
+  test('opens the tool receipt from the stacked icon and reconciles the recorded total', async () => {
+    const user = userEvent.setup()
     renderCost({
       quota: 12500,
       other: {
-        tool_surcharges: [{ name: 'lookup_customer', count: 1, price: 5 }],
+        group_ratio: 2,
+        tool_surcharges: [{ name: 'lookup_customer', count: 2, price: 5 }],
       },
     })
 
     expect(screen.getByText('$0.025')).toBeVisible()
     const marker = screen.getByRole('img', {
-      name: 'Includes tool-call surcharge',
+      name: 'Tool: lookup_customer',
     })
-    expect(marker).toHaveAttribute('data-tool-surcharge-indicator', 'true')
-    expect(marker).toHaveAttribute('tabindex', '0')
+    await user.click(marker)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('2 × $5 / 1,000 × 2')
+    expect(dialog).toHaveTextContent('$0.02')
+    expect(dialog).toHaveTextContent('Remaining charge')
+    expect(dialog).toHaveTextContent('$0.005')
   })
 
   test('shows subscription cost and source alongside the legacy surcharge marker', () => {
@@ -229,8 +231,28 @@ describe('log cost display', () => {
     expect(screen.getByText('$0.01')).toBeVisible()
     expect(screen.getByRole('img', { name: 'Subscription' })).toBeVisible()
     expect(
-      screen.getByRole('img', { name: 'Includes tool-call surcharge' })
+      screen.getByRole('img', { name: 'Tool: web_search' })
     ).toHaveAttribute('data-tool-surcharge-indicator', 'true')
+  })
+
+  test('calculates token categories with the logged tier, token counts and group multiplier', async () => {
+    const user = userEvent.setup()
+    renderCost({
+      quota: 1625,
+      other: {
+        billing_mode: 'tiered_expr',
+        matched_tier: 'standard',
+        group_ratio: 0.5,
+        expr_b64: btoa('tier("standard", p * 2 + cr * 1 + c * 8)'),
+        cache_tokens: 500,
+        billing_tokens: { p: 1000, cr: 500, c: 500 },
+      },
+    })
+    await user.click(screen.getByRole('button', { name: /Billing Details/ }))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('1,000 × $2 / 1,000,000 × 0.5')
+    expect(dialog).toHaveTextContent('500 × $1 / 1,000,000 × 0.5')
+    expect(dialog).toHaveTextContent('500 × $8 / 1,000,000 × 0.5')
   })
 
   const costSnapshot = {
@@ -254,8 +276,14 @@ describe('log cost display', () => {
     expect(screen.getByText('$0.007')).toBeVisible()
   })
 
-  test('regular view hides cost estimates even when a response contains admin metadata', () => {
+  test('regular view hides cost estimates even when a response contains admin metadata', async () => {
     renderCost({ quota: 10000, other: { admin_info: { cost: costSnapshot } } })
+    await userEvent
+      .setup()
+      .click(screen.getByRole('button', { name: /Billing Details/ }))
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      'A reconciled itemized breakdown is unavailable'
+    )
     expect(screen.queryByText('Upstream cost')).not.toBeInTheDocument()
     expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
     expect(screen.queryByText('Gross profit')).not.toBeInTheDocument()

@@ -26,7 +26,9 @@ import {
 import { render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+
+import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema, type UsageLog } from '../../data/schema'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
@@ -112,9 +114,16 @@ function Fixture(props: {
   )
 }
 
+afterEach(() => useAuthStore.getState().auth.reset())
+
 function renderLogs(
   props: Parameters<typeof Fixture>[0] & { source?: 'usage' | 'test' } = {}
 ) {
+  useAuthStore.getState().auth.setUser({
+    id: 1,
+    username: 'viewer',
+    role: props.admin === false ? 1 : 10,
+  })
   return render(
     <QueryClientProvider
       client={
@@ -251,10 +260,16 @@ it('respects hidden columns and omits admin fields in the self view', () => {
 
 it('keeps input, output and cache quantities readable without empty metric cells', () => {
   renderLogs()
-  expect(screen.getByText('Input')).toBeVisible()
+  expect(screen.getByText('Total input').nextElementSibling).toHaveTextContent(
+    '1,700'
+  )
   expect(screen.getByText('Output')).toBeVisible()
-  expect(screen.getByText(/300/)).toBeVisible()
-  expect(screen.getByText('Cache ↑ 200')).toBeVisible()
+  expect(screen.getByText('Read cache').nextElementSibling).toHaveTextContent(
+    '300'
+  )
+  expect(screen.getByText('Write cache').nextElementSibling).toHaveTextContent(
+    '200'
+  )
 })
 
 it('shows the established empty state when no logs exist', () => {
@@ -263,7 +278,7 @@ it('shows the established empty state when no logs exist', () => {
 })
 
 it.each([false, true])(
-  'keeps timing in the right column for streaming=%s',
+  'keeps first-token, total duration and output rate together for streaming=%s',
   (streaming) => {
     renderLogs({
       logs: [
@@ -275,21 +290,19 @@ it.each([false, true])(
         },
       ],
     })
-    const row = screen
-      .getByRole('button', { name: /^Time:/ })
-      .closest('[data-slot="log-time-and-timing"]')
-    expect(row).toHaveClass('grid', 'grid-cols-2')
-    expect(
-      screen.getByRole('button', { name: /^Time:/ }).parentElement
-    ).toHaveClass('flex-col', 'justify-between')
-    expect(
-      within(row as HTMLElement)
-        .getByText('Duration')
-        .closest('.col-start-2')
-    ).not.toBeNull()
-    if (streaming) {
-      expect(within(row as HTMLElement).getByText('First token')).toBeVisible()
+    const metrics = screen.getByText('Duration').closest('dl')
+    if (!metrics) {
+      throw new Error('The duration must appear with the request metrics')
     }
+    expect(
+      within(metrics).getByText('First token').nextElementSibling
+    ).toHaveTextContent(streaming ? '58.0s' : '—')
+    expect(
+      within(metrics).getByText('Duration').nextElementSibling
+    ).toHaveTextContent('58.0s')
+    expect(
+      within(metrics).getByText('Speed').nextElementSibling
+    ).toHaveTextContent('14 t/s')
   }
 )
 
@@ -312,11 +325,12 @@ it('omits unused token and throughput placeholders for async jobs', () => {
     ],
   })
   expect(screen.getByText('Async')).toBeVisible()
-  expect(screen.queryByText('Input')).not.toBeInTheDocument()
-  const timing = screen
-    .getByRole('button', { name: /^Time:/ })
-    .closest('[data-slot="log-time-and-timing"]')
-  expect(within(timing as HTMLElement).queryByText('—')).not.toBeInTheDocument()
+  expect(screen.queryByText('Total input')).not.toBeInTheDocument()
+  expect(screen.queryByText('Output')).not.toBeInTheDocument()
+  expect(screen.queryByText('Speed')).not.toBeInTheDocument()
+  expect(screen.getByText('Duration').nextElementSibling).toHaveTextContent(
+    '1.5s'
+  )
 })
 
 it('labels a task whose result was returned in the response as synchronous', () => {
@@ -399,7 +413,7 @@ it('shows metered page usage when the request has no tokens', () => {
     ],
   })
   expect(screen.getByText('2 page')).toBeVisible()
-  expect(screen.getByText('Billable usage:')).toBeVisible()
+  expect(screen.queryByText('Estimated usage')).not.toBeInTheDocument()
 })
 
 it.each([false, true])(
@@ -421,9 +435,7 @@ it.each([false, true])(
       ],
     })
     expect(screen.getByText('1,000 page')).toBeVisible()
-    expect(
-      screen.getByText(desktop ? 'Estimated usage' : 'Estimated usage:')
-    ).toBeVisible()
+    expect(screen.getByText('Estimated usage')).toBeVisible()
     expect(screen.queryByText('Billable usage:')).not.toBeInTheDocument()
   }
 )

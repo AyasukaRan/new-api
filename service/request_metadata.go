@@ -29,12 +29,14 @@ const requestMetadataContextKey = "relay_request_metadata"
 const requestMetadataMaxFrameBytes = 1 << 20
 const requestMetadataMaxTools = 128
 const requestMetadataMaxNameBytes = 256
+const requestMetadataMaxUserAgentBytes = 512
 
 type requestMetadata struct {
 	mu               sync.Mutex
 	format           types.RelayFormat
 	stream           bool
 	clientTool       string
+	userAgent        string
 	reasoningLabel   string
 	buffer           []byte
 	event            []byte
@@ -55,7 +57,14 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 	if c == nil || c.Request == nil || info == nil {
 		return func() {}
 	}
-	metadata := &requestMetadata{format: info.RelayFormat, stream: info.IsStream, clientTool: IdentifyRequestClient(c.Request.Header), reasoningLabel: strings.Clone(requestReasoningLabel(info))}
+	ua := c.Request.UserAgent()
+	metadata := &requestMetadata{
+		format:         info.RelayFormat,
+		stream:         info.IsStream,
+		clientTool:     IdentifyRequestClient(c.Request.Header),
+		userAgent:      strings.Clone(strings.ToValidUTF8(ua[:min(len(ua), requestMetadataMaxUserAgentBytes)], "")),
+		reasoningLabel: strings.Clone(requestReasoningLabel(info)),
+	}
 	c.Set(requestMetadataContextKey, metadata)
 	supported := info.RelayFormat == types.RelayFormatClaude ||
 		info.RelayFormat == types.RelayFormatGemini && info.RelayMode != relayconstant.RelayModeEmbeddings ||
@@ -388,6 +397,19 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 	if other == nil || c == nil {
 		return
 	}
+	if info != nil && info.ClientWs != nil {
+		other.SetPublic("response_transport", "ws")
+	} else if c.Writer != nil && c.Writer.Written() {
+		// Request headers only describe the client's preference. Use the format
+		// actually written, leaving unclassified streams for the generic label.
+		contentType, _, _ := strings.Cut(c.Writer.Header().Get("Content-Type"), ";")
+		switch {
+		case strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream"):
+			other.SetPublic("response_transport", "sse")
+		case info != nil && !info.IsStream:
+			other.SetPublic("response_transport", "http")
+		}
+	}
 	value, _ := c.Get(requestMetadataContextKey)
 	metadata, _ := value.(*requestMetadata)
 	if metadata == nil {
@@ -398,6 +420,9 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 	}
 	metadata.mu.Lock()
 	defer metadata.mu.Unlock()
+	if metadata.userAgent != "" {
+		other.SetAdmin("user_agent", metadata.userAgent)
+	}
 	if metadata.reasoningLabel != "" {
 		other.SetPublic("reasoning_effort", metadata.reasoningLabel)
 	}

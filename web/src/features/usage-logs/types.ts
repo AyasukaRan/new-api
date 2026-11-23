@@ -132,6 +132,7 @@ export interface LogCostEstimate {
 
 export interface LogOtherData {
   admin_info?: {
+    user_agent?: string
     cost?: LogCostEstimate
     cost_unconfirmed?: boolean
     request_policy?: PolicyEvent[]
@@ -208,6 +209,7 @@ export interface LogOtherData {
   user_agent?: string
   request_path?: string
   request_conversion?: string[]
+  response_transport?: 'ws' | 'sse' | 'http'
   ws?: boolean
   audio?: boolean
   audio_input?: number

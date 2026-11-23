@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -142,6 +143,47 @@ func TestRequestMetadataObservesOnlyCurrentResponseTools(t *testing.T) {
 			assert.Equal(t, test.body, recorder.Body.String(), "observation must never change the client response")
 			finish()
 			assert.Same(t, original, c.Writer)
+		})
+	}
+}
+
+func TestRequestMetadataRecordsObservedTransportAndAdminUserAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name, contentType, transport string
+		written, stream, socket      bool
+	}{
+		{name: "SSE response", contentType: "text/event-stream; charset=utf-8", written: true, transport: "sse"},
+		{name: "ordinary HTTP response", contentType: "application/json", written: true, transport: "http"},
+		{name: "negotiated socket", socket: true, transport: "ws"},
+		{name: "unknown stream", written: true, stream: true},
+		{name: "uncommitted headers", contentType: "text/event-stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Request.Header.Set("User-Agent", strings.Repeat("a", 511)+"测")
+			c.Request.Header.Set("Accept", "text/event-stream")
+			info := &relaycommon.RelayInfo{IsStream: tc.stream}
+			if tc.socket {
+				info.ClientWs = &websocket.Conn{}
+			}
+			defer BeginRequestMetadata(c, info)()
+			c.Request.Header.Set("User-Agent", "outbound-override")
+			c.Writer.Header().Set("Content-Type", tc.contentType)
+			if tc.written {
+				c.Writer.WriteHeaderNow()
+			}
+			other := model.NewLogOther()
+			AppendRequestMetadata(c, info, other)
+			values := other.Snapshot()
+			assert.NotContains(t, values, "user_agent")
+			require.Contains(t, values, "admin_info")
+			assert.Equal(t, strings.Repeat("a", 511), values["admin_info"].(map[string]any)["user_agent"])
+			if tc.transport == "" {
+				assert.NotContains(t, values, "response_transport")
+			} else {
+				assert.Equal(t, tc.transport, values["response_transport"])
+			}
 		})
 	}
 }
@@ -428,11 +470,13 @@ func TestRequestMetadataClientIdentityUsesExplicitOriginalHeaders(t *testing.T) 
 			c.Request.Header.Set("Origin", readFrogOrigin)
 			other := model.NewLogOther()
 			AppendRequestMetadata(c, info, other)
+			values := other.Snapshot()
 			if test.want == "" {
-				assert.Empty(t, other.Snapshot())
+				assert.NotContains(t, values, "client_tool")
 			} else {
-				assert.Equal(t, map[string]any{"client_tool": test.want}, other.Snapshot())
+				assert.Equal(t, test.want, values["client_tool"])
 			}
+			assert.NotContains(t, other.JSONString(), "opencode/99.0.0")
 		})
 	}
 }
@@ -474,7 +518,8 @@ func TestRequestSourceRulesPrecedenceAndOriginalHeaders(t *testing.T) {
 	c.Request.Header.Set("User-Agent", "upstream-only/1.0")
 	other := model.NewLogOther()
 	AppendRequestMetadata(c, info, other)
-	assert.Equal(t, map[string]any{"client_tool": "Custom client"}, other.Snapshot(), "only the fixed label captured from original headers is retained")
+	assert.Equal(t, "Custom client", other.Snapshot()["client_tool"])
+	assert.NotContains(t, other.JSONString(), "upstream-only/1.0")
 
 	require.NoError(t, operation_setting.LoadRequestSourceRulesJSON("[]"))
 	assert.Equal(t, "[]", operation_setting.RequestSourceRulesJSONString())

@@ -210,6 +210,23 @@ export function parseLogOther(other: string): LogOtherData | null {
   }
 }
 
+// A log row is shared by its cells across live updates. Drop cached metadata
+// when the row is released, and reparse if a caller replaces its JSON.
+const metadataByLog = new WeakMap<
+  Pick<UsageLog, 'other'>,
+  { raw: string; parsed: LogOtherData | null }
+>()
+
+export function getLogMetadata(
+  log: Pick<UsageLog, 'other'>
+): LogOtherData | null {
+  const cached = metadataByLog.get(log)
+  if (cached && cached.raw === log.other) return cached.parsed
+  const parsed = parseLogOther(log.other)
+  metadataByLog.set(log, { raw: log.other, parsed })
+  return parsed
+}
+
 export function getReasoningEffortVariant(
   effort: string | undefined
 ): StatusBadgeProps['variant'] {
@@ -288,7 +305,7 @@ export function formatModelName(log: UsageLog): {
   actualModel?: string
   responseModel?: LogOtherData['response_model']
 } {
-  const other = parseLogOther(log.other)
+  const other = getLogMetadata(log)
   const isMapped = !!(
     other?.is_model_mapped &&
     other?.upstream_model_name &&
