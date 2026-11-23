@@ -37,7 +37,7 @@ import { LogDurationPopover } from './log-duration-popover'
 import { renderLogMetricTerm } from './log-metric-icons'
 
 const metricGroup =
-  'grid content-center items-center gap-x-1.5 [grid-template-columns:max-content_minmax(max-content,1fr)] auto-rows-[1.15rem] [&>dt]:text-muted-foreground [&>dd]:justify-self-end [&>dd]:text-right [&>dd]:font-mono [&>dd]:text-xs [&>dd]:font-semibold'
+  'grid auto-rows-[1.15rem] grid-cols-[max-content_max-content] content-center items-center justify-start gap-x-[5px] [&>dt]:text-muted-foreground [&>dd]:justify-self-start [&>dd]:text-start [&>dd]:font-mono [&>dd]:text-xs [&>dd]:font-semibold'
 
 export function TokenPerformanceCell(props: {
   log: UsageLog
@@ -82,24 +82,28 @@ export function TokenPerformanceCell(props: {
       ? [{ label: item.label, value: formatCount(item.value) }]
       : []
   )
+  const durationMs = other?.duration_ms
+  const hasMeasuredDuration =
+    durationMs != null && Number.isFinite(durationMs) && durationMs >= 0
+  const elapsed = hasMeasuredDuration ? durationMs / 1000 : log.use_time
   const first =
     log.is_stream &&
     other?.frt != null &&
     Number.isFinite(other.frt) &&
-    other.frt > 0
+    (other.frt > 0 || (other.frt === 0 && hasMeasuredDuration))
       ? other.frt
       : null
   const speed =
-    log.use_time > 0 && log.completion_tokens > 0
-      ? Math.round(log.completion_tokens / log.use_time)
+    elapsed > 0 && log.completion_tokens > 0
+      ? Math.round(log.completion_tokens / elapsed)
       : null
   return (
     <div
       className={cn(
-        'grid w-full items-stretch gap-x-2.5 whitespace-nowrap text-[11px] leading-tight tabular-nums',
+        'grid items-stretch gap-x-1.5 whitespace-nowrap text-[11px] leading-tight tabular-nums',
         props.compact
-          ? 'gap-y-1.5 [grid-template-columns:repeat(auto-fit,minmax(min(100%,6.25rem),1fr))]'
-          : 'min-w-[21rem] [grid-template-columns:minmax(0,1fr)_minmax(0,1.22fr)_minmax(0,1fr)]'
+          ? 'w-full gap-y-1.5 [grid-template-columns:repeat(auto-fit,minmax(min(100%,6.25rem),1fr))]'
+          : 'mx-auto w-max max-w-full grid-cols-[minmax(5.5rem,max-content)_minmax(6.25rem,max-content)_minmax(5.5rem,max-content)]'
       )}
     >
       {metered ? (
@@ -177,13 +181,11 @@ export function TokenPerformanceCell(props: {
           )}
           {renderLogMetricTerm('Total time', t)}
           <dd>
-            {log.use_time >= 0 ? (
+            {elapsed >= 0 ? (
               <LogDurationPopover
-                seconds={log.use_time}
-                firstMs={first}
-                traceId={
-                  props.isAdmin ? other?.admin_info?.trace_id : undefined
-                }
+                log={log}
+                other={other}
+                isAdmin={props.isAdmin === true}
               />
             ) : (
               '—'

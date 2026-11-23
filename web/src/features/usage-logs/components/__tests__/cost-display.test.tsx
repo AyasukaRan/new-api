@@ -31,6 +31,7 @@ import {
 
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
+import { getChargeBreakdown } from '../../lib/charge-breakdown'
 import { LogCostDisplay } from '../log-cost-display'
 
 function renderCost(
@@ -210,7 +211,7 @@ describe('log cost display', () => {
     })
     await user.click(marker)
     const dialog = screen.getByRole('dialog')
-    expect(dialog).toHaveTextContent('2 × $5 / 1,000 × 2')
+    expect(dialog).toHaveTextContent('2 times × $5 / 1,000 times × 2')
     expect(dialog).toHaveTextContent('$0.02')
     expect(dialog).toHaveTextContent('Remaining charge')
     expect(dialog).toHaveTextContent('$0.005')
@@ -250,9 +251,95 @@ describe('log cost display', () => {
     })
     await user.click(screen.getByRole('button', { name: /Billing Details/ }))
     const dialog = screen.getByRole('dialog')
-    expect(dialog).toHaveTextContent('1,000 × $2 / 1,000,000 × 0.5')
-    expect(dialog).toHaveTextContent('500 × $1 / 1,000,000 × 0.5')
-    expect(dialog).toHaveTextContent('500 × $8 / 1,000,000 × 0.5')
+    expect(dialog).toHaveTextContent(
+      '1,000 tokens × $2 / 1,000,000 tokens × 0.5'
+    )
+    expect(dialog).toHaveTextContent('500 tokens × $1 / 1,000,000 tokens × 0.5')
+    expect(dialog).toHaveTextContent('500 tokens × $8 / 1,000,000 tokens × 0.5')
+  })
+
+  test('reconciles a recorded DeepSeek off-peak receipt without a normalized token snapshot', () => {
+    const other = {
+      billing_mode: 'tiered_expr',
+      matched_tier: 'off_peak',
+      group_ratio: 0.2,
+      cache_tokens: 9856,
+      expr_b64: btoa(
+        'hour("Asia/Shanghai") < 12 ? tier("peak", p * 2 + cr * 0.04 + c * 8) : tier("off_peak", p * 1 + cr * 0.02 + c * 4)'
+      ),
+    }
+    const log = { prompt_tokens: 34666, completion_tokens: 73 }
+    const lines = getChargeBreakdown(other, 2530, 500_000, [], log)
+    expect(lines.map((l) => [l.label, l.basis?.count])).toEqual([
+      ['Uncached input', 24810],
+      ['Cache Read', 9856],
+      ['Output', 73],
+    ])
+    expect(lines[0].quota).toBeCloseTo(2481)
+    expect(lines[1].quota).toBeCloseTo(19.712)
+    expect(lines[2].quota).toBeCloseTo(29.2)
+    expect(getChargeBreakdown(other, 2529, 500_000, [], log)).toEqual([])
+  })
+
+  test('keeps historical Claude cache writes and reads separate from its uncached input', () => {
+    const other = {
+      billing_mode: 'tiered_expr',
+      matched_tier: 'standard',
+      group_ratio: 1.5,
+      usage_semantic: 'anthropic',
+      cache_tokens: 236537,
+      cache_creation_tokens: 1141,
+      cache_creation_tokens_5m: 1141,
+      expr_b64: btoa(
+        'tier("standard", p * 4 + c * 20 + cr * 0.2 + cc * 5 + cc1h * 8)'
+      ),
+    }
+    const lines = getChargeBreakdown(other, 41202, 500_000, [], {
+      prompt_tokens: 96,
+      completion_tokens: 77,
+    })
+    expect(lines.map((l) => [l.label, l.basis?.count])).toEqual([
+      ['Uncached input', 96],
+      ['Cache Read', 236537],
+      ['Cache Write', 1141],
+      ['Output', 77],
+    ])
+    expect(Math.round(lines.reduce((n, l) => n + l.quota, 0))).toBe(41202)
+  })
+
+  test('does not infer missing image counts or itemize a settlement that does not reconcile', () => {
+    const other = {
+      billing_mode: 'tiered_expr',
+      matched_tier: 'base',
+      group_ratio: 1,
+      expr_b64: btoa('tier("base", p * 2 + img * 2)'),
+    }
+    expect(
+      getChargeBreakdown(other, 100, 500_000, [], {
+        prompt_tokens: 100,
+        completion_tokens: 0,
+      })
+    ).toEqual([])
+    expect(
+      getChargeBreakdown(
+        { ...other, billing_tokens: { p: 100 } },
+        100,
+        500_000,
+        []
+      )
+    ).toEqual([])
+    expect(
+      getChargeBreakdown(
+        {
+          ...other,
+          billing_quota_per_unit: 2_000_000,
+          billing_tokens: { p: 99, img: 1 },
+        },
+        400,
+        500_000,
+        []
+      )
+    ).toHaveLength(2)
   })
 
   const costSnapshot = {

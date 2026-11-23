@@ -7,8 +7,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -728,4 +730,28 @@ func TestRequestMetadataReasoningLabelsDoNotChangeRelayParameters(t *testing.T) 
 			assert.Equal(t, test.effort, info.ReasoningEffort)
 		})
 	}
+}
+
+func TestRequestMetadataUsesOneClockForFirstResponseAndDuration(t *testing.T) {
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	started := time.Now().Add(-3 * time.Second)
+	common.SetContextKey(ctx, constant.ContextKeyRequestStartTime, started.Add(-time.Minute))
+	info := &relaycommon.RelayInfo{StartTime: started, FirstResponseTime: started.Add(1234 * time.Millisecond)}
+	log := model.NewLogOther()
+	lower := time.Since(started).Milliseconds()
+	AppendRequestMetadata(ctx, info, log)
+	upper := time.Since(started).Milliseconds()
+	values := log.Snapshot()
+	assert.Equal(t, float64(1234), values["frt"])
+	require.IsType(t, int64(0), values["duration_ms"])
+	assert.GreaterOrEqual(t, values["duration_ms"].(int64), lower)
+	assert.LessOrEqual(t, values["duration_ms"].(int64), upper)
+
+	// A request rejected before relay setup still has a gateway start but no token.
+	log = model.NewLogOther()
+	AppendRequestMetadata(ctx, nil, log)
+	values = log.Snapshot()
+	require.IsType(t, int64(0), values["duration_ms"])
+	assert.GreaterOrEqual(t, values["duration_ms"].(int64), int64(63000))
+	assert.NotContains(t, values, "frt")
 }

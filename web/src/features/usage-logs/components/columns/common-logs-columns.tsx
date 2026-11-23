@@ -354,12 +354,27 @@ function buildTypeDetailSegments(
   return segments
 }
 
+export function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
+  if (!isConsumeLogType(log.type)) return true
+  const other = getLogMetadata(log)
+  return Boolean(
+    isFailedStreamResponse(other?.stream_status) ||
+    other?.retry_decision ||
+    other?.is_system_prompt_overwritten ||
+    isViolationFeeLog(other) ||
+    (isAdmin && other?.admin_info?.quota_saturation) ||
+    other?.content_parts?.length ||
+    log.content?.trim()
+  )
+}
+
 export function useCommonLogsColumns(
   isAdmin: boolean,
   onShowDetails: (log: UsageLog) => void,
   source: LogSource = 'usage',
   showBillingSource = false,
-  compact = false
+  compact = false,
+  eventDetailsOnly = false
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
   const currency = useSystemConfigStore((state) => state.config.currency)
@@ -380,9 +395,14 @@ export function useCommonLogsColumns(
               className='flex min-w-0 flex-col items-start gap-0.5 leading-tight'
               title={dateTime}
             >
-              <span className='font-mono text-[13px] font-semibold tabular-nums'>
+              <button
+                type='button'
+                title={t('Click to view full details')}
+                onClick={() => onShowDetails(log)}
+                className='cursor-pointer rounded-sm font-mono text-[13px] font-semibold tabular-nums hover:underline focus-visible:outline'
+              >
                 {time || date}
-              </span>
+              </button>
               <div className='text-muted-foreground flex items-center gap-1.5 text-[11px] whitespace-nowrap'>
                 <StatusBadge
                   label={t(config.label)}
@@ -588,14 +608,15 @@ export function useCommonLogsColumns(
         if (!isDisplayableLogType(row.original.type)) return null
         const model = formatModelName(row.original)
         return (
-          <div className='flex max-w-full min-w-0 flex-col items-start gap-1'>
+          <div className='flex w-max max-w-44 min-w-0 flex-col items-start gap-1'>
             <ModelBadge
+              wrapText
               modelName={model.name}
               actualModel={model.actualModel}
               responseModel={model.responseModel}
             />
             {compact && (
-              <div className='flex max-w-full flex-wrap items-center gap-1 empty:hidden'>
+              <div className='flex w-full max-w-full flex-wrap items-center gap-1 [contain:inline-size] empty:hidden'>
                 {table.getState().columnVisibility.reasoning_effort !==
                   false && (
                   <RequestMetadataTags
@@ -767,7 +788,8 @@ export function useCommonLogsColumns(
           const other = getLogMetadata(log)
 
           const pricingData = usePricingData(
-            log.type === 2 &&
+            !eventDetailsOnly &&
+              log.type === 2 &&
               other?.is_task === true &&
               other.billing_mode === 'tiered_expr'
           )
@@ -777,14 +799,31 @@ export function useCommonLogsColumns(
             ),
             other?.admin_info?.task_plugin?.key
           )
-          const segments = buildDetailSegments(
-            log,
-            other,
-            t,
-            isAdmin,
-            i18n.language,
-            usageSchema
-          )
+          let segments: DetailSegment[] = []
+          if (
+            !eventDetailsOnly ||
+            !isConsumeLogType(log.type) ||
+            isViolationFeeLog(other)
+          ) {
+            segments = buildDetailSegments(
+              log,
+              other,
+              t,
+              isAdmin,
+              i18n.language,
+              usageSchema
+            )
+          } else if (isAdmin && other?.admin_info?.quota_saturation) {
+            segments = [{ text: t('Quota clamped'), danger: true }]
+          } else if (other?.is_system_prompt_overwritten) {
+            segments = [{ text: t('System Prompt Override'), danger: true }]
+          } else {
+            const event =
+              getRetryDecisionReason(other?.retry_decision, t) ||
+              renderLogContent(other, t) ||
+              log.content
+            if (event) segments = [{ text: event, muted: true }]
+          }
           const primary = segments[0]
           const hasMore = segments.length > 1
           let periodLabel = ''
@@ -853,6 +892,10 @@ export function useCommonLogsColumns(
             )
           }
 
+          if (eventDetailsOnly && !failedRequest && !primary && !log.content) {
+            return null
+          }
+
           const detailsButton = (
             <button
               type='button'
@@ -883,5 +926,14 @@ export function useCommonLogsColumns(
     return columns
     // Log formatters read currency settings from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, isAdmin, onShowDetails, showBillingSource, source, currency, compact])
+  }, [
+    t,
+    isAdmin,
+    onShowDetails,
+    showBillingSource,
+    source,
+    currency,
+    compact,
+    eventDetailsOnly,
+  ])
 }

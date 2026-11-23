@@ -223,6 +223,7 @@ export interface LogOtherData {
   usage_semantic?: string
   image_cache_tokens?: number
   billing_tokens?: Record<string, number>
+  billing_quota_per_unit?: number
   cache_creation_tokens?: number
   cache_creation_tokens_5m?: number
   cache_creation_tokens_1h?: number
@@ -249,6 +250,7 @@ export interface LogOtherData {
   }
   audio_ratio?: number
   audio_completion_ratio?: number
+  duration_ms?: number
   frt?: number
   retry_decision?: {
     action: 'retry_same_key' | 'retry_other_key' | 'stop'

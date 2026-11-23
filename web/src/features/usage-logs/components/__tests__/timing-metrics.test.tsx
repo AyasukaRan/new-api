@@ -28,6 +28,7 @@ import { usageLogSchema } from '../../data/schema'
 import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogMetricLegend } from '../log-metric-legend'
+import { LogTimingDetails } from '../log-timing-details'
 import { StreamModeCell, TimingMetricsCell } from '../timing-metrics-cell'
 import { TokenPerformanceCell } from '../token-performance-cell'
 
@@ -362,10 +363,10 @@ test.each([true, false])(
         screen.getByRole('button', { name: /Timing breakdown/ })
       )
       const breakdown = within(
-        await screen.findByRole('dialog', { name: 'Timing breakdown' })
+        await screen.findByRole('tabpanel', { name: 'Timing breakdown' })
       )
       expect(breakdown.getByText('400ms')).toBeVisible()
-      expect(breakdown.getByText('≈ 600ms')).toBeVisible()
+      expect(breakdown.getByText('<1.6s')).toBeVisible()
       if (admin) {
         expect(await breakdown.findByText('372ms')).toBeVisible()
         expect(breakdown.queryByText('893ms')).not.toBeInTheDocument()
@@ -403,10 +404,33 @@ test('keeps a recorded first token when rounded duration is shorter, without inv
     screen.getByRole('button', { name: /Timing breakdown/ })
   )
   const breakdown = within(
-    await screen.findByRole('dialog', { name: 'Timing breakdown' })
+    await screen.findByRole('tabpanel', { name: 'Timing breakdown' })
   )
   expect(breakdown.getByText('633ms')).toBeVisible()
-  expect(breakdown.queryByText('After first token')).not.toBeInTheDocument()
+  expect(breakdown.getByText('<367ms')).toBeVisible()
+})
+
+test('table metric icons stay beside short values and all groups size to their content', () => {
+  const log = usageLogSchema.parse({
+    id: 4,
+    user_id: 1,
+    created_at: 1,
+    type: 2,
+    content: '',
+    use_time: 2,
+    prompt_tokens: 10,
+    completion_tokens: 1,
+  })
+  render(<TokenPerformanceCell log={log} other={{ cache_tokens: 0 }} />)
+
+  for (const name of ['Output Tokens', 'Cache read tokens', 'Total time']) {
+    const group = screen.getByRole('term', { name }).closest('dl')
+    expect(group).toHaveClass(
+      'grid-cols-[max-content_max-content]',
+      'justify-start'
+    )
+    expect(group?.parentElement).toHaveClass('w-max', 'max-w-full')
+  }
 })
 
 test('a page-metered task shows the page count and duration without empty token metrics', () => {
@@ -465,3 +489,64 @@ test.each([true, false])(
     expect(trigger).toHaveFocus()
   }
 )
+
+test('uses the measured elapsed milliseconds for fast requests and preserves an observed submillisecond first token', () => {
+  const log = usageLogSchema.parse({
+    id: 1,
+    user_id: 1,
+    created_at: 1,
+    type: 2,
+    content: '',
+    is_stream: true,
+    use_time: 0,
+    completion_tokens: 40,
+  })
+  render(
+    <TokenPerformanceCell log={log} other={{ frt: 0, duration_ms: 250 }} />
+  )
+  expect(screen.getByText('0ms')).toBeVisible()
+  expect(screen.getByText('250ms')).toBeVisible()
+  expect(screen.getByText('160 t/s')).toBeVisible()
+})
+
+test('separates exact gateway phases from independently measured routing attempts', () => {
+  const log = usageLogSchema.parse({
+    id: 1,
+    user_id: 1,
+    created_at: 1,
+    type: 2,
+    content: '',
+    is_stream: true,
+    use_time: 5,
+  })
+  const event = (action: string, attempt: number, elapsed_ms: number) => ({
+    decision: { action, reason: '', source: '' },
+    attempt,
+    elapsed_ms,
+  })
+  const other: LogOtherData = {
+    frt: 545,
+    duration_ms: 4340,
+    admin_info: {
+      request_policy: [
+        event('attempt', 1, 12),
+        event('failure', 1, 180),
+        event('retry', 1, 180),
+        event('attempt', 2, 184),
+        event('success', 2, 4200),
+      ],
+    },
+  }
+  const { rerender } = render(
+    <LogTimingDetails log={log} other={other} isAdmin />
+  )
+  expect(screen.getByText('4.34s')).toBeVisible()
+  expect(screen.getByText('545ms')).toBeVisible()
+  expect(screen.getByText('3.795s')).toBeVisible()
+  expect(screen.getByText('12ms')).toBeVisible()
+  expect(screen.getByText('168ms')).toBeVisible()
+  expect(screen.getByText('4ms')).toBeVisible()
+  expect(screen.getByText('4.016s')).toBeVisible()
+  rerender(<LogTimingDetails log={log} other={other} isAdmin={false} />)
+  expect(screen.queryByText('Routing observations')).not.toBeInTheDocument()
+})

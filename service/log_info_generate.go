@@ -142,7 +142,6 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other.SetPublic("cache_ratio", cacheRatio)
 	other.SetPublic("model_price", modelPrice)
 	other.SetPublic("user_group_ratio", userGroupRatio)
-	other.SetPublic("frt", float64(relayInfo.FirstResponseTime.UnixMilli()-relayInfo.StartTime.UnixMilli()))
 	AppendRequestMetadata(ctx, relayInfo, other)
 	if relayInfo.IsModelMapped {
 		other.SetPublic("is_model_mapped", true)
@@ -387,13 +386,16 @@ func InjectTieredBillingInfo(other *model.LogOther, relayInfo *relaycommon.Relay
 		return
 	}
 	other.SetPublic("billing_mode", "tiered_expr")
+	other.SetPublic("billing_quota_per_unit", snap.QuotaPerUnit)
 	other.SetPublic("expr_b64", base64.StdEncoding.EncodeToString([]byte(snap.ExprString)))
 	if result != nil {
 		if result.MeteredUsage != nil {
 			other.SetPublic("metered_usage", *result.MeteredUsage)
 		}
 		if tokens := result.BillingTokens; tokens != nil && result.BillingUnit == billingexpr.BillingUnitToken {
-			other.SetPublic("image_cache_tokens", tokens.ImgCR)
+			if tokens.ImgCR > 0 || billingexpr.UsedVarsByHash(snap.ExprString, snap.ExprHash)["img_cr"] {
+				other.SetPublic("image_cache_tokens", tokens.ImgCR)
+			}
 			other.SetPublic("billing_tokens", map[string]float64{
 				"p": tokens.P, "c": tokens.C, "len": tokens.Len,
 				"cr": tokens.CR, "cc": tokens.CC, "cc1h": tokens.CC1h, "cc12h": tokens.CC12h,

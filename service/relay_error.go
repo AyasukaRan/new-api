@@ -103,9 +103,6 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		other.SetPublic("error_type", err.GetErrorType())
 		other.SetPublic("error_code", err.GetErrorCode())
 		other.SetPublic("status_code", err.StatusCode)
-		if relayInfo != nil && relayInfo.HasSendResponse() {
-			other.SetPublic("frt", float64(relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()))
-		}
 		appendStreamStatus(c, relayInfo, other)
 		for _, event := range RequestPolicy(c).Events() {
 			if event.Decision.Action != "retry" && event.Decision.Action != "stop" {

@@ -19,26 +19,8 @@
   height: 72px;
   padding-block: 7px;
 }
-.grid
-  th:is(
-    [data-column-id='created_at'],
-    [data-column-id='channel'],
-    [data-column-id='reasoning_effort'],
-    [data-column-id='invoked_tools'],
-    [data-column-id='is_stream'],
-    [data-column-id='quota'],
-    [data-column-id='content']
-  ) {
-  width: 1%;
-}
 .grid th[data-column-id='model_name'] {
-  width: 15%;
-}
-.grid th[data-column-id='request_source'] {
-  width: 14%;
-}
-.grid th[data-column-id='prompt_tokens'] {
-  width: 25%;
+  width: 1%;
 }
 .grid
   :is(th, td):is(
@@ -123,10 +105,7 @@
 .grid [data-billed-tool*='image'] {
   color: var(--chart-3);
 }
-.compact td[data-column-id='prompt_tokens'] > div {
-  min-width: 19rem;
-  column-gap: 6px;
-}
+
 @media (min-width: 1580px) {
   .grid td[data-column-id='prompt_tokens'] dd {
     font-size: 13px;

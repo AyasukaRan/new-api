@@ -8,9 +8,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -398,6 +401,27 @@ func (m *requestMetadata) acceptResponsesTool(item gjson.Result, complete bool) 
 func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *model.LogOther) {
 	if other == nil || c == nil {
 		return
+	}
+	// The first response and the log observation share the request clock,
+	// including earlier channel attempts.
+	var started time.Time
+	if info != nil {
+		started = info.StartTime
+	}
+	if started.IsZero() {
+		started = common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	}
+	if !started.IsZero() {
+		elapsed := time.Since(started)
+		if elapsed >= 0 {
+			other.SetPublic("duration_ms", elapsed.Milliseconds())
+			if info != nil && info.FirstResponseTime.After(started) {
+				first := info.FirstResponseTime.Sub(started)
+				if first <= elapsed {
+					other.SetPublic("frt", float64(first.Milliseconds()))
+				}
+			}
+		}
 	}
 	value, _ := c.Get(requestMetadataContextKey)
 	metadata, _ := value.(*requestMetadata)

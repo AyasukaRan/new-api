@@ -16,13 +16,17 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { BILLING_PRICING_VARS } from '@/features/pricing/lib/billing-expr'
+import {
+  BILLING_PRICING_VARS,
+  normalizeTierLabel,
+} from '@/features/pricing/lib/billing-expr'
+import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
 import { formatQuotaWithCurrency } from '@/lib/currency'
-import { formatNumber } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
 import type { LogOtherData } from '../types'
-import { getTieredBillingSummary } from './format'
+import { getLogCacheUsage } from './cache-usage'
+import { decodeBillingExprB64, getTieredBillingSummary } from './format'
 
 // A single quota unit is often split across several token or tool lines.
 export function formatReceiptQuota(quota: number): string {
@@ -96,9 +100,93 @@ export function getBilledTools(other: LogOtherData | null): BilledTool[] {
 
 interface ChargeLine {
   label: string
-  formula: string
+  basis?: {
+    count: number
+    unitPriceQuota: number
+    per: number
+    multipliers: number[]
+  }
   quota: number
   tool?: boolean
+  unit?: string
+}
+
+// Earlier token settlements only saved normalized billing_tokens for image-cache
+// expressions. Text/cache quantities can be recovered from the request's log.
+// Modality intersections and implicit long-write multipliers require the actual
+// normalized snapshot; never infer them by solving backwards from the charge.
+function historicalTextBillingTokens(
+  log: Pick<UsageLog, 'prompt_tokens' | 'completion_tokens'>,
+  other: LogOtherData
+): Record<string, number> | undefined {
+  const expression = compileBillingExpression(
+    decodeBillingExprB64(other.expr_b64)
+  )
+  if (expression.status !== 'ready' || other.is_task || other.audio) return
+  const vars = expression.variables
+  if (
+    (['img', 'img_cr', 'img_o', 'ai', 'ao'] as const).some((v) => vars.has(v))
+  ) {
+    return
+  }
+  const cache = getLogCacheUsage(log.prompt_tokens, other)
+  const read = cache.read ?? 0
+  const write = cache.write ?? 0
+  const oneHour = other.cache_creation_tokens_1h ?? 0
+  const twelveHours = other.cache_creation_tokens_12h ?? 0
+  if (
+    ![
+      log.prompt_tokens,
+      log.completion_tokens,
+      read,
+      write,
+      oneHour,
+      twelveHours,
+    ].every((v) => Number.isSafeInteger(v) && v >= 0)
+  ) {
+    return
+  }
+  if (
+    (oneHour && !vars.has('cc1h')) ||
+    (twelveHours && !vars.has('cc12h')) ||
+    oneHour + twelveHours > write
+  ) {
+    return
+  }
+
+  // Modern logs explicitly tag Anthropic usage. The older Claude rows with a
+  // cache-write split also distinguished uncached input, in the log itself.
+  const anthropic =
+    other.usage_semantic === 'anthropic' ||
+    (!other.usage_semantic &&
+      other.claude === true &&
+      (other.cache_creation_tokens_5m != null ||
+        other.cache_creation_tokens_1h != null))
+  if (
+    (!other.usage_semantic && other.claude && !anthropic && (read || write)) ||
+    (anthropic && twelveHours) ||
+    (!anthropic && oneHour)
+  ) {
+    return
+  }
+  const shortWrites = write - oneHour - twelveHours
+  let input = log.prompt_tokens
+  if (anthropic) {
+    if (!vars.has('cr')) input += read
+    if (!vars.has('cc')) input += shortWrites
+  } else {
+    if (vars.has('cr')) input -= read
+    if (vars.has('cc')) input -= shortWrites
+    if (vars.has('cc12h')) input -= twelveHours
+  }
+  return {
+    p: Math.max(0, input),
+    c: log.completion_tokens,
+    cr: read,
+    cc: shortWrites,
+    cc1h: oneHour,
+    cc12h: twelveHours,
+  }
 }
 
 // Only itemize prices and quantities recorded with this request. A partial or
@@ -106,13 +194,16 @@ interface ChargeLine {
 export function getChargeBreakdown(
   other: LogOtherData | null,
   settled: number,
-  quotaPerUnit: number,
+  displayQuotaPerUnit: number,
   tools: BilledTool[],
   log?: Pick<UsageLog, 'prompt_tokens' | 'completion_tokens'>
 ): ChargeLine[] {
+  const quotaPerUnit = other?.billing_quota_per_unit ?? displayQuotaPerUnit
   const ratio = other?.group_ratio
   if (
     !other ||
+    !Number.isFinite(quotaPerUnit) ||
+    quotaPerUnit <= 0 ||
     typeof ratio !== 'number' ||
     !Number.isFinite(ratio) ||
     ratio < 0
@@ -127,11 +218,13 @@ export function getChargeBreakdown(
     ruleRatios: number[] = []
   ): ChargeLine => ({
     label,
-    formula: [
-      `${formatNumber(count)} × ${formatReceiptQuota(price * quotaPerUnit)} / ${formatNumber(per)}`,
-      ratio,
-      ...ruleRatios,
-    ].join(' × '),
+    basis: {
+      count,
+      unitPriceQuota: price * quotaPerUnit,
+      per,
+      multipliers: [ratio, ...ruleRatios],
+    },
+    unit: per === 1_000_000 ? 'tokens' : 'request',
     quota:
       ((count * price) / per) *
       quotaPerUnit *
@@ -141,10 +234,29 @@ export function getChargeBreakdown(
   const toolLines = tools.map(({ name, count, price, per }) => ({
     ...line(name, count, price, per),
     tool: true,
+    unit: 'times',
   }))
   const tokenLines: ChargeLine[] = []
   const summary = getTieredBillingSummary(other)
-  if (summary) {
+  let quantitiesKnown = true
+  if (
+    summary &&
+    !other.metered_usage_estimated &&
+    (summary.priceEntries[0]?.unit ||
+      summary.tiers.filter(
+        (tier) =>
+          normalizeTierLabel(tier.label) ===
+          normalizeTierLabel(other.matched_tier)
+      ).length === 1)
+  ) {
+    const separateRead = summary.priceEntries.some(
+      (e) => e.field === 'cacheReadPrice'
+    )
+    const separateWrite = summary.priceEntries.some(
+      (e) => e.field === 'cacheCreatePrice'
+    )
+    const counts =
+      other.billing_tokens ?? (log && historicalTextBillingTokens(log, other))
     const rules = Array.isArray(other.request_rules)
       ? other.request_rules
           .filter((rule) => rule?.matched)
@@ -154,7 +266,7 @@ export function getChargeBreakdown(
       const variable = BILLING_PRICING_VARS.find((v) => v.field === entry.field)
       let count: number | undefined
       if (variable) {
-        count = other.billing_tokens?.[variable.key]
+        count = counts?.[variable.key]
       } else if (entry.unit === 'image') {
         count = other.image_count
       } else if (entry.unit === 'request') {
@@ -162,18 +274,34 @@ export function getChargeBreakdown(
       } else if (entry.unit === other.metered_usage?.unit) {
         count = other.metered_usage?.count
       }
-      if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
-        tokenLines.push(
-          line(
-            entry.shortLabel,
+      if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) {
+        quantitiesKnown = false
+      } else if (count > 0) {
+        tokenLines.push({
+          ...line(
+            entry.field === 'inputPrice' &&
+              separateRead &&
+              (separateWrite ||
+                !(other.cache_write_tokens || other.cache_creation_tokens))
+              ? 'Uncached input'
+              : entry.shortLabel,
             count,
             entry.price,
             variable ? 1_000_000 : 1,
             rules
-          )
-        )
+          ),
+          unit: variable ? 'tokens' : entry.unit,
+        })
       }
     }
+  } else if (
+    !other.billing_mode &&
+    typeof other.model_price === 'number' &&
+    other.model_price >= 0 &&
+    !other.is_task &&
+    !other.audio_input_seperate_price
+  ) {
+    tokenLines.push(line('Per-call', 1, other.model_price, 1))
   } else if (
     !other.billing_mode &&
     log &&
@@ -212,10 +340,16 @@ export function getChargeBreakdown(
       }
     }
   }
-  const all = [...tokenLines, ...toolLines]
+  // Keep input, its cache components, and output adjacent in the receipt.
+  const all = [
+    ...tokenLines.filter((l) => l.label !== 'Output'),
+    ...tokenLines.filter((l) => l.label === 'Output'),
+    ...toolLines,
+  ]
   const total = all.reduce((sum, part) => sum + part.quota, 0)
   // The gateway rounds once after summing the fractional quota amounts.
   if (
+    quantitiesKnown &&
     all.every((part) => Number.isFinite(part.quota) && part.quota >= 0) &&
     Math.round(total) === settled
   ) {
@@ -229,7 +363,6 @@ export function getChargeBreakdown(
         ? [
             {
               label: 'Remaining charge',
-              formula: '',
               quota: settled - toolQuota,
             },
           ]

@@ -396,6 +396,9 @@ export function hasAnyCacheTokens(
 ): boolean {
   if (!other) return false
   return (
+    ['cr', 'cc', 'cc1h', 'cc12h', 'img_cr'].some(
+      (key) => (other.billing_tokens?.[key] ?? 0) > 0
+    ) ||
     (other.cache_tokens || 0) > 0 ||
     (other.image_cache_tokens || 0) > 0 ||
     (other.cache_creation_tokens || 0) > 0 ||

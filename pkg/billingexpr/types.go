@@ -90,7 +90,7 @@ type BillingSnapshot struct {
 type TieredResult struct {
 	MeteredUsage *MeteredUsage `json:"metered_usage,omitempty"`
 	// BillingTokens records the actual normalized inputs for successful token
-	// billing that explicitly references img_cr. Logs serialize these through
+	// billing. Logs serialize these quantities through
 	// the shared injection path, not as additional snapshot state.
 	BillingTokens          *TokenParams       `json:"-"`
 	ImageCount             *int               `json:"image_count,omitempty"`

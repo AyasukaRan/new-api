@@ -20,6 +20,7 @@ For commercial licensing, please contact support@quantumnous.com
  * Column definitions factory
  */
 import type { ColumnDef } from '@tanstack/react-table'
+import { useMemo } from 'react'
 
 import { useCommonLogsColumns } from '../components/columns/common-logs-columns'
 import { useDrawingLogsColumns } from '../components/columns/drawing-logs-columns'
@@ -38,7 +39,9 @@ export function useColumnsByCategory(
   onShowDetails: (log: UsageLog) => void,
   source: LogSource = 'usage',
   showBillingSource = false,
-  compact = false
+  compact = false,
+  eventDetailsOnly = false,
+  showDetailColumn = true
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): ColumnDef<any>[] {
   const commonColumns = useCommonLogsColumns(
@@ -46,14 +49,24 @@ export function useColumnsByCategory(
     onShowDetails,
     source,
     showBillingSource,
-    compact
+    compact,
+    eventDetailsOnly
   )
   const drawingColumns = useDrawingLogsColumns(isAdmin)
   const taskColumns = useTaskLogsColumns(isAdmin, isRoot)
 
+  const visibleCommonColumns = useMemo(
+    () =>
+      showDetailColumn
+        ? commonColumns
+        : commonColumns.filter(
+            (col) => !('accessorKey' in col && col.accessorKey === 'content')
+          ),
+    [commonColumns, showDetailColumn]
+  )
   switch (logCategory) {
     case 'common':
-      return commonColumns
+      return visibleCommonColumns
     case 'drawing':
       return drawingColumns
     case 'task':

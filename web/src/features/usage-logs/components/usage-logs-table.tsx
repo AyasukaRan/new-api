@@ -51,6 +51,7 @@ import { getLogMetadata } from '../lib/format'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory } from '../types'
+import { hasLogEventDetail } from './columns/common-logs-columns'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
 import { DetailsDialog } from './dialogs/details-dialog'
 import { TaskLogsFilterBar } from './task-logs-filter-bar'
@@ -281,6 +282,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       ),
   })
   const logs = view?.items ?? data?.items ?? []
+  const desktopUsage = commonUsage && !isMobile && layout !== 'cards'
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,
@@ -288,7 +290,10 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     setSelectedLog,
     logSource,
     showBillingSource,
-    layout === 'compact'
+    layout === 'compact',
+    desktopUsage,
+    !desktopUsage ||
+      (logs as UsageLog[]).some((log) => hasLogEventDetail(log, isAdmin))
   )
   const isLoadingData = isLoading || (isFetching && !data)
 
