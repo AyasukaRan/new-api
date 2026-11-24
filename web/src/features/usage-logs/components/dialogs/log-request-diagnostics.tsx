@@ -35,6 +35,7 @@ import {
 } from '../../lib/format'
 import { isResponseModelMismatch } from '../../lib/response-model'
 import type { LogOtherData } from '../../types'
+import { RequestInfoCard } from '../log-request-info-cards'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { RequestPluginAdminSteps, RequestPluginRecord } from '../request-plugin-record'
@@ -83,6 +84,67 @@ export function LogRequestDiagnostics(props: {
         </p>
       </LogOverviewCard>
     )
+  }
+  if (other?.model_parameters || other?.reasoning_effort) {
+    const params = other.model_parameters ?? {}
+    const entries: [string, unknown][] = [
+      [t('Reasoning Effort'), params.reasoning_effort],
+      [t('Thinking mode'), params.thinking_mode],
+      [t('Thinking enabled'), params.enable_thinking],
+      [t('Thinking budget (tokens)'), params.thinking_budget],
+      [t('Include thoughts'), params.include_thoughts],
+      [t('Reasoning summary'), params.reasoning_summary],
+      [t('Temperature'), params.temperature],
+      [t('Top P'), params.top_p],
+      [t('Top K'), params.top_k],
+      [t('Seed'), params.seed],
+      [t('Frequency Penalty'), params.frequency_penalty],
+      [t('Presence Penalty'), params.presence_penalty],
+      [t('Max Tokens'), params.max_tokens],
+      [t('Max completion tokens'), params.max_completion_tokens],
+      [t('Max output tokens'), params.max_output_tokens],
+      [t('Max tokens to sample'), params.max_tokens_to_sample],
+      [t('Completion choices'), params.n],
+      [t('Candidate count'), params.candidate_count],
+      [t('Response format'), params.response_format],
+      [t('Output verbosity'), params.verbosity],
+      [t('Tool choice'), params.tool_choice],
+      [t('Parallel tool calls'), params.parallel_tool_calls],
+      [t('Max tool calls'), params.max_tool_calls],
+      [t('Service tier'), params.service_tier],
+    ]
+    const legacyEffort = other.reasoning_effort
+    if (!params.reasoning_effort && !params.thinking_mode && legacyEffort) {
+      const label = ['enabled', 'disabled', 'adaptive', 'auto'].includes(
+        legacyEffort
+      )
+        ? t('Thinking mode')
+        : t('Recorded reasoning effort')
+      entries.push([label, legacyEffort])
+    }
+    const fields = entries.flatMap(([label, value]) => {
+      if (typeof value === 'boolean') {
+        return [
+          { label, value: value ? t('Enabled') : t('Disabled'), mono: false },
+        ]
+      }
+      if (
+        (typeof value === 'string' && value.trim()) ||
+        (typeof value === 'number' && Number.isFinite(value))
+      ) {
+        return [{ label, value: String(value), mono: true }]
+      }
+      return []
+    })
+    if (fields.length) {
+      panels.push(
+        <RequestInfoCard
+          key='model-parameters'
+          title={t('Model parameters')}
+          fields={fields}
+        />
+      )
+    }
   }
   if (other?.request_plugins?.length) {
     panels.push(

@@ -849,3 +849,64 @@ func TestRequestMetadataUsesOneClockForFirstResponseAndDuration(t *testing.T) {
 	assert.GreaterOrEqual(t, values["duration_ms"].(int64), int64(63000))
 	assert.NotContains(t, values, "frt")
 }
+
+func TestRequestMetadataModelParameters(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		request    dto.Request
+		body, want string
+	}{
+		{
+			name:    "chat preserves zero and false and excludes tool names, prompts, and schemas",
+			request: &dto.GeneralOpenAIRequest{},
+			body:    `{"messages":[{"role":"user","content":"private prompt"}],"temperature":0,"top_p":0,"n":1,"max_tokens":0,"max_completion_tokens":32,"seed":0,"frequency_penalty":-0.2,"presence_penalty":0,"parallel_tool_calls":false,"reasoning":{"effort":"high","max_tokens":256},"tool_choice":{"type":"function","function":{"name":"private_tool"}},"service_tier":"priority","response_format":{"type":"json_schema","json_schema":{"name":"private schema"}},"metadata":{"secret":"private"}}`,
+			want:    `{"temperature":0,"top_p":0,"n":1,"max_tokens":0,"max_completion_tokens":32,"seed":0,"frequency_penalty":-0.2,"presence_penalty":0,"parallel_tool_calls":false,"reasoning_effort":"high","thinking_budget":256,"tool_choice":"function","service_tier":"priority","response_format":"json_schema"}`,
+		},
+		{
+			name:    "responses preserves nested controls and discards wrong scalar types",
+			request: &dto.OpenAIResponsesRequest{},
+			body:    `{"temperature":0,"max_output_tokens":64,"max_tool_calls":0,"reasoning":{"effort":"medium","summary":"detailed"},"text":{"verbosity":"low","format":{"type":"text"}},"parallel_tool_calls":false,"thinking_budget":"private","presence_penalty":[5],"top_k":1e999,"service_tier":"private","tool_choice":{"type":"file_search","name":"private"}}`,
+			want:    `{"temperature":0,"max_output_tokens":64,"max_tool_calls":0,"reasoning_effort":"medium","reasoning_summary":"detailed","verbosity":"low","response_format":"text","parallel_tool_calls":false,"tool_choice":"file_search"}`,
+		},
+		{
+			name:    "claude records both thinking mode and effort",
+			request: &dto.ClaudeRequest{},
+			body:    `{"max_tokens":128,"top_k":0,"thinking":{"type":"enabled","budget_tokens":0},"output_config":{"effort":"max","format":{"type":"json_schema","schema":{"private":true}}},"tool_choice":{"type":"tool","name":"private","disable_parallel_tool_use":true}}`,
+			want:    `{"max_tokens":128,"top_k":0,"thinking_mode":"enabled","thinking_budget":0,"reasoning_effort":"max","response_format":"json_schema","tool_choice":"tool","parallel_tool_calls":false}`,
+		},
+		{
+			name:    "gemini preserves budget sentinel, explicit false and exact int64 seed",
+			request: &dto.GeminiChatRequest{},
+			body:    `{"generationConfig":{"candidate_count":1,"max_output_tokens":80,"topK":4,"seed":9223372036854775807,"responseMimeType":"application/json","thinking_config":{"thinking_budget":-1,"include_thoughts":false}},"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["private"]}}}`,
+			want:    `{"candidate_count":1,"max_output_tokens":80,"top_k":4,"seed":"9223372036854775807","response_format":"application/json","thinking_budget":-1,"include_thoughts":false,"tool_choice":"any"}`,
+		},
+		{
+			name:    "no settings provided or recognizable",
+			request: &dto.GeneralOpenAIRequest{},
+			body:    `{"prompt":"private","seed":9223372036854775807,"response_format":{"type":"private"},"enable_thinking":"false","tool_choice":"private","thinking_budget":{"budget":128}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, common.UnmarshalJsonStr(tc.body, tc.request))
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			info := &relaycommon.RelayInfo{Request: tc.request}
+			defer BeginRequestMetadata(c, info)()
+			// Simulate a retry or channel adaptor overriding a parameter. Logs
+			// still describe the original accepted request.
+			if chat, ok := tc.request.(*dto.GeneralOpenAIRequest); ok && chat.Temperature != nil {
+				*chat.Temperature = 1
+			}
+			ResetRequestToolObservation(c)
+			other := model.NewLogOther()
+			AppendRequestMetadata(c, info, other)
+			if tc.want == "" {
+				assert.NotContains(t, other.Snapshot(), "model_parameters")
+				return
+			}
+			got, err := common.Marshal(other.Snapshot()["model_parameters"])
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(got))
+		})
+	}
+}

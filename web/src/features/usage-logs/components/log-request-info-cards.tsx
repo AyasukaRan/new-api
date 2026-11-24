@@ -47,7 +47,7 @@ interface InfoField {
   mono?: boolean
 }
 
-function RequestInfoCard(props: {
+export function RequestInfoCard(props: {
   title: string
   fields: InfoField[]
   wide?: boolean

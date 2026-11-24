@@ -34,6 +34,11 @@ test('request detail ring shows exclusive token shares and preserves nested usag
         image_cache_tokens: 2,
         image: true,
         image_output: 4,
+        text_input: 66,
+        text_output: 15,
+        audio_input_token_count: 10,
+        audio_output: 0,
+        cached_tokens_details: { text_tokens: 18, image_tokens: 2 },
       }}
     />
   )
@@ -55,12 +60,58 @@ test('request detail ring shows exclusive token shares and preserves nested usag
   expect(
     screen.getByText('Cache Write (30m)').closest('dt')?.nextElementSibling
   ).toHaveTextContent('7')
+  const table = within(
+    screen.getByRole('table', { name: 'Tokens by modality' })
+  )
+  const cells = (name: RegExp) =>
+    within(table.getByRole('row', { name }))
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent)
+  expect(cells(/^Image/)).toEqual(['4', '2', '—'])
+  expect(cells(/^Text/)).toEqual(['66', '18', '15'])
+  expect(cells(/^Audio/)).toEqual(['10', '—', '0'])
   expect(
-    screen.getByText('Image Cache').closest('dt')?.nextElementSibling
-  ).toHaveTextContent('2')
+    screen.getByText('Non-reasoning output').nextElementSibling
+  ).toHaveTextContent('15')
+})
+
+test('shows cache hits as a share of all input and only derives output composition from recorded reasoning', () => {
+  const { rerender } = render(
+    <LogTokenBreakdown
+      variant='detail'
+      log={{ prompt_tokens: 3976, completion_tokens: 333 }}
+      other={{ cache_ratio: 0.1, cache_tokens: 256 }}
+    />
+  )
   expect(
-    screen.getByText('Image Tokens').closest('dt')?.nextElementSibling
-  ).toHaveTextContent('4')
+    screen.getByText('Total input tokens').nextElementSibling
+  ).toHaveTextContent('3,976')
+  expect(
+    screen.getByText('Input cache hit rate').nextElementSibling
+  ).toHaveTextContent('6.4%')
+  expect(screen.getByText('5.9%')).toBeVisible()
+  expect(screen.queryByText('Non-reasoning output')).not.toBeInTheDocument()
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  rerender(
+    <LogTokenBreakdown
+      variant='detail'
+      log={{ prompt_tokens: 3720, completion_tokens: 333 }}
+      other={{
+        usage_semantic: 'anthropic',
+        cache_tokens: 256,
+        reasoning_tokens: 0,
+      }}
+    />
+  )
+  expect(
+    screen.getByText('Total input tokens').nextElementSibling
+  ).toHaveTextContent('Not recorded')
+  expect(
+    screen.getByText('Input cache hit rate').nextElementSibling
+  ).toHaveTextContent('Not recorded')
+  expect(
+    screen.getByText('Non-reasoning output').nextElementSibling
+  ).toHaveTextContent('333')
 })
 
 test('request detail keeps an unclassified remainder neutral and does not invent a total for missing usage', () => {

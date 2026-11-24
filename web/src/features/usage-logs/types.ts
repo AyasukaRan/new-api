@@ -314,6 +314,11 @@ export interface LogOtherData {
   text_input?: number
   text_output?: number
   cache_tokens?: number
+  cached_tokens_details?: {
+    text_tokens?: number
+    audio_tokens?: number
+    image_tokens?: number
+  }
   input_tokens_total?: number
   reasoning_tokens?: number
   cache_write_tokens?: number
@@ -369,6 +374,32 @@ export interface LogOtherData {
   matched_tier?: string
   request_rules?: RequestRuleTrace[]
   usage_facts?: Record<string, string | number>
+  model_parameters?: {
+    temperature?: number
+    top_p?: number
+    top_k?: number
+    max_tokens?: number
+    max_completion_tokens?: number
+    max_output_tokens?: number
+    max_tokens_to_sample?: number
+    n?: number
+    candidate_count?: number
+    frequency_penalty?: number
+    presence_penalty?: number
+    seed?: number | string
+    parallel_tool_calls?: boolean
+    tool_choice?: string
+    service_tier?: string
+    max_tool_calls?: number
+    thinking_mode?: string
+    enable_thinking?: boolean
+    thinking_budget?: number
+    include_thoughts?: boolean
+    reasoning_effort?: string
+    reasoning_summary?: string
+    response_format?: string
+    verbosity?: string
+  }
   reasoning_effort?: string
   client_tool?: string
   invoked_tools?: string[]

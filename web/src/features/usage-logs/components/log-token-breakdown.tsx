@@ -18,6 +18,14 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
 
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatCompactNumber, formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -25,7 +33,12 @@ import { cn } from '@/lib/utils'
 import type { UsageLog } from '../data/schema'
 import { getLogTokenTotals } from '../lib/cache-usage'
 import type { LogOtherData } from '../types'
+import { CacheHitRing } from './cache-hit-rate'
 import { LogBreakdownBar } from './log-breakdown-bar'
+
+function isTokenCount(value: number | null | undefined): value is number {
+  return value != null && Number.isSafeInteger(value) && value >= 0
+}
 
 export function LogTokenBreakdown(props: {
   log: Pick<UsageLog, 'prompt_tokens' | 'completion_tokens'>
@@ -36,14 +49,10 @@ export function LogTokenBreakdown(props: {
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { log, other } = props
   const detail = props.variant === 'detail'
-  const { cache, output, total } = getLogTokenTotals(log, other)
+  const { cache, output, total, hasUsage } = getLogTokenTotals(log, other)
   const reasoning = other?.reasoning_tokens
   const recordedReasoning =
-    reasoning != null &&
-    Number.isSafeInteger(reasoning) &&
-    reasoning >= 0 &&
-    output != null &&
-    reasoning <= output
+    isTokenCount(reasoning) && output != null && reasoning <= output
       ? reasoning
       : null
   const primary = [
@@ -84,7 +93,7 @@ export function LogTokenBreakdown(props: {
     total != null &&
     total > 0 &&
     measuredTotal <= total &&
-    segments.every((row) => Number.isSafeInteger(row.value) && row.value >= 0)
+    segments.every((row) => isTokenCount(row.value))
   const showChart = consistentShares && measuredTotal > 0
   const percentages = new Intl.NumberFormat(locale, {
     style: 'percent',
@@ -125,18 +134,6 @@ export function LogTokenBreakdown(props: {
           },
         ]
       : primary
-  const extraFacts = detail
-    ? [
-        { label: t('Image Cache'), value: other?.image_cache_tokens },
-        {
-          label: t('Image Tokens'),
-          value: other?.image ? other.image_output : undefined,
-        },
-      ].filter(
-        (row) =>
-          row.value != null && Number.isSafeInteger(row.value) && row.value >= 0
-      )
-    : []
   const text = total == null ? '—' : formatNumber(total, locale)
   const details = (
     <dl className='grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-y-1.5 [&_dt]:pe-3'>
@@ -170,7 +167,7 @@ export function LogTokenBreakdown(props: {
           </dd>
         </div>
       ))}
-      {[...writesByDuration, ...extraFacts].map(({ label, value }) => (
+      {writesByDuration.map(({ label, value }) => (
         <div
           key={label}
           className='text-muted-foreground col-span-full grid grid-cols-subgrid items-baseline text-[11px]'
@@ -185,29 +182,33 @@ export function LogTokenBreakdown(props: {
         <dt className='text-muted-foreground'>
           {t('Reasoning tokens')}{' '}
           <span className='text-[10px]'>({t('Included in output')})</span>
-          {recordedReasoning != null &&
-            recordedReasoning > 0 &&
-            output != null && (
-              <div className='mt-1 flex items-center gap-2'>
-                <div className='grow'>
-                  <LogBreakdownBar
-                    label={`${t('Reasoning tokens')} · ${t('Included in output')}`}
-                    total={output}
-                    segments={[
-                      {
-                        key: 'reasoning',
-                        label: t('Reasoning tokens'),
-                        value: recordedReasoning,
-                        color: 'bg-violet-500',
-                      },
-                    ]}
-                  />
-                </div>
-                <span className='text-muted-foreground text-[10px] tabular-nums'>
-                  {percentages.format(recordedReasoning / output)}
-                </span>
+          {recordedReasoning != null && output != null && output > 0 && (
+            <div className='mt-1 flex items-center gap-2'>
+              <div className='grow'>
+                <LogBreakdownBar
+                  label={`${t('Reasoning tokens')} · ${t('Included in output')}`}
+                  total={output}
+                  segments={[
+                    {
+                      key: 'reasoning',
+                      label: t('Reasoning tokens'),
+                      value: recordedReasoning,
+                      color: 'bg-violet-500',
+                    },
+                    {
+                      key: 'other-output',
+                      label: t('Non-reasoning output'),
+                      value: output - recordedReasoning,
+                      color: 'bg-muted-foreground/20',
+                    },
+                  ]}
+                />
               </div>
-            )}
+              <span className='text-muted-foreground text-[10px] tabular-nums'>
+                {percentages.format(recordedReasoning / output)}
+              </span>
+            </div>
+          )}
         </dt>
         <dd
           className={cn(
@@ -243,6 +244,56 @@ export function LogTokenBreakdown(props: {
     )
   }
 
+  const input =
+    hasUsage && cache.completeTotal && isTokenCount(cache.total)
+      ? cache.total
+      : null
+  const hitRate =
+    input != null &&
+    cache.percent != null &&
+    isTokenCount(cache.read) &&
+    isTokenCount(cache.write ?? 0) &&
+    cache.read + (cache.write ?? 0) <= input ? (
+      <CacheHitRing percent={cache.percent} />
+    ) : null
+  const analysis = [
+    {
+      label: t('Total input tokens'),
+      value: input == null ? null : formatNumber(input, locale),
+    },
+    { label: t('Input cache hit rate'), value: hitRate },
+  ]
+  if (output != null && recordedReasoning != null) {
+    analysis.push({
+      label: t('Non-reasoning output'),
+      value: formatNumber(output - recordedReasoning, locale),
+    })
+  }
+  // Modality and cached-modality counts overlap the slices above.
+  const cached = other?.cached_tokens_details
+  const modalities = [
+    {
+      label: t('Text'),
+      counts: [other?.text_input, cached?.text_tokens, other?.text_output],
+    },
+    {
+      label: t('Audio'),
+      counts: [
+        other?.audio_input ?? other?.audio_input_token_count,
+        cached?.audio_tokens,
+        other?.audio_output,
+      ],
+    },
+    {
+      label: t('Image'),
+      counts: [
+        other?.image ? other.image_output : undefined,
+        cached?.image_tokens ?? other?.image_cache_tokens,
+        undefined,
+      ],
+    },
+  ].filter((row) => row.counts.some(isTokenCount))
+  const modalityColumns = [t('Input'), t('Cache Read'), t('Output')]
   // The neutral track is visible for unclassified input and for unavailable splits.
   let offset = 0
   const arcs = showChart
@@ -256,7 +307,7 @@ export function LogTokenBreakdown(props: {
         })
     : []
   return (
-    <div className='@container'>
+    <div className='@container space-y-4'>
       <div className='grid items-center gap-4 @min-[21rem]:grid-cols-[minmax(7rem,0.8fr)_minmax(0,1.5fr)]'>
         <div className='relative mx-auto grid aspect-square w-32 max-w-full place-items-center @min-[28rem]:w-36'>
           <svg
@@ -304,6 +355,74 @@ export function LogTokenBreakdown(props: {
         </div>
         {details}
       </div>
+      {hasUsage && (
+        <dl className='grid grid-cols-2 gap-x-3 gap-y-2 border-t pt-3 @min-[24rem]:auto-cols-fr @min-[24rem]:grid-flow-col @min-[24rem]:grid-cols-none'>
+          {analysis.map(({ label, value }) => (
+            <div key={label} className='space-y-1'>
+              <dt className='text-muted-foreground text-xs'>{label}</dt>
+              <dd
+                className={cn(
+                  'font-mono font-semibold tabular-nums',
+                  value == null &&
+                    'text-muted-foreground font-sans text-xs font-normal'
+                )}
+              >
+                {value ?? t('Not recorded')}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {modalities.length > 0 && (
+        <Table uniformCellText={false} className='text-xs'>
+          <caption className='caption-top pb-1 text-start font-medium'>
+            {t('Tokens by modality')}
+          </caption>
+          <TableHeader>
+            <TableRow>
+              <TableHead scope='col' className='h-7 ps-0 text-xs'>
+                {t('Modality')}
+              </TableHead>
+              {modalityColumns.map((label) => (
+                <TableHead
+                  key={label}
+                  scope='col'
+                  className='text-muted-foreground h-7 text-end text-xs'
+                >
+                  {label}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody className='[&>tr]:h-7'>
+            {modalities.map(({ label, counts }) => (
+              <TableRow key={label}>
+                <TableHead scope='row' className='h-7 ps-0 text-xs'>
+                  {label}
+                </TableHead>
+                {counts.map((count, index) => (
+                  <TableCell
+                    key={modalityColumns[index]}
+                    className='py-1 text-end tabular-nums'
+                  >
+                    {isTokenCount(count) ? (
+                      formatNumber(count, locale)
+                    ) : (
+                      <span
+                        className='text-muted-foreground'
+                        title={t('Not recorded')}
+                        aria-label={t('Not recorded')}
+                      >
+                        —
+                      </span>
+                    )}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
     </div>
   )
 }

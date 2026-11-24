@@ -337,6 +337,64 @@ test('keeps the recorded decision order in technical details and scopes diagnost
   }
 })
 
+test('technical details show recorded model settings without defaulting omitted parameters', () => {
+  const parameters = {
+    temperature: 0,
+    top_p: 0.0025,
+    seed: '9223372036854775807',
+    parallel_tool_calls: false,
+    reasoning_effort: 'high',
+    prompt: 'private prompt',
+  }
+  const props = {
+    open: true,
+    isAdmin: false,
+    isRoot: false,
+    initialView: 'technical' as const,
+    onOpenChange: () => undefined,
+  }
+  const { rerender } = render(
+    <DetailsDialog
+      {...props}
+      log={makeLog({ model_parameters: parameters })}
+    />,
+    { wrapper: DetailProviders }
+  )
+  const technical = within(
+    screen.getByRole('tabpanel', { name: 'Technical details' })
+  )
+  expect(technical.getByText('Model parameters')).toBeVisible()
+  for (const [label, value] of [
+    ['Temperature', '0'],
+    ['Top P', '0.0025'],
+    ['Seed', '9223372036854775807'],
+    ['Parallel tool calls', 'Disabled'],
+    ['Reasoning Effort', 'high'],
+  ]) {
+    expect(technical.getByText(label).nextElementSibling).toHaveTextContent(
+      value
+    )
+  }
+  expect(technical.queryByText('private prompt')).not.toBeInTheDocument()
+  expect(technical.queryByText('Max output tokens')).not.toBeInTheDocument()
+
+  rerender(
+    <DetailsDialog {...props} log={makeLog({ reasoning_effort: 'medium' })} />
+  )
+  expect(
+    technical.getByText('Recorded reasoning effort').nextElementSibling
+  ).toHaveTextContent('medium')
+  expect(technical.queryByText('Temperature')).not.toBeInTheDocument()
+  rerender(
+    <DetailsDialog {...props} log={makeLog({ reasoning_effort: 'adaptive' })} />
+  )
+  expect(
+    technical.getByText('Thinking mode').nextElementSibling
+  ).toHaveTextContent('adaptive')
+  rerender(<DetailsDialog {...props} log={makeLog({})} />)
+  expect(technical.queryByText('Model parameters')).not.toBeInTheDocument()
+})
+
 test('zero-charge failures keep restricted billing evidence available only to administrators', async () => {
   const other: LogOtherData = {
     admin_info: {

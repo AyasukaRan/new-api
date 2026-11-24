@@ -43,6 +43,7 @@ type requestMetadata struct {
 	clientTool        string
 	userAgent         string
 	reasoningLabel    string
+	modelParameters   requestModelParameters
 	buffer            []byte
 	event             []byte
 	droppingLine      bool
@@ -72,6 +73,7 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 		clientTool:      IdentifyRequestClient(c.Request.Header),
 		userAgent:       strings.Clone(strings.ToValidUTF8(ua[:min(len(ua), requestMetadataMaxUserAgentBytes)], "")),
 		reasoningLabel:  strings.Clone(requestReasoningLabel(info)),
+		modelParameters: captureRequestModelParameters(info.Request),
 	}
 	c.Set(requestMetadataContextKey, metadata)
 	supported := info.RelayFormat == types.RelayFormatClaude ||
@@ -515,6 +517,9 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 	}
 	if metadata.reasoningLabel != "" {
 		other.SetPublic("reasoning_effort", metadata.reasoningLabel)
+	}
+	if len(metadata.modelParameters) > 0 {
+		other.SetPublic("model_parameters", metadata.modelParameters)
 	}
 	if metadata.clientTool != "" {
 		other.SetPublic("client_tool", metadata.clientTool)
