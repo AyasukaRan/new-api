@@ -26,6 +26,7 @@ import {
 } from '@tanstack/react-router'
 import { getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -248,7 +249,7 @@ it('resets the selected group and restores a group from URL navigation', async (
 it('keeps a selected group visible on focus and can clear it without choosing another option', async () => {
   const router = await renderFilter('/usage-logs/common?group=premium')
   const input = screen.getByRole('combobox', { name: 'Group' })
-  await userEvent.click(input)
+  act(() => input.focus())
   expect(input).toHaveValue('premium')
   expect(await screen.findByRole('option', { name: 'default' })).toBeVisible()
   await userEvent.clear(input)
@@ -290,13 +291,24 @@ it('lets mobile users select a long group name inside the filter drawer and subm
   })
   const dialog = screen.getByRole('dialog')
   const input = within(dialog).getByRole('combobox', { name: 'Group' })
+  const submit = within(dialog).getByRole('button', { name: 'Search' })
+  act(() => input.focus())
+  expect(input).toHaveFocus()
+  expect(input).toHaveAttribute('aria-expanded', 'false')
+  expect(within(dialog).queryByRole('listbox')).not.toBeInTheDocument()
   await userEvent.click(input)
   const option = await within(dialog).findByRole('option', { name: longGroup })
   expect(option).toBeVisible()
+  expect(
+    input.compareDocumentPosition(option) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  expect(
+    option.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
   await userEvent.click(option)
   expect(input).toHaveValue(longGroup)
   expect(dialog).toBeVisible()
-  await userEvent.click(within(dialog).getByRole('button', { name: 'Search' }))
+  await userEvent.click(submit)
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({ group: longGroup })
   )

@@ -46,6 +46,7 @@ interface ComboboxInputProps {
   popupClassName?: string
   id?: string
   allowCustomValue?: boolean
+  inlineSuggestions?: boolean
   openOnFocus?: boolean
   disabled?: boolean
   onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
@@ -67,6 +68,7 @@ export function ComboboxInput({
   popupClassName,
   id,
   allowCustomValue = false,
+  inlineSuggestions = false,
   openOnFocus = true,
   disabled = false,
   onKeyDown,
@@ -95,6 +97,7 @@ export function ComboboxInput({
     width: number
   } | null>(null)
   const pointerFocusRef = React.useRef(false)
+  const deferPointerBlur = React.useRef(false)
   const selectedOption = React.useMemo(
     () => options.find((option) => option.value === value),
     [options, value]
@@ -137,13 +140,30 @@ export function ComboboxInput({
       }
     }
 
+    if (inlineSuggestions) {
+      // Collapsing on pointer-induced blur would move the intended click target.
+      // Keep the list in place until the outside click has a target of its own.
+      const trackPress = (event: MouseEvent) => {
+        deferPointerBlur.current = !containerRef.current?.contains(
+          event.target as Node
+        )
+      }
+      document.addEventListener('mousedown', trackPress, true)
+      document.addEventListener('click', handleClickOutside, true)
+      return () => {
+        deferPointerBlur.current = false
+        document.removeEventListener('mousedown', trackPress, true)
+        document.removeEventListener('click', handleClickOutside, true)
+      }
+    }
+
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [open])
+  }, [inlineSuggestions, open])
 
   // Position the portaled dropdown under the input and follow scroll/resize.
   React.useEffect(() => {
-    if (!open) {
+    if (!open || inlineSuggestions) {
       setDropdown(null)
       return
     }
@@ -181,7 +201,7 @@ export function ComboboxInput({
       window.removeEventListener('scroll', measure, true)
       window.removeEventListener('resize', measure)
     }
-  }, [open])
+  }, [inlineSuggestions, open])
 
   const handleSelect = (selectedValue: string) => {
     onValueChange(selectedValue)
@@ -251,136 +271,161 @@ export function ComboboxInput({
       showEmptyOnOpen ||
       (allowCustomValue && searchValue.trim()))
 
-  return (
-    <div ref={containerRef} className='relative'>
-      <Input
-        ref={inputRef}
-        id={id}
-        type='text'
-        maxLength={maxLength}
-        role='combobox'
-        disabled={disabled}
-        aria-label={ariaLabel}
-        aria-labelledby={ariaLabelledBy}
-        aria-invalid={ariaInvalid}
-        aria-expanded={!!showDropdown}
-        aria-controls={showDropdown ? listId : undefined}
-        aria-activedescendant={
-          showDropdown &&
-          highlightedIndex >= 0 &&
-          highlightedIndex < filteredOptions.length
-            ? `${listId}-${highlightedIndex}`
-            : undefined
-        }
-        aria-haspopup='listbox'
-        aria-autocomplete='list'
-        autoComplete='off'
-        placeholder={placeholder}
-        value={displayValue}
-        onChange={(e) => {
-          const nextValue = e.target.value
-          setSearchValue(nextValue)
-          setSearchChanged(true)
-          if (allowCustomValue) {
-            onValueChange(nextValue)
-          }
-          if (!open) setOpen(true)
-        }}
-        onPointerDown={() => {
-          pointerFocusRef.current = true
-          if (document.activeElement === inputRef.current && !open) {
-            setSearchValue(allowCustomValue ? value : '')
-            setSearchChanged(false)
-            setOpen(true)
-          }
-        }}
-        onFocus={() => {
-          setSearchValue(allowCustomValue ? value : '')
-          setSearchChanged(false)
-          if (openOnFocus || pointerFocusRef.current) {
-            setOpen(true)
-          }
-          pointerFocusRef.current = false
-        }}
-        onBlur={() => {
-          setOpen(false)
-          setSearchValue('')
-        }}
-        onKeyDown={(event) => {
-          handleKeyDown(event)
-          if (!event.defaultPrevented) onKeyDown?.(event)
-        }}
-        className={cn('pr-9', className)}
-      />
-      <ChevronsUpDown className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50' />
-
-      {showDropdown &&
-        dropdown &&
-        createPortal(
-          <div
-            ref={dropdownRef}
-            style={{
+  const suggestions = showDropdown && (inlineSuggestions || dropdown) && (
+    <div
+      ref={dropdownRef}
+      style={
+        dropdown && !inlineSuggestions
+          ? {
               position: dropdown.position,
               top: dropdown.top,
               left: dropdown.left,
               width: dropdown.width,
-            }}
-            className={cn(
-              'bg-popover text-popover-foreground z-100 rounded-md border shadow-md',
-              popupClassName
-            )}
-          >
-            <ul
-              ref={listRef}
-              id={listId}
-              role='listbox'
-              className='max-h-[200px] overflow-y-auto p-1 empty:p-0'
-            >
-              {filteredOptions.map((option, index) => (
-                <li
-                  key={option.value}
-                  id={`${listId}-${index}`}
-                  role='option'
-                  aria-selected={value === option.value}
-                  data-highlighted={index === highlightedIndex}
-                  className={cn(
-                    'relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none',
-                    index === highlightedIndex &&
-                      'bg-accent text-accent-foreground',
-                    value === option.value && 'font-medium'
-                  )}
-                  onMouseEnter={() => setHighlightedIndex(index)}
-                  onMouseDown={(e) => {
-                    e.preventDefault() // Prevent blur
-                    handleSelect(option.value)
-                  }}
-                >
-                  <Check
-                    className={cn(
-                      'size-4 shrink-0',
-                      value === option.value ? 'opacity-100' : 'opacity-0'
-                    )}
-                  />
-                  {option.icon && <span aria-hidden>{option.icon}</span>}
-                  <span className='truncate'>{option.label}</span>
-                </li>
-              ))}
-            </ul>
-            {filteredOptions.length === 0 && (
-              <div role='status' className='px-2 py-6 text-center text-sm'>
-                {t(emptyText)}
-                {allowCustomValue && searchValue.trim() && (
-                  <div className='text-muted-foreground mt-1 text-xs'>
-                    {t('Press Enter to use "{{value}}"', {
-                      value: searchValue.trim(),
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>,
-          dropdown.container
+            }
+          : undefined
+      }
+      className={cn(
+        'text-popover-foreground rounded-md border',
+        inlineSuggestions ? 'bg-muted/30 mt-1' : 'bg-popover z-100 shadow-md',
+        popupClassName
+      )}
+    >
+      <ul
+        ref={listRef}
+        id={listId}
+        role='listbox'
+        className={cn(
+          'overflow-y-auto p-1 empty:p-0',
+          inlineSuggestions
+            ? 'max-h-[min(10rem,30dvh)] overscroll-contain'
+            : 'max-h-[200px]'
         )}
+      >
+        {filteredOptions.map((option, index) => (
+          <li
+            key={option.value}
+            id={`${listId}-${index}`}
+            role='option'
+            aria-selected={value === option.value}
+            data-highlighted={index === highlightedIndex}
+            className={cn(
+              'relative flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm select-none',
+              index === highlightedIndex && 'bg-accent text-accent-foreground',
+              value === option.value && 'font-medium'
+            )}
+            onMouseEnter={() => setHighlightedIndex(index)}
+            onMouseDown={(e) => {
+              e.preventDefault() // Prevent blur
+              handleSelect(option.value)
+            }}
+          >
+            <Check
+              className={cn(
+                'size-4 shrink-0',
+                value === option.value ? 'opacity-100' : 'opacity-0'
+              )}
+            />
+            {option.icon && <span aria-hidden>{option.icon}</span>}
+            <span className='truncate'>{option.label}</span>
+          </li>
+        ))}
+      </ul>
+      {filteredOptions.length === 0 && (
+        <div
+          role='status'
+          className={cn(
+            'px-2 text-center text-sm',
+            inlineSuggestions ? 'py-2' : 'py-6'
+          )}
+        >
+          {t(emptyText)}
+          {allowCustomValue && searchValue.trim() && (
+            <div className='text-muted-foreground mt-1 text-xs'>
+              {t('Press Enter to use "{{value}}"', {
+                value: searchValue.trim(),
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+
+  return (
+    <div ref={containerRef} className='min-w-0'>
+      <div className='relative'>
+        <Input
+          ref={inputRef}
+          id={id}
+          type='text'
+          maxLength={maxLength}
+          role='combobox'
+          disabled={disabled}
+          aria-label={ariaLabel}
+          aria-labelledby={ariaLabelledBy}
+          aria-invalid={ariaInvalid}
+          aria-expanded={!!showDropdown}
+          aria-controls={showDropdown ? listId : undefined}
+          aria-activedescendant={
+            showDropdown &&
+            highlightedIndex >= 0 &&
+            highlightedIndex < filteredOptions.length
+              ? `${listId}-${highlightedIndex}`
+              : undefined
+          }
+          aria-haspopup='listbox'
+          aria-autocomplete='list'
+          autoComplete='off'
+          placeholder={placeholder}
+          value={displayValue}
+          onChange={(e) => {
+            const nextValue = e.target.value
+            setSearchValue(nextValue)
+            setSearchChanged(true)
+            if (allowCustomValue) {
+              onValueChange(nextValue)
+            }
+            if (!open) setOpen(true)
+          }}
+          onPointerDown={() => {
+            const focused = document.activeElement === inputRef.current
+            pointerFocusRef.current = !focused
+            if (focused && !open) {
+              setSearchValue(allowCustomValue ? value : '')
+              setSearchChanged(false)
+              setOpen(true)
+            }
+          }}
+          onFocus={() => {
+            setSearchValue(allowCustomValue ? value : '')
+            setSearchChanged(false)
+            if (openOnFocus || pointerFocusRef.current) {
+              setOpen(true)
+            }
+            pointerFocusRef.current = false
+          }}
+          onBlur={() => {
+            pointerFocusRef.current = false
+            if (deferPointerBlur.current) return
+            setOpen(false)
+            setSearchValue('')
+          }}
+          onKeyDown={(event) => {
+            handleKeyDown(event)
+            if (!event.defaultPrevented) onKeyDown?.(event)
+          }}
+          className={cn('pr-9', className)}
+        />
+        <ChevronsUpDown
+          aria-hidden='true'
+          className='pointer-events-none absolute top-1/2 right-3 size-4 shrink-0 -translate-y-1/2 opacity-50'
+        />
+      </div>
+      {inlineSuggestions && suggestions}
+      {!inlineSuggestions &&
+        dropdown &&
+        suggestions &&
+        createPortal(suggestions, dropdown.container)}
     </div>
   )
 }

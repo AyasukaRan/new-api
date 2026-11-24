@@ -488,7 +488,9 @@ export function CommonLogsFilterBar<TData>(
       </Tooltip>
     </LogsFilterField>
   )
+  const inlineSuggestions = isMobile && !isTest
   const columnFieldProps = {
+    inlineSuggestions,
     isAdmin,
     values: filters,
     onChange: handleChange,
@@ -500,6 +502,7 @@ export function CommonLogsFilterBar<TData>(
   )
   const groupFilter = (
     <LogGroupFilter
+      inlineSuggestions={inlineSuggestions}
       isAdmin={isAdmin}
       value={filters.group}
       maskClass={sensitiveInputClass}
@@ -596,6 +599,7 @@ export function CommonLogsFilterBar<TData>(
       )}
       {accountInToolbar && isAdmin && (
         <LogUsernameFilter
+          inlineSuggestions={inlineSuggestions}
           value={filters.username}
           maskClass={sensitiveInputClass}
           onValueChange={(value) => handleChange('username', value)}

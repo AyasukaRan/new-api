@@ -135,10 +135,11 @@ function renderLogs(
           },
         ],
       }
-    } else if (
-      url === '/api/subscription/admin/plans' ||
-      url === '/api/group/'
-    ) {
+    } else if (url === '/api/user/') {
+      data = { items: [{ id: 12, username: 'recent-user' }], total: 1 }
+    } else if (url === '/api/group/') {
+      data = ['premium']
+    } else if (url === '/api/subscription/admin/plans') {
       data = []
     }
     return { data: { success: true, data } }
@@ -251,35 +252,80 @@ test('column filters apply across pages and clear only their own fields', async 
   expect(router.state.location.search.channel).toBeUndefined()
 })
 
-test('keeps client suggestions anchored in the panel when clearing both source fields', async () => {
-  // The unit DOM does not load Tailwind or the browser default position.
-  const styles = document.createElement('style')
-  styles.textContent =
-    'div { position: static; } .relative { position: relative; }'
-  document.head.append(styles)
-  try {
-    const user = userEvent.setup()
-    const { router } = renderLogs(
-      false,
-      '/usage-logs/common?model=model-11&clientTool=Codex+CLI&ip=192.0.2.10'
-    )
-    await user.click(
-      await screen.findByRole('button', { name: 'Filter · Request source (2)' })
-    )
-    const panel = await screen.findByRole('dialog', { name: 'Request source' })
-    const clientInput = within(panel).getByRole('combobox', { name: 'Client' })
-    await user.click(clientInput)
-    const suggestions = await within(panel).findByRole('listbox')
-    expect(suggestions.parentElement).toHaveStyle({ position: 'absolute' })
-    await user.click(within(panel).getByRole('button', { name: 'Clear' }))
-    await waitFor(() =>
-      expect(router.state.location.search.clientTool).toBeUndefined()
-    )
-    expect(router.state.location.search.ip).toBeUndefined()
-    expect(router.state.location.search.model).toBe('model-11')
-  } finally {
-    styles.remove()
-  }
+test('opens the identity filter without obscuring its fields and selects a username inline', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs()
+  await user.click(
+    await screen.findByRole('button', { name: 'Filter · User / Token' })
+  )
+  const panel = await screen.findByRole('dialog', { name: 'User / Token' })
+  const fields = within(panel)
+  const username = fields.getByRole('combobox', { name: 'Username' })
+  const token = fields.getByRole('textbox', { name: 'Token Name' })
+  const group = fields.getByRole('combobox', { name: 'Group' })
+  await waitFor(() => expect(username).toHaveFocus())
+  expect(username).toHaveAttribute('aria-expanded', 'false')
+  expect(fields.queryByRole('listbox')).not.toBeInTheDocument()
+  expect(fields.getByRole('button', { name: 'Apply' })).toBeEnabled()
+  await user.tab()
+  expect(token).toHaveFocus()
+  await user.keyboard('work')
+  await user.tab()
+  expect(group).toHaveFocus()
+  expect(group).toHaveAttribute('aria-expanded', 'false')
+  await user.click(group)
+  await user.click(await fields.findByRole('option', { name: 'premium' }))
+  await user.click(username)
+  expect(
+    await fields.findByRole('option', { name: 'recent-user' })
+  ).toBeVisible()
+  const suggestions = fields.getByRole('listbox')
+  expect(username.closest('form')).toContainElement(suggestions)
+  expect(
+    suggestions.compareDocumentPosition(token) &
+      Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  await user.keyboard('{Escape}')
+  expect(username).toHaveValue('')
+  await user.keyboard('{ArrowDown}')
+  await fields.findByRole('option', { name: 'recent-user' })
+  await user.keyboard('{ArrowDown}{Enter}')
+  expect(username).toHaveValue('recent-user')
+  expect(username).toHaveAttribute('aria-expanded', 'false')
+  expect(router.state.location.search.username).toBeUndefined()
+  await user.click(fields.getByRole('button', { name: 'Apply' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      username: 'recent-user',
+      token: 'work',
+      group: 'premium',
+    })
+  )
+})
+
+test('keeps client suggestions within the source form when clearing both fields', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?model=model-11&clientTool=Codex+CLI&ip=192.0.2.10'
+  )
+  await user.click(
+    await screen.findByRole('button', { name: 'Filter · Request source (2)' })
+  )
+  const panel = await screen.findByRole('dialog', { name: 'Request source' })
+  const clientInput = within(panel).getByRole('combobox', { name: 'Client' })
+  await user.click(clientInput)
+  const suggestions = await within(panel).findByRole('listbox')
+  expect(clientInput.closest('form')).toContainElement(suggestions)
+  const clear = within(panel).getByRole('button', { name: 'Clear' })
+  await user.pointer({ target: clear, keys: '[MouseLeft>]' })
+  expect(suggestions).toBeVisible()
+  await user.pointer({ target: clear, keys: '[/MouseLeft]' })
+  await waitFor(() =>
+    expect(router.state.location.search.clientTool).toBeUndefined()
+  )
+  expect(router.state.location.search.ip).toBeUndefined()
+  expect(router.state.location.search.model).toBe('model-11')
 })
 
 test.each(['desktop', 'mobile'] as const)(

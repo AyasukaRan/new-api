@@ -41,6 +41,7 @@ type FilterInputProps = {
   onValueChange: (value: string) => void
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>
   maskClass?: string
+  inlineSuggestions?: boolean
 }
 
 export function LogUsernameFilter(props: FilterInputProps) {
@@ -49,6 +50,8 @@ export function LogUsernameFilter(props: FilterInputProps) {
   return (
     <LogsFilterField className={props.maskClass}>
       <ComboboxInput
+        inlineSuggestions={props.inlineSuggestions}
+        openOnFocus={!props.inlineSuggestions}
         options={users.map(({ username }) => ({
           label: username,
           value: username,
@@ -91,6 +94,8 @@ export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
   return (
     <LogsFilterField className={props.maskClass}>
       <ComboboxInput
+        inlineSuggestions={props.inlineSuggestions}
+        openOnFocus={!props.inlineSuggestions}
         options={groups
           .filter((group) => group !== 'auto')
           .map((group) => ({
@@ -140,6 +145,7 @@ export function LogColumnFilterFields(props: {
   onChange: (key: LogColumnFilterKey, value: string) => void
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>
   maskClass?: string
+  inlineSuggestions?: boolean
   suggestions?: Partial<Record<LogColumnFilterKey, string[]>>
 }) {
   const { t } = useTranslation()
@@ -151,6 +157,7 @@ export function LogColumnFilterFields(props: {
           onValueChange: (value: string) => props.onChange(key, value),
           onKeyDown: props.onKeyDown,
           maskClass: props.maskClass,
+          inlineSuggestions: props.inlineSuggestions,
         }
         if (key === 'username') {
           return <LogUsernameFilter key={key} {...input} />
@@ -175,6 +182,8 @@ export function LogColumnFilterFields(props: {
           <LogsFilterField key={key}>
             {options.length ? (
               <ComboboxInput
+                inlineSuggestions={props.inlineSuggestions}
+                openOnFocus={!props.inlineSuggestions}
                 allowCustomValue
                 aria-label={label}
                 aria-invalid={invalid || undefined}

@@ -134,7 +134,10 @@ export function LogHeaderFilter(props: {
       >
         <ListFilter aria-hidden='true' />
       </PopoverTrigger>
-      <PopoverContent align='start' className='relative w-64 gap-3 p-3'>
+      <PopoverContent
+        align='start'
+        className='max-h-(--available-height) w-64 gap-3 overflow-y-auto overscroll-contain p-3'
+      >
         <PopoverTitle>{props.title}</PopoverTitle>
         <form
           className='grid gap-2'
@@ -145,6 +148,7 @@ export function LogHeaderFilter(props: {
         >
           {columns.map((column) => (
             <LogColumnFilterFields
+              inlineSuggestions
               key={column}
               column={column}
               isAdmin={props.isAdmin}
