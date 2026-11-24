@@ -25,7 +25,10 @@ import { cn } from '@/lib/utils'
 import { getLogCacheUsage } from '../lib/cache-usage'
 import type { LogOtherData } from '../types'
 
-export function CacheHitRing(props: { percent: number | null }) {
+export function CacheHitRing(props: {
+  percent: number | null
+  inheritFont?: boolean
+}) {
   const { t, i18n } = useTranslation()
   if (props.percent == null) {
     return <span className='text-muted-foreground'>—</span>
@@ -73,7 +76,12 @@ export function CacheHitRing(props: { percent: number | null }) {
           strokeDasharray={`${percent} 100`}
         />
       </svg>
-      <span className='min-w-[4ch] text-end font-mono tabular-nums'>
+      <span
+        className={cn(
+          'min-w-[4ch] text-end tabular-nums',
+          !props.inheritFont && 'font-mono'
+        )}
+      >
         {formatted}
       </span>
     </span>

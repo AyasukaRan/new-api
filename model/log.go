@@ -245,6 +245,19 @@ func FormatLogList(logs []*Log, role int, deferBody bool) {
 // GetLogRequestBody reads only the captured body, never the other privileged
 // metadata from the same row.
 func GetLogRequestBody(ctx context.Context, createdAt int64, requestID, ref string) (string, error) {
+	capture, err := GetLogRequestBodyCapture(ctx, createdAt, requestID, ref)
+	return capture.Body, err
+}
+
+type LogRequestBodyCapture struct {
+	Body        string
+	Truncated   bool
+	RequestPath string
+}
+
+// GetLogRequestBodyCapture keeps completeness and the recorded ingress path
+// alongside the matched capture without loading a different row on a retry.
+func GetLogRequestBodyCapture(ctx context.Context, createdAt int64, requestID, ref string) (LogRequestBodyCapture, error) {
 	query := LOG_DB.WithContext(ctx).Model(&Log{}).Select("other").Where("created_at = ?", createdAt)
 	if requestID == "" {
 		query = query.Where("request_id = '' OR request_id IS NULL")
@@ -253,30 +266,36 @@ func GetLogRequestBody(ctx context.Context, createdAt int64, requestID, ref stri
 	}
 	rows, err := query.Rows()
 	if err != nil {
-		return "", err
+		return LogRequestBodyCapture{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var other *string
 		if err := rows.Scan(&other); err != nil {
-			return "", err
+			return LogRequestBodyCapture{}, err
 		}
 		if other == nil {
 			continue
 		}
 		var capture struct {
-			AdminInfo struct {
-				RequestBody string `json:"request_body"`
+			RequestPath common.RawMessage `json:"request_path"`
+			AdminInfo   struct {
+				RequestBody string            `json:"request_body"`
+				Truncated   common.RawMessage `json:"request_body_truncated"`
 			} `json:"admin_info"`
 		}
 		if common.UnmarshalJsonStr(*other, &capture) == nil {
 			body := capture.AdminInfo.RequestBody
 			if body != "" && logRequestBodyRef(body) == ref {
-				return body, nil
+				var path string
+				_ = common.Unmarshal(capture.RequestPath, &path)
+				marker := strings.TrimSpace(string(capture.AdminInfo.Truncated))
+				truncated := marker != "" && marker != "0" && marker != "false" && marker != "null"
+				return LogRequestBodyCapture{Body: body, Truncated: truncated, RequestPath: path}, nil
 			}
 		}
 	}
-	return "", rows.Err()
+	return LogRequestBodyCapture{}, rows.Err()
 }
 
 // Records predating the dedicated audit table can still occur in the usage

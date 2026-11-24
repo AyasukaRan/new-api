@@ -33,6 +33,8 @@ import type {
   GetLogStatsResponse,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
+  LogInputAnalysis,
+  LogOtherData,
   RequestTraceResponse,
   TaskArtifactsResponse,
   UserInfo,
@@ -101,6 +103,43 @@ export async function getLogRequestBody(
     }
   )
   if (!response.data.success || typeof response.data.data !== 'string') {
+    throw createServerError(response.data)
+  }
+  return response.data.data
+}
+
+export async function getLogInputAnalysis(
+  log: UsageLog,
+  admin: NonNullable<LogOtherData['admin_info']>,
+  path: string | undefined,
+  signal?: AbortSignal
+) {
+  let ref = admin.request_body_ref
+  if (!ref && admin.request_body) {
+    // Older list responses can carry inline text. This also works on HTTP.
+    const forge = await import('node-forge')
+    ref = forge.md.sha256
+      .create()
+      .update(admin.request_body, 'utf8')
+      .digest()
+      .toHex()
+  }
+  const response = await api.get<{ success: boolean; data: LogInputAnalysis }>(
+    '/api/log/input_analysis',
+    {
+      params: {
+        trace_id: admin.trace_id || undefined,
+        created_at: log.created_at,
+        request_id: log.request_id,
+        ref,
+        request_path: path,
+        model: log.model_name,
+      },
+      signal,
+      disableDuplicate: true,
+    }
+  )
+  if (!response.data.success || !response.data.data) {
     throw createServerError(response.data)
   }
   return response.data.data

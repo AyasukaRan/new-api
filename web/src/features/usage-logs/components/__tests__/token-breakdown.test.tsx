@@ -76,7 +76,7 @@ test('request detail ring shows exclusive token shares and preserves nested usag
 })
 
 test('shows cache hits as a share of all input and only derives output composition from recorded reasoning', () => {
-  const { rerender } = render(
+  const { rerender, container } = render(
     <LogTokenBreakdown
       variant='detail'
       log={{ prompt_tokens: 3976, completion_tokens: 333 }}
@@ -90,6 +90,16 @@ test('shows cache hits as a share of all input and only derives output compositi
     screen.getByText('Input cache hit rate').nextElementSibling
   ).toHaveTextContent('6.4%')
   expect(screen.getByText('5.9%')).toBeVisible()
+  for (const value of [
+    screen.getByTitle('4,309'),
+    screen.getByText('3,976'),
+    screen.getByText('6.4%'),
+  ]) {
+    expect(value).toHaveClass('tabular-nums')
+    expect(container.contains(value.closest('.font-mono, .font-sans'))).toBe(
+      false
+    )
+  }
   expect(screen.queryByText('Non-reasoning output')).not.toBeInTheDocument()
   expect(screen.queryByRole('table')).not.toBeInTheDocument()
   rerender(

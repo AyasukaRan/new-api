@@ -225,6 +225,28 @@ export type RequestPluginAdminStep = {
   findings?: { rule: string; category?: string; count: number }[]
 }
 
+export type InputCategory =
+  | 'system'
+  | 'developer'
+  | 'user'
+  | 'assistant'
+  | 'tool_results'
+  | 'tool_definitions'
+
+export interface LogInputAnalysis {
+  status: 'complete' | 'partial' | 'unavailable'
+  reasons: string[]
+  source: 'trace' | 'log_body' | 'none'
+  model: string
+  method: 'tokenkit_estimate'
+  family: string
+  estimated_tokens: number
+  categories: Record<
+    InputCategory,
+    { count: number; estimated_tokens: number; texts?: string[] }
+  >
+}
+
 export interface LogOtherData {
   admin_info?: {
     user_agent?: string

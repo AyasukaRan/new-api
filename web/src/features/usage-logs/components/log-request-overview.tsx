@@ -26,6 +26,7 @@ import { isConsumeLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { LogOverviewCard } from './dialogs/log-detail-layout'
 import { LogChargeDetails } from './log-charge-details'
+import { LogInputAnalysis } from './log-input-analysis'
 import {
   LogRequestIdentifiers,
   LogRequestInfoCards,
@@ -43,6 +44,7 @@ export function LogRequestOverview(props: {
   const { log, other } = props
   const { hasUsage: hasTokens } = getLogTokenTotals(log, other)
   const hasCharge = isConsumeLogType(log.type) || log.quota > 0
+  const admin = props.isAdmin ? other?.admin_info : undefined
 
   return (
     <div data-slot='log-request-overview' className='space-y-3'>
@@ -58,12 +60,26 @@ export function LogRequestOverview(props: {
       )}
       <div className='grid min-w-0 items-stretch gap-3 md:grid-cols-2'>
         <LogRequestInfoCards {...props} />
-        {hasTokens && (
+        {(hasTokens ||
+          admin?.trace_id ||
+          admin?.request_body_ref ||
+          admin?.request_body) && (
           <LogOverviewCard
-            title={t('Token Breakdown')}
+            title={hasTokens ? t('Token Breakdown') : t('Input')}
             className={hasCharge ? undefined : 'md:col-span-2'}
           >
-            <LogTokenBreakdown log={log} other={other} variant='detail' />
+            {hasTokens && (
+              <LogTokenBreakdown log={log} other={other} variant='detail' />
+            )}
+            {props.isAdmin && (
+              <div className={hasTokens ? 'mt-3 border-t pt-1' : undefined}>
+                <LogInputAnalysis
+                  log={log}
+                  admin={admin ?? {}}
+                  path={other?.request_path}
+                />
+              </div>
+            )}
           </LogOverviewCard>
         )}
         {hasCharge && (

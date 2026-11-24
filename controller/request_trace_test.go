@@ -505,6 +505,7 @@ func TestRequestTraceReadAccessAndStreaming(t *testing.T) {
 	router.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPathsRegexs([]string{`^/api/log/trace/body$`})))
 	router.GET("/api/log/conversations", middleware.DisableCache(), middleware.AdminAuth(), GetTraceConversations)
 	router.GET("/api/log/conversations/turns", middleware.DisableCache(), middleware.AdminAuth(), GetTraceConversationTurns)
+	router.GET("/api/log/input_analysis", middleware.DisableCache(), middleware.AdminAuth(), GetLogInputAnalysis)
 	router.GET("/api/log/trace", middleware.DisableCache(), middleware.AdminAuth(), GetRequestTrace)
 	router.GET("/api/log/trace/body", middleware.DisableCache(), middleware.AdminAuth(), GetRequestTraceBody)
 	for _, test := range []struct {
@@ -522,6 +523,7 @@ func TestRequestTraceReadAccessAndStreaming(t *testing.T) {
 			for _, path := range []string{
 				"/api/log/conversations",
 				"/api/log/conversations/turns?conversation_id=restricted-trace",
+				"/api/log/input_analysis?trace_id=restricted-trace",
 				"/api/log/trace?trace_id=restricted-trace&metadata_only=true",
 				"/api/log/trace/body?trace_id=restricted-trace&seq=1",
 				"/api/log/trace/body?trace_id=restricted-trace&seq=1&view=rendered",
@@ -1078,4 +1080,84 @@ func verifyUnidentifiedRequestSources(t *testing.T) {
 	assert.Empty(t, restricted.Path)
 	assert.Equal(t, "X-Client-Name", restricted.CurrentSource)
 
+}
+
+func TestInputAnalysisRecordedParts(t *testing.T) {
+	for _, tc := range []struct {
+		name, format, body, status string
+		truncated                  bool
+		reasons                    []string
+		counts                     map[string]int
+		system, developer          []string
+	}{
+		{name: "chat roles and tool schema", format: "openai", body: `{"model":"gpt-example","messages":[{"role":"system","content":"System rule."},{"role":"developer","content":[{"type":"text","text":"Developer rule."}]},{"role":"user","content":"private question"},{"role":"assistant","tool_calls":[{"function":{"name":"lookup","arguments":"private args"}}]},{"role":"tool","content":"private result"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}]}`, status: "complete", counts: map[string]int{"system": 1, "developer": 1, "user": 1, "assistant": 1, "tool_results": 1, "tool_definitions": 1}, system: []string{"System rule."}, developer: []string{"Developer rule."}},
+		{name: "responses references and reasoning", format: "openai_responses", body: `{"instructions":"Responses rule.","previous_response_id":"resp-private","input":[{"role":"developer","content":"Override."},{"type":"reasoning","summary":[{"type":"summary_text","text":"private reasoning"}]},{"type":"function_call","name":"test","arguments":"private args"},{"type":"function_call_output","output":"private result"}]}`, status: "partial", reasons: []string{"referenced_history"}, counts: map[string]int{"system": 1, "developer": 1, "assistant": 2, "tool_results": 1}, system: []string{"Responses rule."}, developer: []string{"Override."}},
+		{name: "flat responses websocket create with role-bearing instructions", format: "openai_responses", body: `{"type":"response.create","instructions":[{"type":"message","role":"system","content":[{"type":"input_text","text":"A rule."}]},{"role":"developer","content":"A developer override."}],"input":"private question"}`, status: "complete", counts: map[string]int{"system": 1, "developer": 1, "user": 1}, system: []string{"A rule."}, developer: []string{"A developer override."}},
+
+		{name: "claude mixed message and media result", format: "claude", body: `{"system":[{"type":"text","text":"Rule A"},{"type":"text","text":"Rule B"}],"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"private result"},{"type":"image","source":{"type":"base64","data":"privatebinary"}}]},{"type":"text","text":"private question"}]}]}`, status: "partial", reasons: []string{"non_text"}, counts: map[string]int{"system": 1, "user": 1, "tool_results": 1}, system: []string{"Rule A", "Rule B"}},
+		{name: "gemini function responses and media", format: "gemini", body: `{"systemInstruction":{"parts":[{"text":"Gemini rule."}]},"contents":[{"role":"model","parts":[{"functionCall":{"name":"example","args":{"x":1}}}]},{"parts":[{"functionResponse":{"name":"example","response":{"value":"private result"}}},{"inlineData":{"mimeType":"image/png","data":"privatebinary"}}]}],"tools":[{"functionDeclarations":[{"name":"one"},{"name":"two"}]}]}`, status: "partial", reasons: []string{"non_text"}, counts: map[string]int{"system": 1, "assistant": 1, "user": 1, "tool_results": 1, "tool_definitions": 2}, system: []string{"Gemini rule."}},
+		{name: "truncated only complete prefix messages", format: "openai", truncated: true, body: `{"messages":[{"role":"system","content":"Complete."},{"role":"developer","content":"half` + "\n\n... [20 bytes elided] ...\n\n" + `tail"}]}`, status: "partial", reasons: []string{"truncated"}, counts: map[string]int{"system": 1}, system: []string{"Complete."}},
+		{name: "unrecognizable truncated prefix remains partial", body: `{"instructions":"never finis`, truncated: true, status: "partial", reasons: []string{"truncated"}},
+
+		{name: "no captured body", format: "openai", status: "unavailable", reasons: []string{"not_recorded"}},
+		{name: "unsupported input type", format: "embedding", body: `{"input":"private question"}`, status: "unavailable", reasons: []string{"unsupported"}},
+		{name: "empty request", format: "openai", body: `{"messages":[]}`, status: "unavailable", reasons: []string{"unrecognized_content"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := service.AnalyzeCapturedInput(context.Background(), tc.body, tc.format, "", "fallback-model", "trace", tc.truncated)
+			assert.Equal(t, tc.status, got.Status)
+			assert.ElementsMatch(t, tc.reasons, got.Reasons)
+			total := 0
+			for name, c := range got.Categories {
+				assert.Equal(t, tc.counts[name], c.Count, name)
+				total += c.EstimatedTokens
+				switch name {
+				case "system":
+					assert.Equal(t, tc.system, c.Texts)
+				case "developer":
+					assert.Equal(t, tc.developer, c.Texts)
+				default:
+					assert.Empty(t, c.Texts)
+				}
+			}
+			assert.Equal(t, total, got.EstimatedTokens)
+			if len(tc.system) > 0 {
+				assert.Positive(t, got.Categories["system"].EstimatedTokens)
+			}
+			body, err := common.Marshal(got)
+			require.NoError(t, err)
+			assert.NotContains(t, string(body), "private")
+		})
+	}
+	short := service.AnalyzeCapturedInput(context.Background(), `{"tools":[{"type":"function","function":{"name":"f"}}]}`, "openai", "", "", "trace", false)
+	long := service.AnalyzeCapturedInput(context.Background(), `{"tools":[{"type":"function","function":{"name":"f","parameters":{"properties":{"city":{"description":"The name of the city to search for"}}}}}]}`, "openai", "", "", "trace", false)
+	assert.Greater(t, long.EstimatedTokens, short.EstimatedTokens)
+}
+
+func TestInputAnalysisStoredIngress(t *testing.T) {
+	setupAccessTokenAudit(t)
+	require.NoError(t, model.MigrateRequestTraces())
+	upstream := &model.RequestTrace{TraceId: "upstream-only", Seq: 0, Direction: model.TraceDirectionUpstreamRequest, Format: "openai", Body: `{"messages":[{"role":"system","content":"internal upstream secret"}]}`}
+	require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{upstream}))
+	var result struct {
+		Success bool
+		Data    service.InputAnalysis
+	}
+	modelManagementRequest(t, GetLogInputAnalysis, http.MethodGet, "/api/log/input_analysis?trace_id=upstream-only", nil, &result)
+	require.True(t, result.Success)
+	assert.Equal(t, "unavailable", result.Data.Status)
+	assert.Equal(t, "none", result.Data.Source)
+
+	body := `{"model":"claude-example","system":"Retained.","messages":[`
+	other := common.MapToJsonStr(map[string]any{"request_path": "/v1/messages", "admin_info": map[string]any{"request_body": body, "request_body_truncated": 1024}})
+	log := &model.Log{CreatedAt: 123, RequestId: "local-id", Other: other}
+	require.NoError(t, model.LOG_DB.Create(log).Error)
+	ref := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
+	path := "/api/log/input_analysis?trace_id=upstream-only&request_id=local-id&created_at=123&ref=" + ref
+	modelManagementRequest(t, GetLogInputAnalysis, http.MethodGet, path, nil, &result)
+	require.True(t, result.Success)
+	assert.Equal(t, "partial", result.Data.Status)
+	assert.Equal(t, "log_body", result.Data.Source)
+	assert.Equal(t, []string{"truncated"}, result.Data.Reasons)
+	assert.Equal(t, []string{"Retained."}, result.Data.Categories["system"].Texts)
 }

@@ -35,6 +35,7 @@ import {
 } from '../../lib/format'
 import { isResponseModelMismatch } from '../../lib/response-model'
 import type { LogOtherData } from '../../types'
+import { LogInputAnalysis } from '../log-input-analysis'
 import { RequestInfoCard } from '../log-request-info-cards'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
@@ -145,6 +146,16 @@ export function LogRequestDiagnostics(props: {
         />
       )
     }
+  }
+  if (
+    admin &&
+    (admin.trace_id || admin.request_body_ref || admin.request_body)
+  ) {
+    panels.push(
+      <LogOverviewCard key='recorded-input' title={t('Input')}>
+        <LogInputAnalysis log={log} admin={admin} path={other?.request_path} />
+      </LogOverviewCard>
+    )
   }
   if (other?.request_plugins?.length) {
     panels.push(

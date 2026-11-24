@@ -1023,6 +1023,74 @@ describe('request content disclosure in log details', () => {
     useAuthStore.getState().auth.reset()
   })
 
+  test('opens captured prompts on demand and distinguishes local estimates from recorded usage', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          status: 'partial',
+          reasons: ['referenced_history'],
+          estimated_tokens: 30,
+          categories: {
+            system: {
+              count: 1,
+              estimated_tokens: 20,
+              texts: ['System line 1\nSystem line 2'],
+            },
+            developer: {
+              count: 1,
+              estimated_tokens: 10,
+              texts: ['Developer text'],
+            },
+          },
+        },
+      },
+    })
+    const log = {
+      ...makeLog({ admin_info: { trace_id: 'recorded-input' } }),
+      prompt_tokens: 50,
+    }
+    const props = {
+      log,
+      open: true,
+      isRoot: false,
+      onOpenChange: () => undefined,
+    }
+    const view = render(<DetailsDialog {...props} isAdmin />, {
+      wrapper: DetailProviders,
+    })
+    const card = within(screen.getByRole('region', { name: 'Token Breakdown' }))
+    expect(get).not.toHaveBeenCalled()
+    await userEvent.click(
+      card.getByRole('button', { name: 'Input composition and prompts' })
+    )
+    expect(
+      await card.findByText('System line 1 System line 2')
+    ).toHaveTextContent('System line 1 System line 2')
+    expect(get).toHaveBeenCalledWith(
+      '/api/log/input_analysis',
+      expect.objectContaining({
+        params: expect.objectContaining({
+          trace_id: 'recorded-input',
+          request_id: log.request_id,
+        }),
+      })
+    )
+    expect(card.getByText('≈ 30')).toBeVisible()
+    expect(
+      card.getByText('Referenced history is outside this request.')
+    ).toBeVisible()
+    await userEvent.click(
+      card.getByRole('button', { name: /Developer instructions/ })
+    )
+    expect(card.getByText('Developer text')).toBeVisible()
+    view.rerender(<DetailsDialog {...props} isAdmin={false} />)
+    expect(screen.queryByText('Developer text')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Input composition and prompts' })
+    ).not.toBeInTheDocument()
+  })
+
   test('trace-backed details omit duplicated JSON and truncation warnings without loading the trace until requested', async () => {
     const get = vi
       .spyOn(api, 'get')

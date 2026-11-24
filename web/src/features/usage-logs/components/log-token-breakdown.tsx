@@ -152,7 +152,7 @@ export function LogTokenBreakdown(props: {
             />
             <span>{label}</span>
             {consistentShares && value != null && (
-              <span className='ms-auto text-[10px] tabular-nums'>
+              <span className='ms-auto text-xs tabular-nums'>
                 {percentages.format(value / total)}
               </span>
             )}
@@ -170,7 +170,7 @@ export function LogTokenBreakdown(props: {
       {writesByDuration.map(({ label, value }) => (
         <div
           key={label}
-          className='text-muted-foreground col-span-full grid grid-cols-subgrid items-baseline text-[11px]'
+          className='text-muted-foreground col-span-full grid grid-cols-subgrid items-baseline text-xs'
         >
           <dt className='ms-1 border-s ps-3'>{label}</dt>
           <dd className='text-end tabular-nums'>
@@ -181,7 +181,7 @@ export function LogTokenBreakdown(props: {
       <div className='col-span-full grid grid-cols-subgrid items-baseline gap-y-1'>
         <dt className='text-muted-foreground'>
           {t('Reasoning tokens')}{' '}
-          <span className='text-[10px]'>({t('Included in output')})</span>
+          <span className='text-xs'>({t('Included in output')})</span>
           {recordedReasoning != null && output != null && output > 0 && (
             <div className='mt-1 flex items-center gap-2'>
               <div className='grow'>
@@ -204,7 +204,7 @@ export function LogTokenBreakdown(props: {
                   ]}
                 />
               </div>
-              <span className='text-muted-foreground text-[10px] tabular-nums'>
+              <span className='text-muted-foreground text-xs tabular-nums'>
                 {percentages.format(recordedReasoning / output)}
               </span>
             </div>
@@ -254,7 +254,7 @@ export function LogTokenBreakdown(props: {
     isTokenCount(cache.read) &&
     isTokenCount(cache.write ?? 0) &&
     cache.read + (cache.write ?? 0) <= input ? (
-      <CacheHitRing percent={cache.percent} />
+      <CacheHitRing percent={cache.percent} inheritFont />
     ) : null
   const analysis = [
     {
@@ -341,14 +341,14 @@ export function LogTokenBreakdown(props: {
           </svg>
           <div className='pointer-events-none flex max-w-[72%] flex-col items-center text-center'>
             <span
-              className='text-foreground font-mono text-xl font-semibold tracking-tight tabular-nums'
+              className='text-foreground text-xl font-semibold tracking-tight tabular-nums'
               title={text}
             >
               {total == null || total < 1_000_000
                 ? text
                 : formatCompactNumber(total, locale)}
             </span>
-            <span className='text-muted-foreground mt-0.5 text-[10px] leading-3'>
+            <span className='text-muted-foreground mt-0.5 text-xs'>
               {t('Total tokens')}
             </span>
           </div>
@@ -362,9 +362,8 @@ export function LogTokenBreakdown(props: {
               <dt className='text-muted-foreground text-xs'>{label}</dt>
               <dd
                 className={cn(
-                  'font-mono font-semibold tabular-nums',
-                  value == null &&
-                    'text-muted-foreground font-sans text-xs font-normal'
+                  'font-semibold tabular-nums',
+                  value == null && 'text-muted-foreground text-xs font-normal'
                 )}
               >
                 {value ?? t('Not recorded')}
