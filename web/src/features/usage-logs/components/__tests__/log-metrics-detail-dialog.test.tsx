@@ -52,6 +52,13 @@ test('opens the selected receipt, switches tabs on the same request and resets o
   await user.click(opener)
   const dialog = await screen.findByRole('dialog', { name: 'Request details' })
   expect(within(dialog).getByText(/deepseek-flash/)).toBeVisible()
+  const tabList = within(dialog).getByRole('tablist', {
+    name: 'Request details',
+  })
+  expect(tabList.parentElement).toHaveClass(
+    'overflow-x-auto',
+    'overflow-y-hidden'
+  )
   const timing = within(dialog).getByRole('tab', { name: 'Timing breakdown' })
   expect(timing).toHaveAttribute('aria-selected', 'true')
   await user.click(within(dialog).getByRole('tab', { name: 'Overview' }))
@@ -63,7 +70,10 @@ test('opens the selected receipt, switches tabs on the same request and resets o
   expect(
     within(overview).getByRole('region', { name: 'Billing Details' })
   ).toBeVisible()
-  await user.click(within(dialog).getByRole('tab', { name: 'Cost breakdown' }))
+  await user.keyboard('{ArrowRight}{Enter}')
+  expect(
+    within(tabList).getByRole('tab', { name: 'Cost breakdown' })
+  ).toHaveFocus()
   expect(
     within(dialog).getByRole('tabpanel', { name: 'Cost breakdown' })
   ).toBeVisible()

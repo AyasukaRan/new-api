@@ -81,11 +81,11 @@ export function LogRequestDetailTabs(
   return (
     <Tabs defaultValue={props.initialTab} className='gap-3'>
       <div className='border-border bg-popover sticky top-0 z-10 flex min-w-0 items-center justify-between gap-1 border-b'>
-        <div className='min-w-0 overflow-x-auto'>
+        <div className='flex min-w-0 overflow-x-auto overflow-y-hidden pb-0.5'>
           <TabsList
             variant='line'
             aria-label={t('Request details')}
-            className='gap-1 sm:gap-3'
+            className='shrink-0 gap-1 sm:gap-3'
           >
             <TabsTrigger value='overview'>{t('Overview')}</TabsTrigger>
             {hasCharge && (
