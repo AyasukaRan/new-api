@@ -84,6 +84,35 @@ export type ChannelKeyConfigInput = {
   enabled?: boolean
 }
 
+/** One limit of a balance, such as a usage window that resets. */
+const channelBalanceWindowSchema = z.object({
+  name: z.union([z.string(), z.record(z.string(), z.string())]),
+  used: z.number(),
+  limit: z.number(),
+  unit: z.string().nullish(),
+  /** Unix seconds. */
+  resetAt: z.number().nullish(),
+})
+
+const channelBalanceResultSchema = z.object({
+  /** In `currency`; null when the upstream reports only windows. */
+  amount: z.number().nullish(),
+  currency: z.string().nullish(),
+  unlimited: z.boolean().nullish(),
+  windows: z.array(channelBalanceWindowSchema).nullish(),
+  /** The last failed query, kept beside the last good result. */
+  error: z.string().nullish(),
+})
+
+export const channelBalanceDetailSchema = channelBalanceResultSchema.extend({
+  /** The balance of each key of a multi-key channel, by key index. */
+  keys: z.record(z.string(), channelBalanceResultSchema).nullish(),
+})
+
+export type ChannelBalanceWindow = z.infer<typeof channelBalanceWindowSchema>
+export type ChannelBalanceResult = z.infer<typeof channelBalanceResultSchema>
+export type ChannelBalanceDetail = z.infer<typeof channelBalanceDetailSchema>
+
 export const channelSchema = z.object({
   id: z.number(),
   type: z.number(),
@@ -101,6 +130,7 @@ export const channelSchema = z.object({
   balance: z.number().default(0), // in USD
   balance_updated_time: z.number(),
   balance_monitor: channelBalanceMonitorSchema.nullish(),
+  balance_detail: channelBalanceDetailSchema.nullish(),
   models: z.string().default(''),
   group: z.string().default('default'),
   used_quota: z.number().default(0),
@@ -146,6 +176,8 @@ export interface ChannelSettings {
   group_models?: Record<string, string[]>
   task_plugin_key?: string
   task_extend_plugin_keys?: string[]
+  /** Request processing instance ids, in the order they run. */
+  request_plugins?: string[]
   force_format?: boolean
   thinking_to_content?: boolean
   proxy?: string
@@ -197,6 +229,8 @@ export interface ChannelOtherSettings {
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
   advanced_custom?: AdvancedCustomConfig
+  /** The values of the bound plugin's channel settings (type 61). */
+  plugin_config?: Record<string, unknown>
 }
 
 export interface AdvancedCustomConfig {
@@ -298,6 +332,7 @@ export interface ChannelBalanceResponse {
   balance_monitor?: ChannelBalanceMonitor
   partial?: boolean
   known_balance?: number
+  balance_detail?: ChannelBalanceDetail | null
   currency?: string
   raw_response?: string
   key_balances?: ChannelKeyBalance[]
@@ -395,6 +430,7 @@ export interface MultiKeyStatusResponse {
     manual_disabled_count: number
     auto_disabled_count: number
     balance_monitor: ChannelBalanceMonitor | null
+    balance_detail?: ChannelBalanceDetail | null
     balance_query_disabled: boolean
   }
 }

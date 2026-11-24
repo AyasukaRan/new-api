@@ -26,6 +26,7 @@ import {
   PerformanceHealthPanel,
   ResponsePerformancePanel,
 } from '@/features/dashboard/components/overview/performance-health-panel'
+import { api } from '@/lib/api'
 import { ModelDetailsPerformance } from '@/features/pricing/components/model-details-performance'
 import { UptimeSparkline } from '@/features/pricing/components/model-details-uptime-sparkline'
 
@@ -138,6 +139,25 @@ function renderModelDetails() {
 }
 
 describe('server performance summaries', () => {
+  it('requests the administrator diagnostics rather than public model metrics', async () => {
+    const request = vi.spyOn(api, 'get').mockResolvedValue({
+      data: { success: true, data: { diagnostics: { hours: [], models: [] } } },
+    })
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <GatewayModelHotspotsPanel />
+        </QueryClientProvider>
+      )
+      await waitFor(() => expect(request).toHaveBeenCalledWith(
+        '/api/data/perf-metrics/summary',
+        expect.objectContaining({ params: { hours: 24, diagnostics: true } })
+      ))
+    } finally {
+      request.mockRestore()
+    }
+  })
+
   it('uses exact outcome counts and weighted timing for the monitored requests in the window', async () => {
     client.setQueryData(['perf-metrics-summary', 24, 'diagnostics'], {
       success: true,

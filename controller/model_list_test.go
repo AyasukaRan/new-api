@@ -7,10 +7,12 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -37,7 +39,7 @@ type userModelsResponse struct {
 func setupModelListControllerTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	initModelListColumnNames(t)
+	initSQLiteTestColumnNames(t)
 
 	gin.SetMode(gin.TestMode)
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
@@ -61,7 +63,7 @@ func setupModelListControllerTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func initModelListColumnNames(t *testing.T) {
+func initSQLiteTestColumnNames(t *testing.T) {
 	t.Helper()
 
 	originalIsMasterNode := common.IsMasterNode
@@ -169,6 +171,105 @@ func pricingByModelName(pricings []model.Pricing) map[string]model.Pricing {
 		byName[pricing.ModelName] = pricing
 	}
 	return byName
+}
+
+func modelSquareData[T any](t *testing.T, handler gin.HandlerFunc, path, userGroup string) T {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, path, nil)
+	if userGroup != "" {
+		common.SetContextKey(ctx, constant.ContextKeyUserGroup, userGroup)
+	}
+	handler(ctx)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+		Data    T    `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	return response.Data
+}
+
+func TestModelSquareGroupVisibility(t *testing.T) {
+	originalGroups := setting.UserUsableGroups2JSONString()
+	originalRatios := ratio_setting.GroupRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(originalGroups))
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(originalRatios))
+	})
+
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"square-public":"Public"}`))
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"square-public":1,"square-private":2}`))
+			channel := model.Channel{
+				Name: "model-square", Type: constant.ChannelTypeOpenAI, Key: "fixture",
+				Status: common.ChannelStatusEnabled, Group: "square-public,square-private,all", Models: "shared,private-only,wildcard",
+			}
+			channel.SetSetting(dto.ChannelSettings{GroupModels: map[string][]string{
+				"square-public": {"shared"}, "square-private": {"shared", "private-only", "wildcard"}, "all": {"wildcard"},
+			}})
+			require.NoError(t, db.Create(&channel).Error)
+			require.NoError(t, channel.AddAbilities(db))
+			model.InvalidatePricingCache()
+			t.Cleanup(model.InvalidatePricingCache)
+
+			guest := pricingByModelName(modelSquareData[[]model.Pricing](t, GetPricing, "/api/pricing", ""))
+			assert.Equal(t, []string{"square-public"}, guest["shared"].EnableGroup)
+			assert.Equal(t, []string{"square-public"}, guest["wildcard"].EnableGroup)
+			assert.NotContains(t, guest, "private-only")
+			member := pricingByModelName(modelSquareData[[]model.Pricing](t, GetPricing, "/api/pricing", "square-private"))
+			assert.ElementsMatch(t, []string{"square-public", "square-private"}, member["shared"].EnableGroup)
+			assert.Equal(t, []string{"square-private"}, member["private-only"].EnableGroup)
+
+			require.NoError(t, db.AutoMigrate(&model.PerfMetric{}, &model.ChannelPerfMetric{}, &model.ChannelModelActivity{}))
+			ts := time.Now().Add(-time.Hour).Truncate(time.Hour).Unix()
+			observations := []model.PerfMetric{
+				{ModelName: "shared", Group: "square-public", BucketTs: ts, RequestCount: 1, SuccessCount: 1},
+				{ModelName: "shared", Group: "square-private", BucketTs: ts, RequestCount: 1},
+				{ModelName: "private-only", Group: "square-private", BucketTs: ts, RequestCount: 1},
+			}
+			require.NoError(t, db.Create(&observations).Error)
+			for _, obs := range observations {
+				for _, source := range []string{perfmetrics.SourceRequest, perfmetrics.SourceRelayResult} {
+					require.NoError(t, model.UpsertChannelPerfMetric(&model.ChannelPerfMetric{
+						ChannelID: channel.Id, ModelName: obs.ModelName, Group: obs.Group, Source: source,
+						BucketTs: ts, RequestCount: obs.RequestCount, SuccessCount: obs.SuccessCount,
+					}))
+				}
+			}
+			const detailPath = "/api/perf-metrics?model=shared"
+			const summaryPath = "/api/perf-metrics/summary?recent_model=private-only"
+			detail := modelSquareData[perfmetrics.QueryResult](t, GetPerfMetrics, detailPath, "")
+			require.Len(t, detail.Groups, 1)
+			assert.Equal(t, "square-public", detail.Groups[0].Group)
+			denied := modelSquareData[perfmetrics.QueryResult](t, GetPerfMetrics, detailPath+"&group=square-private", "")
+			assert.Empty(t, denied.Groups)
+			summary := modelSquareData[perfmetrics.SummaryAllResult](t, GetPerfMetricsSummary, summaryPath, "")
+			require.Len(t, summary.Models, 1)
+			assert.Equal(t, "shared", summary.Models[0].ModelName)
+			assert.Equal(t, 100.0, summary.Models[0].SuccessRate)
+			assert.NotContains(t, summary.RecentSuccessSeries, "private-only")
+			allowed := modelSquareData[perfmetrics.QueryResult](t, GetPerfMetrics, detailPath+"&group=square-private", "square-private")
+			require.Len(t, allowed.Groups, 1)
+			assert.Equal(t, "square-private", allowed.Groups[0].Group)
+
+			require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{}`))
+			assert.Empty(t, modelSquareData[[]model.Pricing](t, GetPricing, "/api/pricing", ""))
+			assert.Empty(t, modelSquareData[perfmetrics.QueryResult](t, GetPerfMetrics, detailPath, "").Groups)
+			assert.Empty(t, modelSquareData[perfmetrics.SummaryAllResult](t, GetPerfMetricsSummary, summaryPath, "").Models)
+			dashboard := modelSquareData[perfmetrics.SummaryAllResult](t, GetDashboardPerfMetricsSummary, "/api/data/perf-metrics/summary", "")
+			assert.Len(t, dashboard.Models, 2)
+			require.NotNil(t, dashboard.Summary)
+			assert.Equal(t, 33.33, dashboard.Summary.SuccessRate)
+		})
+	}
 }
 
 func decodeUserModelsResponse(t *testing.T, recorder *httptest.ResponseRecorder) []string {

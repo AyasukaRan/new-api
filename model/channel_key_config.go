@@ -66,6 +66,47 @@ func (channel *Channel) OrderedKeyIndices() []int {
 	return indices
 }
 
+// retainKeyConfiguration drops permissions, costs and routing preferences for
+// credentials no longer present. The caller holds the channel's key write lock.
+func (channel *Channel) retainKeyConfiguration() {
+	channel.Keys = nil
+	channel.retainKeyGroups(channel.GetKeys())
+	keys := channel.relayKeys()
+	channel.retainKeyCostRatios(keys)
+	channel.retainKeyGroupPriorities(keys)
+	if len(channel.ChannelInfo.KeyOrder) > 0 {
+		present := make(map[string]bool, len(keys))
+		for _, key := range keys {
+			present[channel.KeyIdentity(key)] = true
+		}
+		channel.ChannelInfo.KeyOrder = slices.DeleteFunc(channel.ChannelInfo.KeyOrder, func(id string) bool { return !present[id] })
+	}
+}
+
+// MoveKeyConfiguration carries a verified plugin account's restrictions and
+// pricing across credential rotation. Ordinary key removal discards them.
+func (channel *Channel) MoveKeyConfiguration(previous, next string) {
+	from, to := channel.KeyIdentity(previous), channel.KeyIdentity(next)
+	if from == to {
+		return
+	}
+	info := &channel.ChannelInfo
+	if groups, ok := info.KeyGroups[from]; ok {
+		info.KeyGroups[to] = groups
+	}
+	if ratio, ok := info.KeyCostRatios[from]; ok {
+		info.KeyCostRatios[to] = ratio
+	}
+	if priorities, ok := info.KeyGroupPriorities[from]; ok {
+		info.KeyGroupPriorities[to] = priorities
+	}
+	for i, id := range info.KeyOrder {
+		if id == from {
+			info.KeyOrder[i] = to
+		}
+	}
+}
+
 func (channel *Channel) KeyConfiguration() ([]ChannelKeyConfigView, string, error) {
 	// Validate without GetSetting's legacy repair/write path in this read view.
 	var setting dto.ChannelSettings

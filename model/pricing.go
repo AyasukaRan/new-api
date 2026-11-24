@@ -56,6 +56,10 @@ type Pricing struct {
 	BillingUsageSchema     map[string]jsplugin.UsageFieldSchema `json:"billing_usage_schema,omitempty"`
 	BillingUsageExamples   []jsplugin.UsageExample              `json:"billing_usage_examples,omitempty"`
 	PricingVersion         string                               `json:"pricing_version,omitempty"`
+	// OrdinaryPricing reports that requests outside the plugin variants still
+	// pay the model-level price: chat requests to a plugin relaying the model,
+	// or requests to ordinary channels.
+	OrdinaryPricing bool `json:"ordinary_pricing,omitempty"`
 }
 
 type PricingVendor struct {
@@ -128,13 +132,24 @@ func GetModelSupportEndpointTypes(model string) []constant.EndpointType {
 }
 
 func getPricingEndpointTypesForAbility(ability AbilityWithChannel, advancedCustomConfigs map[int]*dto.AdvancedCustomConfig) []constant.EndpointType {
-	if ability.ChannelType != constant.ChannelTypeAdvancedCustom {
+	if !pricingUsesRelayRoutes(ability.ChannelType) {
 		return common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
 	}
 	if config := advancedCustomConfigs[ability.ChannelId]; config != nil {
-		return config.SupportedEndpointTypesForModel(ability.Model)
+		endpoints := config.SupportedEndpointTypesForModel(ability.Model)
+		// A task plugin channel also serves the task models of its plugin,
+		// which its relay routes may leave out.
+		if len(endpoints) > 0 || ability.ChannelType == constant.ChannelTypeAdvancedCustom {
+			return endpoints
+		}
 	}
 	return common.GetEndpointTypesByChannelType(ability.ChannelType, ability.Model)
+}
+
+// pricingUsesRelayRoutes reports a channel type whose endpoints come from its
+// relay routes: Advanced Custom settings, or a task plugin's meta.relay.
+func pricingUsesRelayRoutes(channelType int) bool {
+	return channelType == constant.ChannelTypeAdvancedCustom || channelType == constant.ChannelTypeTaskPlugin
 }
 
 // loadPricingAdvancedCustomConfigs runs inside updatePricing while
@@ -149,7 +164,7 @@ func loadPricingAdvancedCustomConfigs(enableAbilities []AbilityWithChannel) map[
 	channelIDs := make([]int, 0)
 	seen := make(map[int]struct{})
 	for _, ability := range enableAbilities {
-		if ability.ChannelType != constant.ChannelTypeAdvancedCustom {
+		if !pricingUsesRelayRoutes(ability.ChannelType) {
 			continue
 		}
 		if _, exists := seen[ability.ChannelId]; exists {
@@ -169,6 +184,10 @@ func loadPricingAdvancedCustomConfigs(enableAbilities []AbilityWithChannel) map[
 		for _, channelID := range channelIDs {
 			if config := channel2advancedCustomConfig[channelID]; config != nil {
 				configs[channelID] = config
+			} else if channel := channelsIDM[channelID]; channel != nil {
+				if config := channelRelayConfig(channel); config != nil {
+					configs[channelID] = config
+				}
 			}
 		}
 		return configs
@@ -178,6 +197,10 @@ func loadPricingAdvancedCustomConfigs(enableAbilities []AbilityWithChannel) map[
 		channel, err := CacheGetChannel(channelID)
 		if err != nil {
 			common.SysLog(common.LogText("load advanced custom channel settings error: channel_id=%d, error=%v", channelID, err))
+			continue
+		}
+		if config := channelRelayConfig(channel); config != nil {
+			configs[channelID] = config
 			continue
 		}
 		if channel.Type != constant.ChannelTypeAdvancedCustom {
@@ -257,6 +280,7 @@ func taskChannelBillingMode(name, mapped string, channelID int) (string, string,
 func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.LoadedPlugin, mappedModel string, sharedModel bool) (Pricing, string) {
 	pricing := base
 	pricing.ChannelPricingVariants = nil
+	pricing.OrdinaryPricing = false
 	pricing.BillingPluginVariants = nil
 	pricing.BillingUsageSchema = nil
 	pricing.BillingUsageExamples = nil
@@ -278,18 +302,21 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 	}
 	mode := billing_setting.GetChannelBillingMode(name, channelID)
 	expression, _ := billing_setting.GetChannelBillingExpr(name, channelID)
+	var overridden, relaysModel bool
 	if provider != nil {
+		relaysModel = provider.Meta.RelaysModel(name) || provider.Meta.RelaysModel(mappedModel)
 		schema, examples := provider.Meta.UsageForModels(mappedModel, name)
 		pricing.BillingUsageSchema = jsplugin.CloneUsageSchema(schema)
 		pricing.BillingUsageExamples = jsplugin.CloneUsageExamples(examples)
 		var found bool
-		expression, found = billing_setting.ResolveTaskBillingExpr(provider.Meta.Key, name, mappedModel)
+		expression, overridden, found = billing_setting.ResolveTaskBillingExpr(provider.Meta.Key, name, mappedModel)
 		mode = billing_setting.BillingModeRatio
 		if found || billing_setting.GetBillingMode(name) == billing_setting.BillingModeTieredExpr {
 			mode = billing_setting.BillingModeTieredExpr
 		}
 		if target, pinnedMode, pinnedExpr, pinned := taskChannelBillingMode(name, mappedModel, channelID); pinned {
 			name, mode, expression = target, pinnedMode, pinnedExpr
+			overridden = true
 		}
 	}
 	pricing.BillingMode = mode
@@ -306,7 +333,7 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 			(!billingexpr.UsesFixedPricing(expression) && ordinaryRouteSharesTaskPrice(base.ModelName, mappedModel, name, nil))):
 			pricing.BillingExpr, pricing.PricingConfigured = "", false
 			return pricing, ModelPricingIssueInvalidExpression
-		case provider != nil && billingexpr.UsesFixedPricing(expression):
+		case provider != nil && (billingexpr.UsesFixedPricing(expression) || !billing_setting.TaskPriceExpr(expression, overridden, relaysModel)):
 			pricing.BillingExpr, pricing.PricingConfigured = "", false
 			return pricing, ModelPricingIssueInvalidTaskPrice
 		case provider != nil && !billing_setting.TaskExprCompatible(expression, pricing.BillingUsageSchema):
@@ -337,6 +364,9 @@ func resolveChannelPricing(base Pricing, channelID int, provider *jsplugin.Loade
 			return pricing, ModelPricingIssueUnconfigured
 		}
 		return pricing, ""
+	}
+	if relaysModel {
+		return pricing, ModelPricingIssueUnconfigured
 	}
 	modelRatio, hasRatio, _ := ratio_setting.GetModelRatio(name)
 	pricing.PricingConfigured = hasRatio || (override.ModelRatio != nil && ratio_setting.ResolveRatio(override.ModelRatio, -1) >= 0)
@@ -404,7 +434,7 @@ func ordinaryRouteSharesTaskPrice(clientModel, mapped, billingName string, alias
 		pin, declared, mappedPin = alias.Alias, alias.Declared, alias.Declared
 	}
 	for _, plugin := range ordinaryEndpointPlugins(g, declared) {
-		if billing_setting.SharesTaskBillingModel(plugin.Meta.Key, pin, mappedPin, billingName) {
+		if !plugin.Meta.RelaysModel(declared) && billing_setting.SharesTaskBillingModel(plugin.Meta.Key, pin, mappedPin, billingName) {
 			return true
 		}
 	}
@@ -432,11 +462,9 @@ func pricingChannelProviders(g *jsplugin.RoutingGeneration, channel *Channel, mo
 			return !setting.BindsTaskPlugin(candidate.Meta.Key) || (channel.Type == constant.ChannelTypeNewAPI && !candidate.Meta.SupportsUpstream(jsplugin.UpstreamKindNewAPI))
 		})
 	}
-	provider, ok := g.GetByChannelType(channel.Type)
-	if ok && slices.Contains(candidates, provider) {
-		return []*jsplugin.LoadedPlugin{provider}
-	}
-	return nil
+	return slices.DeleteFunc(candidates, func(provider *jsplugin.LoadedPlugin) bool {
+		return !slices.Contains(provider.Meta.ChannelTypes, channel.Type)
+	})
 }
 
 // FilterPricingByUsableGroups filters before merging equal prices, so neither a
@@ -546,6 +574,10 @@ func updatePricing() {
 	modelChannelGroups := make(map[string]map[int][]string)
 	pricingChannels := make(map[int]*Channel)
 	pricingModelMappings := make(map[int]map[string]string)
+	pluginGeneration := jsplugin.DefaultRegistry.Generation()
+	// Models an ordinary channel serves: neither a task plugin channel nor a
+	// legacy channel type that one of the model's plugins claims.
+	ordinaryChannelModels := make(map[string]bool)
 
 	for _, ability := range enableAbilities {
 		groups, ok := modelGroupsMap[ability.Model]
@@ -574,6 +606,15 @@ func updatePricing() {
 				}
 				pricingModelMappings[ability.ChannelId] = mapping
 			}
+		}
+		if ability.ChannelType == constant.ChannelTypeTaskPlugin || ordinaryChannelModels[ability.Model] {
+			continue
+		}
+		claimed := slices.ContainsFunc(pluginGeneration.PluginsByModel(ability.Model), func(plugin *jsplugin.LoadedPlugin) bool {
+			return slices.Contains(plugin.Meta.ChannelTypes, ability.ChannelType)
+		})
+		if !claimed {
+			ordinaryChannelModels[ability.Model] = true
 		}
 	}
 
@@ -654,7 +695,6 @@ func updatePricing() {
 	}
 
 	pricingMap = make([]Pricing, 0)
-	pluginGeneration := jsplugin.DefaultRegistry.Generation()
 	for model, groups := range modelGroupsMap {
 		pricing := Pricing{
 			ModelName:              model,
@@ -731,25 +771,35 @@ func updatePricing() {
 			pricing.BillingUsageExamples = jsplugin.CloneUsageExamples(usageExamples)
 		}
 		providers := pluginGeneration.PluginsByModel(model)
-		hasProviderOverride := false
+		hasProviderOverride, relayed := false, false
 		for _, provider := range providers {
 			if _, configured := billing_setting.GetPluginBillingExpr(provider.Meta.Key, model); configured {
 				hasProviderOverride = true
-				break
 			}
+			relayed = relayed || provider.Meta.RelaysModel(model)
 		}
-		if hasProviderOverride || (len(providers) >= 2 && pricing.BillingMode == billing_setting.BillingModeTieredExpr) {
+		// The model-level price may be only a chat price: a provider also
+		// relays the model, or the expression reads chat request quantities.
+		// List the providers so those whose tasks it cannot price show as
+		// unconfigured.
+		tieredModel := pricing.BillingMode == billing_setting.BillingModeTieredExpr
+		if hasProviderOverride || relayed || tieredModel && (len(providers) >= 2 || billingexpr.UsesChatQuantities(pricing.BillingExpr)) {
+			_, defaultPrice := ratio_setting.GetDefaultModelPriceMap()[model]
+			perCall := pricing.QuotaType == 1 || defaultPrice
 			for _, provider := range providers {
 				schema, examples := provider.Meta.UsageForModel(model)
 				if schema == nil {
 					schema = map[string]jsplugin.UsageFieldSchema{}
 				}
-				expression, hasExpression := billing_setting.ResolveTaskBillingExpr(provider.Meta.Key, model, "")
+				expression, overridden, hasExpression := billing_setting.ResolveTaskBillingExpr(provider.Meta.Key, model, "")
+				relaysModel := provider.Meta.RelaysModel(model)
 				mode := billing_setting.BillingModeRatio
-				if hasExpression || billing_setting.GetBillingMode(model) == billing_setting.BillingModeTieredExpr {
+				// Inherited ratio pricing prices the provider's tasks per call
+				// only; with just a token ratio its tasks have no price.
+				if hasExpression || billing_setting.GetBillingMode(model) == billing_setting.BillingModeTieredExpr || relaysModel && !perCall {
 					mode = billing_setting.BillingModeTieredExpr
 				}
-				if mode == billing_setting.BillingModeTieredExpr && !billing_setting.TaskExprCompatible(expression, schema) {
+				if mode == billing_setting.BillingModeTieredExpr && (!billing_setting.TaskExprCompatible(expression, schema) || !billing_setting.TaskPriceExpr(expression, overridden, relaysModel)) {
 					expression = ""
 				}
 				pricing.BillingPluginVariants = append(pricing.BillingPluginVariants, PricingPluginVariant{
@@ -758,6 +808,9 @@ func updatePricing() {
 					BillingUsageSchema: jsplugin.CloneUsageSchema(schema), BillingUsageExamples: jsplugin.CloneUsageExamples(examples),
 				})
 			}
+			// An expression reading u() prices tasks only; ordinary requests
+			// reject it.
+			pricing.OrdinaryPricing = (relayed || ordinaryChannelModels[model]) && !(tieredModel && billingexpr.UsedVars(pricing.BillingExpr)["u"])
 		}
 		channelIDs := make([]int, 0, len(modelChannelGroups[model]))
 		for channelID := range modelChannelGroups[model] {
@@ -784,6 +837,18 @@ func updatePricing() {
 				mappedModel = target
 			}
 			providers := pricingChannelProviders(pluginGeneration, channel, model, mappedModel)
+			if slices.ContainsFunc(providers, func(provider *jsplugin.LoadedPlugin) bool {
+				return provider.Meta.RelaysModel(model) || provider.Meta.RelaysModel(mappedModel)
+			}) {
+				// A bound plugin can relay ordinary requests and submit tasks with
+				// separate prices on this same channel.
+				ordinary, _ := resolveChannelPricing(channelBase, channelID, nil, mappedModel, false)
+				if ordinary.PricingConfigured {
+					ordinary.EnableGroup = modelChannelGroups[model][channelID]
+					ordinary.OrdinaryPricing = true
+					pricing.ChannelPricingVariants = append(pricing.ChannelPricingVariants, ordinary)
+				}
+			}
 			for _, provider := range providers {
 				variant, _ = resolveChannelPricing(channelBase, channelID, provider, mappedModel, pluginGeneration.SharedModel(model) || pluginGeneration.SharedModel(mappedModel))
 				variant.EnableGroup = modelChannelGroups[model][channelID]

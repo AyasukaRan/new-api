@@ -37,6 +37,7 @@ import { isResponseModelMismatch } from '../../lib/response-model'
 import type { LogOtherData } from '../../types'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
+import { RequestPluginAdminSteps, RequestPluginRecord } from '../request-plugin-record'
 import { RequestFailureSummary } from '../request-failure-summary'
 import { CapturedRequestBody } from './captured-request-body'
 import { DetailRow, LogOverviewCard } from './log-detail-layout'
@@ -80,6 +81,20 @@ export function LogRequestDiagnostics(props: {
         <p className='text-destructive text-sm wrap-anywhere whitespace-pre-wrap'>
           {admin.reject_reason}
         </p>
+      </LogOverviewCard>
+    )
+  }
+  if (other?.request_plugins?.length) {
+    panels.push(
+      <LogOverviewCard key='request-plugins' title={t('Request processing')} className='basis-full'>
+        <RequestPluginRecord items={other.request_plugins} loadIcons={props.isRoot} />
+      </LogOverviewCard>
+    )
+  }
+  if (admin?.request_plugins?.length) {
+    panels.push(
+      <LogOverviewCard key='request-plugin-steps' title={t('Request processing steps')} className='basis-full'>
+        <RequestPluginAdminSteps steps={admin.request_plugins} />
       </LogOverviewCard>
     )
   }

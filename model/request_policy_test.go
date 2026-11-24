@@ -87,8 +87,8 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 				{Key: "monitor_setting.channel_test_mode", Value: "scheduled_all"},
 				{Key: "AutomaticEnableChannelEnabled", Value: "false"},
 			}).Error)
-			loadOptionsFromDatabase()
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, "true", CurrentRequestPolicy().Options["monitor_setting.auto_update_balance_enabled"])
 			assert.Equal(t, "12.5", CurrentRequestPolicy().Options[operation_setting.AutoUpdateBalanceMinutesOptionKey])
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{
@@ -113,8 +113,8 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"request_policy_setting.mode": "off"}), "the removed mode switch is not a policy option")
 			assert.False(t, CurrentRequestPolicy().Affinity.Rules[0].SkipRetryOnFailure)
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"])
-			loadOptionsFromDatabase()
-			loadOptionsFromDatabase()
+			LoadOptionsFromDatabase()
+			LoadOptionsFromDatabase()
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "legacy rule JSON survives reloads without dropping extension fields")
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.session_mode": "strict"}))
 			require.NoError(t, UpdateOptionsBulk(map[string]string{"ServerAddress": system_setting.ServerAddress, "RetryTimes": "3"}))
@@ -123,8 +123,8 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			require.NoError(t, UpdateOptionsBulk(map[string]string{"ServerAddress": system_setting.ServerAddress, "RetryTimes": "2"}))
 			assert.Error(t, UpdateOptionsBulk(map[string]string{"ServerAddress": "https://invalid-batch.example.test", "RetryTimes": "-1"}))
 			assert.Equal(t, "https://policy.example.test", system_setting.ServerAddress, "invalid mixed writes change neither domain nor policy")
-			loadOptionsFromDatabase()
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode)
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "a global mode never rewrites rule fields")
 			snapshot := CurrentRequestPolicy()
@@ -150,7 +150,7 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			option = Option{}
 			require.NoError(t, db.Where(map[string]any{"key": "RetryTimes"}).First(&option).Error)
 			assert.Equal(t, "2", option.Value)
-			loadOptionsFromDatabase()
+			LoadOptionsFromDatabase()
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode, "a failed save keeps the persisted global mode")
 		})
 	}

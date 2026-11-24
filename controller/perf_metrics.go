@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/service"
@@ -23,7 +24,7 @@ func monitorScopeForViewer(c *gin.Context, hours int) perfmetrics.QueryParams {
 		params.AllowedGroups = append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
 		return params
 	}
-	usable := service.GetUserVisibleGroups(c.GetString("user_group"))
+	usable := service.GetUserVisibleGroups(common.GetContextKeyString(c, constant.ContextKeyUserGroup))
 	params.AllowedGroups = lo.Keys(usable)
 	if len(params.AllowedGroups) == 0 {
 		return params
@@ -58,6 +59,14 @@ func GetAdminPerfMetrics(c *gin.Context) {
 }
 
 func GetPerfMetricsSummary(c *gin.Context) {
+	getPerfMetricsSummary(c, c.GetInt("role") >= common.RoleAdminUser)
+}
+
+func GetDashboardPerfMetricsSummary(c *gin.Context) {
+	getPerfMetricsSummary(c, true)
+}
+
+func getPerfMetricsSummary(c *gin.Context, dashboard bool) {
 	hours := 24
 	if rawHours := c.Query("hours"); rawHours != "" {
 		if parsed, err := strconv.Atoi(rawHours); err == nil {
@@ -70,13 +79,14 @@ func GetPerfMetricsSummary(c *gin.Context) {
 		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
 		return
 	}
-	scope := monitorScopeForViewer(c, hours)
 	var result perfmetrics.SummaryAllResult
 	var err error
-	if c.GetInt("role") >= common.RoleAdminUser {
-		result, err = perfmetrics.QueryAdminSummary(hours, scope.AllowedGroups, c.Query("diagnostics") == "true", recentModels...)
+	if dashboard {
+		diagnostics, _ := strconv.ParseBool(c.Query("diagnostics"))
+		groups := append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
+		result, err = perfmetrics.QueryAdminSummary(hours, groups, diagnostics, recentModels...)
 	} else {
-		result, err = perfmetrics.QueryVisibleSummary(scope, recentModels...)
+		result, err = perfmetrics.QueryVisibleSummary(monitorScopeForViewer(c, hours), recentModels...)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

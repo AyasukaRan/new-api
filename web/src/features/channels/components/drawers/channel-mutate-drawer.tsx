@@ -24,6 +24,7 @@ import {
   ArrowRightLeft,
   PanelLeftOpen,
   AlertCircle,
+  Puzzle,
   ChevronDown,
   ClipboardPaste,
   Loader2,
@@ -106,6 +107,8 @@ import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { SecureVerificationDialog } from '@/features/auth/secure-verification'
 import { PluginIcon } from '@/features/task-plugins/components/plugin-icon'
+import type { PluginIconInput } from '@/features/task-plugins/lib/plugin-icon'
+import { fromRequestPluginConfigDraft } from '@/features/task-plugins/lib/request-plugins'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
 import {
@@ -119,6 +122,7 @@ import {
 } from '@/lib/channel-connection-info'
 import { formatNumber } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
+import { resolveLocalizedText } from '@/lib/localized-text'
 import { ROLE } from '@/lib/roles'
 import {
   requireServerSuccess,
@@ -226,6 +230,7 @@ import {
   PassthroughWarningDialog,
   type PassthroughKind,
 } from '../dialogs/passthrough-warning-dialog'
+import { PluginLoginDialog } from '../dialogs/plugin-login-dialog'
 import { StatusCodeRiskDialog } from '../dialogs/status-code-risk-dialog'
 import {
   ModelMappingBatchDialog,
@@ -243,7 +248,10 @@ import {
   ChannelConfiguration,
   ChannelConfigurationStatusIndicator,
 } from './channel-configuration'
+import { ChannelPluginConfigFields } from './channel-plugin-config-fields'
 import { ChannelProviderPicker } from './channel-provider-picker'
+import { ChannelRequestPluginsField } from './channel-request-plugins-field'
+import { PluginCredentialPanel } from './plugin-credential-panel'
 import {
   ChannelApiAccessSection,
   ChannelAuthSection,
@@ -272,6 +280,35 @@ const createEmptyModelMappingGuardrail = (): ModelMappingGuardrail => ({
   missingSourceModels: [],
   exposedTargetModels: [],
 })
+
+// Mappings already reflected in the model list count as synced, so the
+// redirect sync only reverts changes it made for the channel being edited.
+const getModelMappingSyncBaseline = (
+  mapping: string,
+  modelsValue: string
+): { aliases: Set<string>; targets: Set<string> } => {
+  const aliases = new Set<string>()
+  const targets = new Set<string>()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(mapping.trim() || '{}')
+  } catch {
+    return { aliases, targets }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { aliases, targets }
+  }
+  const models = new Set(parseModelsString(modelsValue))
+  for (const [rawFrom, rawTo] of Object.entries(parsed)) {
+    if (typeof rawTo !== 'string') continue
+    const from = rawFrom.trim()
+    const to = rawTo.trim()
+    if (!from || !to) continue
+    if (models.has(from)) aliases.add(from)
+    if (!models.has(to)) targets.add(to)
+  }
+  return { aliases, targets }
+}
 
 const formatModelNames = (models: string[]): string =>
   models.map((model) => `"${model}"`).join(', ')
@@ -340,6 +377,8 @@ const SENSITIVE_FORM_FIELDS = [
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
   'upstream_model_update_ignored_models',
+  'plugin_config',
+  'plugin_config_draft',
 ] satisfies (keyof ChannelFormValues)[]
 
 function parseSettingsRecord(
@@ -429,7 +468,7 @@ export function ChannelMutateDrawer({
   onOpenChange,
   currentRow,
 }: ChannelMutateDrawerProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const { setOpen, sensitiveVisible } = useChannels()
   const currentUser = useAuthStore((s) => s.auth.user)
@@ -480,6 +519,13 @@ export function ChannelMutateDrawer({
     useState(false)
   const [clipboardConnectionInfo, setClipboardConnectionInfo] =
     useState<ChannelConnectionInfo | null>(null)
+  // Outlives the drawer: "Save and log in" closes it, then logs in.
+  const [loginRequest, setLoginRequest] = useState<{
+    channelId: number
+    keyIndex: number | null
+    add?: boolean
+    plugin: PluginIconInput
+  } | null>(null)
 
   const isEditing = Boolean(currentRow)
   const requestedSide = isEditing ? 'left' : 'right'
@@ -509,6 +555,16 @@ export function ChannelMutateDrawer({
   const [redirectSyncModels, setRedirectSyncModels] = useState(true)
   const syncedAliasesRef = useRef(new Set<string>())
   const syncedTargetsRef = useRef(new Set<string>())
+  // The drawer stays mounted between channels, so the sync baseline must be
+  // rebuilt whenever another channel is loaded.
+  const resetModelMappingSync = useCallback(
+    (mapping = '', modelsValue = '') => {
+      const baseline = getModelMappingSyncBaseline(mapping, modelsValue)
+      syncedAliasesRef.current = baseline.aliases
+      syncedTargetsRef.current = baseline.targets
+    },
+    []
+  )
   const [viewportWide, setViewportWide] = useState(
     () => window.innerWidth >= REDIRECT_PANEL_MIN_VIEWPORT
   )
@@ -827,6 +883,34 @@ export function ChannelMutateDrawer({
     boundTaskPlugin?.name ||
     (currentType === CHANNEL_TYPE_TASK_PLUGIN && currentTaskPluginKey) ||
     t(currentTypeLabel)
+  // Credentials of a plugin with its own login come from that login, so a
+  // credential panel replaces the key input.
+  const pluginLogin = boundTaskPlugin?.login === true
+  // Login acts on the saved channel, so a plugin picked in this edit waits
+  // for the save.
+  const loginChannelId =
+    isEditing &&
+    !form.formState.dirtyFields.type &&
+    !form.formState.dirtyFields.task_plugin_key
+      ? channelId
+      : null
+  const pluginConfigSchema =
+    boundTaskPlugin?.channelConfig &&
+    Object.keys(boundTaskPlugin.channelConfig.properties ?? {}).length > 0
+      ? boundTaskPlugin.channelConfig
+      : undefined
+  const pluginKeyHint = resolveLocalizedText(
+    boundTaskPlugin?.keyHint,
+    i18n.language
+  )
+  const responsesWebsocketSupported =
+    currentType === CHANNEL_TYPE_TASK_PLUGIN
+      ? boundTaskPlugin?.responsesWebsocket === true
+      : undefined
+  // Batch mode makes one channel per key line, and a login plugin has none.
+  const keyAddModeOptions = pluginLogin
+    ? addModeOptions.filter((option) => option.value !== 'batch')
+    : addModeOptions
 
   const selectProvider = useCallback(
     (target: ChannelProviderTarget) => {
@@ -848,11 +932,25 @@ export function ChannelMutateDrawer({
           (item) => item.key === target.key
         )
         if (!plugin) return
+        const previousKey = form.getValues('task_plugin_key')
         const previousPlugin = taskPluginOptionsQuery.data?.find(
-          (item) => item.key === form.getValues('task_plugin_key')
+          (item) => item.key === previousKey
         )
         form.setValue('type', CHANNEL_TYPE_TASK_PLUGIN, { shouldDirty: true })
         form.setValue('task_plugin_key', plugin.key, { shouldDirty: true })
+        // Settings belong to the plugin that declared them.
+        if (previousKey !== plugin.key) {
+          form.setValue('plugin_config', {}, { shouldDirty: true })
+          form.setValue('plugin_config_draft', null, { shouldDirty: true })
+        }
+        if (!plugin.responsesWebsocket) {
+          form.setValue('responses_websocket_enabled', false, {
+            shouldDirty: true,
+          })
+        }
+        if (plugin.login && form.getValues('multi_key_mode') === 'batch') {
+          form.setValue('multi_key_mode', 'single', { shouldDirty: true })
+        }
         if (!isEditing && !providerTarget && !form.getValues('name').trim()) {
           form.setValue('name', plugin.name)
         }
@@ -913,7 +1011,8 @@ export function ChannelMutateDrawer({
   const configuration = getChannelConfigurationState(
     formValues,
     formErrors,
-    isEditing
+    isEditing || pluginLogin,
+    boundTaskPlugin
   )
 
   // Extract redirect models from model_mapping (target values)
@@ -1068,6 +1167,7 @@ export function ChannelMutateDrawer({
       setChoosingProvider(true)
       setConfigurationSection('connection')
       setPendingErrorFocus(null)
+      resetModelMappingSync()
       return
     }
     if (isEditing && channelData?.data) {
@@ -1082,6 +1182,7 @@ export function ChannelMutateDrawer({
       }
       const defaults = transformChannelToFormDefaults(channelData.data)
       form.reset(defaults)
+      resetModelMappingSync(defaults.model_mapping, defaults.models)
       loadedForm.current = {
         channelId: channelData.data.id,
         snapshot: JSON.stringify(form.getValues()),
@@ -1106,11 +1207,12 @@ export function ChannelMutateDrawer({
         channelData.data.status_code_mapping || ''
     } else if (!isEditing) {
       form.reset(CHANNEL_FORM_DEFAULT_VALUES)
+      resetModelMappingSync()
       initialModelsRef.current = []
       initialModelMappingRef.current = ''
       initialStatusCodeMappingRef.current = ''
     }
-  }, [isEditing, channelId, channelData, form, open])
+  }, [isEditing, channelId, channelData, form, open, resetModelMappingSync])
 
   useEffect(() => {
     if (!open || isEditing) return
@@ -1253,6 +1355,11 @@ export function ChannelMutateDrawer({
     !isEditing ||
     (currentType === CHANNEL_TYPE_ADVANCED_CUSTOM && canEditSensitive)
   const canDiscoverModels = previewModels ? canEditSensitive : canOperateChannel
+  // A plugin channel lists models when its plugin has relay routes. A plugin
+  // that logs in has no credential before the channel is saved.
+  const modelFetchable =
+    MODEL_FETCHABLE_TYPES.has(currentType) ||
+    (boundTaskPlugin?.provider === true && (isEditing || !pluginLogin))
   const previewKey = isEditing
     ? undefined
     : currentKey || currentKeyConfigs?.find((key) => key.key)?.key
@@ -1263,6 +1370,10 @@ export function ChannelMutateDrawer({
         type: currentType,
         key: previewKey,
         channel_id: isEditing ? channelId || undefined : undefined,
+        task_plugin_key:
+          currentType === CHANNEL_TYPE_TASK_PLUGIN
+            ? currentTaskPluginKey
+            : undefined,
         base_url: currentBaseUrl || '',
         advanced_custom: currentAdvancedCustom,
         header_override: currentHeaderOverride,
@@ -1274,6 +1385,7 @@ export function ChannelMutateDrawer({
       previewKey,
       isEditing,
       channelId,
+      currentTaskPluginKey,
       currentBaseUrl,
       currentAdvancedCustom,
       currentHeaderOverride,
@@ -1288,7 +1400,7 @@ export function ChannelMutateDrawer({
     enabled:
       open &&
       canDiscoverModels &&
-      MODEL_FETCHABLE_TYPES.has(currentType) &&
+      modelFetchable &&
       (!isEditing || Boolean(channelData?.data)),
     request: previewModels ? previewRequest : savedRequest,
   })
@@ -1301,7 +1413,7 @@ export function ChannelMutateDrawer({
   const fetchDiscoveredModels = discovery.fetch
   const handleFetchModels = useCallback(async () => {
     const type = form.getValues('type')
-    if (!MODEL_FETCHABLE_TYPES.has(type)) {
+    if (!modelFetchable) {
       toast.error(t('This channel type does not support fetching models'))
       return
     }
@@ -1312,7 +1424,7 @@ export function ChannelMutateDrawer({
     if (
       !isEditing &&
       type !== CHANNEL_TYPE_ADVANCED_CUSTOM &&
-      !form.getValues('key')?.trim()
+      !previewKey?.trim()
     ) {
       form.setError('key', {
         type: 'manual',
@@ -1323,7 +1435,15 @@ export function ChannelMutateDrawer({
       return
     }
     await fetchDiscoveredModels()
-  }, [isEditing, canDiscoverModels, form, t, fetchDiscoveredModels])
+  }, [
+    isEditing,
+    canDiscoverModels,
+    modelFetchable,
+    previewKey,
+    form,
+    t,
+    fetchDiscoveredModels,
+  ])
 
   // Handle model operations
   const handleFillRelatedModels = useCallback(() => {
@@ -1491,15 +1611,18 @@ export function ChannelMutateDrawer({
 
   const applyMappingPairs = useCallback(
     (pairs: ModelMappingPair[], sync: boolean) => {
-      const merged = mergeModelMappingPairs(
-        form.getValues('model_mapping') || '',
-        pairs
-      )
+      const current = form.getValues('model_mapping') || ''
+      const merged = mergeModelMappingPairs(current, pairs)
       if (merged === null) return
       form.setValue('model_mapping', merged, { shouldDirty: true })
-      if (sync) syncModelsWithMapping(merged)
+      if (sync) {
+        // Mapping edits made outside the redirect panel are not synced, so
+        // rebase on the current values and revert only this batch's changes.
+        resetModelMappingSync(current, form.getValues('models') || '')
+        syncModelsWithMapping(merged)
+      }
     },
-    [form, syncModelsWithMapping]
+    [form, resetModelMappingSync, syncModelsWithMapping]
   )
 
   const handleBatchMappingApply = useCallback(
@@ -1525,19 +1648,12 @@ export function ChannelMutateDrawer({
   const openRedirectPanel = useCallback(() => {
     // Pre-existing mappings count as already synced, so opening the panel
     // never rewrites the model list on its own.
-    const models = new Set(parseModelsString(form.getValues('models') || ''))
-    syncedAliasesRef.current = new Set(
-      modelMappingGuardrail.entries
-        .filter((entry) => models.has(entry.source))
-        .map((entry) => entry.source)
-    )
-    syncedTargetsRef.current = new Set(
-      modelMappingGuardrail.entries
-        .filter((entry) => !models.has(entry.target))
-        .map((entry) => entry.target)
+    resetModelMappingSync(
+      form.getValues('model_mapping') || '',
+      form.getValues('models') || ''
     )
     setRedirectPanelOpen(true)
-  }, [form, modelMappingGuardrail.entries])
+  }, [form, resetModelMappingSync])
 
   const closeRedirectPanel = useCallback(() => {
     setRedirectPanelOpen(false)
@@ -1701,7 +1817,12 @@ export function ChannelMutateDrawer({
         }
       }
       // Validate key is required when creating
-      if (!isEditing && !data.key?.trim() && !data.key_configs?.length) {
+      if (
+        !isEditing &&
+        !pluginLogin &&
+        !data.key?.trim() &&
+        !data.key_configs?.length
+      ) {
         form.setError('key', {
           type: 'manual',
           message: ERROR_MESSAGES.REQUIRED_KEY,
@@ -1724,6 +1845,26 @@ export function ChannelMutateDrawer({
           )
           return
         }
+      }
+
+      // Edited plugin settings are saved as values; untouched ones stay as
+      // they were saved.
+      if (
+        data.type === CHANNEL_TYPE_TASK_PLUGIN &&
+        pluginConfigSchema &&
+        data.plugin_config_draft
+      ) {
+        const parsed = fromRequestPluginConfigDraft(
+          pluginConfigSchema,
+          data.plugin_config_draft
+        )
+        if (Object.keys(parsed.errors).length > 0) {
+          setConfigurationSection('connection')
+          setPendingErrorFocus('plugin_config')
+          toast.error(t('Please fix the highlighted fields before saving'))
+          return
+        }
+        data.plugin_config = parsed.config
       }
 
       // Validate status_code_mapping entries
@@ -1812,8 +1953,20 @@ export function ChannelMutateDrawer({
         }
       }
 
+      // A login plugin never takes a typed key, even one left over from
+      // another provider.
+      const loginPlugin = pluginLogin ? boundTaskPlugin : undefined
+      if (loginPlugin) data.key = ''
+
       try {
-        await channelMutation.mutateAsync(data)
+        const result = await channelMutation.mutateAsync(data)
+        if (!isEditing && loginPlugin && result.channelId) {
+          setLoginRequest({
+            channelId: result.channelId,
+            keyIndex: null,
+            plugin: loginPlugin,
+          })
+        }
       } catch {
         // The mutation reports the server error; keep the draft open for correction.
       }
@@ -1821,6 +1974,9 @@ export function ChannelMutateDrawer({
     [
       isEditing,
       useUnifiedKeyEditor,
+      pluginLogin,
+      boundTaskPlugin,
+      pluginConfigSchema,
       providerTarget,
       canEditSensitive,
       sensitiveLocked,
@@ -2383,9 +2539,7 @@ export function ChannelMutateDrawer({
     </div>
   )
 
-  const upstreamModelDetectionFields = MODEL_FETCHABLE_TYPES.has(
-    currentType
-  ) && (
+  const upstreamModelDetectionFields = modelFetchable && (
     <div
       role='group'
       aria-label={t('Upstream Model Detection Settings')}
@@ -2878,10 +3032,42 @@ export function ChannelMutateDrawer({
                   )}
                 />
               </FormControl>
+              <p className='text-muted-foreground text-sm'>
+                {t(
+                  'Rules for all channels are set on the Request processing page'
+                )}
+              </p>
               <FormMessage />
             </FormItem>
           )}
         />
+
+        {canBindTaskPlugin && (
+          <FormField
+            control={form.control}
+            name='request_plugins'
+            render={({ field }) => (
+              <FormItem className='space-y-3 border-t pt-4'>
+                <div className='space-y-1'>
+                  <FormLabel>{t('Request processing plugins')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      "Instances for all requests or for this channel's groups also apply."
+                    )}
+                  </FormDescription>
+                </div>
+                <FormControl>
+                  <ChannelRequestPluginsField
+                    value={field.value ?? []}
+                    onChange={field.onChange}
+                    disabled={sensitiveLocked || isSubmitting}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
 
         <FormField
           control={form.control}
@@ -2973,7 +3159,12 @@ export function ChannelMutateDrawer({
     </div>
   )
 
-  const fieldPassthroughFields = FIELD_PASSTHROUGH_TYPES.has(currentType) && (
+  // A plugin channel without relay routes relays no client fields.
+  const fieldPassthroughSupported =
+    FIELD_PASSTHROUGH_TYPES.has(currentType) &&
+    (currentType !== CHANNEL_TYPE_TASK_PLUGIN ||
+      boundTaskPlugin?.provider === true)
+  const fieldPassthroughFields = fieldPassthroughSupported && (
     <div
       role='group'
       aria-label={t('Field passthrough controls')}
@@ -3385,7 +3576,7 @@ export function ChannelMutateDrawer({
               )}
             />
 
-            {MODEL_FETCHABLE_TYPES.has(currentType) && (
+            {modelFetchable && (
               <div aria-live='polite' className='mt-4 space-y-3'>
                 {discovery.status === 'loading' && (
                   <LoadingState
@@ -3541,7 +3732,7 @@ export function ChannelMutateDrawer({
                   <FileText className='mr-2 h-4 w-4' aria-hidden='true' />
                   {t('Fill Related Models')}
                 </Button>
-                {MODEL_FETCHABLE_TYPES.has(currentType) && (
+                {modelFetchable && (
                   <>
                     <Button
                       type='button'
@@ -4339,7 +4530,7 @@ export function ChannelMutateDrawer({
                       !boundTaskPlugin?.baseUrl && (
                         <FormDescription>
                           {t(
-                            'The upstream address this plugin sends requests to. The plugin declares no default, so it must be filled in.'
+                            'Required. The upstream address this plugin sends requests to.'
                           )}
                         </FormDescription>
                       )}
@@ -4549,7 +4740,7 @@ export function ChannelMutateDrawer({
                       </FormLabel>
                       <Select
                         disabled={sensitiveLocked}
-                        items={addModeOptions.map((option) => ({
+                        items={keyAddModeOptions.map((option) => ({
                           value: option.value,
                           label: t(option.label),
                         }))}
@@ -4563,7 +4754,7 @@ export function ChannelMutateDrawer({
                         </FormControl>
                         <SelectContent alignItemWithTrigger={false}>
                           <SelectGroup>
-                            {addModeOptions.map((option) => (
+                            {keyAddModeOptions.map((option) => (
                               <SelectItem
                                 key={option.value}
                                 value={option.value}
@@ -4580,7 +4771,23 @@ export function ChannelMutateDrawer({
                 />
               )}
 
-              {useUnifiedKeyEditor ? (
+              {pluginLogin && (
+                <PluginCredentialPanel
+                  channelId={loginChannelId}
+                  multiKey={isMultiKeyChannel}
+                  disabled={!canEditSensitive}
+                  onLogin={(keyIndex, add) => {
+                    if (loginChannelId === null || !boundTaskPlugin) return
+                    setLoginRequest({
+                      channelId: loginChannelId,
+                      keyIndex,
+                      add,
+                      plugin: boundTaskPlugin,
+                    })
+                  }}
+                />
+              )}
+              {useUnifiedKeyEditor && (
                 <FormField
                   control={form.control}
                   name='key_configs'
@@ -4614,7 +4821,8 @@ export function ChannelMutateDrawer({
                     </FormItem>
                   )}
                 />
-              ) : (
+              )}
+              {!pluginLogin && !useUnifiedKeyEditor && (
                 <FormField
                   control={form.control}
                   name='key'
@@ -4622,6 +4830,13 @@ export function ChannelMutateDrawer({
                     let keyPlaceholder = t(getKeyPromptForType(currentType))
                     if (isEditing) {
                       keyPlaceholder = t('Leave empty to keep existing key')
+                    } else if (pluginKeyHint && isBatchMode) {
+                      keyPlaceholder = t(
+                        'Enter one key per line, format: {{format}}',
+                        { format: pluginKeyHint }
+                      )
+                    } else if (pluginKeyHint) {
+                      keyPlaceholder = pluginKeyHint
                     } else if (
                       currentType === 33 &&
                       awsKeyType === 'api_key' &&
@@ -4686,6 +4901,14 @@ export function ChannelMutateDrawer({
                         <FormDescription>
                           <span className='flex flex-col gap-2'>
                             <span>{keyDescription}</span>
+                            {pluginKeyHint && (
+                              <span>
+                                {t('Key format')}:{' '}
+                                <span className='font-mono break-all'>
+                                  {pluginKeyHint}
+                                </span>
+                              </span>
+                            )}
                             {!isEditing && isBatchMode && (
                               <Button
                                 type='button'
@@ -4707,7 +4930,7 @@ export function ChannelMutateDrawer({
                 />
               )}
 
-              {isEditing && canRevealChannelKey && (
+              {isEditing && !pluginLogin && canRevealChannelKey && (
                 <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>
                   <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
                     <div>
@@ -4828,7 +5051,7 @@ export function ChannelMutateDrawer({
                 </div>
               )}
 
-              {!useUnifiedKeyEditor && isEditing && isMultiKeyChannel && (
+              {!useUnifiedKeyEditor && isEditing && isMultiKeyChannel && !pluginLogin && (
                 <FormField
                   control={form.control}
                   name='key_mode'
@@ -4942,9 +5165,41 @@ export function ChannelMutateDrawer({
             </ChannelAuthSection>
           </fieldset>
         </div>
+
+        {pluginConfigSchema && currentTaskPluginKey && (
+          <div
+            role='group'
+            aria-label={t('Plugin settings')}
+            className='space-y-3'
+          >
+            <SubHeading
+              title={t('Plugin settings')}
+              icon={<Puzzle />}
+              iconTone='info'
+            />
+            <fieldset
+              disabled={sensitiveLocked}
+              className='min-w-0 disabled:opacity-60'
+            >
+              <ChannelPluginConfigFields
+                pluginKey={currentTaskPluginKey}
+                schema={pluginConfigSchema}
+                models={currentModelsArray}
+                disabled={sensitiveLocked || isSubmitting}
+              />
+            </fieldset>
+          </div>
+        )}
       </ChannelApiAccessSection>
     </div>
   )
+
+  let submitLabel = t('Create Channel')
+  if (isEditing) {
+    submitLabel = t('Update Channel')
+  } else if (pluginLogin) {
+    submitLabel = t('Save and log in')
+  }
 
   let formContent: ReactNode
   if (!isEditing && !providerTarget) {
@@ -4987,6 +5242,8 @@ export function ChannelMutateDrawer({
           viewportWide ? null : (
             <ChannelQuickOptions
               channelType={currentType}
+              modelFetchable={modelFetchable}
+              responsesWebsocket={responsesWebsocketSupported}
               sensitiveLocked={sensitiveLocked}
               disabled={isSubmitting}
               confirmEnablePassthrough={confirmEnablePassthrough}
@@ -5021,6 +5278,7 @@ export function ChannelMutateDrawer({
               >
                 <ResponsesWebSocketSetting
                   channelType={currentType}
+                  supported={responsesWebsocketSupported}
                   disabled={sensitiveLocked || isSubmitting}
                 />
                 {formatFields}
@@ -5305,6 +5563,8 @@ export function ChannelMutateDrawer({
                       form={form}
                       layout='inline'
                       channelType={currentType}
+                      modelFetchable={modelFetchable}
+                      responsesWebsocket={responsesWebsocketSupported}
                       sensitiveLocked={sensitiveLocked}
                       disabled={isSubmitting}
                       className='sm:justify-end'
@@ -5419,7 +5679,7 @@ export function ChannelMutateDrawer({
                 {isSubmitting && (
                   <Loader2 className='mr-2 h-4 w-4 animate-spin' />
                 )}
-                {isEditing ? t('Update Channel') : t('Create Channel')}
+                {submitLabel}
               </Button>
             )}
           </SheetFooter>
@@ -5539,6 +5799,28 @@ export function ChannelMutateDrawer({
         }}
         handleConfirm={() => handlePassthroughWarningAction(true)}
       />
+
+      {loginRequest && (
+        <PluginLoginDialog
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setLoginRequest(null)
+          }}
+          channelId={loginRequest.channelId}
+          keyIndex={loginRequest.keyIndex}
+          add={loginRequest.add}
+          plugin={loginRequest.plugin}
+          onDone={() => {
+            // A login can enable the channel, so the list refreshes too.
+            void queryClient.invalidateQueries({
+              queryKey: channelsQueryKeys.detail(loginRequest.channelId),
+            })
+            void queryClient.invalidateQueries({
+              queryKey: channelsQueryKeys.lists(),
+            })
+          }}
+        />
+      )}
     </>
   )
 }

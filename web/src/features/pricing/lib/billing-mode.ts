@@ -20,6 +20,7 @@ import type { PricingModel } from '../types'
 import { getChannelPricingVariants } from './channel-pricing'
 import { hasTaskUsageSchema, isDynamicPricingModel } from './dynamic-price'
 import { isTokenBasedModel } from './model-helpers'
+import { withBasePricing } from './plugin-pricing'
 
 export type BillingModeLabelKey =
   | 'Per Request'
@@ -29,9 +30,10 @@ export type BillingModeLabelKey =
   | 'Channel pricing'
 
 export function getBillingModeLabelKey(
-  model: PricingModel,
+  listedModel: PricingModel,
   selectedGroup?: string
 ): BillingModeLabelKey {
+  const model = withBasePricing(listedModel)
   if (model.channel_pricing_variants?.length) {
     const modes = new Set(
       getChannelPricingVariants(model, selectedGroup).map((variant) =>

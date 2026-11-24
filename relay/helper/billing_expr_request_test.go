@@ -2,7 +2,6 @@ package helper
 
 import (
 	"bytes"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,23 +19,34 @@ import (
 
 func TestResolveIncomingBillingExprRequestInput(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	ctx.Request.Header.Set("Content-Type", "application/json")
-
 	body := []byte(`{"service_tier":"fast"}`)
-	ctx.Request.Body = io.NopCloser(bytes.NewReader(body))
-	ctx.Set(common.KeyRequestBody, body)
+	for _, tc := range []struct {
+		name      string
+		frozen    *billingexpr.RequestInput
+		readsBody bool
+		wantBody  []byte
+	}{
+		{name: "param expression reads the body", readsBody: true, wantBody: body},
+		{name: "expression without param leaves the body unread"},
+		{name: "later param expression reads a body the snapshot skipped", frozen: &billingexpr.RequestInput{}, readsBody: true, wantBody: body},
+		{name: "frozen body is kept", frozen: &billingexpr.RequestInput{Body: []byte(`{"service_tier":"flex"}`)}, readsBody: true, wantBody: []byte(`{"service_tier":"flex"}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			t.Cleanup(func() { common.CleanupBodyStorage(ctx) })
+			info := &relaycommon.RelayInfo{
+				RequestHeaders:      map[string]string{"Content-Type": "application/json"},
+				BillingRequestInput: tc.frozen,
+			}
 
-	info := &relaycommon.RelayInfo{
-		RequestHeaders: map[string]string{"Content-Type": "application/json"},
+			input, err := ResolveIncomingBillingExprRequestInput(ctx, info, tc.readsBody)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantBody, input.Body)
+			assert.Equal(t, "application/json", input.Headers["Content-Type"])
+		})
 	}
-
-	input, err := ResolveIncomingBillingExprRequestInput(ctx, info)
-	require.NoError(t, err)
-	require.Equal(t, body, input.Body)
-	require.Equal(t, "application/json", input.Headers["Content-Type"])
 }
 
 func TestBuildBillingExprRequestInputFromRequest(t *testing.T) {
@@ -97,7 +107,12 @@ func TestBillingRequestFormatCannotBeSpoofed(t *testing.T) {
 				delete(headers, "X-DashScope-Session-Cache")
 			}
 			info := &relaycommon.RelayInfo{Request: tc.request, RequestHeaders: headers}
-			input, err := ResolveIncomingBillingExprRequestInput(ctx, info)
+			headerOnly, err := ResolveIncomingBillingExprRequestInput(ctx, info, false)
+			require.NoError(t, err)
+			assert.Equal(t, tc.format, headerOnly.Headers[reserved])
+			assert.NotContains(t, headerOnly.Headers, "X-New-Api-Billing-Request-Format")
+			assert.Nil(t, headerOnly.Body)
+			input, err := ResolveIncomingBillingExprRequestInput(ctx, info, true)
 			require.NoError(t, err)
 			assert.Equal(t, tc.format, input.Headers[reserved])
 			assert.NotContains(t, input.Headers, "X-New-Api-Billing-Request-Format")
@@ -110,7 +125,7 @@ func TestBillingRequestFormatCannotBeSpoofed(t *testing.T) {
 
 			info.BillingRequestInput = &input
 			input.Headers[reserved] = "forged cached input"
-			cloned, err := ResolveIncomingBillingExprRequestInput(nil, info)
+			cloned, err := ResolveIncomingBillingExprRequestInput(nil, info, false)
 			require.NoError(t, err)
 			assert.Equal(t, tc.format, cloned.Headers[reserved])
 			assert.Equal(t, "forged cached input", input.Headers[reserved], "resolver must clone the frozen input")
@@ -118,7 +133,7 @@ func TestBillingRequestFormatCannotBeSpoofed(t *testing.T) {
 			info.BillingRequestInput = &cloned
 			info.OriginModelName = "qwen3.8-max"
 			info.ChannelMeta = &relaycommon.ChannelMeta{UpstreamModelName: "qwen3.8-max-0902"}
-			afterMapping, err := ResolveIncomingBillingExprRequestInput(nil, info)
+			afterMapping, err := ResolveIncomingBillingExprRequestInput(nil, info, false)
 			require.NoError(t, err)
 			assert.Equal(t, tc.format, afterMapping.Headers[reserved])
 			snapshot := &billingexpr.BillingSnapshot{ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, QuotaPerUnit: 1000000, ExprVersion: 1}
@@ -131,7 +146,7 @@ func TestBillingRequestFormatCannotBeSpoofed(t *testing.T) {
 			assert.NotContains(t, encoded.Headers, "X-New-Api-Billing-Request-Format")
 		})
 	}
-	input, err := ResolveIncomingBillingExprRequestInput(nil, nil)
+	input, err := ResolveIncomingBillingExprRequestInput(nil, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, "", input.Headers[reserved])
 }

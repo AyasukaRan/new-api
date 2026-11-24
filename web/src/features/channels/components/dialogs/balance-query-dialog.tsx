@@ -34,6 +34,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 
 import { getCodexUsage, updateChannelBalance } from '../../api'
+import { CHANNEL_TYPE_TASK_PLUGIN } from '../../constants'
 import { channelsQueryKeys, parseChannelSettings } from '../../lib'
 import { ChannelBalanceSummary } from '../channel-balance-summary'
 import { useChannels } from '../channels-provider'
@@ -118,6 +119,10 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
         setCurrentRow({
           ...currentRow,
           balance_monitor: response.balance_monitor,
+          balance_detail:
+            response.balance_detail === undefined
+              ? currentRow.balance_detail
+              : response.balance_detail,
           balance: response.balance_monitor.balance ?? currentRow.balance,
           balance_updated_time: response.balance_monitor.balance_updated_time,
         })
@@ -132,7 +137,9 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
       } else if (
         response.success &&
         response.raw_response === undefined &&
-        (response.balance_monitor?.success || response.balance != null)
+        (response.balance_monitor?.success ||
+          response.balance != null ||
+          response.balance_detail != null)
       ) {
         const newBalance =
           response.balance ??
@@ -140,7 +147,7 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
           currentRow.balance
         const now =
           response.balance_monitor?.balance_updated_time ??
-          currentRow.balance_updated_time
+          Math.floor(Date.now() / 1000)
 
         toast.success(t('Balance updated successfully'))
 
@@ -150,6 +157,10 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
           balance_monitor: response.balance_monitor,
           balance: newBalance,
           balance_updated_time: now,
+          balance_detail:
+            response.balance_detail === undefined
+              ? currentRow.balance_detail
+              : response.balance_detail,
         })
 
         setRawResponse(null)
@@ -219,50 +230,56 @@ export function BalanceQueryDialog(props: BalanceQueryDialogProps) {
         {!sensitiveVisible && (
           <EmptyState title={t('Sensitive information is hidden')} />
         )}
-        {sensitiveVisible &&
-          (rawResponse !== null ? (
-            <>
-              <Alert>
-                <AlertTitle>{t('Balance response not recognized')}</AlertTitle>
-                <AlertDescription>
-                  {t(
-                    'The upstream response is valid JSON, but it does not match the OpenAI credit_summary format. The channel balance was not updated.'
-                  )}
-                </AlertDescription>
-              </Alert>
-              <CodeBlock
-                code={rawResponse}
-                language='json'
-                maxExpandedLines={24}
-                showLineNumbers
-                title={t('Upstream JSON response')}
-              >
-                <CodeBlockCopyButton />
-              </CodeBlock>
-            </>
-          ) : (
-            <ChannelBalanceSummary
-              balanceRechargeMultiplier={
-                parseChannelSettings(currentRow.setting)
-                  ?.balance_recharge_multiplier
+        {sensitiveVisible && rawResponse !== null && (
+          <>
+            <Alert>
+              <AlertTitle>{t('Balance response not recognized')}</AlertTitle>
+              <AlertDescription>
+                {t(
+                  'The upstream response is valid JSON, but it does not match the OpenAI credit_summary format. The channel balance was not updated.'
+                )}
+              </AlertDescription>
+            </Alert>
+            <CodeBlock
+              code={rawResponse}
+              language='json'
+              maxExpandedLines={24}
+              showLineNumbers
+              title={t('Upstream JSON response')}
+            >
+              <CodeBlockCopyButton />
+            </CodeBlock>
+          </>
+        )}
+        {sensitiveVisible && rawResponse === null && (
+          <ChannelBalanceSummary
+            detail={currentRow.balance_detail}
+            storedCurrency={
+              currentRow.type === CHANNEL_TYPE_TASK_PLUGIN
+                ? null
+                : currentRow.balance_detail?.currency
+            }
+            balanceRechargeMultiplier={
+              parseChannelSettings(currentRow.setting)
+                ?.balance_recharge_multiplier
+            }
+            queryDisabled={balanceQueryDisabled}
+            monitor={
+              currentRow.balance_monitor ?? {
+                balance: currentRow.balance_updated_time
+                  ? currentRow.balance
+                  : null,
+                balance_updated_time: currentRow.balance_updated_time,
+                checked_at: currentRow.balance_updated_time,
+                known_balance: currentRow.balance,
+                partial: false,
+                success: true,
+                configuration_changed: false,
+                key_balances: [],
               }
-              queryDisabled={balanceQueryDisabled}
-              monitor={
-                currentRow.balance_monitor ?? {
-                  balance: currentRow.balance_updated_time
-                    ? currentRow.balance
-                    : null,
-                  balance_updated_time: currentRow.balance_updated_time,
-                  checked_at: currentRow.balance_updated_time,
-                  known_balance: currentRow.balance,
-                  partial: false,
-                  success: true,
-                  configuration_changed: false,
-                  key_balances: [],
-                }
-              }
-            />
-          ))}
+            }
+          />
+        )}
 
         {/* Balance Update Button */}
         <Button

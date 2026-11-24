@@ -89,7 +89,7 @@ func TestRequestSourceRulesOptionDatabaseRoundTrip(t *testing.T) {
 			})
 			require.NoError(t, UpdateOption(builtinKey, `{"enabled":false,"display_name":"CLI"}`))
 			require.NoError(t, operation_setting.LoadBuiltinRequestSourceOption(builtinKey, `{"enabled":true}`))
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, operation_setting.BuiltinRequestSourceSetting{Enabled: false, DisplayName: "CLI"}, operation_setting.BuiltinRequestSourceSettingFor("Codex CLI"))
 			require.Error(t, UpdateOption(builtinKey, `{"enabled":true,"display_name":"Bearer token"}`))
 			assert.False(t, operation_setting.BuiltinRequestSourceSettingFor("Codex CLI").Enabled)
@@ -105,7 +105,7 @@ func TestRequestSourceRulesOptionDatabaseRoundTrip(t *testing.T) {
 			assert.JSONEq(t, first, row.Value)
 			for range 2 {
 				require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(`[]`))
-				loadOptionsFromDatabase()
+				require.NoError(t, LoadOptionsFromDatabase())
 				assert.Equal(t, "测试客户端", operation_setting.IdentifyConfiguredRequestSource(header))
 				assert.JSONEq(t, first, common.OptionMap[key])
 				assert.Equal(t, "preserved", common.OptionMap["request_source_unrelated"])
@@ -120,13 +120,13 @@ func TestRequestSourceRulesOptionDatabaseRoundTrip(t *testing.T) {
 
 			// A bad external database edit must not replace the last good runtime rules.
 			require.NoError(t, db.Model(&Option{}).Where(&Option{Key: key}).Update("value", invalid).Error)
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, "测试客户端", operation_setting.IdentifyConfiguredRequestSource(header))
 			assert.JSONEq(t, first, common.OptionMap[key])
 
 			second := strings.Replace(first, "测试客户端", "Updated client", 1)
 			require.NoError(t, db.Model(&Option{}).Where(&Option{Key: key}).Update("value", second).Error)
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, "Updated client", operation_setting.IdentifyConfiguredRequestSource(header))
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -176,12 +176,12 @@ func TestRequestSourceRulesOptionDatabaseRoundTrip(t *testing.T) {
 			assert.Equal(t, string(encoded), row.Value, "large valid rules must be stored without truncation")
 			t.Logf("large source rules roundtrip: %d bytes", len(encoded))
 			require.NoError(t, operation_setting.LoadRequestSourceRulesJSON(`[]`))
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, string(encoded), common.OptionMap[key])
 			assert.Equal(t, "Bulk client 0", operation_setting.IdentifyConfiguredRequestSource(http.Header{"User-Agent": {strings.Repeat("a", 512)}, "X-Client-Version": {strings.Repeat("b", 512)}}))
 
 			require.NoError(t, UpdateOption(key, `[]`))
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Empty(t, operation_setting.IdentifyConfiguredRequestSource(header))
 			assert.JSONEq(t, `[]`, common.OptionMap[key])
 			var unrelated Option

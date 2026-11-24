@@ -44,6 +44,7 @@ const (
 	MsgRelayModelPriceNotConfiguredAdmin = "relay.model_price_not_configured_admin"
 	MsgRelayTaskUsagePriceUnsupported    = "relay.task_usage_price_unsupported"
 	MsgRelaySharedTaskPriceNeedsOverride = "relay.shared_task_price_needs_override"
+	MsgRelayTaskPriceNotConfigured       = "relay.task_price_not_configured"
 	MsgRelayTaskChannelDisabled          = "relay.task_channel_disabled"
 	MsgRelayGroupSaturated               = "relay.group_saturated"
 	MsgRelayGroupUpstreamSaturated       = "relay.group_upstream_saturated"
@@ -54,6 +55,9 @@ const (
 	MsgRelayChannelNoGroupKey            = "relay.channel_no_group_key"
 	MsgRelayConnectionKeyGroupDenied     = "relay.connection_key_group_denied"
 	MsgRelayChannelEndpointsExhausted    = "relay.channel_endpoints_exhausted"
+	MsgRelayRequestRejected              = "relay.request_rejected"
+	MsgRelayRequestPluginFailed          = "relay.request_plugin_failed"
+	MsgRelayResponseRejected             = "relay.response_rejected"
 )
 
 // Emails and the name of the token created at registration, in the
@@ -104,15 +108,16 @@ const (
 // Channel notices sent to administrators who receive them and to model update
 // watchers
 const (
-	MsgChannelBalanceEmailSubject   = "channel.balance_email_subject"
-	MsgChannelBalanceEmailContent   = "channel.balance_email_content"
-	MsgChannelNotifyDisabledSubject = "channel.notify_disabled_subject"
-	MsgChannelNotifyDisabledContent = "channel.notify_disabled_content"
-	MsgChannelNotifyEnabledSubject  = "channel.notify_enabled_subject"
-	MsgChannelNotifyEnabledContent  = "channel.notify_enabled_content"
-	MsgChannelTestCompletedSubject  = "channel.test_completed_subject"
-	MsgChannelTestCompletedContent  = "channel.test_completed_content"
-	MsgChannelResponseTimeExceeded  = "channel.response_time_exceeded"
+	MsgChannelBalanceEmailSubject    = "channel.balance_email_subject"
+	MsgChannelBalanceEmailContent    = "channel.balance_email_content"
+	MsgChannelNotifyDisabledSubject  = "channel.notify_disabled_subject"
+	MsgChannelNotifyDisabledContent  = "channel.notify_disabled_content"
+	MsgChannelNotifyEnabledSubject   = "channel.notify_enabled_subject"
+	MsgChannelNotifyEnabledContent   = "channel.notify_enabled_content"
+	MsgChannelTestCompletedSubject   = "channel.test_completed_subject"
+	MsgChannelTestCompletedContent   = "channel.test_completed_content"
+	MsgChannelResponseTimeExceeded   = "channel.response_time_exceeded"
+	MsgChannelNotifyScheduledSubject = "channel.notify_scheduled_subject"
 
 	MsgChannelUpstreamUpdateNotifySubject   = "channel.upstream_update_notify_subject"
 	MsgChannelUpstreamUpdateSummary         = "channel.upstream_update_summary"

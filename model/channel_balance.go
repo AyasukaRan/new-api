@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -189,9 +190,15 @@ func channelBalanceConfigurationHash(channel *Channel) (string, error) {
 		BalanceRoute        dto.AdvancedCustomRoute
 		HeaderOverride      *string
 		IsMultiKey          bool
+		PluginKey           string `json:",omitempty"`
+		PluginConfig        string `json:",omitempty"`
 	}{channel.Key, channel.Type, channel.GetBaseURL(), setting.Proxy,
 		setting.BalanceQueryType, setting.BalanceQueryBaseURL, balanceRoute,
-		channel.HeaderOverride, channel.ChannelInfo.IsMultiKey}
+		channel.HeaderOverride, channel.ChannelInfo.IsMultiKey, "", ""}
+	if channel.Type == constant.ChannelTypeTaskPlugin {
+		configuration.PluginKey = setting.TaskPluginKey
+		configuration.PluginConfig = string(other.PluginConfig)
+	}
 	encoded, err := common.Marshal(configuration)
 	if err != nil {
 		return "", err
@@ -203,6 +210,11 @@ func channelBalanceConfigurationHash(channel *Channel) (string, error) {
 // lock. An in-flight query cannot overwrite a replacement/reordering of keys,
 // key status, polling state, or a newer balance check.
 func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) error {
+	return RecordChannelBalanceSampleWithDetail(channel, sample, nil)
+}
+
+// RecordChannelBalanceSampleWithDetail keeps the upstream report and numeric snapshot consistent under the same channel lock.
+func RecordChannelBalanceSampleWithDetail(channel *Channel, sample *ChannelBalanceSample, updateDetail func(*Channel, *ChannelBalanceDetail) *ChannelBalanceDetail) error {
 	if channel == nil || channel.Id <= 0 || sample == nil {
 		return errors.New("a saved channel is required for balance monitoring")
 	}
@@ -314,13 +326,42 @@ func RecordChannelBalanceSample(channel *Channel, sample *ChannelBalanceSample) 
 		}
 		sample.KeyBalancesJSON = string(keyJSON)
 		sample.UsedQuota = current.UsedQuota
+		updates := make(map[string]any)
 		if sample.Success && !sample.Partial {
 			balance := sample.KnownBalance
 			sample.Balance = &balance
 			sample.BalanceUpdatedTime = sample.CheckedAt
-			if err := tx.Model(&current).Updates(map[string]any{
-				"balance": balance, "balance_updated_time": sample.CheckedAt,
-			}).Error; err != nil {
+			updates["balance"] = balance
+			updates["balance_updated_time"] = sample.CheckedAt
+		}
+		if updateDetail != nil {
+			stored := current.GetBalanceDetail()
+			if previousErr == nil && previous.ConfigurationHash != configurationHash {
+				stored = nil
+			}
+			if detail := updateDetail(&current, stored); detail != nil {
+				if detail.Windows == nil {
+					detail.Windows = []jsplugin.BalanceWindow{}
+				}
+				var info map[string]any
+				if current.OtherInfo != "" {
+					if err := common.UnmarshalJsonStr(current.OtherInfo, &info); err != nil {
+						return err
+					}
+				}
+				if info == nil {
+					info = make(map[string]any)
+				}
+				info[channelBalanceDetailKey] = detail
+				encoded, err := common.Marshal(info)
+				if err != nil {
+					return err
+				}
+				updates["other_info"] = string(encoded)
+			}
+		}
+		if len(updates) > 0 {
+			if err := tx.Model(&current).Updates(updates).Error; err != nil {
 				return err
 			}
 		}
@@ -643,4 +684,67 @@ func ListChannelBalanceSamples(channelID int, start, end int64, limit int) ([]Ch
 		}
 	}
 	return samples, nil
+}
+
+// channelBalanceDetailKey is the other_info member of the last balance query.
+const channelBalanceDetailKey = "balance_detail"
+
+// ChannelBalanceDetail is the last balance query of a channel, kept in
+// other_info: the result in its own currency, the last failure, and for a
+// multi-key plugin channel the result of each key by its 0-based index.
+type ChannelBalanceDetail struct {
+	jsplugin.BalanceResult
+	Error string                          `json:"error,omitempty"`
+	Keys  map[string]ChannelBalanceDetail `json:"keys,omitempty"`
+}
+
+// GetBalanceDetail returns the channel's last balance query, nil before the
+// first one.
+func (channel *Channel) GetBalanceDetail() *ChannelBalanceDetail {
+	value, ok := channel.GetOtherInfo()[channelBalanceDetailKey]
+	if !ok || value == nil {
+		return nil
+	}
+	encoded, err := common.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var detail ChannelBalanceDetail
+	if err = common.Unmarshal(encoded, &detail); err != nil {
+		return nil
+	}
+	return &detail
+}
+
+// UpdateChannelBalanceDetail stores a balance query of a channel. update gets
+// the stored detail, nil before the first query, and returns the detail to
+// store, or nil to store nothing, and the new USD balance, if any. When
+// another writer changes other_info between the read and the write, on any
+// node, update runs again on the newer detail (see UpdateChannelOtherInfo).
+// The update time moves when the stored detail has no error, so it is the
+// time of the last query that returned a balance.
+func UpdateChannelBalanceDetail(channelID int, update func(stored *ChannelBalanceDetail) (*ChannelBalanceDetail, *float64)) (*ChannelBalanceDetail, error) {
+	var detail *ChannelBalanceDetail
+	_, err := UpdateChannelOtherInfo(channelID, func(channel *Channel) (map[string]any, error) {
+		var balance *float64
+		detail, balance = update(channel.GetBalanceDetail())
+		if detail == nil {
+			return nil, nil
+		}
+		if detail.Windows == nil {
+			detail.Windows = []jsplugin.BalanceWindow{}
+		}
+		info := channel.GetOtherInfo()
+		info[channelBalanceDetailKey] = detail
+		channel.SetOtherInfo(info)
+		updates := map[string]any{}
+		if detail.Error == "" {
+			updates["balance_updated_time"] = common.GetTimestamp()
+		}
+		if balance != nil {
+			updates["balance"] = *balance
+		}
+		return updates, nil
+	})
+	return detail, err
 }

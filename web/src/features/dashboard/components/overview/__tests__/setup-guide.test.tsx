@@ -100,7 +100,7 @@ beforeEach(() => {
             data: { subscriptions: [], all_subscriptions: [] },
           },
         }
-      case '/api/perf-metrics/summary':
+      case '/api/data/perf-metrics/summary':
         return {
           data: {
             success: true,
@@ -172,7 +172,7 @@ describe('overview setup guide', () => {
       vi
         .mocked(api.get)
         .mock.calls.some(
-          ([url]) => url === '/api/perf-metrics/summary' || url === '/api/data/'
+          ([url]) => url === '/api/data/perf-metrics/summary' || url === '/api/data/'
         )
     ).toBe(false)
     const usage = screen.getByRole('group', { name: 'Last 24h usage' })
@@ -229,7 +229,7 @@ describe('overview setup guide', () => {
     expect(week).toHaveAttribute('aria-pressed', 'true')
     await waitFor(() => {
       expect(api.get).toHaveBeenCalledWith(
-        '/api/perf-metrics/summary',
+        '/api/data/perf-metrics/summary',
         expect.objectContaining({
           params: expect.objectContaining({ hours: 168, diagnostics: true }),
         })

@@ -104,7 +104,7 @@ export function LogChargeDetails({
   if (tier === 'off_peak') tariff = 'Off-peak hours'
   if (tier === 'base' || tier === 'standard') tariff = 'Standard'
   const rateSummary =
-    compact || lines.length ? null : getTieredBillingSummary(other)
+    compact || lines.length ? null : getTieredBillingSummary(other, log?.model_name)
 
   return (
     <div className={compact ? 'space-y-2 text-xs' : 'space-y-4 text-sm'}>

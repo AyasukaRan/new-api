@@ -187,7 +187,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	info.SetEstimatePromptTokens(promptTokens)
 	billingModelName := info.GetBillingModelName()
 	if info.BillingRequestInput == nil {
-		requestInput, err := ResolveIncomingBillingExprRequestInput(c, info)
+		requestInput, err := ResolveIncomingBillingExprRequestInput(c, info, false)
 		if err != nil {
 			return hosttypes.PriceData{}, err
 		}
@@ -464,7 +464,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 	if endpoint, ok := value.(jsplugin.PinnedEndpoint); ok && !fixedPricing {
 		for _, candidate := range endpoint.Candidates {
 			pluginKey := candidate.Plugin.Meta.Key
-			if billing_setting.SharesTaskBillingModel(pluginKey, endpoint.Model, endpoint.MappedModel, billingModelName) {
+			if !candidate.Plugin.Meta.RelaysModel(endpoint.Model) && !candidate.Plugin.Meta.RelaysModel(endpoint.MappedModel) && billing_setting.SharesTaskBillingModel(pluginKey, endpoint.Model, endpoint.MappedModel, billingModelName) {
 				return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelaySharedTaskPriceNeedsOverride, map[string]any{"Model": billingModelName, "Plugin": pluginKey}))
 			}
 		}
@@ -478,7 +478,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 		return hosttypes.PriceData{}, err
 	}
 
-	requestInput, err := ResolveIncomingBillingExprRequestInput(c, info)
+	requestInput, err := ResolveIncomingBillingExprRequestInput(c, info, usedVars["param"])
 	if err != nil {
 		return hosttypes.PriceData{}, err
 	}

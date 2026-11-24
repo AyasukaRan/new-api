@@ -29,6 +29,21 @@ export const perfMetricsQueryKeys = {
   details: ['perf-metrics'] as const,
 }
 
+export async function getDashboardPerfMetricsSummary(
+  hours = 24,
+  signal?: AbortSignal
+): Promise<PerfSummaryAllData> {
+  const res = await api.get<PerfSummaryAllData>(
+    '/api/data/perf-metrics/summary',
+    {
+      params: { hours, diagnostics: true },
+      signal,
+      disableDuplicate: true,
+    }
+  )
+  return res.data
+}
+
 export async function getPerfMetricsSummary(
   hours = 24,
   recentModels?: string[],

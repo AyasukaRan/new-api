@@ -22,7 +22,7 @@ import { StaticDataTable } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { formatCurrencyFromUSD } from '@/lib/currency'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampToDate } from '@/lib/format'
 
 import {
@@ -32,18 +32,27 @@ import {
   getMultiKeyStatusConfig,
   type ChannelKeyBalanceRow,
 } from '../lib'
-import type { ChannelBalanceMonitor } from '../types'
+import {
+  formatChannelBalanceAmount,
+  formatChannelBalanceSummary,
+  getReportedChannelBalance,
+} from '../lib/channel-balance'
+import type { ChannelBalanceDetail, ChannelBalanceMonitor } from '../types'
+import { ChannelBalanceDetails } from './channel-balance-details'
 
 export function ChannelKeyBalanceValue({
   row,
   sensitiveVisible = true,
   balanceRechargeMultiplier,
+  currency,
 }: {
   row: ChannelKeyBalanceRow
   sensitiveVisible?: boolean
+  currency?: string | null
   balanceRechargeMultiplier?: number
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   if (!sensitiveVisible) return <span>••••</span>
   const balance = getChannelDisplayBalance(
     row.balance,
@@ -56,7 +65,8 @@ export function ChannelKeyBalanceValue({
   if (balance != null) {
     return (
       <StatusBadge
-        label={formatCurrencyFromUSD(balance, {
+        label={formatChannelBalanceAmount(balance, currency, {
+          locale,
           digitsLarge: 2,
           digitsSmall: 4,
           abbreviate: false,
@@ -76,7 +86,8 @@ export function ChannelKeyBalanceValue({
       {lastKnownBalance != null && (
         <p className='text-muted-foreground text-[10px] leading-snug'>
           {t('Last known balance: {{balance}}', {
-            balance: formatCurrencyFromUSD(lastKnownBalance, {
+            balance: formatChannelBalanceAmount(lastKnownBalance, currency, {
+              locale,
               digitsLarge: 2,
               digitsSmall: 4,
               abbreviate: false,
@@ -115,13 +126,23 @@ function KeyBalanceGroups(props: { groups?: string[] }) {
 
 export function ChannelBalanceSummary(props: {
   monitor: ChannelBalanceMonitor | null | undefined
+  detail?: ChannelBalanceDetail | null
+  storedCurrency?: string | null
   queryDisabled?: boolean
   balanceRechargeMultiplier?: number
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const monitor = props.monitor
+  const reported = getReportedChannelBalance(
+    props.detail,
+    monitor,
+    props.balanceRechargeMultiplier
+  )
   const rows = getChannelKeyBalanceRows(monitor)
-  const updatedAt = monitor?.balance_updated_time
+  const updatedAt = reported
+    ? monitor?.checked_at
+    : monitor?.balance_updated_time
   const formatBalance = (value: number | null | undefined) => {
     const balance = getChannelDisplayBalance(
       value,
@@ -129,7 +150,8 @@ export function ChannelBalanceSummary(props: {
     )
     return balance == null
       ? t('Not queried')
-      : formatCurrencyFromUSD(balance, {
+      : formatChannelBalanceAmount(balance, props.storedCurrency, {
+          locale,
           digitsLarge: 2,
           digitsSmall: 4,
           abbreviate: false,
@@ -148,7 +170,12 @@ export function ChannelBalanceSummary(props: {
     notice = t(
       'Some accounts could not be queried. The total retains the last complete balance.'
     )
-  } else if (monitor && !monitor.success && monitor.checked_at > 0) {
+  } else if (
+    monitor &&
+    !monitor.success &&
+    !reported &&
+    monitor.checked_at > 0
+  ) {
     notice = t(
       'The latest balance query failed. The last complete balance is retained.'
     )
@@ -159,14 +186,24 @@ export function ChannelBalanceSummary(props: {
       <div className='bg-muted/30 rounded-lg border p-4'>
         <p className='text-muted-foreground text-sm'>{t('Total balance')}</p>
         <p className='mt-1 text-2xl font-semibold tabular-nums'>
-          {formatBalance(
-            monitor?.configuration_changed ? null : monitor?.balance
-          )}
+          {reported
+            ? formatChannelBalanceSummary(reported, 0, {
+                digitsLarge: 2,
+                digitsSmall: 4,
+                abbreviate: false,
+                locale,
+              })
+            : formatBalance(
+                monitor?.configuration_changed ? null : monitor?.balance
+              )}
         </p>
         <p className='text-muted-foreground mt-2 text-xs'>
           {t('Last updated:')}{' '}
           {updatedAt ? formatTimestampToDate(updatedAt) : t('Never')}
         </p>
+        {!monitor?.configuration_changed && (
+          <ChannelBalanceDetails result={props.detail} />
+        )}
       </div>
       {notice && (
         <Alert>
@@ -191,12 +228,34 @@ export function ChannelBalanceSummary(props: {
             {
               id: 'balance',
               header: t('Balance'),
-              cell: (row) => (
-                <ChannelKeyBalanceValue
-                  row={row}
-                  balanceRechargeMultiplier={props.balanceRechargeMultiplier}
-                />
-              ),
+              cell: (row) => {
+                const keyDetail = props.detail?.keys?.[String(row.index)]
+                const keyResult =
+                  monitor?.configuration_changed ||
+                  keyDetail?.error ||
+                  (row.error && row.error !== 'non_numeric_balance')
+                    ? undefined
+                    : getReportedChannelBalance(
+                        keyDetail,
+                        undefined,
+                        props.balanceRechargeMultiplier
+                      )
+                if (keyResult) {
+                  return (
+                    <div>
+                      {formatChannelBalanceSummary(keyResult, 0, { locale })}
+                      <ChannelBalanceDetails result={keyDetail} />
+                    </div>
+                  )
+                }
+                return (
+                  <ChannelKeyBalanceValue
+                    row={row}
+                    currency={props.storedCurrency}
+                    balanceRechargeMultiplier={props.balanceRechargeMultiplier}
+                  />
+                )
+              },
             },
             {
               id: 'status',

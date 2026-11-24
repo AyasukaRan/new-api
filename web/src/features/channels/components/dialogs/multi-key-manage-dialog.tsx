@@ -60,6 +60,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 import {
   getServerMessage,
   requireServerSuccess,
+  translateServerText,
 } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -86,12 +87,14 @@ import {
   getMultiKeyConfirmMessage,
   isDestructiveAction,
 } from '../../lib'
+import { formatChannelBalanceSummary } from '../../lib/channel-balance'
 import type {
   Channel,
   KeyStatus,
   MultiKeyConfirmAction,
   MultiKeyStatusResponse,
 } from '../../types'
+import { ChannelBalanceDetails } from '../channel-balance-details'
 import { useChannels } from '../channels-provider'
 import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
@@ -124,10 +127,18 @@ function MultiKeyManageContent({
   channel: Channel
   onOpenChange: (open: boolean) => void
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { sensitiveVisible } = useChannels()
   const queryClient = useQueryClient()
   const currentUser = useAuthStore((s) => s.auth.user)
+  const canShowBalance =
+    sensitiveVisible &&
+    hasPermission(
+      currentUser,
+      ADMIN_PERMISSION_RESOURCES.CHANNEL,
+      ADMIN_PERMISSION_ACTIONS.OPERATE
+    )
   const canEditSensitive = hasPermission(
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
@@ -150,6 +161,8 @@ function MultiKeyManageContent({
     Record<string, string | undefined>
   >({})
   const instanceId = useId()
+  const confirmOpenerRef = useRef<HTMLElement | null>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
@@ -185,7 +198,15 @@ function MultiKeyManageContent({
   const confirmAction =
     confirmation?.statusSnapshot === data ? confirmation : null
   const setConfirmAction = (action: MultiKeyConfirmAction | null) => {
+    if (action) {
+      const opener = document.activeElement
+      confirmOpenerRef.current = opener instanceof HTMLElement ? opener : null
+    }
     setConfirmation(action ? { ...action, statusSnapshot: data } : null)
+  }
+  const getConfirmFinalFocus = () => {
+    const opener = confirmOpenerRef.current
+    return opener && bodyRef.current?.contains(opener) ? opener : bodyRef.current
   }
   const keys = data?.keys ?? []
   const enabledCount = data?.enabled_count ?? 0
@@ -195,6 +216,11 @@ function MultiKeyManageContent({
   const page = data?.page ?? currentPage
   const totalPages = data?.total_pages ?? 0
   const monitor = data?.balance_monitor
+  const balanceDetail =
+    data?.balance_detail === undefined
+      ? channel.balance_detail
+      : data.balance_detail
+  const keyBalances = monitor?.configuration_changed ? undefined : balanceDetail?.keys
   const busy = isPerformingAction || isUpdatingBalance || statusQuery.isFetching
   const actionsUnavailable = busy || !data || statusQuery.isError
   const balances = new Map(
@@ -206,7 +232,6 @@ function MultiKeyManageContent({
     channel.setting
   )?.balance_recharge_multiplier
   const formatBalance = (value: number) => {
-    if (!sensitiveVisible) return '••••'
     const balance = getChannelDisplayBalance(value, rechargeMultiplier)
     return balance == null
       ? t('Not queried')
@@ -268,7 +293,7 @@ function MultiKeyManageContent({
   }
 
   const refreshBalances = async () => {
-    if (actionsUnavailable || data?.balance_query_disabled) return
+    if (!canShowBalance || actionsUnavailable || data?.balance_query_disabled) return
     setIsUpdatingBalance(true)
     try {
       const response = await updateChannelBalance(channel.id)
@@ -321,7 +346,11 @@ function MultiKeyManageContent({
         contentHeight='min(72vh, 720px)'
         bodyClassName='space-y-4'
       >
-        <div className='flex min-h-0 flex-1 flex-col gap-4 overflow-auto'>
+        <div
+          ref={bodyRef}
+          tabIndex={-1}
+          className='flex min-h-0 flex-1 flex-col gap-4 overflow-auto'
+        >
           <div className='grid shrink-0 grid-cols-3 gap-3'>
             <StatisticsCard
               label={t('Enabled')}
@@ -384,7 +413,7 @@ function MultiKeyManageContent({
                 variant='outline'
                 size='sm'
                 onClick={refreshBalances}
-                disabled={actionsUnavailable || data?.balance_query_disabled}
+                disabled={!canShowBalance || actionsUnavailable || data?.balance_query_disabled}
               >
                 {t('Update Balance')}
               </Button>
@@ -499,7 +528,7 @@ function MultiKeyManageContent({
                           />
                           {key.reason && (
                             <p className='text-muted-foreground text-xs wrap-anywhere'>
-                              {t(key.reason)}
+                              {translateServerText(t, key.reason)}
                             </p>
                           )}
                           {!!key.disabled_time && (
@@ -517,17 +546,50 @@ function MultiKeyManageContent({
                     header: t('Balance'),
                     cellClassName: 'whitespace-normal align-top',
                     cell: (key) => {
+                      if (!canShowBalance) return '••••'
                       const balance = balances.get(key.index)
-                      let balanceLabel = balance
-                        ? t('Query failed')
-                        : t('Not queried')
-                      if (balance?.balance != null) {
+                      const result = keyBalances?.[String(key.index)]
+                      // A window or a non-USD currency can be valid even when
+                      // the numeric monitor cannot represent it.
+                      const currentResult =
+                        result &&
+                        (!monitor ||
+                          (!result.error &&
+                            balance &&
+                            ((!balance.error && balance.balance != null) ||
+                              balance.error === 'non_numeric_balance')))
+                          ? result
+                          : undefined
+                      let balanceLabel = t('Not queried')
+                      if (currentResult) {
+                        balanceLabel = formatChannelBalanceSummary(
+                          {
+                            ...currentResult,
+                            amount: getChannelDisplayBalance(
+                              currentResult.amount,
+                              rechargeMultiplier
+                            ),
+                          },
+                          Number.NaN,
+                          { locale }
+                        )
+                      } else if (balance?.balance != null) {
                         balanceLabel = formatBalance(balance.balance)
+                      } else if (balance) {
+                        balanceLabel = t('Query failed')
+                      } else if (!monitor && keyBalances) {
+                        balanceLabel = '-'
                       }
                       return (
-                        <div className='space-y-1 text-sm tabular-nums'>
+                        <div className='max-w-56 space-y-1 text-sm whitespace-normal tabular-nums'>
                           <div>{balanceLabel}</div>
-                          {balance?.balance == null &&
+                          {currentResult && (
+                            <ChannelBalanceDetails
+                              result={currentResult}
+                              className='text-muted-foreground'
+                            />
+                          )}
+                          {!currentResult && balance?.balance == null &&
                             balance?.last_known_balance != null && (
                               <p className='text-muted-foreground text-xs'>
                                 {t('Last known balance: {{balance}}', {
@@ -644,6 +706,7 @@ function MultiKeyManageContent({
       </Dialog>
       <ConfirmDialog
         open={confirmAction !== null}
+        finalFocus={getConfirmFinalFocus}
         onOpenChange={(open) =>
           !open && !isPerformingAction && setConfirmAction(null)
         }

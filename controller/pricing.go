@@ -2,6 +2,7 @@ package controller
 
 import (
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -16,7 +17,7 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 func GetPricing(c *gin.Context) {
 	pricing := model.GetPricing()
 	// The pricing route's auth middleware supplies the current account group.
-	group := c.GetString("user_group")
+	group := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 	groupRatio := ratio_setting.GetGroupRatioCopy()
 	usableGroup := service.GetUserVisibleGroups(group)
 	pricing = filterPricingByUsableGroups(pricing, usableGroup)

@@ -20,21 +20,37 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next, { createInstance, type i18n } from 'i18next'
+import { useEffect, useState } from 'react'
 import { I18nextProvider } from 'react-i18next'
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
+import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
-import type { Channel, MultiKeyManageParams } from '../../types'
+import { channelsQueryKeys } from '../../lib'
+import {
+  channelSchema,
+  type Channel,
+  type KeyStatus,
+  type MultiKeyManageParams,
+} from '../../types'
 import { ChannelsProvider, useChannels } from '../channels-provider'
 import { MultiKeyManageDialog } from '../dialogs/multi-key-manage-dialog'
 
 const clients: QueryClient[] = []
 const originalAuth = useAuthStore.getState().auth
+beforeEach(() => {
+  originalAuth.setUser({
+    id: 1,
+    username: 'operator',
+    role: ROLE.ADMIN,
+    permissions: { admin_permissions: { channel: { operate: true } } },
+  })
+})
 afterEach(() => {
   clients.splice(0).forEach((client) => client.clear())
   useAuthStore.setState({ auth: originalAuth })
@@ -758,4 +774,330 @@ test('a failed group save retains its draft through a failed status refresh', as
   await screen.findByText('sk-a**********0001')
   expect(keyRow(1).getByText('premium')).toBeVisible()
   expect(keyRow(1).getByRole('button', { name: 'Save groups' })).toBeEnabled()
+})
+
+const multiKeyChannel = {
+  id: 7,
+  type: 61,
+  key: '',
+  name: 'Account Live',
+  status: 1,
+  created_time: 1,
+  test_time: 0,
+  response_time: 0,
+  balance_updated_time: 0,
+  channel_info: {
+    is_multi_key: true,
+    multi_key_size: 2,
+    multi_key_polling_index: 0,
+    multi_key_mode: 'random',
+  },
+}
+
+function keyStatusResponse(keys: Pick<KeyStatus, 'index' | 'status'>[]) {
+  const enabled = keys.filter((key) => key.status === 1).length
+  return {
+    data: {
+      success: true,
+      data: {
+        keys: keys.map((key) => ({
+          ...key,
+          key_identity: `identity-${key.index}`,
+          groups: [],
+          upstream_cost_ratio: null,
+        })),
+        total: keys.length,
+        page: 1,
+        page_size: 10,
+        total_pages: 1,
+        enabled_count: enabled,
+        manual_disabled_count: 0,
+        auto_disabled_count: keys.length - enabled,
+      },
+    },
+  }
+}
+
+function OpenDialog(props: { channel: Channel; masked?: boolean }) {
+  const { setCurrentRow, setSensitiveVisible } = useChannels()
+  useEffect(() => {
+    setCurrentRow(props.channel)
+    setSensitiveVisible(!props.masked)
+  }, [props.channel, props.masked, setCurrentRow, setSensitiveVisible])
+  return <MultiKeyManageDialog open onOpenChange={() => {}} />
+}
+
+test('translates the disabled reasons the server writes and shows upstream text as written', async () => {
+  const language = createInstance()
+  await language.init({
+    lng: 'zhCN',
+    resources: {
+      zhCN: {
+        translation: {
+          'Plugin credential needs a new login': '插件凭证需要重新登录',
+        },
+      },
+    },
+    keySeparator: false,
+  })
+  const upstream = 'upstream said {{bad}}'
+  vi.spyOn(api, 'post').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        keys: [
+          {
+            index: 0,
+            status: 3,
+            disabled_time: 1,
+            reason: 'Plugin credential needs a new login',
+          },
+          { index: 1, status: 3, disabled_time: 1, reason: upstream },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 10,
+        total_pages: 1,
+        enabled_count: 0,
+        manual_disabled_count: 0,
+        auto_disabled_count: 2,
+      },
+    },
+  })
+  const queryClient = new QueryClient()
+  clients.push(queryClient)
+  const channel = channelSchema.parse(multiKeyChannel)
+
+  render(
+    <I18nextProvider i18n={language}>
+      <QueryClientProvider client={queryClient}>
+        <ChannelsProvider>
+          <OpenDialog channel={channel} />
+        </ChannelsProvider>
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+
+  expect(await screen.findByText('插件凭证需要重新登录')).toBeInTheDocument()
+  expect(screen.getByText(upstream)).toBeInTheDocument()
+})
+
+/** Opens Manage Keys from inside another dialog, as the channel drawer does. */
+function ManageKeysInsideDialog(props: { channel: Channel }) {
+  const { setCurrentRow } = useChannels()
+  const [editOpen, setEditOpen] = useState(true)
+  const [manageOpen, setManageOpen] = useState(false)
+  useEffect(() => {
+    setCurrentRow(props.channel)
+  }, [props.channel, setCurrentRow])
+  return (
+    <Dialog open={editOpen} onOpenChange={setEditOpen} title='Edit Channel'>
+      <Button onClick={() => setManageOpen(true)}>Manage Keys</Button>
+      <MultiKeyManageDialog open={manageOpen} onOpenChange={setManageOpen} />
+    </Dialog>
+  )
+}
+
+test('after a key is deleted, Escape closes Manage Keys and not the dialog that opened it', async () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'root', role: ROLE.SUPER_ADMIN })
+  const post = vi.spyOn(api, 'post')
+  post
+    .mockResolvedValueOnce(
+      keyStatusResponse([
+        { index: 0, status: 1 },
+        { index: 1, status: 1 },
+      ])
+    )
+    .mockResolvedValueOnce({ data: { success: true, message: '' } })
+    .mockResolvedValueOnce(keyStatusResponse([{ index: 0, status: 1 }]))
+  const queryClient = new QueryClient()
+  clients.push(queryClient)
+  const credentialsKey = channelsQueryKeys.pluginCredentials(7)
+  queryClient.setQueryData(credentialsKey, [])
+  const user = userEvent.setup()
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ChannelsProvider>
+        <ManageKeysInsideDialog
+          channel={channelSchema.parse(multiKeyChannel)}
+        />
+      </ChannelsProvider>
+    </QueryClientProvider>
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Manage Keys' }))
+  const manage = await screen.findByRole('dialog', {
+    name: /Multi-Key Management/,
+  })
+  const row = await within(manage).findByRole('row', { name: /^#2\s/ })
+  await user.click(within(row).getByRole('button', { name: 'Delete' }))
+  await user.click(await screen.findByRole('button', { name: 'Continue' }))
+
+  await waitFor(() =>
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  )
+  expect(within(manage).queryByText('#2')).not.toBeInTheDocument()
+  expect(post).toHaveBeenNthCalledWith(
+    2,
+    '/api/channel/multi_key/manage',
+    { channel_id: 7, action: 'delete_key', key_index: 1 },
+    expect.anything()
+  )
+  // The credential panel in the edit drawer shows the lines that are left.
+  expect(queryClient.getQueryState(credentialsKey)?.isInvalidated).toBe(true)
+  await waitFor(() =>
+    expect(manage.contains(document.activeElement)).toBe(true)
+  )
+
+  await user.keyboard('{Escape}')
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: /Multi-Key Management/ })
+    ).not.toBeInTheDocument()
+  )
+  expect(screen.getByRole('dialog', { name: 'Edit Channel' })).toBeVisible()
+})
+
+test('a plugin channel shows each key its own balance', async () => {
+  vi.spyOn(api, 'post').mockResolvedValue(
+    keyStatusResponse([
+      { index: 0, status: 1 },
+      { index: 1, status: 1 },
+      { index: 2, status: 1 },
+    ])
+  )
+  const queryClient = new QueryClient()
+  clients.push(queryClient)
+  const channel = channelSchema.parse({
+    ...multiKeyChannel,
+    channel_info: { ...multiKeyChannel.channel_info, multi_key_size: 3 },
+    balance_detail: {
+      amount: null,
+      currency: 'USD',
+      unlimited: false,
+      windows: [],
+      keys: {
+        '0': { amount: 42, currency: 'CNY', unlimited: false, windows: [] },
+        '1': {
+          amount: null,
+          currency: 'USD',
+          unlimited: false,
+          windows: [{ name: 'Daily', used: 30, limit: 40 }],
+          error: 'Key rejected by upstream',
+        },
+      },
+    },
+  })
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ChannelsProvider>
+        <OpenDialog channel={channel} />
+      </ChannelsProvider>
+    </QueryClientProvider>
+  )
+
+  const first = await screen.findByRole('row', { name: /^#1\s/ })
+  expect(within(first).getByText('CN¥42')).toBeInTheDocument()
+  const second = screen.getByRole('row', { name: /^#2\s/ })
+  expect(within(second).getByText('75% used')).toBeInTheDocument()
+  expect(within(second).getByText('Daily: 30 / 40')).toBeInTheDocument()
+  expect(
+    within(second).getByText('Last error: Key rejected by upstream')
+  ).toBeInTheDocument()
+  const balanceColumn = screen
+    .getAllByRole('columnheader')
+    .findIndex((header) => header.textContent === 'Balance')
+  const third = screen.getByRole('row', { name: /^#3\s/ })
+  expect(within(third).getAllByRole('cell')[balanceColumn]).toHaveTextContent(
+    /^-$/
+  )
+})
+
+test('prefers current per-key currencies and windows while failed keys keep their last numeric balance', async () => {
+  const monitor = statusResponse().data.data.balance_monitor
+  const response = {
+    balance_monitor: {
+      ...monitor,
+      key_balances: [
+        { index: 0, balance: 10 },
+        { index: 1, balance: null, error: 'non_numeric_balance' },
+        { index: 2, balance: null, error: 'balance_query_failed', last_known_balance: 6 },
+      ],
+    },
+    balance_detail: {
+      keys: {
+        '0': { amount: 84, currency: 'CNY' },
+        '1': { windows: [{ name: 'Hourly', used: 1, limit: 4 }] },
+        '2': { amount: 999, currency: 'CNY', error: 'last upstream error' },
+      },
+    } as Channel['balance_detail'],
+  }
+  vi.spyOn(api, 'post').mockImplementation(async () => statusResponse(response))
+  const channel = channelSchema.parse({
+    ...multiKeyChannel,
+    type: 1,
+    setting: JSON.stringify({ balance_recharge_multiplier: 2 }),
+    balance_detail: { keys: { '0': { amount: 888, currency: 'CNY' } } },
+  })
+  const client = new QueryClient()
+  clients.push(client)
+  const view = (masked = false) => (
+    <QueryClientProvider client={client}>
+      <ChannelsProvider>
+        <OpenDialog channel={channel} masked={masked} />
+      </ChannelsProvider>
+    </QueryClientProvider>
+  )
+  const { rerender } = render(view())
+  expect(await screen.findByText('CN¥42')).toBeVisible()
+  expect(keyRow(2).getByText('25% used')).toBeVisible()
+  expect(keyRow(3).getByText('Query failed')).toBeVisible()
+  expect(keyRow(3).getByText('Last known balance: $3')).toBeVisible()
+  expect(screen.queryByText(/last upstream error/)).not.toBeInTheDocument()
+
+  rerender(view(true))
+  expect(screen.queryByText('CN¥42')).not.toBeInTheDocument()
+  expect(screen.queryByText(/Hourly/)).not.toBeInTheDocument()
+  rerender(view())
+  expect(await screen.findByText('CN¥42')).toBeVisible()
+  await act(() => {
+    originalAuth.setUser({ id: 1, username: 'reader', role: ROLE.USER })
+  })
+  expect(screen.queryByText('CN¥42')).not.toBeInTheDocument()
+  expect(screen.queryByText('Last known balance: $3')).not.toBeInTheDocument()
+})
+
+test('null key details and changed credentials cannot reuse indexed balances from the channel list', async () => {
+  const response = statusResponse()
+  const detail = { keys: { '0': { amount: 444, currency: 'CNY' } } }
+  let status: Record<string, unknown> = { balance_detail: null }
+  vi.spyOn(api, 'post').mockImplementation(async () => statusResponse(status))
+  const client = new QueryClient()
+  clients.push(client)
+  render(
+    <QueryClientProvider client={client}>
+      <ChannelsProvider>
+        <OpenDialog
+          channel={channelSchema.parse({ ...multiKeyChannel, balance_detail: detail })}
+        />
+      </ChannelsProvider>
+    </QueryClientProvider>
+  )
+  await screen.findByText('sk-a**********0001')
+  expect(keyRow(1).getByText('$0')).toBeVisible()
+  expect(screen.queryByText('CN¥444')).not.toBeInTheDocument()
+  status = {
+    balance_detail: detail,
+    balance_monitor: {
+      ...response.data.data.balance_monitor,
+      configuration_changed: true,
+    },
+  }
+  await act(() => client.invalidateQueries({ queryKey: ['channels'] }))
+  expect(await keyRow(1).findByText('Not queried')).toBeVisible()
+  expect(screen.queryByText('CN¥444')).not.toBeInTheDocument()
 })

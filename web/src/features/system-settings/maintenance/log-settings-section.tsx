@@ -63,6 +63,9 @@ const logSettingsSchema = z.object({
     user_export_enabled: z.boolean(),
     max_range_days: z.number().int().min(1),
   }),
+  system_task_setting: z.object({
+    retention_days: z.number().int().min(1),
+  }),
 })
 
 type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
@@ -76,6 +79,7 @@ type LogSettingsSectionProps = {
     RequestTraceMaxBytes: number
     'log_setting.user_export_enabled': boolean
     'log_setting.max_range_days': number
+    'system_task_setting.retention_days': number
   }
 }
 
@@ -87,6 +91,8 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
   const userExportEnabled =
     props.defaultValues['log_setting.user_export_enabled']
   const maxRangeDays = props.defaultValues['log_setting.max_range_days']
+  const retentionDays = props.defaultValues['system_task_setting.retention_days']
+  const taskHistoryTitleId = useId()
   const formDefaults = useMemo<LogSettingsFormValues>(
     () => ({
       LogConsumeEnabled: props.defaultValues.LogConsumeEnabled,
@@ -98,6 +104,9 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
         user_export_enabled: userExportEnabled,
         max_range_days: maxRangeDays,
       },
+      system_task_setting: {
+        retention_days: retentionDays,
+      },
     }),
     [
       props.defaultValues.LogConsumeEnabled,
@@ -107,6 +116,7 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
       props.defaultValues.RequestTraceMaxBytes,
       userExportEnabled,
       maxRangeDays,
+      retentionDays,
     ]
   )
   const form = useForm<LogSettingsFormValues>({
@@ -133,6 +143,10 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
         values.log_setting.user_export_enabled,
       ],
       ['log_setting.max_range_days', values.log_setting.max_range_days],
+      [
+        'system_task_setting.retention_days',
+        values.system_task_setting.retention_days,
+      ],
     ] as const
     for (const [key, value] of changes) {
       if (value === props.defaultValues[key]) continue
@@ -333,6 +347,44 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                     <FormDescription>
                       {t(
                         'The longest time range a user can view at once in the logs and on the dashboard, and the longest range any export can cover.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </SettingsFormGrid>
+          </div>
+
+          <Separator />
+
+          <div
+            role='group'
+            aria-labelledby={taskHistoryTitleId}
+            className='flex min-w-0 flex-col gap-4'
+          >
+            <h4 id={taskHistoryTitleId} className='font-medium'>
+              {t('System task records')}
+            </h4>
+            <SettingsFormGrid>
+              <FormField
+                control={form.control}
+                name='system_task_setting.retention_days'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Keep finished tasks for (days)')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={1}
+                        step={1}
+                        placeholder='30'
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Finished system tasks older than this are deleted automatically every day.'
                       )}
                     </FormDescription>
                     <FormMessage />

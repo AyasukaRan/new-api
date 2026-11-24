@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel/advancedcustom"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -57,6 +58,7 @@ type OpenAICreditGrants struct {
 const maxAdvancedCustomBalanceResponseBytes = 256 << 10
 
 type channelBalanceResult struct {
+	Detail      *model.ChannelBalanceDetail
 	Balance     float64
 	RawResponse string
 	KeyBalances []model.ChannelKeyBalance
@@ -605,13 +607,35 @@ func updateChannelBalanceWithContext(ctx context.Context, channel *model.Channel
 }
 
 func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled bool) (channelBalanceResult, error) {
+	return queryChannelBalanceKeys(ctx, channel, scheduled, false)
+}
+
+var errNoEnabledPluginBalanceKeys = errors.New("no enabled plugin keys to query")
+
+var errPluginBalanceUnsupported = common.NewMessage("The plugin of this channel does not report a balance")
+
+func queryChannelBalanceKeys(ctx context.Context, channel *model.Channel, scheduled, sweep bool) (channelBalanceResult, error) {
 	startedAt := time.Now().UnixNano()
+	var plugin *jsplugin.LoadedPlugin
+	var reports map[int]model.ChannelBalanceDetail
+	if channel.Type == constant.ChannelTypeTaskPlugin {
+		var ok bool
+		plugin, ok = service.PluginOfChannel(channel)
+		if !ok || !pluginReportsBalance(plugin) {
+			return channelBalanceResult{}, errPluginBalanceUnsupported
+		}
+		reports = make(map[int]model.ChannelBalanceDetail)
+	}
 	keys := []string{channel.Key}
 	if channel.ChannelInfo.IsMultiKey {
 		keys = channel.GetKeys()
 	}
 	result := channelBalanceResult{KeyBalances: make([]model.ChannelKeyBalance, 0, len(keys))}
 	succeeded := 0
+	pluginSucceeded := 0
+	var firstPluginError string
+	var currency string
+	mixedCurrencies := false
 	for index, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return channelBalanceResult{}, err
@@ -625,14 +649,46 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 		if err := current.CheckBalanceQueryEnabled(); err != nil {
 			return channelBalanceResult{}, err
 		}
-		// Probes read upstream only. They never write channel configuration,
-		// key status, or intermediate balances to the database.
-		probe := *channel
-		probe.Key = key
-		probe.Keys = nil
-		probe.ChannelInfo.IsMultiKey = false
-		keyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		keyResult, err := updateSingleKeyChannelBalance(keyCtx, &probe)
+		if plugin != nil && sweep {
+			if current.Status != common.ChannelStatusEnabled {
+				return channelBalanceResult{}, errNoEnabledPluginBalanceKeys
+			}
+			if status, ok := current.ChannelInfo.MultiKeyStatusList[index]; channel.ChannelInfo.IsMultiKey && ok && status != common.ChannelStatusEnabled {
+				result.KeyBalances = append(result.KeyBalances, model.ChannelKeyBalance{Index: index, Error: "balance_key_disabled"})
+				continue
+			}
+		}
+		// All probes finish before the snapshot and its upstream detail commit together.
+		keyCtx, cancel := context.WithTimeout(ctx, balanceQueryTimeout)
+		var keyResult channelBalanceResult
+		numeric := true
+		if plugin != nil {
+			var report jsplugin.BalanceResult
+			report, err = queryPluginKeyBalance(keyCtx, channel, plugin, index, key)
+			detail := model.ChannelBalanceDetail{BalanceResult: report}
+			if err != nil {
+				detail.Error = balanceErrorText(err, key)
+				if firstPluginError == "" {
+					firstPluginError = detail.Error
+				}
+			} else {
+				pluginSucceeded++
+				keyResult.Balance, numeric = service.PluginBalanceUSD(report)
+				if numeric {
+					if currency != "" && currency != report.Currency {
+						mixedCurrencies = true
+					}
+					currency = report.Currency
+				}
+			}
+			reports[index] = detail
+		} else {
+			probe := *channel
+			probe.Key = key
+			probe.Keys = nil
+			probe.ChannelInfo.IsMultiKey = false
+			keyResult, err = updateSingleKeyChannelBalance(keyCtx, &probe)
+		}
 		cancel()
 		if ctx.Err() != nil {
 			return channelBalanceResult{}, ctx.Err()
@@ -645,7 +701,7 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 			// Provider errors may echo authorization headers, query credentials,
 			// or proxy URLs. Monitoring stores and exposes only stable codes.
 			entry.Error = "balance_query_failed"
-		} else if keyResult.RawResponse != "" {
+		} else if !numeric || keyResult.RawResponse != "" {
 			entry.Error = "non_numeric_balance"
 		} else if math.IsNaN(keyResult.Balance) || math.IsInf(keyResult.Balance, 0) {
 			entry.Error = "invalid_balance"
@@ -656,13 +712,29 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 		}
 		result.KeyBalances = append(result.KeyBalances, entry)
 	}
-	result.Partial = succeeded > 0 && succeeded < len(keys)
+	if plugin != nil && sweep && len(reports) == 0 {
+		return channelBalanceResult{}, errNoEnabledPluginBalanceKeys
+	}
+	result.Partial = succeeded > 0 && (succeeded < len(keys) || mixedCurrencies)
 	sample := &model.ChannelBalanceSample{
 		Scheduled: scheduled, StartedAt: startedAt, CheckedAt: common.GetTimestamp(),
 		KnownBalance: result.Balance, Partial: result.Partial,
-		Success: len(keys) > 0 && succeeded == len(keys), KeyBalances: result.KeyBalances,
+		Success: len(keys) > 0 && succeeded == len(keys) && !mixedCurrencies, KeyBalances: result.KeyBalances,
 	}
-	if err := model.RecordChannelBalanceSample(channel, sample); err != nil {
+	if err := ctx.Err(); err != nil {
+		return channelBalanceResult{}, err
+	}
+	if err := model.RecordChannelBalanceSampleWithDetail(channel, sample, func(current *model.Channel, stored *model.ChannelBalanceDetail) *model.ChannelBalanceDetail {
+		if plugin != nil {
+			result.Detail, _ = service.MergePluginKeyBalances(current, stored, reports)
+		} else if sample.Success {
+			result.Detail = &model.ChannelBalanceDetail{BalanceResult: jsplugin.BalanceResult{Amount: sample.Balance, Currency: channelBalanceUnit(current)}}
+		} else if stored != nil && result.RawResponse == "" {
+			stored.Error = "balance_query_failed"
+			result.Detail = stored
+		}
+		return result.Detail
+	}); err != nil {
 		return channelBalanceResult{}, err
 	}
 	result.Balance = sample.KnownBalance
@@ -673,7 +745,21 @@ func queryChannelBalance(ctx context.Context, channel *model.Channel, scheduled 
 		Partial: sample.Partial, Success: sample.Success, KeyBalances: sample.KeyBalances,
 		KeyAccounts: channel.BalanceKeyAccounts(),
 	}
-	if succeeded == 0 && result.RawResponse == "" {
+	if plugin != nil && sweep && ctx.Err() == nil && channel.Status == common.ChannelStatusEnabled && channel.GetAutoBan() {
+		for index, key := range keys {
+			if report, ok := reports[index]; ok && report.Error == "" && emptyBalance(report.BalanceResult) {
+				usingKey := ""
+				if channel.ChannelInfo.IsMultiKey {
+					usingKey = key
+				}
+				service.DisableChannel(*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, usingKey, true), "Insufficient balance")
+			}
+		}
+	}
+	if succeeded == 0 && pluginSucceeded == 0 && result.RawResponse == "" {
+		if firstPluginError != "" {
+			return result, errors.New(firstPluginError)
+		}
 		return result, errors.New("balance query failed for all keys")
 	}
 	return result, nil
@@ -789,14 +875,10 @@ func UpdateChannelBalance(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if channel.Type == constant.ChannelTypeTaskPlugin {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Task Plugin channels do not support balance queries"})
-		return
-	}
 	result, err := updateChannelBalanceWithContext(c.Request.Context(), channel)
 	if err != nil {
 		if result.Monitor != nil {
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error(), "balance_monitor": result.Monitor})
+			common.ApiErrorStatus(c, http.StatusOK, err, gin.H{"balance_monitor": result.Monitor, "balance_detail": result.Detail})
 			return
 		}
 		common.ApiError(c, err)
@@ -812,6 +894,9 @@ func UpdateChannelBalance(c *gin.Context) {
 		response["partial"] = result.Partial
 	} else {
 		response["raw_response"] = result.RawResponse
+	}
+	if result.Detail != nil {
+		response["balance_detail"] = result.Detail
 	}
 	response["balance_monitor"] = result.Monitor
 	if len(result.KeyBalances) > 0 {
@@ -846,46 +931,26 @@ func refreshChannelBalances(ctx context.Context, report func(processed, total in
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
-		if channel.Type == constant.ChannelTypeTaskPlugin {
+		result, err := updateBalanceInRun(ctx, channel, scheduled)
+		if errors.Is(err, model.ErrChannelBalanceQueryDisabled) || errors.Is(err, errPluginBalanceUnsupported) || errors.Is(err, errNoEnabledPluginBalanceKeys) {
 			summary.Skipped++
+		} else if err != nil {
+			if ctx.Err() != nil {
+				return summary, ctx.Err()
+			}
+			summary.Failed++
+		} else if result.RawResponse != "" {
+			summary.Skipped++
+		} else if result.Partial {
+			summary.Partial++
 		} else {
-			// A disabled channel can still have upstream funds. Balance checks
-			// include every channel and never enable/disable channels or keys.
-			result, err := queryChannelBalance(ctx, channel, scheduled)
-			if errors.Is(err, model.ErrChannelBalanceQueryDisabled) {
-				summary.Skipped++
-			} else if err != nil {
-				if ctx.Err() != nil {
-					return summary, ctx.Err()
-				}
-				summary.Failed++
-			} else if result.RawResponse != "" {
-				summary.Skipped++
-			} else if result.Partial {
-				summary.Partial++
-			} else {
-				summary.Succeeded++
-				if scheduled && result.sample.EmailState != nil {
-					queryType, _ := resolveBalanceQuery(channel)
-					unit := ""
-					switch queryType {
-					case constant.ChannelTypeDeepSeek, constant.ChannelTypeSiliconFlow:
-						unit = "CNY"
-					case constant.ChannelTypeOpenAI, constant.ChannelTypeCustom, constant.ChannelTypeOpenRouter, constant.ChannelTypeMoonshot, constant.ChannelTypeNewAPI, constant.ChannelTypeSub2API:
-						unit = "USD"
-					case constant.ChannelTypeAIProxy:
-						unit = "points"
-					}
-					// Advanced custom always uses its own balance route, independently of the provider override.
-					if channel.Type == constant.ChannelTypeAdvancedCustom {
-						unit = ""
-					}
-					sent, notifyErr := service.SendChannelBalanceEmails(result.sample, unit)
-					summary.EmailsSent += sent
-					if notifyErr != nil {
-						summary.EmailFailedChannels++
-						common.SysError(fmt.Sprintf("channel %d balance email failed: %v", channel.Id, notifyErr))
-					}
+			summary.Succeeded++
+			if scheduled && result.sample.EmailState != nil {
+				sent, notifyErr := service.SendChannelBalanceEmails(result.sample, channelBalanceUnit(channel))
+				summary.EmailsSent += sent
+				if notifyErr != nil {
+					summary.EmailFailedChannels++
+					common.SysError(fmt.Sprintf("channel %d balance email failed: %v", channel.Id, notifyErr))
 				}
 			}
 		}
@@ -905,33 +970,42 @@ func refreshChannelBalances(ctx context.Context, report func(processed, total in
 	return summary, nil
 }
 
-// UpdateAllChannelsBalance enqueues a channel_balance system task instead of
-// holding the request open for the whole sweep: one upstream billing call per
-// channel adds up well past any sane HTTP timeout.
+// UpdateAllChannelsBalance queues an update of all balances as a system task
+// and answers at once with its task id. When one is already queued or
+// running, it answers with that one, and started is false.
 func UpdateAllChannelsBalance(c *gin.Context) {
 	task, created, err := service.EnqueueSystemTask(model.SystemTaskTypeChannelBalance, nil)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	data := gin.H{"started": created, "task_id": task.TaskID, "status": task.Status}
 	if !created {
-		c.JSON(http.StatusConflict, gin.H{
-			"success": false,
-			"message": "已有余额刷新任务正在运行或等待中，不能启动本次手动任务",
-			"data": gin.H{
-				"task_id": task.TaskID,
-				"status":  task.Status,
-				"type":    task.Type,
-			},
-		})
+		common.ApiSuccessT(c, "A balance update is already running", data)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data": gin.H{
-			"task_id": task.TaskID,
-			"status":  task.Status,
-		},
+	common.ApiSuccessT(c, "Balance update started in the background", data)
+}
+
+// GetChannelBalanceTask answers the progress of an update of all balances,
+// read from the system task any node can see: its status, how many enabled
+// channels it has queried of how many, and its failure. It reads no other
+// kind of system task.
+func GetChannelBalanceTask(c *gin.Context) {
+	task, err := model.GetSystemTaskByTaskID(c.Param("task_id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if task == nil || task.Type != model.SystemTaskTypeChannelBalance {
+		common.ApiErrorT(c, "Balance update task not found")
+		return
+	}
+	response := task.ToResponse()
+	common.ApiSuccess(c, gin.H{
+		"task_id": response.TaskID,
+		"status":  response.Status,
+		"state":   response.State,
+		"error":   response.Error,
 	})
 }

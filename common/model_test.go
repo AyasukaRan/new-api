@@ -28,15 +28,19 @@ func TestWanEndpointsDistinguishImagesFromVideos(t *testing.T) {
 }
 
 // /v1/models reports the DeepSeek Search and Fetch routing names with their
-// own endpoint, and the native Responses models with Chat as the default.
-func TestDeepSeekModelEndpoints(t *testing.T) {
+// own endpoint on the channels that relay them; chat models report every
+// protocol DeepSeek serves.
+func TestDeepSeekToolRoutingNamesReportTheirEndpoint(t *testing.T) {
 	for _, channelType := range []int{constant.ChannelTypeDeepSeek, constant.ChannelTypeNewAPI} {
 		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekToolsSearch}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekSearchModel))
 		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekToolsFetch}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekFetchModel))
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekToolsOCR}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekOCRModel))
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekToolsASR}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekASRModel))
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekFiles}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekFilesModel))
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekToolsTTS}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekTTSModel))
 	}
-	for _, name := range []string{"deepseek-v4-pro", "deepseek-flash"} {
-		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse}, common.GetEndpointTypesByChannelType(constant.ChannelTypeDeepSeek, name))
+	for _, name := range []string{"deepseek-v4-pro", "deepseek-flash", "private-model"} {
+		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse, constant.EndpointTypeAnthropic}, common.GetEndpointTypesByChannelType(constant.ChannelTypeDeepSeek, name))
 		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeOpenAI, name))
 	}
-	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeDeepSeek, "private-model"))
 }

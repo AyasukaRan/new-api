@@ -745,10 +745,10 @@ func TestMultiKeyGroupPermissions(t *testing.T) {
 	require.NoError(t, model.DB.Model(loaded).Update("group", "public,private,blocked").Error)
 
 	// Reordering follows the physical credential, and stale index writes fail.
-	loaded, err = model.GetChannelById(channel.Id, true)
-	require.NoError(t, err)
-	loaded.Key = keyB + "\n" + keyA
-	require.NoError(t, loaded.Update())
+	reorder := putUpdateChannel(t, rootID, common.RoleRootUser, fmt.Sprintf(
+		`{"id":%d,"key":%q}`, channel.Id, keyB+"\n"+keyA,
+	))
+	require.Contains(t, reorder.Body.String(), `"success":true`)
 	status = manage(MultiKeyManageRequest{Action: "get_key_status"}, true)
 	assert.Equal(t, identityB, status.Keys[0].KeyIdentity)
 	assert.Equal(t, []string{"private"}, status.Keys[0].Groups)
@@ -930,10 +930,10 @@ func TestMultiKeyCostRatios(t *testing.T) {
 	require.NotNil(t, batchCost)
 	assert.Zero(t, *batchCost)
 	require.NoError(t, model.DB.Model(channel).Update("setting", channel.Setting).Error)
-	stored, err = model.GetChannelById(channel.Id, true)
-	require.NoError(t, err)
-	stored.Key = keyB + "\n" + keyA
-	require.NoError(t, stored.Update())
+	reorder := putUpdateChannel(t, rootID, common.RoleRootUser, fmt.Sprintf(
+		`{"id":%d,"key":%q}`, channel.Id, keyB+"\n"+keyA,
+	))
+	require.Contains(t, reorder.Body.String(), `"success":true`)
 	status = manage(map[string]any{"action": "get_key_status"}, true)
 	assert.Equal(t, identityB, status.Keys[0].KeyIdentity)
 	require.NotNil(t, status.Keys[0].UpstreamCostRatio)

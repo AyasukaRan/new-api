@@ -19,7 +19,7 @@ import (
 // Relay diagnostics are visible to the request owner. Keep useful upstream
 // messages, but never repeat the selected secret or the provider's request ID.
 func relayLogErrorText(c *gin.Context, info *relaycommon.RelayInfo, text string) string {
-	if info != nil && info.ApiKey != "" {
+	if info != nil && info.ChannelMeta != nil && info.ApiKey != "" {
 		text = strings.ReplaceAll(text, info.ApiKey, "[redacted]")
 	}
 	if upstreamID := c.GetString(common.UpstreamRequestIdKey); upstreamID != "" {
@@ -87,45 +87,53 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		})
 	}
 
-	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
-		userId := c.GetInt("id")
-		tokenName := c.GetString("token_name")
-		modelName := c.GetString("original_model")
-		tokenId := c.GetInt("token_id")
-		userGroup := c.GetString("group")
-		other := model.NewLogOther()
-		if c.GetBool("deepseek_tts_cost_unconfirmed") || c.GetBool("deepseek_file_cost_unconfirmed") {
-			other.SetAdmin("cost_unconfirmed", true)
-		}
-		if c.Request != nil && c.Request.URL != nil {
-			other.SetPublic("request_path", c.Request.URL.Path)
-		}
-		other.SetPublic("error_type", err.GetErrorType())
-		other.SetPublic("error_code", err.GetErrorCode())
-		other.SetPublic("status_code", err.StatusCode)
-		appendStreamStatus(c, relayInfo, other)
-		for _, event := range RequestPolicy(c).Events() {
-			if event.Decision.Action != "retry" && event.Decision.Action != "stop" {
-				continue
-			}
-			action := event.Decision.Action
-			if action == "retry" {
-				action = "retry_other_key"
-				if event.Decision.Reason == "same_key_transient_retry" {
-					action = "retry_same_key"
-				}
-			}
-			other.SetPublic("retry_decision", map[string]string{"action": action, "reason": event.Decision.Reason})
-		}
-		AppendRequestMetadata(c, relayInfo, other)
-		AppendRelayLogAdminInfo(c, relayInfo, other)
-		AppendResponseModelLogInfo(relayInfo, other)
-		AppendTaskPluginContextAuditInfo(c, other)
-		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-		if startTime.IsZero() {
-			startTime = time.Now()
-		}
-		useTimeSeconds := int(time.Since(startTime).Seconds())
-		model.RecordErrorLog(c, userId, channelError.ChannelId, modelName, tokenName, message, tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+	RecordRelayErrorLog(c, channelError.ChannelId, err, relayInfo)
+}
+
+// RecordRelayErrorLog writes the error log of a failed relay request when
+// error logs are on. channelId is 0 for a request that reached no channel.
+func RecordRelayErrorLog(c *gin.Context, channelId int, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+	if !constant.ErrorLogEnabled || !types.IsRecordErrorLog(err) {
+		return
 	}
+	userId := c.GetInt("id")
+	tokenName := c.GetString("token_name")
+	modelName := c.GetString("original_model")
+	tokenId := c.GetInt("token_id")
+	userGroup := c.GetString("group")
+	other := model.NewLogOther()
+	if c.GetBool("deepseek_tts_cost_unconfirmed") || c.GetBool("deepseek_file_cost_unconfirmed") {
+		other.SetAdmin("cost_unconfirmed", true)
+	}
+	if c.Request != nil && c.Request.URL != nil {
+		other.SetPublic("request_path", c.Request.URL.Path)
+	}
+	other.SetPublic("error_type", err.GetErrorType())
+	other.SetPublic("error_code", err.GetErrorCode())
+	other.SetPublic("status_code", err.StatusCode)
+	appendStreamStatus(c, relayInfo, other)
+	for _, event := range RequestPolicy(c).Events() {
+		if event.Decision.Action != "retry" && event.Decision.Action != "stop" {
+			continue
+		}
+		action := event.Decision.Action
+		if action == "retry" {
+			action = "retry_other_key"
+			if event.Decision.Reason == "same_key_transient_retry" {
+				action = "retry_same_key"
+			}
+		}
+		other.SetPublic("retry_decision", map[string]string{"action": action, "reason": event.Decision.Reason})
+	}
+	AppendRequestMetadata(c, relayInfo, other)
+	AppendRelayLogAdminInfo(c, relayInfo, other)
+	appendRequestPluginRecord(relayInfo, other)
+	AppendResponseModelLogInfo(relayInfo, other)
+	AppendTaskPluginContextAuditInfo(c, other)
+	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+	if startTime.IsZero() {
+		startTime = time.Now()
+	}
+	useTimeSeconds := int(time.Since(startTime).Seconds())
+	model.RecordErrorLog(c, userId, channelId, modelName, tokenName, relayLogErrorText(c, relayInfo, err.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(c)...)), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 }

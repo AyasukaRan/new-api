@@ -24,6 +24,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import {
   getPerfMetrics,
   getPerfMetricsSummary,
+  getDashboardPerfMetricsSummary,
   perfMetricsQueryKeys,
 } from './api'
 
@@ -47,12 +48,9 @@ export function usePerfMetricsSummary(options?: {
     ],
     queryFn: async ({ signal }) =>
       requireServerSuccess(
-        await getPerfMetricsSummary(
-          hours,
-          undefined,
-          signal,
-          options?.diagnostics
-        )
+        options?.diagnostics
+          ? await getDashboardPerfMetricsSummary(hours, signal)
+          : await getPerfMetricsSummary(hours, undefined, signal)
       ),
     staleTime: refreshInterval,
     refetchInterval: options?.poll ? refreshInterval : false,

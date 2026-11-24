@@ -384,7 +384,7 @@ describe('log cost display', () => {
     expect(lines.map((l) => [l.label, l.basis?.count])).toEqual([
       ['Uncached input', 96],
       ['Cache Read', 236537],
-      ['Cache Write', 1141],
+      ['Cache Write (5m)', 1141],
       ['Output', 77],
     ])
     expect(Math.round(lines.reduce((n, l) => n + l.quota, 0))).toBe(41202)

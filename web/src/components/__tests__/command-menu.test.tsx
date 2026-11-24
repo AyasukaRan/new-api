@@ -43,7 +43,12 @@ const adminEntries = [
   'Users',
   'Redemption Codes',
 ]
-const superAdminEntries = ['System Info', 'Task Plugins', 'System Settings']
+const superAdminEntries = [
+  'System Info',
+  'Plugins',
+  'Request processing',
+  'System Settings',
+]
 
 // jsdom lacks the Web Animations API the menu's scroll area waits on.
 const getAnimationsDescriptor = Object.getOwnPropertyDescriptor(
@@ -124,6 +129,15 @@ test('admins find admin pages in search but not super admin pages', async () => 
   for (const entry of superAdminEntries) {
     expect(entries).not.toContain(entry)
   }
+})
+
+test('super admins find Request processing right after Plugins', async () => {
+  const entries = await searchEntriesFor(ROLE.SUPER_ADMIN)
+
+  expect(entries).toEqual(expect.arrayContaining(superAdminEntries))
+  expect(entries.indexOf('Request processing')).toBe(
+    entries.indexOf('Plugins') + 1
+  )
 })
 
 test('pages hidden in the sidebar settings stay out of search', async () => {

@@ -88,6 +88,7 @@ import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { StreamModeCell } from '../timing-metrics-cell'
 import { TokenPerformanceCell } from '../token-performance-cell'
+import { RequestPluginLogMarker } from '../request-plugin-record'
 import { useUsageLogsContext } from '../usage-logs-provider'
 
 interface DetailSegment {
@@ -189,7 +190,7 @@ function buildTypeDetailSegments(
     return showUnit ? `${text}/M` : text
   }
   const isTieredExpr = other.billing_mode === 'tiered_expr'
-  const tieredSummary = getTieredBillingSummary(other)
+  const tieredSummary = getTieredBillingSummary(other, log.model_name)
   if (isTieredExpr && other.is_task) {
     const tiers = parseTaskTiersFromExpr(
       decodeBillingExprB64(other.expr_b64),
@@ -245,11 +246,11 @@ function buildTypeDetailSegments(
           ].includes(entry.field)
         )
         .map((entry) => {
-          return formatPriceCompact(entry.price)
+          return `${t(entry.shortLabel)} ${formatPrice(entry.price)}`
         })
       if (cacheEntries.length > 0) {
         segments.push({
-          text: `${t('Cache')} ${formatPriceList(cacheEntries, false)}`,
+          text: cacheEntries.join(' · '),
           muted: true,
         })
       }
@@ -622,6 +623,7 @@ export function useCommonLogsColumns(
       cell: ({ row, table }) => {
         if (!isDisplayableLogType(row.original.type)) return null
         const model = formatModelName(row.original)
+        const requestPlugins = getLogMetadata(row.original)?.request_plugins
         return (
           <div className='flex w-max max-w-44 min-w-0 flex-col items-start gap-1'>
             <ModelBadge
@@ -630,6 +632,7 @@ export function useCommonLogsColumns(
               actualModel={model.actualModel}
               responseModel={model.responseModel}
             />
+            {requestPlugins?.length ? <RequestPluginLogMarker items={requestPlugins} /> : null}
             {compact && (
               <div className='flex w-full max-w-full flex-wrap items-center gap-1 [contain:inline-size] empty:hidden'>
                 {table.getState().columnVisibility.reasoning_effort !==

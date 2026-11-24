@@ -51,7 +51,10 @@ type ModelPricingPluginVariant struct {
 	Configured    string                               `json:"configured"`
 	Effective     string                               `json:"effective"`
 	Compatible    bool                                 `json:"compatible"`
-	Stale         bool                                 `json:"stale,omitempty"`
+	// Relay reports that the plugin also relays the model, so a model-level
+	// price prices its tasks only per call or with u().
+	Relay bool `json:"relay,omitempty"`
+	Stale bool `json:"stale,omitempty"`
 }
 
 type ModelPricingSnapshot struct {
@@ -405,14 +408,16 @@ func GetModelPricingSnapshot(names []string) (*ModelPricingSnapshot, error) {
 				if !overridden && entry.Effective["billing_setting.billing_mode"] == billing_setting.BillingModeTieredExpr {
 					expression, _ = entry.Effective["billing_setting.billing_expr"].(string)
 				}
+				relaysModel := slices.ContainsFunc(targets[key], plugin.Meta.RelaysModel)
 				compatible := !slices.ContainsFunc(targets[key], func(declared string) bool {
 					profile, _ := plugin.Meta.UsageForModel(declared)
-					return !billing_setting.TaskExprCompatible(expression, profile)
+					return !billing_setting.TaskExprCompatible(expression, profile) || !billing_setting.TaskPriceExpr(expression, overridden, plugin.Meta.RelaysModel(declared))
 				})
 				entry.PluginVariants = append(entry.PluginVariants, ModelPricingPluginVariant{
 					PluginKey: plugin.Meta.Key, PluginName: plugin.Meta.Name, Icon: plugin.Meta.Icon,
 					UsageSchema: schema, UsageExamples: examples, Configured: configuredExpr, Effective: expression,
 					Compatible: compatible,
+					Relay:      relaysModel,
 				})
 			}
 		}
@@ -716,6 +721,7 @@ func GetModelPricingIssues(pluginKey string) ([]ModelPricingIssue, error) {
 			if pluginKey != "" && variant.PluginKey != pluginKey {
 				continue
 			}
+			overridden := variant.Configured != ""
 			reason := ModelPricingIssueUnconfigured
 			switch {
 			case variant.Stale && slices.Contains(stopped[variant.PluginKey], entry.ModelName):
@@ -724,10 +730,12 @@ func GetModelPricingIssues(pluginKey string) ([]ModelPricingIssue, error) {
 				reason = ModelPricingIssueStale
 			case !served[entry.ModelName], variant.Compatible:
 				continue
-			// fixed() marks ordinary channel pricing: the provider has no task price.
-			case variant.Effective != "" && !billingexpr.UsesFixedPricing(variant.Effective):
+			// fixed() and chat prices mark ordinary channel pricing: the
+			// provider has no task price.
+			case variant.Effective != "" && !billingexpr.UsesFixedPricing(variant.Effective) && billing_setting.TaskPriceExpr(variant.Effective, overridden, variant.Relay):
 				reason = ModelPricingIssueIncompatible
-			case perCall:
+			// The provider's own price replaces the per-call price.
+			case perCall && !overridden:
 				continue
 			}
 			issues = append(issues, ModelPricingIssue{ModelName: entry.ModelName, PluginKey: variant.PluginKey, PluginName: variant.PluginName, Reason: reason})
@@ -850,6 +858,9 @@ func validateModelPricing(db *gorm.DB, name string, values, previous PricingValu
 			// its price after the plugin narrows its usage profile; relay checks
 			// shared models against each profile, so their prices must follow it.
 			unchanged := previous[key] == expression
+			if !unchanged && billingexpr.UsedVars(expression)["u"] && billingexpr.UsesChatQuantities(expression) {
+				return fmt.Errorf("model %s: an expression cannot read both u() usage facts and chat request quantities such as token counts or image_count", name)
+			}
 			var err error
 			if len(targets) == 0 && generation != nil {
 				// Global alias prices can be prepared before the channel's
@@ -867,6 +878,7 @@ func validateModelPricing(db *gorm.DB, name string, values, previous PricingValu
 				}
 			}
 			if len(targets) > 0 {
+				chatPrice := false
 				for pluginKey, models := range targets {
 					_, overridden := variants[pluginKey]
 					_, wasOverridden := previousVariants[pluginKey]
@@ -878,11 +890,31 @@ func validateModelPricing(db *gorm.DB, name string, values, previous PricingValu
 						if unchanged && !wasOverridden && len(targets) == 1 && !generation.SharedModel(declared) {
 							continue
 						}
+						if !billing_setting.TaskPriceExpr(expression, false, plugin.Meta.RelaysModel(declared)) {
+							chatPrice = true
+							continue
+						}
 						schema, _ := plugin.Meta.UsageForModel(declared)
 						if err := billing_setting.SmokeTestTaskExpr(expression, schema); err != nil {
 							return fmt.Errorf("model %s: plugin %s: %w", name, pluginKey, err)
 						}
 					}
+				}
+				if chatPrice && !unchanged {
+					err = billing_setting.SmokeTestExpr(expression)
+				}
+			} else if target, resolved := ResolveTaskModelAlias(generation, name); resolved {
+				plugin, ok := generation.Get(target.PluginKey)
+				switch {
+				case !ok:
+					err = billing_setting.SmokeTestExpr(expression)
+				case !billing_setting.TaskPriceExpr(expression, false, plugin.Meta.RelaysModel(name)):
+					if !unchanged {
+						err = billing_setting.SmokeTestExpr(expression)
+					}
+				case !unchanged || generation.SharedModel(target.Declared):
+					schema, _ := plugin.Meta.UsageForModel(target.Declared)
+					err = billing_setting.SmokeTestTaskExpr(expression, schema)
 				}
 			} else if !unchanged || len(billingexpr.UsedUsageKeys(expression)) == 0 {
 				err = billing_setting.SmokeTestExpr(expression)
@@ -1037,6 +1069,7 @@ func mutateModelPricingOptions(mutate func(*gorm.DB, map[string]map[string]any) 
 	if err != nil {
 		return err
 	}
+	BumpSyncTopic(SyncTopicOptions)
 	for _, key := range modelPricingOptionKeys {
 		encoded, _ := common.Marshal(committed[key])
 		if err := updateOptionMap(key, string(encoded)); err != nil {

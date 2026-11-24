@@ -1464,6 +1464,7 @@ const ModelPricingFields = forwardRef<
                   modelBillingMode={
                     pricingMode === 'tiered_expr' ? 'tiered_expr' : 'ratio'
                   }
+                  perCallPrice={pricingMode === 'per-request'}
                   currency={currency}
                   ordinaryPricing={!usesTaskPricing}
                   onConfigureOrdinaryPricing={configureOrdinaryPricing}
@@ -1705,7 +1706,7 @@ const ModelPricingFields = forwardRef<
                 <div className='border-b px-3 py-2'>
                   <div className='text-sm font-medium'>
                     {!usesTaskPricing && pluginVariants?.length ? (
-                      <>{t('Ordinary OpenAI')} · </>
+                      <>{t('Default price')} · </>
                     ) : null}
                     {t('Preview')}
                   </div>

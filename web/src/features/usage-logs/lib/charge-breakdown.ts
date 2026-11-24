@@ -268,7 +268,7 @@ export function getChargeBreakdown(
   settled: number,
   displayQuotaPerUnit: number,
   tools: BilledTool[],
-  log?: Pick<UsageLog, 'prompt_tokens' | 'completion_tokens'>
+  log?: Pick<UsageLog, 'prompt_tokens' | 'completion_tokens'> & Partial<Pick<UsageLog, 'model_name'>>
 ): ChargeLine[] {
   const quotaPerUnit = other?.billing_quota_per_unit ?? displayQuotaPerUnit
   const ratio = other?.group_ratio
@@ -309,7 +309,7 @@ export function getChargeBreakdown(
     unit: 'times',
   }))
   const tokenLines: ChargeLine[] = []
-  const summary = getTieredBillingSummary(other)
+  const summary = getTieredBillingSummary(other, log?.model_name)
   let quantitiesKnown = true
   if (
     summary &&
