@@ -70,7 +70,10 @@ test('opens the selected receipt, switches tabs on the same request and resets o
 test('previews metrics on hover and keyboard focus, and dismisses without moving focus', async () => {
   const user = userEvent.setup()
   render(
-    <LogMetricPopover label='Token Breakdown' trigger={<button>800</button>}>
+    <LogMetricPopover
+      label='Token Breakdown'
+      trigger={<button type='button'>800</button>}
+    >
       <span>Recorded total</span>
     </LogMetricPopover>
   )

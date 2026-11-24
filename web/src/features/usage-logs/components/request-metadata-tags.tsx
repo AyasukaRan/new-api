@@ -39,8 +39,9 @@ function toolInvocationCount(name: string, metadata: LogOtherData) {
     typeof observed === 'number' &&
     Number.isSafeInteger(observed) &&
     observed > 0
-  )
+  ) {
     return observed
+  }
   let legacy: number | undefined
   if (name === 'web_search') legacy = metadata.web_search_call_count
   if (name === 'file_search') legacy = metadata.file_search_call_count
@@ -94,7 +95,7 @@ function ToolCallPopover(props: {
                 <span className='sr-only'>{t('Count')} </span>
                 {count === undefined
                   ? t('Not recorded')
-                  : '×' + formatNumber(count, toIntlLocale(i18n.language))}
+                  : `×${formatNumber(count, toIntlLocale(i18n.language))}`}
               </dd>
             </div>
           )

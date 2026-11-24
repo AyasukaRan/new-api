@@ -161,9 +161,7 @@ export function TokenPerformanceCell(props: {
                   <Button
                     variant='link'
                     size='xs'
-                    aria-label={
-                      t('Cache read tokens') + ' · ' + t('Token Breakdown')
-                    }
+                    aria-label={`${t('Cache read tokens')} · ${t('Token Breakdown')}`}
                     className={tokenTriggerClass}
                   >
                     {formatCount(cache.read)}
@@ -375,9 +373,7 @@ function LogTokenBreakdown({
                 <div className='mt-1 flex items-center gap-2'>
                   <div className='grow'>
                     <LogBreakdownBar
-                      label={
-                        t('Reasoning tokens') + ' · ' + t('Included in output')
-                      }
+                      label={`${t('Reasoning tokens')} · ${t('Included in output')}`}
                       total={output}
                       segments={[
                         {

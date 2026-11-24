@@ -664,8 +664,9 @@ test.each([
     else if (openWith === 'keyboard') {
       await userEvent.tab()
       expect(trigger).toHaveFocus()
-      if (trigger.getAttribute('aria-expanded') !== 'true')
+      if (trigger.getAttribute('aria-expanded') !== 'true') {
         await userEvent.keyboard('{Enter}')
+      }
     } else if (openWith === 'touch') {
       await userEvent.pointer([
         { keys: '[TouchA>]', target: trigger },
@@ -679,14 +680,15 @@ test.each([
       details
     )
     expect(card.getByText('(Included in output)')).toBeVisible()
-    const chart = card.queryByRole('img', { name: 'Token distribution' })
+    const chartName = { name: 'Token distribution' }
     if (percentOfOutput == null) {
-      expect(chart).not.toBeInTheDocument()
+      expect(card.queryByRole('img', chartName)).not.toBeInTheDocument()
     } else {
+      const chart = card.getByRole('img', chartName)
       expect(chart).toBeVisible()
-      const plotted = within(chart!)
+      const plotted = within(chart)
       expect(
-        parseFloat(plotted.getByTitle('Output Tokens').style.width)
+        Number.parseFloat(plotted.getByTitle('Output Tokens').style.width)
       ).toBeCloseTo(100 * percentOfOutput)
       expect(plotted.queryByTitle('Reasoning tokens')).not.toBeInTheDocument()
       expect(
