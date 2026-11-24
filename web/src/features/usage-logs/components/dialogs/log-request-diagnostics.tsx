@@ -62,7 +62,7 @@ export function LogRequestDiagnostics(props: {
     getRetryDecisionReason(other?.retry_decision, t)
   ) {
     panels.push(
-      <div key='failure' className='md:col-span-full'>
+      <div key='failure' className='basis-full'>
         <RequestFailureSummary
           metadata={other}
           error={log.type === 5 ? details || '' : undefined}
@@ -75,7 +75,7 @@ export function LogRequestDiagnostics(props: {
       <LogOverviewCard
         key='reject'
         title={t('Reject Reason')}
-        className='md:col-span-full'
+        className='basis-full'
       >
         <p className='text-destructive text-sm wrap-anywhere whitespace-pre-wrap'>
           {admin.reject_reason}
@@ -88,7 +88,7 @@ export function LogRequestDiagnostics(props: {
       <LogOverviewCard
         key='policy'
         title={t('Request policy decisions')}
-        className='md:col-span-full'
+        className='basis-full'
       >
         <PolicyDecisionRecord events={admin.request_policy} />
       </LogOverviewCard>
@@ -284,7 +284,7 @@ export function LogRequestDiagnostics(props: {
       <LogOverviewCard
         key='overrides'
         title={`${t('Param Override')} (${overrides.length})`}
-        className='md:col-span-full'
+        className='basis-full'
       >
         <ul className='divide-border divide-y'>
           {overrides.map((entry) => (
@@ -311,7 +311,7 @@ export function LogRequestDiagnostics(props: {
       <LogOverviewCard
         key='content'
         title={t('Content')}
-        className='md:col-span-full'
+        className='basis-full'
       >
         <div className='flex items-start gap-2'>
           <p className='min-w-0 flex-1 text-sm leading-relaxed wrap-anywhere whitespace-pre-wrap'>
@@ -335,7 +335,7 @@ export function LogRequestDiagnostics(props: {
           log.request_id,
           admin.request_body_ref,
         ])}
-        className='md:col-span-full'
+        className='basis-full'
       >
         <CapturedRequestBody log={log} adminInfo={admin} />
       </div>
@@ -351,7 +351,7 @@ export function LogRequestDiagnostics(props: {
     )
   }
   return (
-    <div className='grid min-w-0 items-start gap-3 md:grid-cols-2'>
+    <div className='flex min-w-0 flex-wrap items-start gap-3 *:w-full *:min-w-0 *:grow md:*:w-[calc(50%_-_0.375rem)]'>
       {panels}
     </div>
   )

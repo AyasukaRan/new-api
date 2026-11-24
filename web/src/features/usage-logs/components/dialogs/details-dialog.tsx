@@ -536,7 +536,9 @@ export function DetailsDialog(props: DetailsDialogProps) {
       description={t('View the complete details for this log entry')}
       contentClassName={cn(
         'min-w-0 overflow-hidden',
-        'max-sm:max-h-(--dialog-available-height) max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
+        'max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
+        requestOverview &&
+          '[--log-detail-max-height:min(90dvh,58rem,var(--dialog-available-height))] top-[calc(var(--dialog-viewport-center)_-_var(--log-detail-max-height)/2)] max-h-(--log-detail-max-height) translate-y-0',
         requestOverview || isTieredBilling
           ? 'sm:max-w-[min(96vw,64rem)]'
           : 'sm:max-w-lg'
@@ -544,9 +546,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
       headerClassName='max-sm:gap-1'
       titleClassName='flex items-center gap-2 pe-8 text-base'
       descriptionClassName='sr-only'
-      contentHeight={
-        requestOverview ? 'min(78dvh, 52rem)' : 'min(72dvh, 720px)'
-      }
+      contentHeight={requestOverview ? 'auto' : 'min(72dvh, 720px)'}
       bodyClassName='px-1'
     >
       {props.open &&
