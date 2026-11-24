@@ -26,7 +26,13 @@ import { formatQuotaWithCurrency } from '@/lib/currency'
 import type { UsageLog } from '../data/schema'
 import type { LogOtherData } from '../types'
 import { getLogCacheUsage } from './cache-usage'
-import { decodeBillingExprB64, getTieredBillingSummary } from './format'
+import {
+  decodeBillingExprB64,
+  getTieredBillingSummary,
+  isViolationFeeLog,
+  hasAnyCacheTokens,
+  getLogCostEstimate,
+} from './format'
 
 // A single quota unit is often split across several token or tool lines.
 export function formatReceiptQuota(quota: number): string {
@@ -35,6 +41,72 @@ export function formatReceiptQuota(quota: number): string {
     digitsSmall: 9,
     abbreviate: false,
   })
+}
+
+export function hasRecordedBillingRates(
+  other: LogOtherData,
+  isAdmin: boolean,
+  type: number
+) {
+  return Boolean(
+    other.billing_mode === 'tiered_expr' ||
+    other.model_ratio != null ||
+    other.model_price != null ||
+    other.group_ratio != null ||
+    (other.user_group_ratio != null && other.user_group_ratio !== -1) ||
+    (other.usage_facts &&
+      typeof other.usage_facts === 'object' &&
+      !Array.isArray(other.usage_facts) &&
+      Object.keys(other.usage_facts).length) ||
+    (other.web_search && other.web_search_call_count) ||
+    (other.file_search && other.file_search_call_count) ||
+    (other.image_generation_call && other.image_generation_call_price) ||
+    (other.audio_input_seperate_price && other.audio_input_price) ||
+    (isAdmin &&
+      (other.admin_info?.channel_ratio != null ||
+        (type === 2 && getLogCostEstimate(other))))
+  )
+}
+
+export function hasRecordedAudioUsage(other: LogOtherData) {
+  return (
+    (other.audio || other.ws) &&
+    [
+      other.audio_input,
+      other.audio_output,
+      other.text_input,
+      other.text_output,
+    ].some((count) => (count ?? 0) > 0)
+  )
+}
+
+// A private accounting marker cannot reveal itself by adding a tab to a personal error.
+export function hasLogBillingEvidence(
+  other: LogOtherData | null,
+  isAdmin: boolean,
+  type: number
+) {
+  if (!other) return false
+  return Boolean(
+    hasRecordedBillingRates(other, isAdmin, type) ||
+    isViolationFeeLog(other) ||
+    other.metered_usage ||
+    (other.billing_tokens &&
+      BILLING_PRICING_VARS.some(({ key }) =>
+        Number.isFinite(other.billing_tokens?.[key])
+      )) ||
+    hasAnyCacheTokens(other) ||
+    other.image_cache_tokens != null ||
+    (other.image && other.image_output) ||
+    hasRecordedAudioUsage(other) ||
+    other.billing_source === 'subscription' ||
+    other.billing_source === 'free_allowance' ||
+    (isAdmin &&
+      (other.admin_info?.quota_saturation ||
+        other.admin_info?.cost_unconfirmed ||
+        other.admin_info?.usage_billing_path ||
+        other.admin_info?.local_count_tokens != null))
+  )
 }
 
 export interface BilledTool {

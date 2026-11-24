@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import i18next from 'i18next'
 import { afterEach, beforeAll, describe, expect, test } from 'vitest'
 
@@ -64,7 +64,11 @@ function makeLog(other: LogOtherData): UsageLog {
   }
 }
 
-function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
+function renderDetails(
+  other: LogOtherData,
+  promptTokens = 0,
+  view: 'technical' | 'cost' = 'cost'
+): QueryClient {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -79,7 +83,7 @@ function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
   render(
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
-        initialView='technical'
+        initialView={view === 'technical' ? 'technical' : 'overview'}
         log={{ ...makeLog(other), prompt_tokens: promptTokens }}
         isAdmin={false}
         isRoot={false}
@@ -88,6 +92,10 @@ function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
       />
     </QueryClientProvider>
   )
+  if (view === 'cost') {
+    fireEvent.click(screen.getByRole('tab', { name: 'Cost breakdown' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Billing parameters' }))
+  }
   return queryClient
 }
 
@@ -96,13 +104,17 @@ function rowValue(label: string): string | null {
 }
 
 test('shows the recorded request and response models in log details', () => {
-  const queryClient = renderDetails({
-    response_model: {
-      requested_model: 'requested-model',
-      upstream_model: 'mapped-model',
-      returned_model: 'unexpected-model',
+  const queryClient = renderDetails(
+    {
+      response_model: {
+        requested_model: 'requested-model',
+        upstream_model: 'mapped-model',
+        returned_model: 'unexpected-model',
+      },
     },
-  })
+    0,
+    'technical'
+  )
   expect(screen.getByText('Response model: unexpected-model')).toBeVisible()
   expect(rowValue('Request Model')).toBe('requested-model')
   expect(rowValue('Upstream Model')).toBe('mapped-model')
@@ -200,13 +212,15 @@ describe('usage facts billing details', () => {
       '400'
     )
     expect(
-      screen.getByText('Input Tokens').nextElementSibling
-    ).toHaveTextContent('1,000')
-    expect(
       screen
         .getAllByText('Cache Read')
         .some((label) => label.nextElementSibling?.textContent === '300')
     ).toBe(true)
+    fireEvent.click(screen.getByRole('tab', { name: 'Overview' }))
+    const usage = within(
+      screen.getByRole('region', { name: 'Transport and usage' })
+    )
+    expect(usage.getByText('1,000')).toBeVisible()
   })
 
   beforeAll(() => {
@@ -220,7 +234,7 @@ describe('usage facts billing details', () => {
     queryClients.length = 0
   })
 
-  test('renders one raw-key row per usage fact before total cost', () => {
+  test('keeps raw recorded usage and its tier in billing parameters with the settled total in the receipt', () => {
     const expression = 'tier("720P", u("seconds") * 5)'
     queryClients.push(
       renderDetails({
@@ -241,12 +255,7 @@ describe('usage facts billing details', () => {
     expect(rowValue('Billing Mode')).toBe('Dynamic Pricing')
     expect(rowValue('Matched Tier')).toBe('720P')
 
-    const usageHeader = screen.getByText('Usage parameters')
-    const totalCost = screen.getByText('Total Cost')
-    expect(
-      usageHeader.compareDocumentPosition(totalCost) &
-        Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
+    expect(rowValue('Amount charged')).toBe('$0.01')
   })
 
   test('does not render usage parameter rows when usage_facts is absent', () => {
@@ -259,7 +268,7 @@ describe('usage facts billing details', () => {
     expect(screen.queryByText('Usage parameters')).toBeNull()
     expect(screen.queryByText('resolution')).toBeNull()
     expect(screen.queryByText('seconds')).toBeNull()
-    expect(screen.getByText('Total Cost')).toBeInTheDocument()
+    expect(rowValue('Amount charged')).toBe('$0.01')
   })
 
   test('does not render usage parameter rows when usage_facts is empty', () => {
@@ -273,7 +282,7 @@ describe('usage facts billing details', () => {
     expect(screen.queryByText('Usage parameters')).toBeNull()
     expect(screen.queryByText('resolution')).toBeNull()
     expect(screen.queryByText('seconds')).toBeNull()
-    expect(screen.getByText('Total Cost')).toBeInTheDocument()
+    expect(rowValue('Amount charged')).toBe('$0.01')
   })
 })
 

@@ -140,6 +140,22 @@ test('personal overview omits administrator-only routing, client metadata and id
   ).not.toBeInTheDocument()
 })
 
+test.each([
+  ['partial', 'Tool details incomplete'],
+  ['complete', 'No tools invoked'],
+] as const)(
+  'shows the %s empty tool observation only on the administrator overview',
+  (state, label) => {
+    const metadata = { ...other, invoked_tools: [], tool_observation: state }
+    const { rerender } = render(
+      <LogRequestInfoCards log={log} other={metadata} isAdmin />
+    )
+    expect(screen.getByText(label)).toBeVisible()
+    rerender(<LogRequestInfoCards log={log} other={metadata} isAdmin={false} />)
+    expect(screen.queryByText(label)).not.toBeInTheDocument()
+  }
+)
+
 test('shows the recorded failure code and omits measurements missing from older requests', () => {
   render(
     <LogRequestInfoCards

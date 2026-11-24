@@ -257,15 +257,126 @@ test.each(['hover', 'keyboard'])(
   }
 )
 
-test('keeps log details open when the parent refreshes with unchanged data', async () => {
-  const other = { model_price: 0.25 }
-  const wrapper = ({ children }: { children: React.ReactNode }) => (
+function DetailProviders({ children }: { children: React.ReactNode }) {
+  return (
     <I18nextProvider i18n={i18n}>
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     </I18nextProvider>
   )
+}
+
+test('keeps the recorded decision order in technical details and scopes diagnostics by viewer', () => {
+  const log = makeLog({
+    group_ratio: 1,
+    admin_info: {
+      request_policy: [
+        {
+          attempt: 1,
+          elapsed_ms: 28,
+          rule: 'primary-route',
+          decision: {
+            action: 'failure',
+            reason: 'failure',
+            source: 'upstream',
+          },
+          status: 503,
+        },
+        {
+          attempt: 2,
+          elapsed_ms: 141,
+          rule: 'secondary-route',
+          decision: { action: 'stop', reason: 'stop', source: 'gateway' },
+        },
+      ],
+    },
+    root_info: { node_name: 'private-gateway-node' },
+  })
+  const props = {
+    open: true,
+    log,
+    initialView: 'technical' as const,
+    onOpenChange: () => undefined,
+  }
+  const { rerender } = render(<DetailsDialog {...props} isAdmin isRoot />, {
+    wrapper: DetailProviders,
+  })
+  const technical = within(
+    screen.getByRole('tabpanel', { name: 'Technical details' })
+  )
+  const decisions = technical
+    .getAllByRole('listitem')
+    .filter((item) =>
+      /primary-route|secondary-route/.test(item.textContent ?? '')
+    )
+  expect(decisions).toHaveLength(2)
+  expect(decisions[0]).toHaveTextContent('primary-route')
+  expect(decisions[0]).toHaveTextContent('28 ms')
+  expect(decisions[1]).toHaveTextContent('secondary-route')
+  expect(decisions[1]).toHaveTextContent('141 ms')
+  expect(technical.getByText('private-gateway-node')).toBeVisible()
+  rerender(<DetailsDialog {...props} isAdmin isRoot={false} />)
+  expect(technical.getByText(/primary-route/)).toBeVisible()
+  expect(technical.queryByText('private-gateway-node')).not.toBeInTheDocument()
+  rerender(<DetailsDialog {...props} isAdmin={false} isRoot={false} />)
+  expect(
+    technical.queryByText(/primary-route|secondary-route|private-gateway-node/)
+  ).not.toBeInTheDocument()
+  expect(
+    technical.getByText('No diagnostics recorded for this request')
+  ).toBeVisible()
+  for (const label of [
+    'Request ID',
+    'Token',
+    'Group',
+    'Billing Details',
+    'Token Breakdown',
+  ]) {
+    expect(
+      technical.queryByText(label, { exact: true })
+    ).not.toBeInTheDocument()
+  }
+})
+
+test('zero-charge failures keep restricted billing evidence available only to administrators', async () => {
+  const other: LogOtherData = {
+    admin_info: {
+      quota_saturation: {
+        op: 'round',
+        kind: 'overflow',
+        original: 3e9,
+        clamped: 2147483647,
+      },
+    },
+  }
+  const log = { ...makeLog(other, 5), quota: 0 }
+  const props = {
+    open: true,
+    log,
+    isRoot: false,
+    onOpenChange: () => undefined,
+  }
+  const { rerender } = render(<DetailsDialog {...props} isAdmin />, {
+    wrapper: DetailProviders,
+  })
+  await userEvent.click(screen.getByRole('tab', { name: 'Cost breakdown' }))
+  const evidence = screen.getByRole('button', { name: 'Billing parameters' })
+  expect(evidence).toHaveAttribute('aria-expanded', 'false')
+  expect(screen.queryByText('Quota clamped')).not.toBeInTheDocument()
+  await userEvent.click(evidence)
+  expect(screen.getByText('Clamped to').nextElementSibling).toHaveTextContent(
+    '2147483647'
+  )
+  rerender(<DetailsDialog {...props} isAdmin={false} />)
+  expect(
+    screen.queryByRole('tab', { name: 'Cost breakdown' })
+  ).not.toBeInTheDocument()
+  expect(screen.queryByText('Clamped to')).not.toBeInTheDocument()
+})
+
+test('keeps log details open when the parent refreshes with unchanged data', async () => {
+  const other = { model_price: 0.25 }
   const { rerender } = render(<DetailPreview other={other} isAdmin />, {
-    wrapper,
+    wrapper: DetailProviders,
   })
   fireEvent.click(screen.getByRole('button', { name: 'Per-call · $0.25' }))
   expect(await screen.findByRole('dialog')).toBeVisible()
@@ -721,13 +832,22 @@ test.each([true, false])(
     }
     fireEvent.click(renderPreview(other, isAdmin))
     const dialog = within(await screen.findByRole('dialog'))
+    await userEvent.click(dialog.getByRole('tab', { name: 'Cost breakdown' }))
     if (isAdmin) {
-      expect(dialog.getByText('Upstream cost')).toBeVisible()
+      expect(dialog.getByText('Estimated upstream cost')).toBeVisible()
       expect(dialog.getByText('$0.013')).toBeVisible()
-      expect(dialog.getByText('-$0.003')).toBeVisible()
+      expect(
+        dialog.getByText('Gross profit').nextElementSibling
+      ).toHaveTextContent(/-\$0\.003$/)
+      await userEvent.click(
+        dialog.getByRole('button', { name: 'Billing parameters' })
+      )
       expect(dialog.getByText('1.3000x')).toBeVisible()
     } else {
-      expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
+      expect(
+        dialog.queryByText('Estimated upstream cost')
+      ).not.toBeInTheDocument()
+      expect(dialog.queryByText('1.3000x')).not.toBeInTheDocument()
       expect(dialog.queryByText('-$0.003')).not.toBeInTheDocument()
     }
   }
@@ -778,11 +898,13 @@ test.each([true, false])(
     }
     fireEvent.click(renderPreview(other, isAdmin))
     const dialog = within(await screen.findByRole('dialog'))
+    await userEvent.click(dialog.getByRole('tab', { name: 'Cost breakdown' }))
     if (isAdmin) {
       expect(dialog.getByText('Upstream cost')).toBeVisible()
       expect(dialog.getByText('$0.013')).toBeVisible()
-      expect(dialog.getByText('Gross profit')).toBeVisible()
-      expect(dialog.getByText('-$0.003')).toBeVisible()
+      expect(
+        dialog.getByText('Gross profit').nextElementSibling
+      ).toHaveTextContent(/-\$0\.003$/)
     } else {
       expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
       expect(dialog.queryByText('$0.013')).not.toBeInTheDocument()
@@ -864,9 +986,28 @@ describe('request content disclosure in log details', () => {
     ).not.toBeInTheDocument()
     expect(screen.queryByText('Legacy summary')).not.toBeInTheDocument()
     expect(screen.queryByText(/Truncated for storage/)).not.toBeInTheDocument()
+    const dialog = within(screen.getByRole('dialog'))
+    for (const name of [
+      'Overview',
+      'Cost breakdown',
+      'Technical details',
+    ]) {
+      await userEvent.click(dialog.getByRole('tab', { name }))
+      expect(
+        dialog.getByRole('button', { name: 'View request trace' })
+      ).toBeVisible()
+    }
     expect(get).not.toHaveBeenCalled()
+    await userEvent.click(dialog.getByRole('tab', { name: 'Timing breakdown' }))
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(get).toHaveBeenCalledWith(
+      '/api/log/trace',
+      expect.objectContaining({
+        params: { trace_id: 'complete-original', metadata_only: true },
+      })
+    )
     await userEvent.click(
-      screen.getByRole('button', { name: 'View request trace' })
+      dialog.getByRole('button', { name: 'View request trace' })
     )
     expect(
       await screen.findByText('No trace records are available.')

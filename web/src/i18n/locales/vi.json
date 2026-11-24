@@ -4459,6 +4459,7 @@
     "No deployments available. Create one to get started.": "Không có triển khai nào khả dụng. Tạo một cái để bắt đầu.",
     "No Deployments Found": "Không tìm thấy triển khai nào",
     "No description available.": "Chưa có mô tả.",
+    "No diagnostics recorded for this request": "Không có thông tin chẩn đoán nào được ghi cho yêu cầu này",
     "No discount tiers configured. Click \"Add discount tier\" to get started.": "Chưa cấu hình cấp chiết khấu nào. Nhấp vào \"Thêm cấp chiết khấu\" để bắt đầu.",
     "No distinctive client headers": "Tiêu đề không có dấu hiệu phân biệt máy khách",
     "No duplicate keys found": "Không tìm thấy khóa trùng lặp",

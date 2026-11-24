@@ -4459,6 +4459,7 @@
     "No deployments available. Create one to get started.": "Нет доступных развертываний. Создайте одно, чтобы начать.",
     "No Deployments Found": "Развертывания не найдены",
     "No description available.": "Описание отсутствует.",
+    "No diagnostics recorded for this request": "Для этого запроса нет диагностических данных",
     "No discount tiers configured. Click \"Add discount tier\" to get started.": "Не настроены уровни скидок. Нажмите \"Добавить уровень скидки\", чтобы начать.",
     "No distinctive client headers": "В заголовках нет отличительных признаков клиента",
     "No duplicate keys found": "Дубликаты ключей не найдены",

@@ -64,6 +64,7 @@ function renderDetails(isAdmin: boolean, extraOther: LogOtherData = {}): void {
   render(
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
+        initialView='technical'
         log={makeLog({
           admin_info: {
             reject_reason: 'blocked by channel policy',

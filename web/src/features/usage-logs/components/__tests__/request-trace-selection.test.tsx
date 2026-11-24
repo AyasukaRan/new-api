@@ -323,6 +323,7 @@ test.each(['desktop', 'mobile'] as const)(
 
     await user.keyboard('{Escape}')
     const details = await screen.findByRole('dialog', { name: /Log Details/ })
+    await user.click(within(details).getByRole('tab', { name: 'Overview' }))
     expect(within(details).getByText('request-11')).toBeVisible()
     await user.keyboard('{Escape}')
     await user.click(
@@ -368,6 +369,7 @@ test('follows new logs once, and keeps the table and selected details still unti
   await append(13)
   expect(screen.queryByText('model-13')).not.toBeInTheDocument()
   const details = screen.getByRole('dialog', { name: /Log Details/ })
+  await user.click(within(details).getByRole('tab', { name: 'Overview' }))
   expect(within(details).getByText('request-12')).toBeVisible()
   await user.keyboard('{Escape}')
   expect(screen.queryByText('model-13')).not.toBeInTheDocument()

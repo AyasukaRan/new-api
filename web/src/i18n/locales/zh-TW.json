@@ -4459,6 +4459,7 @@
     "No deployments available. Create one to get started.": "沒有可用的部署。建立一個開始吧。",
     "No Deployments Found": "未找到部署",
     "No description available.": "暫無描述。",
+    "No diagnostics recorded for this request": "此請求未記錄診斷資訊",
     "No discount tiers configured. Click \"Add discount tier\" to get started.": "未設定折扣等級。點擊「新增折扣等級」即可開始使用。",
     "No distinctive client headers": "請求標頭中沒有可區分的用戶端特徵",
     "No duplicate keys found": "未發現重複金鑰",

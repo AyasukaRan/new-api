@@ -25,7 +25,6 @@ import { isViolationFeeLog, renderLogContent } from '../lib/format'
 import { isConsumeLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { LogOverviewCard } from './dialogs/log-detail-layout'
-import { RequestTraceSection } from './dialogs/request-trace-section'
 import { LogChargeDetails } from './log-charge-details'
 import {
   LogRequestIdentifiers,
@@ -38,23 +37,25 @@ export function LogRequestOverview(props: {
   log: UsageLog
   other: LogOtherData | null
   isAdmin: boolean
+  showFailure: boolean
 }) {
   const { t } = useTranslation()
   const { log, other } = props
-  const traceId = props.isAdmin && other?.admin_info?.trace_id
   const { hasUsage: hasTokens } = getLogTokenTotals(log, other)
   const hasCharge = isConsumeLogType(log.type) || log.quota > 0
 
   return (
     <div data-slot='log-request-overview' className='space-y-3'>
-      <RequestFailureSummary
-        metadata={other}
-        error={
-          log.type === LOG_TYPE_ENUM.ERROR
-            ? (renderLogContent(other, t) ?? log.content)
-            : undefined
-        }
-      />
+      {props.showFailure && (
+        <RequestFailureSummary
+          metadata={other}
+          error={
+            log.type === LOG_TYPE_ENUM.ERROR
+              ? (renderLogContent(other, t) ?? log.content)
+              : undefined
+          }
+        />
+      )}
       <div className='grid min-w-0 items-stretch gap-3 md:grid-cols-2'>
         <LogRequestInfoCards {...props} />
         {hasTokens && (
@@ -84,9 +85,6 @@ export function LogRequestOverview(props: {
         )}
         <LogRequestIdentifiers log={log} isAdmin={props.isAdmin} />
       </div>
-      {traceId && (
-        <RequestTraceSection traceId={traceId} enabled metadata={other} />
-      )}
     </div>
   )
 }

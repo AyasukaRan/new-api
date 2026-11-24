@@ -24,7 +24,7 @@ import {
   isFailedStreamResponse,
 } from '../lib/format'
 import type { LogOtherData } from '../types'
-import { DetailRow, DetailSection } from './dialogs/log-detail-layout'
+import { DetailRow, LogOverviewCard } from './dialogs/log-detail-layout'
 
 export function RequestFailureSummary(props: {
   metadata?: LogOtherData | null
@@ -43,24 +43,29 @@ export function RequestFailureSummary(props: {
     metadata?.stream_status?.errors?.at(-1) ||
     t('Request failed')
   return (
-    <DetailSection label={t('Request failed')} variant='danger'>
-      <DetailRow label={t('Failure reason')} value={failureReason} />
-      {props.showFirstResponse &&
-        firstResponseMs != null &&
-        firstResponseMs > 0 && (
-          <DetailRow
-            label={t('First token')}
-            value={formatFirstResponseTime(firstResponseMs)}
-          />
-        )}
-      <DetailRow
-        label={
-          metadata?.retry_decision?.action === 'stop'
-            ? t('Why retry stopped')
-            : t('Retry decision')
-        }
-        value={retryReason ?? t('Not recorded')}
-      />
-    </DetailSection>
+    <LogOverviewCard
+      title={t('Request failed')}
+      className='ring-destructive/25'
+    >
+      <div className='space-y-2'>
+        <DetailRow label={t('Failure reason')} value={failureReason} />
+        {props.showFirstResponse &&
+          firstResponseMs != null &&
+          firstResponseMs > 0 && (
+            <DetailRow
+              label={t('First token')}
+              value={formatFirstResponseTime(firstResponseMs)}
+            />
+          )}
+        <DetailRow
+          label={
+            metadata?.retry_decision?.action === 'stop'
+              ? t('Why retry stopped')
+              : t('Retry decision')
+          }
+          value={retryReason ?? t('Not recorded')}
+        />
+      </div>
+    </LogOverviewCard>
   )
 }

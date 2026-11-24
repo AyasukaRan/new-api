@@ -33,6 +33,7 @@ const RequestTraceViewer = lazy(() => import('./request-trace-viewer'))
 export function RequestTraceSection(props: {
   traceId: string
   enabled: boolean
+  compact?: boolean
   metadata?: LogOtherData | null
 }) {
   const { t } = useTranslation()
@@ -51,14 +52,25 @@ export function RequestTraceSection(props: {
       trigger={
         <Button
           type='button'
-          variant='outline'
-          className='h-auto w-full justify-between gap-3 py-3'
+          variant={props.compact ? 'ghost' : 'outline'}
+          size={props.compact ? 'sm' : 'default'}
+          aria-label={t('View request trace')}
+          title={props.compact ? t('View request trace') : undefined}
+          className={
+            props.compact
+              ? 'text-muted-foreground shrink-0 gap-1.5 px-2'
+              : 'h-auto w-full justify-between gap-3 py-3'
+          }
         >
           <span className='flex min-w-0 items-center gap-2'>
             <Route className='size-4 shrink-0' aria-hidden='true' />
-            {t('View request trace')}
+            <span className={props.compact ? 'hidden sm:inline' : undefined}>
+              {t('View request trace')}
+            </span>
           </span>
-          <ArrowUpRight className='size-4 shrink-0' aria-hidden='true' />
+          {!props.compact && (
+            <ArrowUpRight className='size-4 shrink-0' aria-hidden='true' />
+          )}
         </Button>
       }
       contentClassName='w-[calc(100vw-1.5rem)] max-w-none gap-3 sm:max-w-[min(96vw,1440px)]'

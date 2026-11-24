@@ -105,6 +105,7 @@ export function LogRequestInfoCards(props: {
   log: UsageLog
   other: LogOtherData | null
   isAdmin: boolean
+  showFailure?: boolean
 }) {
   const { t, i18n } = useTranslation()
   const { log, other, isAdmin } = props
@@ -141,8 +142,17 @@ export function LogRequestInfoCards(props: {
   }
   const first = other?.frt
   const total = timing ? getLogTokenTotals(log, other).total : null
-  const requestedModel =
-    (isAdmin && other?.response_model?.requested_model) || log.model_name
+  const observation = isAdmin ? other?.response_model : undefined
+  const requestedModel = observation?.requested_model || log.model_name
+  const hasNamedTools =
+    Array.isArray(other?.invoked_tools) &&
+    other.invoked_tools.some((name) => typeof name === 'string' && name.trim())
+  const hasToolObservation =
+    hasNamedTools ||
+    other?.tool_observation === 'partial' ||
+    (other?.tool_observation === 'complete' &&
+      Array.isArray(other.invoked_tools) &&
+      other.invoked_tools.length === 0)
   return (
     <>
       <RequestInfoCard
@@ -157,7 +167,7 @@ export function LogRequestInfoCards(props: {
           { label: t('Log Type'), value: t(getLogTypeConfig(log.type).label) },
           {
             label: t('Reject Reason'),
-            value: admin?.reject_reason && (
+            value: props.showFailure !== false && admin?.reject_reason && (
               <span className='text-destructive whitespace-pre-wrap'>
                 {admin.reject_reason}
               </span>
@@ -229,14 +239,13 @@ export function LogRequestInfoCards(props: {
           {
             label: t('Upstream Model'),
             value:
-              isAdmin &&
-              (other?.response_model?.upstream_model ||
-                other?.upstream_model_name),
+              observation?.upstream_model ||
+              (isAdmin && other?.upstream_model_name),
             mono: true,
           },
           {
             label: t('Response Model'),
-            value: isAdmin && other?.response_model?.returned_model,
+            value: observation?.returned_model,
             mono: true,
           },
           { label: t('Channel'), value: channel },
@@ -272,17 +281,16 @@ export function LogRequestInfoCards(props: {
           },
           {
             label: t('Tools'),
-            value: isAdmin &&
-              Array.isArray(other?.invoked_tools) &&
-              other.invoked_tools.length > 0 && (
-                <div className='w-fit'>
-                  <RequestMetadataTags
-                    isAdmin
-                    field='invoked_tools'
-                    metadata={other}
-                  />
-                </div>
-              ),
+            value: isAdmin && hasToolObservation && (
+              <div className='w-fit'>
+                <RequestMetadataTags
+                  isAdmin
+                  expanded={!hasNamedTools}
+                  field='invoked_tools'
+                  metadata={other}
+                />
+              </div>
+            ),
           },
           {
             label: t('User Agent'),

@@ -20,14 +20,23 @@ import { useState, type ReactElement, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from '@/components/ui/accordion'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { formatTimestampToDate } from '@/lib/format'
 
 import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
-import { isViolationFeeLog } from '../lib/format'
+import { hasLogBillingEvidence } from '../lib/charge-breakdown'
+import { hasToolSurcharge, isViolationFeeLog } from '../lib/format'
 import { isTimingLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
+import { RequestTraceSection } from './dialogs/request-trace-section'
+import { LogBillingEvidence } from './log-billing-evidence'
 import { LogChargeDetails } from './log-charge-details'
 import { LogRequestOverview } from './log-request-overview'
 import { LogTimingDetails } from './log-timing-details'
@@ -57,32 +66,51 @@ export function LogRequestDetailTabs(
     />
   )
   if (!isTimingLogType(props.log.type)) return charge
+  const traceId = props.isAdmin && props.other?.admin_info?.trace_id
+  const hasEvidence = hasLogBillingEvidence(
+    props.other,
+    props.isAdmin,
+    props.log.type
+  )
   const hasCharge =
+    hasEvidence ||
+    hasToolSurcharge(props.other) ||
     props.log.type !== LOG_TYPE_ENUM.ERROR ||
     props.log.quota > 0 ||
     props.initialTab === 'cost'
   return (
     <Tabs defaultValue={props.initialTab} className='gap-3'>
-      <div className='border-border bg-popover sticky top-0 z-10 overflow-x-auto border-b'>
-        <TabsList
-          variant='line'
-          aria-label={t('Request details')}
-          className='gap-1 sm:gap-3'
-        >
-          <TabsTrigger value='overview'>{t('Overview')}</TabsTrigger>
-          {hasCharge && (
-            <TabsTrigger value='cost'>{t('Cost breakdown')}</TabsTrigger>
-          )}
-          <TabsTrigger value='timing'>{t('Timing breakdown')}</TabsTrigger>
-          {props.children && (
-            <TabsTrigger value='technical'>
-              {t('Technical details')}
-            </TabsTrigger>
-          )}
-        </TabsList>
+      <div className='border-border bg-popover sticky top-0 z-10 flex min-w-0 items-center justify-between gap-1 border-b'>
+        <div className='min-w-0 overflow-x-auto'>
+          <TabsList
+            variant='line'
+            aria-label={t('Request details')}
+            className='gap-1 sm:gap-3'
+          >
+            <TabsTrigger value='overview'>{t('Overview')}</TabsTrigger>
+            {hasCharge && (
+              <TabsTrigger value='cost'>{t('Cost breakdown')}</TabsTrigger>
+            )}
+            <TabsTrigger value='timing'>{t('Timing breakdown')}</TabsTrigger>
+            {props.children && (
+              <TabsTrigger value='technical'>
+                {t('Technical details')}
+              </TabsTrigger>
+            )}
+          </TabsList>
+        </div>
+        {traceId && (
+          <RequestTraceSection
+            traceId={traceId}
+            enabled
+            compact
+            metadata={props.other}
+          />
+        )}
       </div>
       <TabsContent value='overview'>
         <LogRequestOverview
+          showFailure={!props.children}
           log={props.log}
           other={props.other}
           isAdmin={props.isAdmin}
@@ -91,6 +119,20 @@ export function LogRequestDetailTabs(
       {hasCharge && (
         <TabsContent value='cost' className='mx-auto w-full max-w-xl'>
           {charge}
+          {props.other && hasEvidence && (
+            <Accordion className='mt-4 border-t'>
+              <AccordionItem value='parameters'>
+                <AccordionTrigger>{t('Billing parameters')}</AccordionTrigger>
+                <AccordionContent>
+                  <LogBillingEvidence
+                    log={props.log}
+                    other={props.other}
+                    isAdmin={props.isAdmin}
+                  />
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          )}
         </TabsContent>
       )}
       <TabsContent value='timing' className='mx-auto w-full max-w-xl'>

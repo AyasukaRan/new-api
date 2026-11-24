@@ -513,8 +513,9 @@ it('opens the shared pagination evidence from a mobile log', async () => {
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: /Details · #1/ }))
   const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+  await user.click(within(dialog).getByRole('tab', { name: 'Cost breakdown' }))
   await user.click(
-    within(dialog).getByRole('tab', { name: 'Technical details' })
+    within(dialog).getByRole('button', { name: 'Billing parameters' })
   )
   expect(
     within(dialog).getByText('Locally counted document pages')
