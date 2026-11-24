@@ -131,8 +131,9 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				for range 2 {
 					require.NoError(t, model.MigrateLogFilterIndexes())
 				}
-				require.NoError(t, model.LOG_DB.Exec("DROP INDEX idx_logs_client_tool_time_v1, idx_logs_reasoning_effort_time_v1").Error)
+				require.NoError(t, model.LOG_DB.Exec("DROP INDEX idx_logs_client_tool_time_v1, idx_logs_reasoning_effort_time_v1, idx_logs_transport_time_v1, idx_logs_request_path_time_v1").Error)
 				require.NoError(t, model.LOG_DB.Exec("DROP FUNCTION new_api_log_text_v1(text,text)").Error)
+				require.NoError(t, model.LOG_DB.Exec("DROP FUNCTION new_api_log_transport_v1(text,bigint,boolean)").Error)
 			}
 			seedExportLogs(t, mainDB, model.LOG_DB, now)
 			query := fmt.Sprintf("start_timestamp=%d&end_timestamp=%d", now-2*24*3600, now+3600)
@@ -388,6 +389,75 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				ownStats := callLogHandler(t, GetLogsSelfStat, 78, common.RoleCommonUser, private+"&live_total=1")[0]
 				require.Equal(t, true, ownStats["success"])
 				assert.EqualValues(t, 1, ownStats["data"].(map[string]any)["live_total"])
+			})
+			t.Run("transport and endpoint filters", func(t *testing.T) {
+				require.NoError(t, model.MigrateLogFilterIndexes())
+				const userID = 82
+				const query = "model_name=transport-fixture"
+				rows := []model.Log{
+					{RequestId: "observed", Other: `{"request_path":"/v1/responses","response_transport":"sse"}`},
+					{RequestId: "prepared", Type: model.LogTypeError, Other: `{"request_path":"/v1/responses?beta=true","prepared_response_transport":"sse"}`},
+					{RequestId: "observed-first", Other: `{"response_transport":"http","prepared_response_transport":"sse","ws":true}`},
+					{RequestId: "ws", Other: `{"ws":true,"prepared_response_transport":"sse"}`},
+					{RequestId: "legacy", Other: `{"request_path":"/v1/messages?beta=true","frt":1.5,"stream_status":{"status":"ok","end_reason":"eof"}}`},
+					{RequestId: "incomplete", Other: `{"request_path":"/v1/messages","frt":15,"stream_status":{"status":"ok","response_status":"incomplete"}}`},
+					{RequestId: "legacy-completed", Other: `{"request_path":"/v1/messages","stream_status":{"status":"ok","response_status":"completed"}}`},
+					{RequestId: "errored", Other: `{"request_path":"/v1/messages","frt":4,"stream_status":{"status":"ok","error_count":1}}`},
+					{RequestId: "nested-only", Other: `{"admin_info":{"response_transport":"sse","request_path":"/v1/responses"}}`},
+					{RequestId: "broken", Other: `{"response_transport":"sse"`},
+					{RequestId: "other-owner", UserId: userID + 1, Other: `{"response_transport":"sse","request_path":"/v1/responses_extra"}`},
+					{RequestId: "nonstream"}, {RequestId: "async", Other: `{"is_task":true,"response_transport":"sse"}`},
+					{RequestId: "sync", Other: `{"is_task":true,"task_sync":true,"response_transport":"http"}`},
+					{RequestId: "refund", Type: model.LogTypeRefund, Other: `{"response_transport":"sse","request_path":"/v1/responses"}`},
+					{RequestId: "other-path", Other: `{"ws":true,"request_path":"/v1/responsesXextra"}`},
+				}
+				var refs []model.LiveLogRef
+				for i := range rows {
+					row := &rows[i]
+					if row.UserId == 0 {
+						row.UserId = userID
+					}
+					if row.Type == 0 {
+						row.Type = model.LogTypeConsume
+					}
+					row.IsStream = row.RequestId != "nonstream"
+					row.Id, row.CreatedAt, row.ModelName = 91500+i, now, "transport-fixture"
+					require.NoError(t, model.LOG_DB.Create(row).Error)
+					refs = append(refs, model.LiveLogRef{ID: row.Id, UserID: row.UserId, RequestID: row.RequestId, CreatedAt: now})
+				}
+				for transport, want := range map[string][]string{
+					"sse":  {"observed", "prepared", "legacy", "legacy-completed", "other-owner"},
+					"http": {"observed-first"}, "ws": {"ws", "other-path"},
+					"unknown":      {"broken", "incomplete", "nested-only", "errored"},
+					"non_streamed": {"nonstream"}, "sync": {"sync"}, "async": {"async"},
+				} {
+					data := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, query+"&response_transport="+transport)[0]
+					require.Equal(t, true, data["success"], data)
+					page := data["data"].(map[string]any)
+					assert.EqualValues(t, len(want), page["total"], transport)
+					var ids []string
+					for _, item := range page["items"].([]any) {
+						ids = append(ids, item.(map[string]any)["request_id"].(string))
+					}
+					assert.ElementsMatch(t, want, ids, transport)
+				}
+				filtered := query + "&response_transport=sse&request_path=/v1/responses"
+				exported := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, filtered)
+				assert.ElementsMatch(t, []any{"observed", "prepared"}, exportedRequestIds(exported))
+				// A literal underscore in a path is never a wildcard.
+				exactPath := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&request_path=/v1/responses_extra")
+				assert.Equal(t, []any{"other-owner"}, exportedRequestIds(exactPath))
+				stat := callLogHandler(t, GetLogsStat, 3, common.RoleAdminUser, filtered+"&live_total=1")[0]
+				require.Equal(t, true, stat["success"], stat)
+				assert.EqualValues(t, 2, stat["data"].(map[string]any)["live_total"])
+				changes, omitted, err := model.GetChangedLogs(t.Context(), model.LogFilter{ResponseTransport: "sse", RequestPath: "/v1/responses"}, 0, common.RoleAdminUser, true, 10, refs)
+				require.NoError(t, err)
+				assert.Len(t, changes, 2)
+				assert.Zero(t, omitted)
+				// The personal API accepts the visible mode, ignores the admin-only endpoint,
+				// and never returns rows belonging to a different user.
+				own := callLogHandler(t, ExportUserLogs, userID, common.RoleCommonUser, filtered)
+				assert.ElementsMatch(t, []any{"observed", "prepared", "legacy", "legacy-completed"}, exportedRequestIds(own))
 			})
 			t.Run("live changes", func(t *testing.T) {
 				first := model.Log{Id: 88001, UserId: 81, CreatedAt: now - 1, ModelName: "live-test", Type: model.LogTypeError, RequestId: "multi-attempt", ChannelId: 9, UpstreamRequestId: "private-upstream", Other: `{"admin_info":{"request_body":"sensitive input"},"root_info":{"secret":"root-only"}}`}

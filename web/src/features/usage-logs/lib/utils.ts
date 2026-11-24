@@ -205,6 +205,12 @@ export function buildApiParams(config: {
     ...(config.source !== 'test' && isAdmin && searchParams.clientTool
       ? { client_tool: String(searchParams.clientTool) }
       : {}),
+    ...(config.source !== 'test' && searchParams.responseTransport
+      ? { response_transport: String(searchParams.responseTransport) }
+      : {}),
+    ...(config.source !== 'test' && isAdmin && searchParams.requestPath
+      ? { request_path: String(searchParams.requestPath) }
+      : {}),
     ...(config.source !== 'test' && searchParams.ip
       ? { ip: String(searchParams.ip) }
       : {}),

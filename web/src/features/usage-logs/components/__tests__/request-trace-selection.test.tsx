@@ -69,12 +69,13 @@ afterEach(() => {
 function renderLogs(
   live = false,
   path = '/usage-logs/common',
-  content?: string | ((id: number) => string)
+  content?: string | ((id: number) => string),
+  initialIds = [11, 10]
 ) {
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
-  let records = [entry(11), entry(10)].map((record) => ({
+  let records = initialIds.map(entry).map((record) => ({
     ...record,
     content:
       typeof content === 'function'
@@ -250,6 +251,114 @@ test('column filters apply across pages and clear only their own fields', async 
     'Enter a positive integer'
   )
   expect(router.state.location.search.channel).toBeUndefined()
+})
+
+test('filters error logs from the Time header and preserves the other filters when cleared', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?page=2&group=default&type=%5B%220%22%5D'
+  )
+  const button = await screen.findByRole('button', { name: 'Filter · Time' })
+  expect(
+    screen.queryByRole('combobox', { name: 'Type' })
+  ).not.toBeInTheDocument()
+  button.focus()
+  await user.keyboard('{Enter}')
+  await user.click(screen.getByRole('combobox', { name: 'Type' }))
+  await user.click(await screen.findByRole('option', { name: 'Error' }))
+  await user.click(screen.getByRole('button', { name: 'Apply' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      type: ['5'],
+      group: 'default',
+      page: 1,
+    })
+  )
+  await user.click(screen.getByRole('button', { name: 'Filter · Time (1)' }))
+  await user.click(screen.getByRole('button', { name: 'Clear' }))
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Filter · Time' })).toBeVisible()
+  )
+  expect(router.state.location.search.type).toBeUndefined()
+  expect(router.state.location.search.group).toBe('default')
+})
+
+test('can select a protocol and enter an off-page endpoint from an empty log table', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?page=2&type=%5B%225%22%5D',
+    undefined,
+    []
+  )
+  await user.click(
+    await screen.findByRole('button', { name: 'Filter · Transport' })
+  )
+  const panel = screen.getByRole('dialog', { name: 'Transport' })
+  await user.click(
+    within(panel).getByRole('combobox', { name: 'Response mode' })
+  )
+  await user.click(await screen.findByRole('option', { name: 'SSE' }))
+  await user.type(within(panel).getByLabelText('Endpoint'), '/v1/responses')
+  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      type: ['5'],
+      responseTransport: 'sse',
+      requestPath: '/v1/responses',
+      page: 1,
+    })
+  )
+  await waitFor(() =>
+    expect(
+      vi.mocked(api.get).mock.calls.some(([path]) => {
+        const url = new URL(path, 'http://localhost')
+        return (
+          url.pathname === '/api/log/' &&
+          url.searchParams.get('response_transport') === 'sse' &&
+          url.searchParams.get('request_path') === '/v1/responses'
+        )
+      })
+    ).toBe(true)
+  )
+  await user.click(
+    screen.getByRole('button', { name: 'Filter · Transport (2)' })
+  )
+  await user.click(screen.getByRole('button', { name: 'Clear' }))
+  await waitFor(() =>
+    expect(router.state.location.search.responseTransport).toBeUndefined()
+  )
+  expect(router.state.location.search.requestPath).toBeUndefined()
+  expect(router.state.location.search.type).toEqual(['5'])
+})
+
+test('keeps transport filters editable in the toolbar when the column is hidden', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?responseTransport=sse&requestPath=%2Fv1%2Fmessages'
+  )
+  await screen.findByRole('button', { name: 'Filter · Transport (2)' })
+  await user.click(screen.getByRole('button', { name: 'Column settings' }))
+  await user.click(screen.getByRole('menuitemcheckbox', { name: 'Transport' }))
+  await user.keyboard('{Escape}')
+  expect(
+    screen.queryByRole('button', { name: /Filter · Transport/ })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: /^Expand/ }))
+  const mode = screen.getByRole('combobox', { name: 'Response mode' })
+  expect(mode).toHaveTextContent('SSE')
+  expect(screen.getByLabelText('Endpoint')).toHaveValue('/v1/messages')
+  await user.click(mode)
+  await user.click(await screen.findByRole('option', { name: 'HTTP' }))
+  await user.click(screen.getByRole('button', { name: 'Search' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      responseTransport: 'http',
+      requestPath: '/v1/messages',
+    })
+  )
 })
 
 test('opens the identity filter without obscuring its fields and selects a username inline', async () => {

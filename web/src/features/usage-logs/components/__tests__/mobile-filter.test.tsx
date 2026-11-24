@@ -155,12 +155,19 @@ it('applies mobile drawer filters only when Search is pressed', async () => {
     within(dialog).getByPlaceholderText('Model Name'),
     'gemini-3.7-flash'
   )
+  expect(within(dialog).getByRole('combobox', { name: 'Type' })).toBeVisible()
+  expect(within(dialog).queryByLabelText('Endpoint')).not.toBeInTheDocument()
+  await user.click(
+    within(dialog).getByRole('combobox', { name: 'Response mode' })
+  )
+  await user.click(await screen.findByRole('option', { name: 'WS' }))
   expect(router.state.location.search).not.toHaveProperty('model')
   await user.click(within(dialog).getByRole('button', { name: 'Search' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       page: 1,
       model: 'gemini-3.7-flash',
+      responseTransport: 'ws',
     })
   )
   await waitFor(() =>

@@ -23,16 +23,7 @@ import { Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Tooltip,
   TooltipContent,
@@ -40,9 +31,14 @@ import {
 } from '@/components/ui/tooltip'
 import { useMediaQuery } from '@/hooks'
 
-import { LOG_TYPE_ALL_VALUE, LOG_TYPE_FILTERS } from '../constants'
+import { LOG_TYPE_ALL_VALUE } from '../constants'
 import { useLiveLogRange } from '../hooks/use-live-log-range'
-import { buildSearchParams, isValidLogChannelFilter } from '../lib/filter'
+import {
+  buildSearchParams,
+  getLogTypeValue,
+  isValidLogChannelFilter,
+  type LogColumnFilterKey,
+} from '../lib/filter'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import type { CommonLogFilters } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
@@ -62,28 +58,10 @@ import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 
-type LogTypeValue = (typeof LOG_TYPE_FILTERS)[number]['value']
-const logTypeValueSet = new Set<string>(
-  LOG_TYPE_FILTERS.map((type) => type.value)
-)
-
 type CommonLogDraft = {
   sourceKey: string
   filters: CommonLogFilters
-  logType: LogTypeValue
-}
-
-function isLogTypeValue(value: string): value is LogTypeValue {
-  return logTypeValueSet.has(value)
-}
-
-function getLogTypeValue(value: unknown): LogTypeValue {
-  return Array.isArray(value) &&
-    value.length === 1 &&
-    typeof value[0] === 'string' &&
-    isLogTypeValue(value[0])
-    ? value[0]
-    : LOG_TYPE_ALL_VALUE
+  logType: string
 }
 
 function buildSearchSourceKey(values: {
@@ -97,6 +75,8 @@ function buildSearchSourceKey(values: {
   username?: unknown
   reasoningEffort?: unknown
   clientTool?: unknown
+  responseTransport?: unknown
+  requestPath?: unknown
   ip?: unknown
   requestId?: unknown
   upstreamRequestId?: unknown
@@ -113,6 +93,8 @@ function buildSearchSourceKey(values: {
     values.username,
     values.reasoningEffort,
     values.clientTool,
+    values.responseTransport,
+    values.requestPath,
     values.ip,
     values.requestId,
     values.upstreamRequestId,
@@ -138,7 +120,7 @@ export function CommonLogsFilterBar<TData>(
   const searchParams = route.useSearch()
   const livePreset = getLogTimePreset(searchParams)
   const autoRefresh = searchParams.autoRefresh !== false
-  const { isAdminView: isAdmin, canManageScope, logSource } = useLogsViewScope()
+  const { isAdminView: isAdmin, logSource } = useLogsViewScope()
   const isTest = logSource === 'test'
   const section = isTest ? 'test' : 'common'
   useLiveLogRange(livePreset, isTest && autoRefresh)
@@ -181,6 +163,8 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username,
       reasoningEffort: searchParams.reasoningEffort,
       clientTool: searchParams.clientTool,
+      responseTransport: searchParams.responseTransport,
+      requestPath: searchParams.requestPath,
       ip: searchParams.ip,
       requestId: searchParams.requestId,
       upstreamRequestId: searchParams.upstreamRequestId,
@@ -199,6 +183,8 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username || undefined,
       reasoningEffort: searchParams.reasoningEffort || undefined,
       clientTool: searchParams.clientTool || undefined,
+      responseTransport: searchParams.responseTransport || undefined,
+      requestPath: searchParams.requestPath || undefined,
       ip: searchParams.ip || undefined,
       requestId: searchParams.requestId || undefined,
       upstreamRequestId: searchParams.upstreamRequestId || undefined,
@@ -219,6 +205,8 @@ export function CommonLogsFilterBar<TData>(
     searchParams.username,
     searchParams.reasoningEffort,
     searchParams.clientTool,
+    searchParams.responseTransport,
+    searchParams.requestPath,
     searchParams.ip,
     searchParams.requestId,
     searchParams.upstreamRequestId,
@@ -346,6 +334,8 @@ export function CommonLogsFilterBar<TData>(
   const reasoningInToolbar = !isTest && inToolbar('reasoning_effort')
   const sourceInToolbar = !isTest && inToolbar('request_source')
   const modelInToolbar = inToolbar('model_name')
+  const typeInToolbar = !isTest && inToolbar('created_at')
+  const transportInToolbar = !isTest && inToolbar('is_stream')
   const hasTypeFilter = logType !== LOG_TYPE_ALL_VALUE
   const expandedFilterCount = [
     accountInToolbar && filters.token,
@@ -354,6 +344,8 @@ export function CommonLogsFilterBar<TData>(
     reasoningInToolbar && filters.reasoningEffort,
     isAdmin && sourceInToolbar && filters.clientTool,
     sourceInToolbar && filters.ip,
+    transportInToolbar && filters.responseTransport,
+    transportInToolbar && isAdmin && filters.requestPath,
     filters.requestId,
     isAdmin && filters.upstreamRequestId,
   ].filter(Boolean).length
@@ -367,28 +359,14 @@ export function CommonLogsFilterBar<TData>(
     !isTest && filters.reasoningEffort,
     !isTest && isAdmin && filters.clientTool,
     !isTest && filters.ip,
+    !isTest && filters.responseTransport,
+    !isTest && isAdmin && filters.requestPath,
     filters.requestId,
     isAdmin && filters.upstreamRequestId,
   ].filter(Boolean).length
   const sensitiveInputClass = sensitiveVisible
     ? undefined
     : '[-webkit-text-security:disc]'
-  const logTypeItems = useMemo(
-    () =>
-      LOG_TYPE_FILTERS.filter((type) => !type.deprecated || canManageScope).map(
-        (type) => ({
-          value: type.value,
-          label: t(type.label),
-          deprecated: type.deprecated,
-        })
-      ),
-    [t, canManageScope]
-  )
-  const selectedLogType = logTypeItems.find((type) => type.value === logType)
-  const deprecatedTypeDescription = t(
-    'Only used to find historical logs. New records are available in Audit Logs.'
-  )
-
   const statsBar = (
     <CommonLogsStats
       livePreset={streamPreset}
@@ -492,8 +470,18 @@ export function CommonLogsFilterBar<TData>(
   const columnFieldProps = {
     inlineSuggestions,
     isAdmin,
-    values: filters,
-    onChange: handleChange,
+    values: { ...filters, type: logType },
+    onChange: (field: LogColumnFilterKey, value: string) => {
+      if (field !== 'type') {
+        handleChange(field, value)
+        return
+      }
+      setDraft((current) => {
+        const base =
+          current.sourceKey === searchState.sourceKey ? current : searchState
+        return { ...base, logType: value }
+      })
+    },
     onKeyDown: handleKeyDown,
     maskClass: sensitiveInputClass,
   }
@@ -511,77 +499,7 @@ export function CommonLogsFilterBar<TData>(
     />
   )
   const typeFilter = (
-    <LogsFilterField>
-      <Select
-        items={logTypeItems}
-        value={logType}
-        onValueChange={(value) => {
-          const nextLogType =
-            value !== null && isLogTypeValue(value) ? value : LOG_TYPE_ALL_VALUE
-          setDraft((current) => {
-            const base =
-              current.sourceKey === searchState.sourceKey
-                ? current
-                : searchState
-            return {
-              sourceKey: searchState.sourceKey,
-              filters: base.filters,
-              logType: nextLogType,
-            }
-          })
-        }}
-      >
-        <SelectTrigger
-          aria-label={t('Type')}
-          aria-description={
-            selectedLogType?.deprecated ? deprecatedTypeDescription : undefined
-          }
-        >
-          <SelectValue className='min-w-0'>
-            <span className='truncate'>
-              {selectedLogType?.label ?? t('All Types')}
-            </span>
-            {selectedLogType?.deprecated && (
-              <Badge
-                variant='secondary'
-                className='h-4 px-1.5 text-[10px] font-normal'
-                title={deprecatedTypeDescription}
-              >
-                {t('Deprecated')}
-              </Badge>
-            )}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent
-          alignItemWithTrigger={false}
-          className='max-w-[calc(100vw-2rem)] min-w-52'
-        >
-          <SelectGroup>
-            {logTypeItems.map((type) => (
-              <SelectItem
-                key={type.value}
-                value={type.value}
-                className='[&_[data-slot=select-item-text]]:items-center'
-                aria-description={
-                  type.deprecated ? deprecatedTypeDescription : undefined
-                }
-              >
-                {type.label}
-                {type.deprecated && (
-                  <Badge
-                    variant='secondary'
-                    className='h-4 px-1.5 text-[10px] font-normal'
-                    title={deprecatedTypeDescription}
-                  >
-                    {t('Deprecated')}
-                  </Badge>
-                )}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
-    </LogsFilterField>
+    <LogColumnFilterFields column='time' {...columnFieldProps} />
   )
   const advancedFilters = (
     <>
@@ -611,6 +529,9 @@ export function CommonLogsFilterBar<TData>(
       )}
       {reasoningInToolbar && (
         <LogColumnFilterFields column='reasoning' {...columnFieldProps} />
+      )}
+      {transportInToolbar && (
+        <LogColumnFilterFields column='transport' {...columnFieldProps} />
       )}
       {sourceInToolbar && (
         <LogColumnFilterFields column='source' {...columnFieldProps} />
@@ -649,7 +570,7 @@ export function CommonLogsFilterBar<TData>(
           {dateRangeFilter}
           {modelInToolbar && modelFilter}
           {accountInToolbar && groupFilter}
-          {!isTest && typeFilter}
+          {typeInToolbar && typeFilter}
         </>
       }
       advancedFilters={advancedFilters}

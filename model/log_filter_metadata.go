@@ -66,8 +66,31 @@ END; $$`
 				return err
 			}
 		}
-		for _, key := range []string{"reasoning_effort", "client_tool"} {
-			name := "idx_logs_" + key + "_time_v1"
+		if err := db.Raw("SELECT to_regprocedure('new_api_log_transport_v1(text,bigint,boolean)') IS NOT NULL").Scan(&installed).Error; err != nil {
+			return err
+		}
+		if !installed {
+			query := `CREATE FUNCTION new_api_log_transport_v1(metadata text, log_type bigint, streaming boolean)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE facts jsonb;
+BEGIN
+	facts := NULLIF(metadata, '')::jsonb;
+	RETURN ` + logTransportCaseSQL("log_type", "streaming") + `;
+EXCEPTION WHEN data_exception OR program_limit_exceeded THEN
+	RETURN CASE WHEN streaming THEN 'unknown' ELSE 'non_streamed' END;
+END; $$`
+			if err := db.Exec(query).Error; err != nil {
+				return err
+			}
+		}
+		indexes := []struct{ name, expression string }{
+			{"idx_logs_reasoning_effort_time_v1", "left(new_api_log_text_v1(other, 'reasoning_effort'), 128)"},
+			{"idx_logs_client_tool_time_v1", "left(new_api_log_text_v1(other, 'client_tool'), 128)"},
+			{"idx_logs_transport_time_v1", "new_api_log_transport_v1(other, type, is_stream)"},
+			{"idx_logs_request_path_time_v1", "left(split_part(new_api_log_text_v1(other, 'request_path'), chr(63), 1), 128)"},
+		}
+		for _, index := range indexes {
+			name := index.name
 			var valid sql.NullBool
 			if err := db.Raw("SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(?))", name).Row().Scan(&valid); err != nil {
 				return err
@@ -80,7 +103,7 @@ END; $$`
 					return err
 				}
 			}
-			if err := db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS " + name + " ON logs (left(new_api_log_text_v1(other, '" + key + "'), 128), created_at, id)").Error; err != nil {
+			if err := db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS " + name + " ON logs (" + index.expression + ", created_at, id)").Error; err != nil {
 				return err
 			}
 		}

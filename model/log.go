@@ -638,6 +638,8 @@ type LogFilter struct {
 	EndTimestamp      int64
 	ModelName         string
 	ReasoningEffort   string
+	ResponseTransport string
+	RequestPath       string
 	ClientTool        string
 	IP                string
 	Username          string
@@ -719,6 +721,25 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	}
 	if f.ReasoningEffort != "" {
 		tx = filterLogMetadataText(tx, "reasoning_effort", f.ReasoningEffort)
+	}
+	if f.ResponseTransport != "" {
+		switch f.ResponseTransport {
+		case "sse", "ws", "http", "sync", "async", "unknown", "non_streamed":
+			tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeError, LogTypeTestConsume}).
+				Where(logTransportFilterSQL()+" = ?", f.ResponseTransport)
+		default:
+			return nil, common.NewMessage("Invalid parameters")
+		}
+	}
+	if f.RequestPath != "" {
+		tx = tx.Where("logs.type IN ?", []int{LogTypeUnknown, LogTypeConsume, LogTypeError, LogTypeTestConsume})
+		path := logRequestPathSQL()
+		if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
+			tx = tx.Where("left("+path+", 128) = left(CAST(? AS text), 128)", f.RequestPath)
+		}
+		if !common.UsingLogDatabase(common.DatabaseTypePostgreSQL) || len(f.RequestPath) >= 128 {
+			tx = tx.Where(path+" = ?", f.RequestPath)
+		}
 	}
 	if f.ClientTool != "" {
 		tx = filterLogMetadataText(tx, "client_tool", f.ClientTool)

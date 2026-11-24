@@ -19,7 +19,11 @@ For commercial licensing, please contact support@quantumnous.com
 /**
  * Utility functions for usage logs filters
  */
-import { LOG_CATEGORY_LABELS } from '../constants'
+import {
+  LOG_CATEGORY_LABELS,
+  LOG_TYPE_ALL_VALUE,
+  LOG_TYPE_FILTERS,
+} from '../constants'
 import type {
   LogCategory,
   LogFilters,
@@ -27,6 +31,15 @@ import type {
   DrawingLogFilters,
   TaskLogFilters,
 } from '../types'
+
+export function getLogTypeValue(value: unknown): string {
+  return Array.isArray(value) &&
+    value.length === 1 &&
+    typeof value[0] === 'string' &&
+    LOG_TYPE_FILTERS.some((type) => type.value === value[0])
+    ? value[0]
+    : LOG_TYPE_ALL_VALUE
+}
 
 // ============================================================================
 // Filter Building Functions
@@ -60,6 +73,12 @@ export function buildSearchParams(
         }),
         ...(commonFilters.clientTool && {
           clientTool: commonFilters.clientTool,
+        }),
+        ...(commonFilters.responseTransport && {
+          responseTransport: commonFilters.responseTransport,
+        }),
+        ...(commonFilters.requestPath && {
+          requestPath: commonFilters.requestPath,
         }),
         ...(commonFilters.ip && { ip: commonFilters.ip }),
         ...(commonFilters.requestId && { requestId: commonFilters.requestId }),
@@ -95,6 +114,8 @@ export function getLogCategoryLabel(category: LogCategory): string {
 }
 
 const columnKeys = {
+  time: ['type'],
+  transport: ['responseTransport', 'requestPath'],
   channel: ['channel'],
   identity: ['username', 'token', 'group'],
   model: ['model'],
@@ -120,6 +141,8 @@ export function getLogColumnFilterKeys(
   isAdmin: boolean
 ) {
   return columnKeys[column].filter(
-    (key) => isAdmin || !['channel', 'username', 'clientTool'].includes(key)
+    (key) =>
+      isAdmin ||
+      !['channel', 'username', 'clientTool', 'requestPath'].includes(key)
   )
 }

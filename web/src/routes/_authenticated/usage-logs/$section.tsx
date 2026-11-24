@@ -20,6 +20,7 @@ import { createFileRoute, redirect } from '@tanstack/react-router'
 import z from 'zod'
 
 import { UsageLogs } from '@/features/usage-logs'
+import { LOG_RESPONSE_TRANSPORTS } from '@/features/usage-logs/constants'
 import { LOG_TIME_PRESETS } from '@/features/usage-logs/lib/time-range'
 import {
   isUsageLogsSectionId,
@@ -48,6 +49,13 @@ const usageLogsSearchSchema = z.object({
   username: z.string().optional().catch(''),
   reasoningEffort: z.string().optional().catch(''),
   clientTool: z.string().optional().catch(''),
+  responseTransport: z.enum(LOG_RESPONSE_TRANSPORTS).optional().catch(undefined),
+  requestPath: z
+    .string()
+    .trim()
+    .transform((value) => value.split('?', 1)[0] || undefined)
+    .optional()
+    .catch(undefined),
   ip: z.string().optional().catch(''),
   requestId: z.string().optional().catch(''),
   upstreamRequestId: z.string().optional().catch(''),

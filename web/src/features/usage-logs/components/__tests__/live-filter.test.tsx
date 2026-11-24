@@ -144,7 +144,7 @@ afterEach(() => {
 
 it('selects Today as a live range from local midnight through now and preserves saved filters', async () => {
   const { router } = await renderFilter(
-    '?startTime=1000000&endTime=2000000&page=3&pageSize=25&model=model-a&group=default&reasoningEffort=high&ip=192.0.2.10&clientTool=Claude%20Code'
+    '?startTime=1000000&endTime=2000000&page=3&pageSize=25&model=model-a&group=default&reasoningEffort=high&ip=192.0.2.10&clientTool=Claude%20Code&responseTransport=sse&requestPath=%2Fv1%2Fresponses'
   )
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: /^1970/ }))
@@ -161,6 +161,8 @@ it('selects Today as a live range from local midnight through now and preserves 
       reasoningEffort: 'high',
       ip: '192.0.2.10',
       clientTool: 'Claude Code',
+      responseTransport: 'sse',
+      requestPath: '/v1/responses',
     })
   )
   await waitFor(() =>
@@ -170,6 +172,8 @@ it('selects Today as a live range from local midnight through now and preserves 
       reasoning_effort: 'high',
       ip: '192.0.2.10',
       client_tool: 'Claude Code',
+      response_transport: 'sse',
+      request_path: '/v1/responses',
     })
   )
   expect(screen.getByRole('button', { name: 'Auto refresh' })).toHaveAttribute(

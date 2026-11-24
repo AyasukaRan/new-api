@@ -378,6 +378,8 @@ function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
 }
 
 const filterColumns: Partial<Record<string, LogFilterColumn>> = {
+  created_at: 'time',
+  is_stream: 'transport',
   channel: 'channel',
   token_name: 'identity',
   model_name: 'model',

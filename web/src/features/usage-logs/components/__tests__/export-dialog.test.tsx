@@ -220,7 +220,15 @@ it('downloads the streamed logs of the current filters as CSV from a subpath dep
   const success = vi.spyOn(toast, 'success')
   const user = userEvent.setup()
   const range = recentRange()
-  renderExport({ role: ROLE.USER, search: { ...range, model: 'gpt-4o' } })
+  renderExport({
+    role: ROLE.USER,
+    search: {
+      ...range,
+      model: 'gpt-4o',
+      responseTransport: 'ws',
+      requestPath: '/v1/responses',
+    },
+  })
 
   await user.click(await screen.findByRole('button', { name: 'Export' }))
   await user.click(
@@ -232,6 +240,8 @@ it('downloads the streamed logs of the current filters as CSV from a subpath dep
   const params = new URL(String(url), 'http://localhost').searchParams
   expect(String(url)).toMatch(/^\/new-api\/api\/log\/self\/export\?/)
   expect(params.get('model_name')).toBe('gpt-4o')
+  expect(params.get('response_transport')).toBe('ws')
+  expect(params.has('request_path')).toBe(false)
   expect(params.get('start_timestamp')).toBe(
     String(Math.floor(range.startTime / 1000))
   )

@@ -30,9 +30,11 @@ import {
 } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 
+import { LOG_TYPE_ALL_VALUE } from '../constants'
 import type { UsageLog } from '../data/schema'
 import {
   getLogColumnFilterKeys,
+  getLogTypeValue,
   isValidLogChannelFilter,
   type LogColumnFilterKey,
   type LogColumnFilterValues,
@@ -50,6 +52,7 @@ const suggestionsFromLog: Partial<
   clientTool: (log) => getLogMetadata(log)?.client_tool,
   reasoningEffort: (log) => getLogMetadata(log)?.reasoning_effort,
   model: (log) => log.model_name,
+  requestPath: (log) => getLogMetadata(log)?.request_path?.split('?', 1)[0],
   channel: (log) => (log.channel ? String(log.channel) : undefined),
 }
 
@@ -75,12 +78,19 @@ export function LogHeaderFilter(props: {
   const keys = columns.flatMap((column) =>
     getLogColumnFilterKeys(column, props.isAdmin)
   )
-  const active = keys.filter((key) => !!search[key]).length
+  const selected: LogColumnFilterValues = Object.fromEntries(
+    keys.map((key) => {
+      if (key !== 'type') return [key, search[key] ?? '']
+      const type = getLogTypeValue(search.type)
+      return [key, type === LOG_TYPE_ALL_VALUE ? '' : type]
+    })
+  )
+  const active = keys.filter((key) => !!selected[key]).length
   const label = `${t('Filter')} · ${props.title}`
 
   function handleOpen(nextOpen: boolean) {
     if (nextOpen) {
-      setDraft(Object.fromEntries(keys.map((key) => [key, search[key] ?? ''])))
+      setDraft(selected)
       // These are suggestions only. A typed value searches the entire selected period.
       const options: Partial<Record<LogColumnFilterKey, string[]>> = {}
       for (const key of keys) {
@@ -106,7 +116,16 @@ export function LogHeaderFilter(props: {
       search: (previous) => ({
         ...previous,
         ...Object.fromEntries(
-          keys.map((key) => [key, values[key]?.trim() || undefined])
+          keys.map((key) => {
+            const value = values[key]?.trim()
+            if (key === 'type') {
+              return [
+                key,
+                value && value !== LOG_TYPE_ALL_VALUE ? [value] : undefined,
+              ]
+            }
+            return [key, value || undefined]
+          })
         ),
         page: 1,
       }),

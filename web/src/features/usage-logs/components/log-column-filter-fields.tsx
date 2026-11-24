@@ -34,6 +34,7 @@ import {
   type LogColumnFilterValues,
   type LogFilterColumn,
 } from '../lib/filter'
+import { LogChoiceFilter } from './log-choice-filter'
 import { LogsFilterField, LogsFilterInput } from './logs-filter-toolbar'
 
 type FilterInputProps = {
@@ -136,6 +137,7 @@ const fieldLabels = {
   reasoningEffort: 'Reasoning Effort',
   clientTool: 'Client',
   ip: 'IP Address',
+  requestPath: 'Endpoint',
 } as const
 
 export function LogColumnFilterFields(props: {
@@ -158,6 +160,16 @@ export function LogColumnFilterFields(props: {
           onKeyDown: props.onKeyDown,
           maskClass: props.maskClass,
           inlineSuggestions: props.inlineSuggestions,
+        }
+        if (key === 'type' || key === 'responseTransport') {
+          return (
+            <LogChoiceFilter
+              key={key}
+              field={key}
+              value={input.value}
+              onChange={input.onValueChange}
+            />
+          )
         }
         if (key === 'username') {
           return <LogUsernameFilter key={key} {...input} />

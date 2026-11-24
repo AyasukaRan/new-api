@@ -23,20 +23,22 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	filter := model.LogFilter{
-		Source:          model.LogSourceUsage,
-		AdminSelfView:   c.GetInt("role") >= common.RoleAdminUser,
-		Type:            logType,
-		StartTimestamp:  startTimestamp,
-		EndTimestamp:    endTimestamp,
-		ModelName:       c.Query("model_name"),
-		ReasoningEffort: strings.TrimSpace(c.Query("reasoning_effort")),
-		IP:              strings.TrimSpace(c.Query("ip")),
-		TokenName:       c.Query("token_name"),
-		Group:           c.Query("group"),
-		RequestId:       c.Query("request_id"),
+		Source:            model.LogSourceUsage,
+		AdminSelfView:     c.GetInt("role") >= common.RoleAdminUser,
+		Type:              logType,
+		StartTimestamp:    startTimestamp,
+		EndTimestamp:      endTimestamp,
+		ModelName:         c.Query("model_name"),
+		ReasoningEffort:   strings.TrimSpace(c.Query("reasoning_effort")),
+		ResponseTransport: strings.TrimSpace(c.Query("response_transport")),
+		IP:                strings.TrimSpace(c.Query("ip")),
+		TokenName:         c.Query("token_name"),
+		Group:             c.Query("group"),
+		RequestId:         c.Query("request_id"),
 	}
 	if admin {
 		filter.ClientTool = strings.TrimSpace(c.Query("client_tool"))
+		filter.RequestPath, _, _ = strings.Cut(strings.TrimSpace(c.Query("request_path")), "?")
 		filter.UpstreamRequestId = c.Query("upstream_request_id")
 		filter.Source = model.LogSource(c.DefaultQuery("source", string(model.LogSourceUsage)))
 		filter.Username = c.Query("username")
