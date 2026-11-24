@@ -114,7 +114,7 @@ export function CommonLogMobileCard<TData>(props: {
 
   return (
     <div className='min-w-0 space-y-2.5 text-sm leading-5'>
-      <div className='grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2'>
+      <div className='grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 has-[[data-log-event]]:[&>div]:col-span-full'>
         <div className='flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2'>
           {fields.model.visible && (
             <div className='min-w-0 flex-[1_1_10rem]'>
@@ -137,7 +137,7 @@ export function CommonLogMobileCard<TData>(props: {
           )}
         </div>
         {props.detailsCell && (
-          <div className='[&_[data-request-detail-caption]]:block [&_button]:min-h-11 [&_button]:min-w-11 [&_button]:flex-col [&_button]:gap-1'>
+          <div className='[&_[data-log-event]]:mr-auto [&_[data-log-event]]:max-w-[min(100%,20rem)] [&_[data-log-event]]:items-start [&_[data-log-event]]:justify-center [&_[data-request-detail-caption]]:block [&_button]:min-h-11 [&_button]:min-w-11 [&_button]:flex-col [&_button]:gap-1'>
             {flexRender(
               props.detailsCell.column.columnDef.cell,
               props.detailsCell.getContext()

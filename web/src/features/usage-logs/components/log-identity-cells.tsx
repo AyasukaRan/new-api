@@ -225,7 +225,7 @@ export function LogSourceCell({
                   className='text-muted-foreground/70'
                   title={t('Not recorded')}
                 >
-                  —
+                  {id === 'user_agent' ? t('Not recorded') : '—'}
                 </span>
               )}
             </div>

@@ -74,7 +74,10 @@ function Fixture(props: {
   const columns = useCommonLogsColumns(
     props.admin ?? true,
     setSelectedLog,
-    context.logSource
+    context.logSource,
+    false,
+    false,
+    context.logSource === 'usage'
   )
   const table = useReactTable({
     data: props.logs ?? [log],
@@ -507,8 +510,12 @@ it('opens the shared pagination evidence from a mobile log', async () => {
       },
     ],
   })
-  await userEvent.setup().click(screen.getByTitle('Click to view full details'))
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: /Details · #1/ }))
   const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+  await user.click(
+    within(dialog).getByRole('tab', { name: 'Technical details' })
+  )
   expect(
     within(dialog).getByText('Locally counted document pages')
   ).toBeVisible()

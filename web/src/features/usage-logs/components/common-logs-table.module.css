@@ -45,6 +45,9 @@
   margin-inline: auto;
   justify-content: center;
 }
+.grid td[data-column-id='request_details'] > div {
+  justify-content: end;
+}
 .grid th[data-column-id='prompt_tokens'] {
   text-align: center;
 }
@@ -70,8 +73,8 @@
 .grid table:has([data-fee-tool-lanes='3']) {
   --log-fee-tool-track: 3.5rem;
 }
-.grid td[data-column-id='content'] button {
-  max-width: clamp(6rem, 8vw, 12.5rem);
+.grid :is(td[data-column-id='content'] button, [data-log-event]) {
+  max-width: clamp(6rem, 8vw, 10rem);
 }
 .grid td[data-column-id='request_source'] {
   max-width: 14rem;
@@ -97,7 +100,7 @@
 .compact td {
   padding-inline: 5px;
 }
-.compact td[data-column-id='content'] button {
+.compact :is(td[data-column-id='content'] button, [data-log-event]) {
   max-width: 5.5rem;
 }
 .compact td[data-column-id='request_source'] {

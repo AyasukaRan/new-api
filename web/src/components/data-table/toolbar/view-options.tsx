@@ -46,9 +46,13 @@ export function DataTableViewOptions<TData>({
   const { t } = useTranslation()
   const label = columnSwitches ? t('Column settings') : t('View')
 
-  const hideableColumns = table
+  const configurableColumns = table
     .getAllColumns()
-    .filter((column) => column.accessorFn && column.getCanHide())
+    .filter(
+      (column) =>
+        (column.accessorFn && column.getCanHide()) ||
+        column.columnDef.meta?.displayFields?.length
+    )
 
   return (
     <DropdownMenu modal={false}>
@@ -69,27 +73,33 @@ export function DataTableViewOptions<TData>({
       >
         <DropdownMenuGroup>
           <DropdownMenuLabel>{t('Toggle columns')}</DropdownMenuLabel>
-          {hideableColumns.map((column) => {
+          {configurableColumns.map((column) => {
+            const hideable = Boolean(column.accessorFn && column.getCanHide())
             return (
               <Fragment key={column.id}>
-                <DropdownMenuCheckboxItem
-                  className={columnSwitches ? undefined : 'capitalize'}
-                  closeOnClick={columnSwitches ? false : undefined}
-                  checked={column.getIsVisible()}
-                  onCheckedChange={(value) => column.toggleVisibility(!!value)}
-                >
-                  {typeof column.columnDef.header === 'string'
-                    ? column.columnDef.header
-                    : (column.columnDef.meta?.label ?? column.id)}
-                </DropdownMenuCheckboxItem>
+                {hideable && (
+                  <DropdownMenuCheckboxItem
+                    className={columnSwitches ? undefined : 'capitalize'}
+                    closeOnClick={columnSwitches ? false : undefined}
+                    checked={column.getIsVisible()}
+                    onCheckedChange={(value) =>
+                      column.toggleVisibility(!!value)
+                    }
+                  >
+                    {typeof column.columnDef.header === 'string'
+                      ? column.columnDef.header
+                      : (column.columnDef.meta?.label ?? column.id)}
+                  </DropdownMenuCheckboxItem>
+                )}
                 {column.getIsVisible() &&
                   column.columnDef.meta?.displayFields?.map(
                     (field: { id: string; label: string }) => (
                       <DropdownMenuCheckboxItem
                         key={field.id}
-                        className={
-                          columnSwitches ? styles.field : 'pl-10 text-xs'
-                        }
+                        className={cn(
+                          hideable &&
+                            (columnSwitches ? styles.field : 'pl-10 text-xs')
+                        )}
                         closeOnClick={columnSwitches ? false : undefined}
                         checked={
                           table.getState().columnVisibility[field.id] !== false

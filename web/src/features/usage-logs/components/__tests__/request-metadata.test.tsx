@@ -39,6 +39,7 @@ import type { LogOtherData, RequestTraceLeg } from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { RequestTraceSection } from '../dialogs/request-trace-section'
+import { LogSourceCell } from '../log-identity-cells'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { UsageLogsMobileList } from '../usage-logs-mobile-card'
 import { UsageLogsProvider } from '../usage-logs-provider'
@@ -139,6 +140,18 @@ afterEach(() => {
   clients.length = 0
   useAuthStore.getState().auth.reset()
   vi.restoreAllMocks()
+})
+
+test('distinguishes an identified client from an unrecorded User-Agent', () => {
+  renderWithQueries(
+    <LogSourceCell
+      log={{ ...log, other: JSON.stringify({ client_tool: 'Claude Code' }) }}
+      isAdmin
+      visibility={{}}
+    />
+  )
+  expect(screen.getByText('Claude Code')).toBeVisible()
+  expect(screen.getByText('Not recorded')).toBeVisible()
 })
 
 test('leaves old records without metadata unlabelled instead of claiming no tools were called', () => {

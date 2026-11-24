@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { Action } from '@/components/ai-elements/actions'
 import { TruncatedCell } from '@/components/data-table'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -359,7 +360,7 @@ function buildTypeDetailSegments(
   return segments
 }
 
-export function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
+function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
   if (!isConsumeLogType(log.type)) return true
   const other = getLogMetadata(log)
   return Boolean(
@@ -379,7 +380,7 @@ export function useCommonLogsColumns(
   source: LogSource = 'usage',
   showBillingSource = false,
   compact = false,
-  eventDetailsOnly = false
+  inlineEvents = false
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
   const currency = useSystemConfigStore((state) => state.config.currency)
@@ -780,158 +781,169 @@ export function useCommonLogsColumns(
             />
           )
         },
-      },
+      }
+    )
 
-      {
+    function LogEventPreview({ log }: { log: UsageLog }) {
+      const { t, i18n } = useTranslation()
+      const other = getLogMetadata(log)
+
+      const pricingData = usePricingData(
+        !inlineEvents &&
+          log.type === 2 &&
+          other?.is_task === true &&
+          other.billing_mode === 'tiered_expr'
+      )
+      const usageSchema = pluginUsageSchema(
+        pricingData.models.find((model) => model.model_name === log.model_name),
+        other?.admin_info?.task_plugin?.key
+      )
+      let segments: DetailSegment[] = []
+      if (
+        !inlineEvents ||
+        !isConsumeLogType(log.type) ||
+        isViolationFeeLog(other)
+      ) {
+        segments = buildDetailSegments(
+          log,
+          other,
+          t,
+          isAdmin,
+          i18n.language,
+          usageSchema
+        )
+      } else if (isAdmin && other?.admin_info?.quota_saturation) {
+        segments = [{ text: t('Quota clamped'), danger: true }]
+      } else if (other?.is_system_prompt_overwritten) {
+        segments = [{ text: t('System Prompt Override'), danger: true }]
+      } else {
+        const event =
+          getRetryDecisionReason(other?.retry_decision, t) ||
+          renderLogContent(other, t) ||
+          log.content
+        if (event) segments = [{ text: event, muted: true }]
+      }
+      const primary = segments[0]
+      const hasMore = segments.length > 1
+      let periodLabel = ''
+      if (primary?.period === 'peak') {
+        periodLabel = t('Peak hours')
+      } else if (primary?.period === 'off_peak') {
+        periodLabel = t('Off-peak hours')
+      } else if (primary?.period === 'standard') {
+        periodLabel = t('Standard')
+      }
+      let primaryTextClass = 'text-foreground'
+      if (primary?.muted) {
+        primaryTextClass = 'text-muted-foreground/60'
+      } else if (primary?.danger) {
+        primaryTextClass = 'text-red-600 dark:text-red-400'
+      }
+      let detailPreview = <span className='text-muted-foreground/40'>—</span>
+      const failedRequest =
+        log.type === LOG_TYPE_ENUM.ERROR ||
+        isFailedStreamResponse(other?.stream_status)
+      const retryReason = getRetryDecisionReason(other?.retry_decision, t)
+      if (failedRequest) {
+        const failureReason =
+          other?.stream_status?.end_error ||
+          renderLogContent(other, t) ||
+          log.content ||
+          t('Request failed')
+        detailPreview = (
+          <span className='flex min-w-0 flex-col gap-0.5 leading-snug'>
+            <span className='text-destructive truncate'>{failureReason}</span>
+            {retryReason && (
+              <span className='text-muted-foreground truncate'>
+                {retryReason}
+              </span>
+            )}
+          </span>
+        )
+      } else if (primary) {
+        detailPreview = (
+          <span
+            className={cn(
+              'truncate leading-snug group-hover:underline',
+              primaryTextClass
+            )}
+          >
+            {primary.period && (
+              <BillingTierIcon tier={primary.period} label={periodLabel} />
+            )}
+            {primary.text}
+            {hasMore && (
+              <span className='text-muted-foreground/40 ml-0.5'>
+                +{segments.length - 1}
+              </span>
+            )}
+          </span>
+        )
+      } else if (log.content) {
+        detailPreview = (
+          <span className='text-muted-foreground truncate group-hover:underline'>
+            {renderLogContent(other, t) ?? log.content}
+          </span>
+        )
+      }
+
+      if (inlineEvents && !failedRequest && !primary && !log.content) {
+        return null
+      }
+
+      const detailsButton = (
+        <Button
+          variant='ghost'
+          size='sm'
+          data-log-event={inlineEvents || undefined}
+          aria-haspopup='dialog'
+          type='button'
+          className='group flex h-auto max-w-[200px] min-w-0 items-center justify-start gap-1 rounded-sm p-0 text-start text-xs font-normal hover:bg-transparent'
+          onClick={() => onShowDetails({ log, initialView: 'technical' })}
+          title={t('Click to view full details')}
+        >
+          {detailPreview}
+        </Button>
+      )
+
+      return periodLabel ? (
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger render={detailsButton} />
+            <TooltipContent>{periodLabel}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      ) : (
+        detailsButton
+      )
+    }
+
+    if (!inlineEvents) {
+      columns.push({
         accessorKey: 'content',
         header: t('Event'),
-        cell: function DetailsCell({ row }) {
-          const { t, i18n } = useTranslation()
-          const log = row.original
-          const other = getLogMetadata(log)
-
-          const pricingData = usePricingData(
-            !eventDetailsOnly &&
-              log.type === 2 &&
-              other?.is_task === true &&
-              other.billing_mode === 'tiered_expr'
-          )
-          const usageSchema = pluginUsageSchema(
-            pricingData.models.find(
-              (model) => model.model_name === log.model_name
-            ),
-            other?.admin_info?.task_plugin?.key
-          )
-          let segments: DetailSegment[] = []
-          if (
-            !eventDetailsOnly ||
-            !isConsumeLogType(log.type) ||
-            isViolationFeeLog(other)
-          ) {
-            segments = buildDetailSegments(
-              log,
-              other,
-              t,
-              isAdmin,
-              i18n.language,
-              usageSchema
-            )
-          } else if (isAdmin && other?.admin_info?.quota_saturation) {
-            segments = [{ text: t('Quota clamped'), danger: true }]
-          } else if (other?.is_system_prompt_overwritten) {
-            segments = [{ text: t('System Prompt Override'), danger: true }]
-          } else {
-            const event =
-              getRetryDecisionReason(other?.retry_decision, t) ||
-              renderLogContent(other, t) ||
-              log.content
-            if (event) segments = [{ text: event, muted: true }]
-          }
-          const primary = segments[0]
-          const hasMore = segments.length > 1
-          let periodLabel = ''
-          if (primary?.period === 'peak') {
-            periodLabel = t('Peak hours')
-          } else if (primary?.period === 'off_peak') {
-            periodLabel = t('Off-peak hours')
-          } else if (primary?.period === 'standard') {
-            periodLabel = t('Standard')
-          }
-          let primaryTextClass = 'text-foreground'
-          if (primary?.muted) {
-            primaryTextClass = 'text-muted-foreground/60'
-          } else if (primary?.danger) {
-            primaryTextClass = 'text-red-600 dark:text-red-400'
-          }
-          let detailPreview = (
-            <span className='text-muted-foreground/40'>—</span>
-          )
-          const failedRequest =
-            log.type === LOG_TYPE_ENUM.ERROR ||
-            isFailedStreamResponse(other?.stream_status)
-          const retryReason = getRetryDecisionReason(other?.retry_decision, t)
-          if (failedRequest) {
-            const failureReason =
-              other?.stream_status?.end_error ||
-              renderLogContent(other, t) ||
-              log.content ||
-              t('Request failed')
-            detailPreview = (
-              <span className='flex min-w-0 flex-col gap-0.5 leading-snug'>
-                <span className='text-destructive truncate'>
-                  {failureReason}
-                </span>
-                {retryReason && (
-                  <span className='text-muted-foreground truncate'>
-                    {retryReason}
-                  </span>
-                )}
-              </span>
-            )
-          } else if (primary) {
-            detailPreview = (
-              <span
-                className={cn(
-                  'truncate leading-snug group-hover:underline',
-                  primaryTextClass
-                )}
-              >
-                {primary.period && (
-                  <BillingTierIcon tier={primary.period} label={periodLabel} />
-                )}
-                {primary.text}
-                {hasMore && (
-                  <span className='text-muted-foreground/40 ml-0.5'>
-                    +{segments.length - 1}
-                  </span>
-                )}
-              </span>
-            )
-          } else if (log.content) {
-            detailPreview = (
-              <span className='text-muted-foreground truncate group-hover:underline'>
-                {renderLogContent(other, t) ?? log.content}
-              </span>
-            )
-          }
-
-          if (eventDetailsOnly && !failedRequest && !primary && !log.content) {
-            return null
-          }
-
-          const detailsButton = (
-            <button
-              type='button'
-              className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
-              onClick={() => onShowDetails({ log, initialView: 'technical' })}
-              title={t('Click to view full details')}
-            >
-              {detailPreview}
-            </button>
-          )
-
-          return periodLabel ? (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger render={detailsButton} />
-                <TooltipContent>{periodLabel}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          ) : (
-            detailsButton
-          )
-        },
+        cell: ({ row }) => <LogEventPreview log={row.original} />,
         size: 180,
         maxSize: 200,
-      },
-      {
-        id: 'request_details',
-        header: t('Details'),
-        enableSorting: false,
-        enableHiding: false,
-        cell: ({ row }) => {
-          const log = row.original
-          return (
+      })
+    }
+    columns.push({
+      id: 'request_details',
+      header: t('Details'),
+      enableSorting: false,
+      enableHiding: false,
+      meta: inlineEvents
+        ? { displayFields: [{ id: 'content', label: t('Event') }] }
+        : undefined,
+      cell: ({ row, table }) => {
+        const log = row.original
+        const showEvent =
+          inlineEvents &&
+          table.getState().columnVisibility.content !== false &&
+          hasLogEventDetail(log, isAdmin)
+        return (
+          <div className='flex items-center justify-end gap-1'>
+            {showEvent && <LogEventPreview log={log} />}
             <Action
               size='icon-sm'
               label={`${t('Details')} · ${log.request_id || `#${log.id}`}`}
@@ -941,18 +953,20 @@ export function useCommonLogsColumns(
               className='size-8 rounded-sm border-0 p-0 hover:bg-transparent dark:hover:bg-transparent pointer-coarse:size-11'
             >
               <FileSearch aria-hidden='true' className='size-4' />
-              <span
-                data-request-detail-caption
-                aria-hidden='true'
-                className='hidden text-[11px] leading-3 font-normal'
-              >
-                {t('Details')}
-              </span>
+              {!inlineEvents && (
+                <span
+                  data-request-detail-caption
+                  aria-hidden='true'
+                  className='hidden text-[11px] leading-3 font-normal'
+                >
+                  {t('Details')}
+                </span>
+              )}
             </Action>
-          )
-        },
-      }
-    )
+          </div>
+        )
+      },
+    })
 
     return columns
     // Log formatters read currency settings from the store.
@@ -965,6 +979,6 @@ export function useCommonLogsColumns(
     source,
     currency,
     compact,
-    eventDetailsOnly,
+    inlineEvents,
   ])
 }

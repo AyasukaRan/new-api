@@ -66,14 +66,17 @@ afterEach(() => {
 function renderLogs(
   live = false,
   path = '/usage-logs/common',
-  content?: string
+  content?: string | ((id: number) => string)
 ) {
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
   let records = [entry(11), entry(10)].map((record) => ({
     ...record,
-    content: content ?? record.content,
+    content:
+      typeof content === 'function'
+        ? content(record.id)
+        : (content ?? record.content),
   }))
   let liveTotal = 0
   const selfRecords = [entry(100)]
@@ -430,4 +433,44 @@ test('opens the chosen request from its named details action when there is no su
   await user.keyboard('{Enter}')
   const details = await screen.findByRole('dialog', { name: /Log Details/ })
   expect(within(details).getByText('request-10')).toBeVisible()
+})
+
+test('shares one details column between normal requests and event summaries', async () => {
+  const user = userEvent.setup()
+  renderLogs(false, '/usage-logs/common', (id) =>
+    id === 11 ? 'Retried upstream' : ''
+  )
+  const event = await screen.findByRole('button', { name: 'Retried upstream' })
+  expect(
+    screen.queryByRole('columnheader', { name: 'Event' })
+  ).not.toBeInTheDocument()
+  const detailCell = screen.getByRole('cell', { name: /Retried upstream/ })
+  expect(
+    within(detailCell).getByRole('button', { name: 'Details · request-11' })
+  ).toBeVisible()
+  const plainCell = screen.getByRole('cell', { name: /^Details · request-10$/ })
+  expect(within(plainCell).getAllByRole('button')).toHaveLength(1)
+  await user.click(event)
+  expect(
+    screen.getByRole('tab', { name: 'Technical details' })
+  ).toHaveAttribute('aria-selected', 'true')
+})
+
+test('can hide inline events and still open request details', async () => {
+  const user = userEvent.setup()
+  renderLogs()
+  const event = await screen.findByRole('button', {
+    name: 'Summary for request 10',
+  })
+  await user.click(screen.getByRole('button', { name: 'Column settings' }))
+  const toggle = screen.getByRole('menuitemcheckbox', { name: 'Event' })
+  expect(toggle).toBeChecked()
+  await user.click(toggle)
+  await user.keyboard('{Escape}')
+  expect(event).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Details · request-10' }))
+  expect(screen.getByRole('tab', { name: 'Overview' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
 })
