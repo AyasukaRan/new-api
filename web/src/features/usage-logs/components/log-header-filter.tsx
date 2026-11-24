@@ -134,7 +134,7 @@ export function LogHeaderFilter(props: {
       >
         <ListFilter aria-hidden='true' />
       </PopoverTrigger>
-      <PopoverContent align='start' className='w-64 gap-3 p-3'>
+      <PopoverContent align='start' className='relative w-64 gap-3 p-3'>
         <PopoverTitle>{props.title}</PopoverTitle>
         <form
           className='grid gap-2'

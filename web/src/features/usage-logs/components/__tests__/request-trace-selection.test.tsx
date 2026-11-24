@@ -53,7 +53,10 @@ function entry(id: number) {
     content: `Summary for request ${id}`,
     model_name: `model-${id}`,
     request_id: `request-${id}`,
-    other: JSON.stringify({ admin_info: { trace_id: `trace-${id}` } }),
+    other: JSON.stringify({
+      client_tool: 'Codex CLI',
+      admin_info: { trace_id: `trace-${id}` },
+    }),
   })
 }
 
@@ -246,6 +249,37 @@ test('column filters apply across pages and clear only their own fields', async 
     'Enter a positive integer'
   )
   expect(router.state.location.search.channel).toBeUndefined()
+})
+
+test('keeps client suggestions anchored in the panel when clearing both source fields', async () => {
+  // The unit DOM does not load Tailwind or the browser default position.
+  const styles = document.createElement('style')
+  styles.textContent =
+    'div { position: static; } .relative { position: relative; }'
+  document.head.append(styles)
+  try {
+    const user = userEvent.setup()
+    const { router } = renderLogs(
+      false,
+      '/usage-logs/common?model=model-11&clientTool=Codex+CLI&ip=192.0.2.10'
+    )
+    await user.click(
+      await screen.findByRole('button', { name: 'Filter · Request source (2)' })
+    )
+    const panel = await screen.findByRole('dialog', { name: 'Request source' })
+    const clientInput = within(panel).getByRole('combobox', { name: 'Client' })
+    await user.click(clientInput)
+    const suggestions = await within(panel).findByRole('listbox')
+    expect(suggestions.parentElement).toHaveStyle({ position: 'absolute' })
+    await user.click(within(panel).getByRole('button', { name: 'Clear' }))
+    await waitFor(() =>
+      expect(router.state.location.search.clientTool).toBeUndefined()
+    )
+    expect(router.state.location.search.ip).toBeUndefined()
+    expect(router.state.location.search.model).toBe('model-11')
+  } finally {
+    styles.remove()
+  }
 })
 
 test.each(['desktop', 'mobile'] as const)(
