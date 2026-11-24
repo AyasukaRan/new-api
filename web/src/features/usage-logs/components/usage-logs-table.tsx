@@ -19,7 +19,13 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -45,6 +51,7 @@ import {
 } from '../constants'
 import type { UsageLog } from '../data/schema'
 import { useLiveUsageLogs } from '../hooks/use-live-usage-logs'
+import { useUsageLogHistory } from '../hooks/use-usage-log-history'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
 import { getLogMetadata } from '../lib/format'
@@ -62,6 +69,20 @@ import styles from './common-logs-table.module.css'
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 
 const commonColumnVisibility = { request_path: true }
+const scrollViewport = '[data-slot="data-table-scroll"]'
+
+function hasOpenLogDialog() {
+  return !!document.querySelector(
+    '[role="dialog"]:not([hidden]),[role="alertdialog"]:not([hidden])'
+  )
+}
+
+function atScrollBottom(viewport: HTMLElement) {
+  return (
+    viewport.clientHeight > 0 &&
+    viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 1
+  )
+}
 
 const logTypeRowTint: Record<number, string> = {
   [LOG_TYPE_ENUM.ERROR]: 'bg-rose-50/40 dark:bg-rose-950/20',
@@ -131,6 +152,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   const searchParams = route.useSearch()
   const navigate = route.useNavigate()
   const scrollArea = useRef<HTMLElement | null>(null)
+  const previousScrollTop = useRef(0)
+  const lastTopWheel = useRef(-Infinity)
   const commonUsage = logCategory === 'common' && logSource === 'usage'
   const preset =
     commonUsage && searchParams.autoRefresh !== false
@@ -251,7 +274,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       if (!result?.success) {
         throw createServerError(result, t('Failed to load logs'))
       }
-      return { ...(result.data ?? DEFAULT_LOGS_DATA), live: result.live }
+      return {
+        ...(result.data ?? DEFAULT_LOGS_DATA),
+        live: result.live,
+        historyFilters: result.historyFilters,
+      }
     },
     placeholderData: (previousData, previousQuery) => {
       if (
@@ -267,6 +294,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     },
   })
 
+  const history = useUsageLogHistory(
+    commonUsage && !isPlaceholderData ? data?.historyFilters : undefined,
+    isAdmin
+  )
+  const { clearHistory } = history
   const { view, showLatest } = useLiveUsageLogs({
     snapshot: isPlaceholderData ? undefined : data?.live,
     preset,
@@ -274,14 +306,16 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     isAdmin,
     refetch,
     isReading: () =>
+      history.isBrowsingHistory ||
       pagination.pageIndex > 0 ||
       !!selectedLog ||
       (scrollArea.current?.isConnected && scrollArea.current.scrollTop > 0) ||
-      !!document.querySelector(
-        '[role="dialog"]:not([hidden]),[role="alertdialog"]:not([hidden])'
-      ),
+      hasOpenLogDialog(),
   })
-  const logs = view?.items ?? data?.items ?? []
+  const firstPage = view?.items ?? data?.items ?? []
+  const total = view?.total ?? data?.total ?? 0
+  const loadOlder = () => history.loadOlder(firstPage as UsageLog[], total)
+  const logs = history.rows ?? firstPage
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,
@@ -313,23 +347,93 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     onColumnFiltersChange,
     manualPagination: true,
     manualFiltering: true,
-    totalCount: view?.total ?? data?.total ?? 0,
+    totalCount: total,
     ensurePageInRange,
   })
+
+  const refreshFromTop = () => {
+    clearHistory()
+    if (scrollArea.current) scrollArea.current.scrollTop = 0
+    if (pagination.pageIndex > 0) {
+      table.setPageIndex(0)
+    } else if (view?.pending || view?.reset) {
+      showLatest()
+    } else if (!isFetching) {
+      void refetch()
+    }
+  }
+
+  const onLogWheel = useEffectEvent((event: WheelEvent) => {
+    if (
+      event.ctrlKey ||
+      Math.abs(event.deltaY) <= Math.abs(event.deltaX) ||
+      selectedLog
+    ) {
+      return
+    }
+    const viewport =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>(scrollViewport)
+        : null
+    if (!viewport || !tableArea.current?.contains(viewport)) return
+    if (event.deltaY < 0 && viewport.scrollTop <= 0) {
+      if (hasOpenLogDialog()) return
+      scrollArea.current = viewport
+      // Trackpads emit several wheel events after the scrollbar has stopped.
+      const now = performance.now()
+      const newGesture = now - lastTopWheel.current > 450
+      lastTopWheel.current = now
+      if (newGesture) refreshFromTop()
+    } else if (
+      event.deltaY > 0 &&
+      atScrollBottom(viewport) &&
+      !hasOpenLogDialog()
+    ) {
+      loadOlder()
+    }
+  })
+  useLayoutEffect(() => {
+    const area = tableArea.current
+    if (!commonUsage || !area) return
+    // Read the position before the browser scrolls. Passive wheel listeners
+    // can see zero for the very wheel event that just reached the top.
+    area.addEventListener('wheel', onLogWheel, {
+      passive: false,
+      capture: true,
+    })
+    return () => area.removeEventListener('wheel', onLogWheel, true)
+  }, [commonUsage])
 
   return (
     <>
       <div
         ref={tableArea}
-        className='relative h-full min-h-0'
+        className={cn(
+          'relative h-full min-h-0',
+          commonUsage && '**:data-[slot=data-table-scroll]:overscroll-y-contain'
+        )}
         onScrollCapture={(event) => {
           const target = event.target
           if (
-            target instanceof HTMLElement &&
-            event.currentTarget.contains(target) &&
-            (target.scrollTop > 0 || target === scrollArea.current)
+            !commonUsage ||
+            !(target instanceof HTMLElement) ||
+            !target.matches(scrollViewport) ||
+            !event.currentTarget.contains(target)
           ) {
-            scrollArea.current = target
+            return
+          }
+          const movingDown =
+            target.scrollTop >
+            (scrollArea.current === target ? previousScrollTop.current : 0)
+          scrollArea.current = target
+          previousScrollTop.current = target.scrollTop
+          if (
+            movingDown &&
+            atScrollBottom(target) &&
+            !selectedLog &&
+            !hasOpenLogDialog()
+          ) {
+            loadOlder()
           }
         }}
       >
@@ -414,14 +518,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
             <Button
               size='sm'
               className='pointer-events-auto shadow-md'
-              onClick={() => {
-                if (scrollArea.current) scrollArea.current.scrollTop = 0
-                if (pagination.pageIndex > 0) {
-                  table.setPageIndex(0)
-                } else {
-                  showLatest()
-                }
-              }}
+              onClick={refreshFromTop}
             >
               {view.reset || view.pendingUncertain
                 ? t('Show latest logs')

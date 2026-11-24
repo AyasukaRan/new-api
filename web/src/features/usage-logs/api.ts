@@ -49,7 +49,8 @@ function buildApiPath(endpoint: string, isAdmin: boolean): string {
 async function fetchLogs<T>(
   endpoint: string,
   params: T,
-  isAdmin: boolean
+  isAdmin: boolean,
+  signal?: AbortSignal
 ): Promise<GetLogsResponse> {
   const paramRecord = params as unknown as Record<string, unknown>
   const queryParams = buildQueryParams({
@@ -58,7 +59,10 @@ async function fetchLogs<T>(
     ...params,
   })
   const path = buildApiPath(endpoint, isAdmin)
-  const res = await api.get(`${path}?${queryParams}`)
+  const res = await api.get(
+    `${path}?${queryParams}`,
+    signal ? { signal, disableDuplicate: true } : undefined
+  )
   return res.data
 }
 
@@ -79,8 +83,8 @@ async function fetchLogStats<T>(
 // Common Log APIs
 // ============================================================================
 
-export const getAllLogs = (params: GetLogsParams = {}) =>
-  fetchLogs('/api/log/', { ...params, compact: 1 }, true)
+export const getAllLogs = (params: GetLogsParams = {}, signal?: AbortSignal) =>
+  fetchLogs('/api/log/', { ...params, compact: 1 }, true, signal)
 
 export async function getLogRequestBody(
   createdAt: number,
@@ -103,8 +107,9 @@ export async function getLogRequestBody(
 }
 
 export const getUserLogs = (
-  params: Omit<GetLogsParams, 'username' | 'channel'> = {}
-) => fetchLogs('/api/log', params, false)
+  params: Omit<GetLogsParams, 'username' | 'channel'> = {},
+  signal?: AbortSignal
+) => fetchLogs('/api/log', params, false, signal)
 
 /** Read a resumable stream using the same authenticated client as the initial list. */
 export async function streamUsageLogs(

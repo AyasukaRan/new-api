@@ -70,7 +70,8 @@ function renderLogs(
   live = false,
   path = '/usage-logs/common',
   content?: string | ((id: number) => string),
-  initialIds = [11, 10]
+  initialIds = [11, 10],
+  olderIds?: number[]
 ) {
   useAuthStore
     .getState()
@@ -84,14 +85,18 @@ function renderLogs(
   }))
   let liveTotal = 0
   const selfRecords = [entry(100)]
-  const initialTotal = path.includes('page=2') ? 205 : 2
+  const defaultTotal = path.includes('page=2') ? 205 : 2
+  const initialTotal = olderIds
+    ? new Set([...initialIds, ...olderIds]).size
+    : defaultTotal
   const requestedTraces: string[] = []
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     let data: unknown = {}
     if (url.startsWith('/api/log/?')) {
+      const page = new URL(url, 'http://localhost').searchParams.get('p')
       data = {
-        items: records,
+        items: olderIds && page === '2' ? olderIds.map(entry) : records,
         total: initialTotal,
         ...(live && { live_cursor: 'initial' }),
       }
@@ -516,7 +521,8 @@ test('follows new logs once, and keeps the table and selected details still unti
   const { append } = renderLogs(true)
   await screen.findByText('model-11')
   await append(12, 11)
-  expect(await screen.findByText('model-12')).toBeVisible()
+  const selectedModel = await screen.findByText('model-12')
+  expect(selectedModel).toBeVisible()
   expect(screen.getAllByText('model-11')).toHaveLength(1)
   await user.click(
     screen.getByRole('button', { name: 'Summary for request 12' })
@@ -524,12 +530,165 @@ test('follows new logs once, and keeps the table and selected details still unti
   await append(13)
   expect(screen.queryByText('model-13')).not.toBeInTheDocument()
   const details = screen.getByRole('dialog', { name: /Log Details/ })
+  fireEvent.wheel(details, { deltaY: -120 })
+  fireEvent.wheel(selectedModel, { deltaY: -120 })
   await user.click(within(details).getByRole('tab', { name: 'Overview' }))
   expect(within(details).getByText('request-12')).toBeVisible()
   await user.keyboard('{Escape}')
   expect(screen.queryByText('model-13')).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Show new logs (1)' }))
   expect(await screen.findByText('model-13')).toBeVisible()
+})
+
+test('reveals buffered live logs only when the reader keeps scrolling up at the top', async () => {
+  const { append } = renderLogs(true)
+  const viewport = (await screen.findByText('model-11')).closest(
+    'table'
+  )?.parentElement
+  if (!viewport) throw new Error('Missing log list viewport')
+
+  viewport.scrollTop = 90
+  fireEvent.scroll(viewport)
+  await append(12)
+  fireEvent.wheel(viewport, { deltaY: -120 })
+  viewport.scrollTop = 0
+  fireEvent.scroll(viewport)
+  expect(
+    screen.getByRole('button', { name: 'Show new logs (1)' })
+  ).toBeVisible()
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+
+  fireEvent.wheel(viewport, { deltaY: -120 })
+  expect(await screen.findByText('model-12')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Show new logs (1)' })).toBeNull()
+  expect(viewport.scrollTop).toBe(0)
+})
+
+test('refreshes once for a continued upward wheel gesture even without buffered logs', async () => {
+  renderLogs(true)
+  const viewport = (await screen.findByText('model-11')).closest(
+    'table'
+  )?.parentElement
+  if (!viewport) throw new Error('Missing log list viewport')
+  const listRequests = () =>
+    vi
+      .mocked(api.get)
+      .mock.calls.filter(([url]) => url.startsWith('/api/log/?'))
+
+  expect(listRequests()).toHaveLength(1)
+  fireEvent.wheel(viewport, { deltaY: -120 })
+  fireEvent.wheel(viewport, { deltaY: -100 })
+  fireEvent.wheel(viewport, { deltaY: -80 })
+  await waitFor(() => expect(listRequests()).toHaveLength(2))
+})
+
+test('appends the next filtered page at the bottom, preserving the visible rows and stopping at the end', async () => {
+  const { router, append } = renderLogs(
+    true,
+    '/usage-logs/common?pageSize=3&username=fp',
+    undefined,
+    [18, 17, 16],
+    [16, 15, 14]
+  )
+  const first = await screen.findByText('model-18')
+  const viewport = first.closest('table')?.parentElement
+  if (!viewport) throw new Error('Missing log list viewport')
+  Object.defineProperties(viewport, {
+    clientHeight: { value: 200 },
+    scrollHeight: { value: 600 },
+  })
+  const pages = () =>
+    vi
+      .mocked(api.get)
+      .mock.calls.filter(([url]) => url.startsWith('/api/log/?'))
+      .map(([url]) => new URL(url, 'http://localhost').searchParams)
+
+  viewport.scrollTop = 100
+  fireEvent.scroll(viewport)
+  await append(20)
+  expect(pages().map((query) => query.get('p'))).toEqual(['1'])
+  viewport.scrollTop = 400
+  fireEvent.scroll(viewport)
+  fireEvent.wheel(viewport, { deltaY: 120 })
+
+  const last = await screen.findByText('model-14')
+  expect(first.compareDocumentPosition(last)).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(screen.getAllByText('model-16')).toHaveLength(1)
+  expect(screen.getByText('model-15')).toBeVisible()
+  expect(screen.queryByText('model-20')).toBeNull()
+  expect(viewport.scrollTop).toBe(400)
+  expect(router.state.location.search.page ?? 1).toBe(1)
+  expect(pages()[1].get('username')).toBe('fp')
+  expect(pages()[1].get('page_size')).toBe('3')
+  await act(async () => {
+    fireEvent.wheel(viewport, { deltaY: 120 })
+    fireEvent.scroll(viewport)
+  })
+  expect(pages().map((query) => query.get('p'))).toEqual(['1', '2'])
+
+  const user = userEvent.setup()
+  await user.click(
+    screen.getByRole('button', { name: /^Filter · User \/ Token/ })
+  )
+  const identityFilter = screen.getByRole('dialog', { name: 'User / Token' })
+  await user.click(
+    within(identityFilter).getByRole('button', { name: 'Clear' })
+  )
+  await waitFor(() =>
+    expect(router.state.location.search.username).toBeUndefined()
+  )
+  expect(screen.queryByText('model-14')).not.toBeInTheDocument()
+  expect(screen.queryByText('model-15')).not.toBeInTheDocument()
+  expect(screen.getByText('model-18')).toBeVisible()
+})
+
+test('finds the frozen tail after two pages of same-second inserts displace it', async () => {
+  renderLogs(
+    true,
+    '/usage-logs/common?pageSize=2',
+    undefined,
+    [13, 12],
+    [11, 10]
+  )
+  const viewport = (await screen.findByText('model-13')).closest(
+    'table'
+  )?.parentElement
+  if (!viewport) throw new Error('Missing log list viewport')
+  Object.defineProperties(viewport, {
+    clientHeight: { value: 200 },
+    scrollHeight: { value: 600 },
+  })
+
+  // The log store committed four more rows in the original head's second.
+  // Page 2 now contains only inserts. The old tail is the last row of page 3.
+  const ids = [19, 18, 17, 16, 13, 12, 11, 10]
+  const apiGet = vi.mocked(api.get)
+  const initial = apiGet.getMockImplementation()
+  if (!initial) throw new Error('Missing log API fixture')
+  apiGet.mockImplementation((url, config) => {
+    if (!url.startsWith('/api/log/?')) return initial(url, config)
+    const params = new URL(url, 'http://localhost').searchParams
+    const offset = (Number(params.get('p')) - 1) * 2
+    return Promise.resolve({
+      data: {
+        success: true,
+        data: {
+          total: ids.length,
+          items: ids.slice(offset, offset + 2).map(entry),
+        },
+      },
+    })
+  })
+
+  viewport.scrollTop = 400
+  fireEvent.scroll(viewport)
+  await screen.findByText('model-10')
+  expect(
+    screen.getAllByText(/^model-\d+$/).map((node) => node.textContent)
+  ).toEqual(['model-13', 'model-12', 'model-11', 'model-10'])
+  expect(viewport.scrollTop).toBe(400)
 })
 
 test('preserves the server order for same-second rows with page-relative display IDs', async () => {

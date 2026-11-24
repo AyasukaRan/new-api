@@ -269,26 +269,35 @@ export function buildApiParams(config: {
  */
 export async function fetchLogsByCategory(
   config: FetchLogsConfig
-): Promise<GetLogsResponse & { live?: LiveLogSnapshot }> {
+): Promise<
+  GetLogsResponse & { live?: LiveLogSnapshot; historyFilters?: GetLogsParams }
+> {
   const { logCategory, isAdmin, page, pageSize, searchParams } = config
 
   if (logCategory === 'common') {
     const params = buildApiParams(config)
-    if (config.livePreset) {
-      params.live = 1
-      if (page === 1) {
-        const { start } = getRelativeLogTimeRange(config.livePreset)
-        params.start_timestamp = Math.floor(start.getTime() / 1000)
-        // Include rows committed up to the cursor even if the client clock lags.
-        delete params.end_timestamp
-      }
+    // Personal and ClickHouse log IDs are display-only. Ask for stable row
+    // keys for paging even when the chosen date range has no live subscription.
+    if (config.source !== 'test') params.live = 1
+    if (config.livePreset && page === 1) {
+      const { start } = getRelativeLogTimeRange(config.livePreset)
+      params.start_timestamp = Math.floor(start.getTime() / 1000)
+      // Include rows committed up to the cursor even if the client clock lags.
+      delete params.end_timestamp
+    } else if (params.live && page > 1 && !params.end_timestamp) {
+      // Preserve the offset of a manually selected page in an open-ended range.
+      params.end_timestamp = Math.floor(Date.now() / 1000)
     }
     const result = await (isAdmin ? getAllLogs : getUserLogs)(params)
-    if (!config.livePreset || !result.data?.live_cursor) return result
+    const historyFilters = params.live ? { ...params } : undefined
+    if (!config.livePreset || !result.data?.live_cursor) {
+      return { ...result, historyFilters }
+    }
     delete params.live
     delete params.end_timestamp
     return {
       ...result,
+      historyFilters,
       live: {
         cursor: result.data.live_cursor,
         items: result.data.items as UsageLog[],
