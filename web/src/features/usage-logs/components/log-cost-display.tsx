@@ -18,7 +18,6 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { CrownIcon, Wallet01Icon } from '@hugeicons/core-free-icons'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -39,6 +38,7 @@ import { getLogToolIcon } from '../lib/tool-icon'
 import type { LogOtherData } from '../types'
 import { LogChargeDetails } from './log-charge-details'
 import { renderLogMetricTerm } from './log-metric-icons'
+import { LogMetricPopover } from './log-metric-popover'
 import { LogMetricsDetailDialog } from './log-metrics-detail-dialog'
 
 interface LogCostDisplayProps {
@@ -51,7 +51,6 @@ interface LogCostDisplayProps {
 
 export function LogCostDisplay(props: LogCostDisplayProps) {
   const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
   const cost = props.isAdmin ? getLogCostEstimate(props.other) : null
   const isSubscription = props.other?.billing_source === 'subscription'
   const free = getLogFreeQuota(props.other, props.quota)
@@ -83,19 +82,21 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
       aria-label={`${t('Billing Details')} · ${formatLogQuota(quota)}`}
       className={cn(
         'col-start-2 row-start-1 h-auto min-h-5 gap-0 rounded-sm border-0 p-0 font-sans text-[13px] leading-5',
+        (free > 0 || props.isAdmin) &&
+          'after:absolute after:inset-y-0 after:end-0 after:start-(--log-fee-source-track)',
         toolCounts.size > 0
           ? 'col-end-4 grid grid-cols-subgrid'
           : 'justify-self-end'
       )}
     >
-      <span className='justify-self-end font-semibold whitespace-nowrap tabular-nums underline decoration-current/40 decoration-dotted underline-offset-4'>
+      <span className='relative z-[1] justify-self-end font-semibold whitespace-nowrap tabular-nums underline decoration-current/40 decoration-dotted underline-offset-4'>
         {formatLogQuota(quota)}
       </span>
       {toolCounts.size > 0 && (
         <span
           data-fee-tool-lanes={Math.min(toolCounts.size, 3)}
           className={cn(
-            'ms-1 grid shrink-0 items-center justify-self-start gap-0.5',
+            'relative z-[1] ms-1 grid shrink-0 items-center justify-self-start gap-0.5',
             toolCounts.size > 3 ? 'grid-cols-3' : 'grid-flow-col'
           )}
         >
@@ -130,9 +131,14 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
       )}
     </Button>
   )
+  const detailsButton = (
+    <Button variant='link' size='xs' className='self-end p-0'>
+      {t('Request details')}
+    </Button>
+  )
   return (
     <TooltipProvider>
-      <div className='grid w-full grid-cols-[1.1875rem_minmax(max-content,1fr)_var(--log-fee-tool-track,max-content)] items-center gap-y-0.5 self-center font-sans tabular-nums'>
+      <div className='relative grid w-full grid-cols-[var(--log-fee-source-track)_minmax(max-content,1fr)_var(--log-fee-tool-track,max-content)] items-center gap-y-0.5 self-center font-sans tabular-nums [--log-fee-source-track:1.1875rem]'>
         {source && (
           <Tooltip>
             <TooltipTrigger
@@ -155,25 +161,22 @@ export function LogCostDisplay(props: LogCostDisplayProps) {
             <TooltipContent>{source}</TooltipContent>
           </Tooltip>
         )}
-        {props.log ? (
-          <LogMetricsDetailDialog
-            log={props.log}
-            other={props.other}
-            isAdmin={Boolean(props.isAdmin)}
-            initialTab='cost'
-            trigger={amountButton}
-          />
-        ) : (
-          <Dialog
-            open={open}
-            onOpenChange={setOpen}
-            title={t('Billing Details')}
-            contentClassName='sm:max-w-md'
-            trigger={amountButton}
-          >
-            {open && <LogChargeDetails {...props} />}
-          </Dialog>
-        )}
+        <LogMetricPopover label={t('Billing Details')} trigger={amountButton}>
+          <LogChargeDetails {...props} compact />
+          {props.log ? (
+            <LogMetricsDetailDialog
+              log={props.log}
+              other={props.other}
+              isAdmin={Boolean(props.isAdmin)}
+              initialTab='cost'
+              trigger={detailsButton}
+            />
+          ) : (
+            <Dialog title={t('Request details')} trigger={detailsButton}>
+              <LogChargeDetails {...props} />
+            </Dialog>
+          )}
+        </LogMetricPopover>
         {(free > 0 || props.isAdmin) && (
           <dl className='text-muted-foreground col-span-2 col-start-1 grid grid-cols-subgrid items-center gap-y-0.5 text-end text-xs leading-4 font-normal [&_dd]:whitespace-nowrap [&_dt]:justify-start'>
             {free > 0 && (

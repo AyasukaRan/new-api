@@ -219,6 +219,7 @@ export interface LogOtherData {
   text_output?: number
   cache_tokens?: number
   input_tokens_total?: number
+  reasoning_tokens?: number
   cache_write_tokens?: number
   usage_semantic?: string
   image_cache_tokens?: number
@@ -275,6 +276,7 @@ export interface LogOtherData {
   reasoning_effort?: string
   client_tool?: string
   invoked_tools?: string[]
+  invoked_tool_counts?: Record<string, number>
   tool_observation?: 'complete' | 'partial'
   image?: boolean
   image_ratio?: number

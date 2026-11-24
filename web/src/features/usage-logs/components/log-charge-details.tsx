@@ -37,17 +37,18 @@ import {
 } from '../lib/format'
 import type { LogOtherData } from '../types'
 import { BillingTierIcon } from './billing-tier-icon'
+import { LogBreakdownBar } from './log-breakdown-bar'
 import { LogGroupLabel } from './log-identity-cells'
 
 const chargeColors: Record<string, string> = {
-  Input: 'bg-blue-400',
-  'Uncached input': 'bg-blue-400',
-  Output: 'bg-violet-400',
-  'Cache Read': 'bg-emerald-400',
+  Input: 'bg-sky-500',
+  'Uncached input': 'bg-sky-500',
+  Output: 'bg-violet-500',
+  'Cache Read': 'bg-teal-500',
   'Cache Write': 'bg-amber-500',
   'Cache Write (1h)': 'bg-yellow-400',
   'Cache Write (12h)': 'bg-orange-400',
-  web_search: 'bg-teal-400',
+  web_search: 'bg-emerald-400',
   file_search: 'bg-fuchsia-400',
   image_generation: 'bg-orange-400',
 }
@@ -56,11 +57,13 @@ export function LogChargeDetails({
   log,
   other,
   isAdmin,
+  compact = false,
   quota = log?.quota ?? 0,
 }: {
   log?: UsageLog
   other: LogOtherData | null
   isAdmin?: boolean
+  compact?: boolean
   quota?: number
 }) {
   const { t, i18n } = useTranslation()
@@ -80,8 +83,15 @@ export function LogChargeDetails({
     config.quotaPerUnit,
     tools,
     log
-  )
-  const rawTotal = lines.reduce((sum, line) => sum + line.quota, 0)
+  ).map(({ quota: value, ...part }) => ({
+    ...part,
+    key: `${part.tool ?? false}:${part.label}:${part.basis?.unitPriceQuota}`,
+    label: part.tool ? part.label : t(part.label),
+    color:
+      chargeColors[part.label] ?? (part.tool ? 'bg-cyan-400' : 'bg-slate-400'),
+    value,
+  }))
+  const rawTotal = lines.reduce((sum, line) => sum + line.value, 0)
   const rounding = quota - rawTotal
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const percentage = new Intl.NumberFormat(locale, {
@@ -93,13 +103,19 @@ export function LogChargeDetails({
   if (tier === 'peak') tariff = 'Peak hours'
   if (tier === 'off_peak') tariff = 'Off-peak hours'
   if (tier === 'base' || tier === 'standard') tariff = 'Standard'
-  const rateSummary = lines.length ? null : getTieredBillingSummary(other)
+  const rateSummary =
+    compact || lines.length ? null : getTieredBillingSummary(other)
 
   return (
-    <div className='space-y-4 text-sm'>
+    <div className={compact ? 'space-y-2 text-xs' : 'space-y-4 text-sm'}>
       <div className='flex items-baseline justify-between gap-2'>
         <span className='text-muted-foreground'>{t('Amount charged')}</span>
-        <strong className='font-mono text-xl font-semibold tabular-nums'>
+        <strong
+          className={cn(
+            'font-mono font-semibold tabular-nums',
+            compact ? 'text-base' : 'text-xl'
+          )}
+        >
           {formatReceiptQuota(payable)}
         </strong>
       </div>
@@ -125,22 +141,20 @@ export function LogChargeDetails({
       )}
       {lines.length > 0 && (
         <>
-          {quota > 0 && (
-            <div
-              className='bg-muted flex h-2 w-full overflow-hidden rounded-full'
-              aria-hidden='true'
-            >
-              {lines.map((part) => (
-                <span
-                  key={`${part.tool ?? false}:${part.label}:${part.basis?.unitPriceQuota}`}
-                  className={
-                    chargeColors[part.label] ??
-                    (part.tool ? 'bg-cyan-400' : 'bg-slate-400')
-                  }
-                  style={{ flexGrow: part.quota, flexBasis: 0 }}
-                />
-              ))}
+          {payable !== quota && (
+            <div className='text-muted-foreground flex items-baseline justify-between gap-2 text-xs'>
+              <span>{t('Total Cost')}</span>
+              <span className='font-mono tabular-nums'>
+                {formatReceiptQuota(quota)}
+              </span>
             </div>
+          )}
+          {quota > 0 && rawTotal > 0 && (
+            <LogBreakdownBar
+              label={t('Cost breakdown')}
+              segments={lines}
+              total={rawTotal}
+            />
           )}
           <ul
             aria-label={t('Cost breakdown')}
@@ -148,44 +162,52 @@ export function LogChargeDetails({
           >
             {lines.map((part) => (
               <li
-                key={`${part.tool ?? false}:${part.label}:${part.basis?.unitPriceQuota}`}
-                className='grid grid-cols-[0.5rem_minmax(0,1fr)_auto] items-baseline gap-x-2 gap-y-1 py-2'
+                key={part.key}
+                className={cn(
+                  'grid grid-cols-[0.5rem_minmax(0,1fr)_auto] items-baseline gap-x-2 gap-y-1',
+                  compact ? 'py-1.5' : 'py-2'
+                )}
               >
                 <span
                   aria-hidden
-                  className={cn(
-                    'size-2 rounded-full',
-                    chargeColors[part.label] ??
-                      (part.tool ? 'bg-cyan-400' : 'bg-slate-400')
-                  )}
+                  className={cn('size-2 rounded-full', part.color)}
                 />
                 <span className='min-w-0 font-medium break-all'>
-                  {part.tool ? part.label : t(part.label)}
-                </span>
-                <span className='text-end font-mono font-medium tabular-nums'>
-                  {formatReceiptQuota(part.quota)}
-                </span>
-                <span className='text-muted-foreground col-start-2 font-mono text-xs tabular-nums'>
-                  {part.basis && (
-                    <>
-                      {formatNumber(part.basis.count, locale)}{' '}
-                      {part.unit && t(part.unit)}
-                      {' × '}
-                      {formatReceiptQuota(part.basis.unitPriceQuota)} /{' '}
-                      {formatNumber(part.basis.per, locale)}{' '}
-                      {part.unit && t(part.unit)}
-                      {part.basis.multipliers
-                        .map((factor) => ` × ${factor}`)
-                        .join('')}
-                    </>
+                  {part.label}
+                  {compact && part.tool && part.basis && (
+                    <span className='text-muted-foreground ms-1 font-mono text-xs whitespace-nowrap'>
+                      ×{formatNumber(part.basis.count, locale)}
+                    </span>
                   )}
                 </span>
-                <span className='text-muted-foreground text-end font-mono text-xs tabular-nums'>
-                  {rawTotal > 0 &&
-                    (part.quota > 0 && part.quota / rawTotal < 0.001
-                      ? `<${percentage.format(0.001)}`
-                      : percentage.format(part.quota / rawTotal))}
+                <span className='text-end font-mono font-medium tabular-nums'>
+                  {formatReceiptQuota(part.value)}
                 </span>
+                {!compact && (
+                  <>
+                    <span className='text-muted-foreground col-start-2 font-mono text-xs tabular-nums'>
+                      {part.basis && (
+                        <>
+                          {formatNumber(part.basis.count, locale)}{' '}
+                          {part.unit && t(part.unit)}
+                          {' × '}
+                          {formatReceiptQuota(part.basis.unitPriceQuota)} /{' '}
+                          {formatNumber(part.basis.per, locale)}{' '}
+                          {part.unit && t(part.unit)}
+                          {part.basis.multipliers
+                            .map((factor) => ` × ${factor}`)
+                            .join('')}
+                        </>
+                      )}
+                    </span>
+                    <span className='text-muted-foreground text-end font-mono text-xs tabular-nums'>
+                      {rawTotal > 0 &&
+                        (part.value > 0 && part.value / rawTotal < 0.001
+                          ? `<${percentage.format(0.001)}`
+                          : percentage.format(part.value / rawTotal))}
+                    </span>
+                  </>
+                )}
               </li>
             ))}
             {Math.abs(rounding) > 0.000001 && (
@@ -228,9 +250,15 @@ export function LogChargeDetails({
             >
               <span className='break-all'>{tool.name}</span>
               <span className='text-muted-foreground font-mono text-xs'>
-                {formatNumber(tool.count)} ×{' '}
-                {formatReceiptQuota(tool.price * config.quotaPerUnit)} /{' '}
-                {formatNumber(tool.per)}
+                {compact ? (
+                  `×${formatNumber(tool.count, locale)}`
+                ) : (
+                  <>
+                    {formatNumber(tool.count, locale)} ×{' '}
+                    {formatReceiptQuota(tool.price * config.quotaPerUnit)} /{' '}
+                    {formatNumber(tool.per, locale)}
+                  </>
+                )}
               </span>
             </div>
           ))}
@@ -244,7 +272,7 @@ export function LogChargeDetails({
               <dd>−{formatLogQuota(free)}</dd>
             </>
           )}
-          {(free > 0 || payable !== quota) && (
+          {!lines.length && payable !== quota && (
             <>
               <dt>{t('Total Cost')}</dt>
               <dd>{formatLogQuota(quota)}</dd>
@@ -262,14 +290,15 @@ export function LogChargeDetails({
               <dd>{formatLogQuota(cost.cost_quota)}</dd>
               <dt>{t('Gross profit')}</dt>
               <dd>
-                {Math.abs(
-                  cost.revenue_quota - cost.cost_quota - cost.profit_quota
-                ) < 0.000001 && (
-                  <>
-                    {formatLogQuota(cost.revenue_quota)} −{' '}
-                    {formatLogQuota(cost.cost_quota)} ={' '}
-                  </>
-                )}
+                {!compact &&
+                  Math.abs(
+                    cost.revenue_quota - cost.cost_quota - cost.profit_quota
+                  ) < 0.000001 && (
+                    <>
+                      {formatLogQuota(cost.revenue_quota)} −{' '}
+                      {formatLogQuota(cost.cost_quota)} ={' '}
+                    </>
+                  )}
                 {formatLogQuota(cost.profit_quota)}
               </dd>
             </>

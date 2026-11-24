@@ -550,3 +550,156 @@ test('separates exact gateway phases from independently measured routing attempt
   rerender(<LogTimingDetails log={log} other={other} isAdmin={false} />)
   expect(screen.queryByText('Routing observations')).not.toBeInTheDocument()
 })
+
+test.each([
+  {
+    name: 'Responses reports cache and reasoning as subsets',
+    openWith: 'hover',
+    prompt: 1000,
+    percentOfOutput: 100 / 1100,
+    other: {
+      cache_tokens: 200,
+      cache_write_tokens: 150,
+      cache_creation_tokens_12h: 50,
+      reasoning_tokens: 35,
+    },
+    details: ['650', '100', '200', '150', '50', '35', '1,100'],
+  },
+  {
+    name: 'Anthropic reports ordinary input separately',
+    openWith: 'keyboard',
+    prompt: 650,
+    percentOfOutput: 100 / 1100,
+    other: {
+      usage_semantic: 'anthropic',
+      cache_tokens: 200,
+      cache_creation_tokens_5m: 100,
+      cache_creation_tokens_1h: 50,
+    },
+    details: ['650', '100', '200', '150', '100', '50', 'Not recorded', '1,100'],
+  },
+  {
+    name: 'recorded zeros and missing facts remain distinct',
+    openWith: 'touch',
+    prompt: 50,
+    percentOfOutput: 100 / 150,
+    other: { cache_tokens: 0, cache_ratio: 0.1, reasoning_tokens: 0 },
+    details: ['50', '100', '0', 'Not recorded', '0', '150'],
+  },
+  {
+    name: 'legacy totals do not prove a cache or reasoning breakdown',
+    openWith: 'click',
+    prompt: 50,
+    percentOfOutput: 100 / 150,
+    other: {},
+    details: [
+      'Not recorded',
+      '100',
+      'Not recorded',
+      'Not recorded',
+      'Not recorded',
+      '150',
+    ],
+  },
+  {
+    name: 'historical separate cache input lacks a reliable grand total',
+    openWith: 'click',
+    prompt: 50,
+    other: { usage_semantic: 'anthropic', cache_tokens: 25 },
+    percentOfOutput: null,
+    details: [
+      '50',
+      '100',
+      '25',
+      'Not recorded',
+      'Not recorded',
+      'Not recorded',
+    ],
+  },
+  {
+    name: 'all known counts are zero',
+    openWith: 'click',
+    prompt: 0,
+    output: 0,
+    other: { cache_tokens: 0, cache_write_tokens: 0 },
+    percentOfOutput: null,
+    details: ['0', '0', '0', '0', 'Not recorded', '0'],
+  },
+  {
+    name: 'contradictory subsets keep their original counts without plotting',
+    openWith: 'click',
+    prompt: 10,
+    other: { cache_tokens: 8, cache_write_tokens: 6 },
+    percentOfOutput: null,
+    details: ['Not recorded', '100', '8', '6', 'Not recorded', '110'],
+  },
+] satisfies {
+  name: string
+  prompt: number
+  output?: number
+  percentOfOutput: number | null
+  other: LogOtherData
+  details: string[]
+  openWith: 'hover' | 'keyboard' | 'click' | 'touch'
+}[])(
+  'token breakdown: $name',
+  async ({ prompt, output, other, details, openWith, percentOfOutput }) => {
+    const log = usageLogSchema.parse({
+      id: 1,
+      user_id: 1,
+      created_at: 1,
+      type: 2,
+      content: '',
+      prompt_tokens: prompt,
+      completion_tokens: output ?? 100,
+    })
+    render(<TokenPerformanceCell log={log} other={other} />)
+    const trigger = screen.getByRole('button', {
+      name:
+        openWith === 'hover'
+          ? 'Cache read tokens · Token Breakdown'
+          : 'Token Breakdown',
+    })
+    if (openWith === 'hover') await userEvent.hover(trigger)
+    else if (openWith === 'keyboard') {
+      await userEvent.tab()
+      expect(trigger).toHaveFocus()
+      if (trigger.getAttribute('aria-expanded') !== 'true')
+        await userEvent.keyboard('{Enter}')
+    } else if (openWith === 'touch') {
+      await userEvent.pointer([
+        { keys: '[TouchA>]', target: trigger },
+        { keys: '[/TouchA]' },
+      ])
+    } else await userEvent.click(trigger)
+    const card = within(
+      await screen.findByRole('dialog', { name: 'Token Breakdown' })
+    )
+    expect(card.getAllByRole('definition').map((dd) => dd.textContent)).toEqual(
+      details
+    )
+    expect(card.getByText('(Included in output)')).toBeVisible()
+    const chart = card.queryByRole('img', { name: 'Token distribution' })
+    if (percentOfOutput == null) {
+      expect(chart).not.toBeInTheDocument()
+    } else {
+      expect(chart).toBeVisible()
+      const plotted = within(chart!)
+      expect(
+        parseFloat(plotted.getByTitle('Output Tokens').style.width)
+      ).toBeCloseTo(100 * percentOfOutput)
+      expect(plotted.queryByTitle('Reasoning tokens')).not.toBeInTheDocument()
+      expect(
+        plotted.queryByTitle('Cache Creation (12h)')
+      ).not.toBeInTheDocument()
+      if (other.reasoning_tokens === 35) {
+        const reasoning = card.getByRole('img', {
+          name: 'Reasoning tokens · Included in output',
+        })
+        expect(within(reasoning).getByTitle('Reasoning tokens')).toHaveStyle({
+          width: '35%',
+        })
+      }
+    }
+  }
+)

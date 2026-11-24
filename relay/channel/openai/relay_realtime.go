@@ -125,12 +125,7 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 				if realtimeEvent.Type == dto.RealtimeEventTypeResponseDone {
 					realtimeUsage := realtimeEvent.Response.Usage
 					if realtimeUsage != nil {
-						usage.TotalTokens += realtimeUsage.TotalTokens
-						usage.InputTokens += realtimeUsage.InputTokens
-						usage.OutputTokens += realtimeUsage.OutputTokens
-						usage.InputTokenDetails.Add(realtimeUsage.InputTokenDetails)
-						usage.OutputTokenDetails.AudioTokens += realtimeUsage.OutputTokenDetails.AudioTokens
-						usage.OutputTokenDetails.TextTokens += realtimeUsage.OutputTokenDetails.TextTokens
+						accumulateRealtimeUsage(usage, realtimeUsage)
 						err := preConsumeUsage(c, info, usage, sumUsage)
 						if err != nil {
 							errChan <- fmt.Errorf("error consume usage: %v", err)
@@ -226,13 +221,26 @@ func preConsumeUsage(ctx *gin.Context, info *relaycommon.RelayInfo, usage *dto.R
 		return fmt.Errorf("invalid usage pointer")
 	}
 
+	accumulateRealtimeUsage(totalUsage, usage)
+	return service.PreWssConsumeQuota(ctx, info, usage)
+}
+
+func accumulateRealtimeUsage(totalUsage, usage *dto.RealtimeUsage) {
+	// A session-wide reasoning count is exact only when every turn that
+	// generated output reported its reasoning count. Zero has no presence bit.
+	if usage.OutputTokens > 0 {
+		reasoning := usage.OutputTokenDetails.ReasoningTokens
+		previousTurnsKnown := totalUsage.OutputTokens == 0 || totalUsage.OutputTokenDetails.ReasoningTokens > 0
+		if previousTurnsKnown && reasoning > 0 && reasoning <= usage.OutputTokens {
+			totalUsage.OutputTokenDetails.ReasoningTokens += reasoning
+		} else {
+			totalUsage.OutputTokenDetails.ReasoningTokens = 0
+		}
+	}
 	totalUsage.TotalTokens += usage.TotalTokens
 	totalUsage.InputTokens += usage.InputTokens
 	totalUsage.OutputTokens += usage.OutputTokens
 	totalUsage.InputTokenDetails.Add(usage.InputTokenDetails)
 	totalUsage.OutputTokenDetails.TextTokens += usage.OutputTokenDetails.TextTokens
 	totalUsage.OutputTokenDetails.AudioTokens += usage.OutputTokenDetails.AudioTokens
-	// clear usage
-	err := service.PreWssConsumeQuota(ctx, info, usage)
-	return err
 }

@@ -706,3 +706,17 @@ func TestAzureHostedWebSearch(t *testing.T) {
 		})
 	}
 }
+
+func TestRealtimeReasoningRequiresUsageForEveryGeneratedTurn(t *testing.T) {
+	total := &dto.RealtimeUsage{}
+	for _, turn := range []struct{ output, reasoning, want int }{
+		{5, 3, 3}, {6, 4, 7}, {0, 0, 7}, {2, 0, 0}, {10, 4, 0},
+	} {
+		accumulateRealtimeUsage(total, &dto.RealtimeUsage{
+			OutputTokens:       turn.output,
+			OutputTokenDetails: dto.OutputTokenDetails{ReasoningTokens: turn.reasoning},
+		})
+		assert.Equal(t, turn.want, total.OutputTokenDetails.ReasoningTokens)
+	}
+	assert.Equal(t, 23, total.OutputTokens)
+}

@@ -17,15 +17,92 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Brain, Terminal, Wrench } from 'lucide-react'
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { BadgeListCell } from '@/components/data-table'
 import { StatusBadge } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import { getReasoningEffortVariant } from '../lib/format'
 import { getLogToolIcon } from '../lib/tool-icon'
 import type { LogOtherData } from '../types'
+import { LogMetricPopover } from './log-metric-popover'
+
+/** Only observed calls and explicit legacy per-call counters identify an invocation count. */
+function toolInvocationCount(name: string, metadata: LogOtherData) {
+  const observed = metadata.invoked_tool_counts?.[name]
+  if (
+    typeof observed === 'number' &&
+    Number.isSafeInteger(observed) &&
+    observed > 0
+  )
+    return observed
+  let legacy: number | undefined
+  if (name === 'web_search') legacy = metadata.web_search_call_count
+  if (name === 'file_search') legacy = metadata.file_search_call_count
+  if (name === 'image_generation') legacy = metadata.image_generation_call_count
+  return typeof legacy === 'number' &&
+    Number.isSafeInteger(legacy) &&
+    legacy > 0
+    ? legacy
+    : undefined
+}
+
+function ToolCallPopover(props: {
+  names: string[]
+  label: string
+  metadata: LogOtherData
+  children: ReactNode
+}) {
+  const { t, i18n } = useTranslation()
+  return (
+    <LogMetricPopover
+      label={t('Tools')}
+      className='w-64'
+      trigger={
+        <Button
+          variant='ghost'
+          size='sm'
+          aria-label={props.label}
+          className='bg-muted text-muted-foreground hover:text-foreground size-[26px] shrink-0 rounded-sm p-0 text-xs'
+        >
+          {props.children}
+        </Button>
+      }
+    >
+      <dl className='space-y-1.5'>
+        {props.names.map((name) => {
+          const count = toolInvocationCount(name, props.metadata)
+          const Icon = getLogToolIcon(name)
+          return (
+            <div
+              key={name}
+              className='grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3'
+            >
+              <dt className='flex min-w-0 items-start gap-1.5'>
+                <Icon
+                  aria-hidden
+                  className='text-muted-foreground mt-px size-3.5 shrink-0'
+                />
+                <span className='font-mono break-all'>{name}</span>
+              </dt>
+              <dd className='text-muted-foreground text-right tabular-nums'>
+                <span className='sr-only'>{t('Count')} </span>
+                {count === undefined
+                  ? t('Not recorded')
+                  : '×' + formatNumber(count, toIntlLocale(i18n.language))}
+              </dd>
+            </div>
+          )
+        })}
+      </dl>
+    </LogMetricPopover>
+  )
+}
 
 export type RequestMetadataField =
   | 'reasoning_effort'
@@ -101,34 +178,40 @@ export function RequestMetadataTags(props: {
     return null
   }
 
-  if (props.field === 'invoked_tools' && !props.expanded && tools.length > 0) {
-    const icons = tools.map((name) => {
-      const Icon = getLogToolIcon(name)
-      return (
-        <span
-          key={name}
-          tabIndex={0}
-          title={name}
-          className='bg-muted text-muted-foreground hover:text-foreground focus-visible:ring-ring inline-flex size-[26px] shrink-0 items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none [[data-slot=popover-content]_&]:w-auto [[data-slot=popover-content]_&]:gap-1.5 [[data-slot=popover-content]_&]:px-2'
-        >
-          <Icon aria-hidden className='size-[15px]' />
-          <span className='sr-only [[data-slot=popover-content]_&]:not-sr-only'>
-            {name}
-          </span>
-        </span>
-      )
-    })
+  if (
+    props.field === 'invoked_tools' &&
+    !props.expanded &&
+    adminMetadata &&
+    tools.length > 0
+  ) {
     return (
       <div
-        className='flex items-center justify-center gap-1 [&>div]:ml-0'
+        className='flex items-center justify-center gap-1'
         aria-label={t('Tools')}
       >
-        <BadgeListCell
-          items={icons}
-          max={3}
-          expandable
-          expandLabel={t('Show all invoked tools')}
-        />
+        {tools.slice(0, 3).map((name) => {
+          const Icon = getLogToolIcon(name)
+          return (
+            <ToolCallPopover
+              key={name}
+              names={[name]}
+              label={t('Tool: {{name}}', { name })}
+              metadata={adminMetadata}
+            >
+              <Icon aria-hidden className='size-[15px]' />
+              <span className='sr-only'>{name}</span>
+            </ToolCallPopover>
+          )
+        })}
+        {tools.length > 3 && (
+          <ToolCallPopover
+            names={tools}
+            label={t('Show all invoked tools')}
+            metadata={adminMetadata}
+          >
+            +{tools.length - 3}
+          </ToolCallPopover>
+        )}
         {partial && (
           <span
             title={t('Tool details incomplete')}

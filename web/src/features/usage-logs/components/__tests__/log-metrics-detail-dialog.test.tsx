@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { expect, test } from 'vitest'
 
 import { usageLogSchema } from '../../data/schema'
+import { LogMetricPopover } from '../log-metric-popover'
 import { LogMetricsDetailDialog } from '../log-metrics-detail-dialog'
 
 test('opens the selected receipt, switches tabs on the same request and resets on reopen', async () => {
@@ -64,4 +65,32 @@ test('opens the selected receipt, switches tabs on the same request and resets o
   expect(
     await screen.findByRole('tab', { name: 'Timing breakdown' })
   ).toHaveAttribute('aria-selected', 'true')
+})
+
+test('previews metrics on hover and keyboard focus, and dismisses without moving focus', async () => {
+  const user = userEvent.setup()
+  render(
+    <LogMetricPopover label='Token Breakdown' trigger={<button>800</button>}>
+      <span>Recorded total</span>
+    </LogMetricPopover>
+  )
+  const amount = screen.getByRole('button', { name: '800' })
+  expect(screen.queryByText('Recorded total')).not.toBeInTheDocument()
+  await user.hover(amount)
+  expect(
+    await screen.findByRole('dialog', { name: 'Token Breakdown' })
+  ).toBeVisible()
+  expect(amount).not.toHaveFocus()
+  await user.unhover(amount)
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+  await user.tab()
+  expect(amount).toHaveFocus()
+  expect(await screen.findByText('Recorded total')).toBeVisible()
+  await user.keyboard('{Escape}')
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  )
+  expect(amount).toHaveFocus()
 })

@@ -28,9 +28,10 @@ import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
 import { useState, type ReactNode } from 'react'
 import { I18nextProvider } from 'react-i18next'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 
 import { DataTableViewOptions } from '@/components/data-table'
+import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema } from '../../data/schema'
@@ -49,6 +50,8 @@ const metadata: LogOtherData = {
   user_agent: 'codex-tui/1.0',
   client_tool: 'Codex CLI',
   invoked_tools: ['exec_command', 'apply_patch', 'read_resource'],
+  invoked_tool_counts: { exec_command: 3 },
+  admin_info: { trace_id: 'private-trace' },
   tool_observation: 'complete',
 }
 const log = usageLogSchema.parse({
@@ -92,10 +95,17 @@ function renderWithQueries(element: ReactNode, client?: QueryClient) {
 function LogSurface(props: {
   mobile: boolean
   isAdmin: boolean
+  compact?: boolean
   visibility?: VisibilityState
   showViewMenu?: boolean
 }) {
-  const columns = useCommonLogsColumns(props.isAdmin, onShowDetails)
+  const columns = useCommonLogsColumns(
+    props.isAdmin,
+    onShowDetails,
+    'usage',
+    false,
+    props.compact
+  )
   const table = useReactTable({
     data: [log],
     columns,
@@ -128,6 +138,7 @@ afterEach(() => {
   for (const client of clients) client.clear()
   clients.length = 0
   useAuthStore.getState().auth.reset()
+  vi.restoreAllMocks()
 })
 
 test('leaves old records without metadata unlabelled instead of claiming no tools were called', () => {
@@ -293,6 +304,9 @@ test('opens a fourth tool with the keyboard when using compact tool icons', asyn
       isAdmin
       metadata={{
         invoked_tools: ['bash', 'read', 'web_search', 'file_search'],
+        invoked_tool_counts: { bash: 4, file_search: 0.5 },
+        web_search_call_count: 3,
+        file_search_call_count: 7,
       }}
     />
   )
@@ -301,13 +315,55 @@ test('opens a fourth tool with the keyboard when using compact tool icons', asyn
   const more = screen.getByRole('button', { name: 'Show all invoked tools' })
   more.focus()
   await user.keyboard('{Enter}')
-  expect(await screen.findByTitle('file_search')).toHaveTextContent(
-    'file_search'
-  )
+  const panel = within(await screen.findByRole('dialog'))
+  const counts = panel.getAllByRole('definition').map((row) => row.textContent)
+  expect(counts).toEqual([
+    'Count ×4',
+    'Count Not recorded',
+    'Count ×3',
+    'Count ×7',
+  ])
+  expect(panel.getAllByRole('term').map((term) => term.textContent)).toEqual([
+    'bash',
+    'read',
+    'web_search',
+    'file_search',
+  ])
   await user.keyboard('{Escape}')
   await waitFor(() => expect(more).toHaveAttribute('aria-expanded', 'false'))
   expect(more).toHaveFocus()
 })
+
+test.each(['desktop', 'compact', 'mobile'] as const)(
+  'shows only the selected tool type and count without loading its trace (%s)',
+  async (surface) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
+    const get = vi.spyOn(api, 'get')
+    renderWithQueries(
+      <LogSurface
+        mobile={surface === 'mobile'}
+        compact={surface === 'compact'}
+        isAdmin
+      />
+    )
+    const area =
+      surface === 'compact'
+        ? within(screen.getByRole('cell', { name: 'model_name' }))
+        : screen
+    const target = area.getByRole('button', { name: 'Tool: exec_command' })
+    if (surface === 'mobile') await userEvent.click(target)
+    else await userEvent.hover(target)
+    const dialog = within(await screen.findByRole('dialog'))
+    expect(dialog.getAllByRole('term')).toHaveLength(1)
+    expect(dialog.getByRole('term')).toHaveTextContent('exec_command')
+    expect(dialog.getByRole('definition')).toHaveTextContent('×3')
+    expect(dialog.queryByText('Parameters')).not.toBeInTheDocument()
+    expect(dialog.queryByText('Tool result')).not.toBeInTheDocument()
+    expect(
+      get.mock.calls.some(([path]) => String(path).startsWith('/api/log/trace'))
+    ).toBe(false)
+  }
+)
 
 test.each([false, true])(
   'allows hiding model and client independently of reasoning and tools (mobile: %s)',

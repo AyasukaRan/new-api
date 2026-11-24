@@ -149,6 +149,100 @@ func TestRequestMetadataObservesOnlyCurrentResponseTools(t *testing.T) {
 	}
 }
 
+func TestRequestMetadataCountsToolCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format types.RelayFormat
+		stream bool
+		events []string
+		counts map[string]int
+	}{
+		{
+			name: "chat parallel calls and fragmented names", format: types.RelayFormatOpenAI, stream: true,
+			events: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_"}},{"index":1,"function":{"name":"read_file"}}]}}]}`,
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"file"}}]}}]}`, "[DONE]",
+			},
+			counts: map[string]int{"read_file": 2},
+		},
+		{
+			name: "claude repeated block starts and results", format: types.RelayFormatClaude, stream: true,
+			events: []string{
+				`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read","id":"a"}}`,
+				`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read","id":"a"}}`,
+				`{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","name":"Read","id":"b"}}`,
+				`{"type":"content_block_start","index":3,"content_block":{"type":"tool_result","tool_use_id":"b"}}`,
+				`{"type":"message_stop"}`,
+			},
+			counts: map[string]int{"Read": 2},
+		},
+		{
+			name: "responses final snapshot supersedes notifications", format: types.RelayFormatOpenAIResponses, stream: true,
+			events: []string{
+				`{"type":"response.output_item.added","output_index":0,"item":{"id":"a","type":"web_search_call"}}`,
+				`{"type":"response.output_item.done","item":{"id":"a","type":"web_search_call"}}`,
+				`{"type":"response.completed","response":{"output":[{"id":"a","type":"web_search_call"},{"id":"b","type":"web_search_call"},{"type":"function_call","name":"read_file"}]}}`,
+			},
+			counts: map[string]int{"web_search": 2, "read_file": 1},
+		},
+		{
+			name: "responses stable id even when an index is omitted", format: types.RelayFormatOpenAIResponses, stream: true,
+			events: []string{
+				`{"type":"response.output_item.added","output_index":0,"item":{"id":"a","type":"web_search_call"}}`,
+				`{"type":"response.output_item.done","item":{"id":"a","type":"web_search_call"}}`,
+				`{"type":"response.completed","response":{}}`,
+			},
+			counts: map[string]int{"web_search": 1},
+		},
+		{
+			name: "incomparable identities do not imply two calls", format: types.RelayFormatOpenAIResponses, stream: true,
+			events: []string{
+				`{"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call"}}`,
+				`{"type":"response.output_item.done","item":{"id":"a","type":"web_search_call"}}`,
+				`{"type":"response.completed","response":{}}`,
+			},
+		},
+		{
+			name: "gemini result is not another invocation", format: types.RelayFormatGemini,
+			events: []string{`{"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON"}},{"codeExecutionResult":{"outcome":"OUTCOME_OK"}},{"functionCall":{"name":"read_file"}},{"functionCall":{"name":"read_file"}}]},"groundingMetadata":{"webSearchQueries":["query"]}}]}`},
+			counts: map[string]int{"code_execution": 1, "read_file": 2},
+		},
+		{
+			name: "gemini unknown identity affects only that type", format: types.RelayFormatGemini, stream: true,
+			events: []string{`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"a","name":"lookup"}},{"functionCall":{"name":"lookup"}},{"functionCall":{"id":"b","name":"read_file"}}]},"finishReason":"STOP"}]}`},
+			counts: map[string]int{"read_file": 1},
+		},
+		{
+			name: "unfinished response has no exact count", format: types.RelayFormatOpenAIResponses, stream: true,
+			events: []string{`{"type":"response.output_item.added","output_index":0,"item":{"type":"web_search_call"}}`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Set(requestMetadataContextKey, &requestMetadata{format: tc.format, stream: tc.stream})
+			for _, event := range tc.events {
+				ObserveRequestMetadataEvent(c, []byte(event))
+			}
+			for range 2 {
+				other := model.NewLogOther()
+				AppendRequestMetadata(c, nil, other)
+				values := other.Snapshot()
+				require.NotEmpty(t, values["invoked_tools"])
+				if tc.counts == nil {
+					assert.NotContains(t, values, "invoked_tool_counts")
+				} else {
+					assert.Equal(t, tc.counts, values["invoked_tool_counts"])
+				}
+			}
+			ResetRequestToolObservation(c)
+			other := model.NewLogOther()
+			AppendRequestMetadata(c, nil, other)
+			assert.NotContains(t, other.Snapshot(), "invoked_tool_counts")
+		})
+	}
+}
+
 func TestRequestMetadataRecordsObservedTransportAndAdminUserAgent(t *testing.T) {
 	for _, tc := range []struct {
 		name, contentType, transport                      string

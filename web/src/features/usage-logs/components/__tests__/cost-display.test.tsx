@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18next from 'i18next'
 import type React from 'react'
@@ -31,6 +31,7 @@ import {
 
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
+import { usageLogSchema } from '../../data/schema'
 import { getChargeBreakdown } from '../../lib/charge-breakdown'
 import { LogCostDisplay } from '../log-cost-display'
 
@@ -195,6 +196,80 @@ describe('log cost display', () => {
     }
   )
 
+  test.each(['amount', 'tool'])(
+    'hovering the %s shows every billed tool and its recorded count without clicking',
+    async (target) => {
+      const user = userEvent.setup()
+      renderCost({
+        quota: 12500,
+        other: {
+          group_ratio: 2,
+          free_quota: 2500,
+          wallet_quota_deducted: 10000,
+          tool_surcharges: [
+            { name: 'mcp__files__find_in_workspace', count: 2, price: 5 },
+            { name: 'web_search', count: 1, price: 2 },
+          ],
+        },
+      })
+      const amount = screen.getByRole('button', { name: /Billing Details/ })
+      const tool = screen.getByRole('img', { name: 'Tool: web_search' })
+      await user.hover(target === 'amount' ? amount : tool)
+      const panel = await screen.findByRole('dialog', {
+        name: 'Billing Details',
+      })
+      const chart = within(panel).getByRole('img', { name: 'Cost breakdown' })
+      expect(chart).toBeVisible()
+      expect(
+        within(chart).getByTitle('mcp__files__find_in_workspace')
+      ).toHaveStyle({ width: '80%' })
+      expect(panel).toHaveTextContent('Total Cost$0.025')
+      expect(panel).toHaveTextContent('Amount charged$0.02')
+      const rows = within(panel).getByRole('list', { name: 'Cost breakdown' })
+      expect(rows).toHaveTextContent(/mcp__files__find_in_workspace\s*×2/)
+      expect(rows).toHaveTextContent(/web_search\s*×1/)
+      expect(rows).toHaveTextContent('$0.02')
+      expect(rows).not.toHaveTextContent('/ 1,000 times')
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(panel).not.toBeInTheDocument())
+    }
+  )
+
+  test('opens the linked request from the amount panel on the same log', async () => {
+    const user = userEvent.setup()
+    renderCost({
+      quota: 100,
+      log: usageLogSchema.parse({
+        id: 48,
+        user_id: 3,
+        created_at: 1795400000,
+        type: 2,
+        content: '',
+        model_name: 'deepseek-flash',
+        quota: 100,
+      }),
+      other: null,
+    })
+    await user.click(screen.getByRole('button', { name: /Billing Details/ }))
+    const panel = await screen.findByRole('dialog', { name: 'Billing Details' })
+    await user.click(
+      within(panel).getByRole('button', { name: 'Request details' })
+    )
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Request details',
+    })
+    expect(within(dialog).getByText(/deepseek-flash/)).toBeVisible()
+    expect(
+      within(dialog).getByRole('tab', { name: 'Cost breakdown' })
+    ).toHaveAttribute('aria-selected', 'true')
+    await user.click(
+      within(dialog).getByRole('tab', { name: 'Timing breakdown' })
+    )
+    expect(
+      within(dialog).getByRole('tabpanel', { name: 'Timing breakdown' })
+    ).toBeVisible()
+  })
+
   test('opens the tool receipt from the stacked icon and reconciles the recorded total', async () => {
     const user = userEvent.setup()
     renderCost({
@@ -210,7 +285,11 @@ describe('log cost display', () => {
       name: 'Tool: lookup_customer',
     })
     await user.click(marker)
-    const dialog = screen.getByRole('dialog')
+    const preview = screen.getByRole('dialog', { name: 'Billing Details' })
+    await user.click(
+      within(preview).getByRole('button', { name: 'Request details' })
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Request details' })
     expect(dialog).toHaveTextContent('2 times × $5 / 1,000 times × 2')
     expect(dialog).toHaveTextContent('$0.02')
     expect(dialog).toHaveTextContent('Remaining charge')
@@ -250,7 +329,11 @@ describe('log cost display', () => {
       },
     })
     await user.click(screen.getByRole('button', { name: /Billing Details/ }))
-    const dialog = screen.getByRole('dialog')
+    const preview = screen.getByRole('dialog', { name: 'Billing Details' })
+    await user.click(
+      within(preview).getByRole('button', { name: 'Request details' })
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Request details' })
     expect(dialog).toHaveTextContent(
       '1,000 tokens × $2 / 1,000,000 tokens × 0.5'
     )
@@ -414,9 +497,15 @@ describe('log cost display', () => {
 
   test('regular view hides cost estimates even when a response contains admin metadata', async () => {
     renderCost({ quota: 10000, other: { admin_info: { cost: costSnapshot } } })
-    await userEvent
-      .setup()
-      .click(screen.getByRole('button', { name: /Billing Details/ }))
+    await userEvent.setup().tab()
+    expect(
+      screen.getByRole('button', { name: /Billing Details/ })
+    ).toHaveFocus()
+    expect(
+      within(screen.getByRole('dialog')).queryByRole('img', {
+        name: 'Cost breakdown',
+      })
+    ).not.toBeInTheDocument()
     expect(screen.getByRole('dialog')).toHaveTextContent(
       'A reconciled itemized breakdown is unavailable'
     )

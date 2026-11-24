@@ -36,7 +36,7 @@ func TestFormatUserLogsStripsQuotaSaturation(t *testing.T) {
 }
 
 func TestUserLogHidesRequestSourceAndTools(t *testing.T) {
-	other := `{"reasoning_effort":"high","client_tool":"Go HTTP Client","invoked_tools":["sub2api_web_fetch"],"tool_observation":"complete"}`
+	other := `{"reasoning_effort":"high","client_tool":"Go HTTP Client","invoked_tools":["sub2api_web_fetch"],"invoked_tool_counts":{"sub2api_web_fetch":2},"tool_observation":"complete"}`
 	user := []*Log{{Other: other}}
 	formatUserLogs(user, 0)
 	assert.JSONEq(t, `{"reasoning_effort":"high"}`, user[0].Other)

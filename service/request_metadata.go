@@ -31,27 +31,30 @@ const requestMetadataContextKey = "relay_request_metadata"
 // not lose later tool calls when the independent request trace is truncated.
 const requestMetadataMaxFrameBytes = 1 << 20
 const requestMetadataMaxTools = 128
+const requestMetadataMaxToolCalls = 4096
 const requestMetadataMaxNameBytes = 256
 const requestMetadataMaxUserAgentBytes = 512
 
 type requestMetadata struct {
-	mu               sync.Mutex
-	format           types.RelayFormat
-	requestedStream  bool
-	stream           bool
-	clientTool       string
-	userAgent        string
-	reasoningLabel   string
-	buffer           []byte
-	event            []byte
-	droppingLine     bool
-	droppingEvent    bool
-	partial          bool
-	seen             bool
-	terminal         bool
-	names            []string
-	chatNames        map[string]string
-	droppedChatNames map[string]bool
+	mu                sync.Mutex
+	format            types.RelayFormat
+	requestedStream   bool
+	stream            bool
+	clientTool        string
+	userAgent         string
+	reasoningLabel    string
+	buffer            []byte
+	event             []byte
+	droppingLine      bool
+	droppingEvent     bool
+	partial           bool
+	seen              bool
+	terminal          bool
+	names             []string
+	toolCalls         map[string]string
+	unknownToolCounts map[string]bool
+	chatNames         map[string]string
+	droppedChatNames  map[string]bool
 }
 
 // BeginRequestMetadata observes the client-facing response independently of
@@ -104,6 +107,7 @@ func ResetRequestToolObservation(c *gin.Context) {
 	defer metadata.mu.Unlock()
 	metadata.buffer, metadata.event, metadata.names = nil, nil, nil
 	metadata.chatNames, metadata.droppedChatNames = nil, nil
+	metadata.toolCalls, metadata.unknownToolCounts = nil, nil
 	metadata.droppingLine, metadata.droppingEvent, metadata.partial = false, false, false
 	metadata.seen, metadata.terminal = false, false
 }
@@ -202,22 +206,62 @@ func (m *requestMetadata) acceptSSELine(line []byte) {
 	}
 }
 
-func (m *requestMetadata) addTool(name string) {
+func (m *requestMetadata) addTool(name string) bool {
 	if name == "" {
-		return
+		return false
 	}
 	if len(name) > requestMetadataMaxNameBytes || !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 		m.partial = true
-		return
+		return false
 	}
 	if slices.Contains(m.names, name) {
-		return
+		return true
 	}
 	if len(m.names) >= requestMetadataMaxTools {
 		m.partial = true
-		return
+		return false
 	}
 	m.names = append(m.names, strings.Clone(name))
+	return true
+}
+
+// Repeated stream notifications describe the same call. Without a stable ID or
+// position we can still name the tool, but cannot report an exact count for it.
+func (m *requestMetadata) observeToolCall(name, key string) {
+	if !m.addTool(name) {
+		return
+	}
+	if key == "" || len(key) > requestMetadataMaxNameBytes {
+		if m.unknownToolCounts == nil {
+			m.unknownToolCounts = make(map[string]bool)
+		}
+		m.unknownToolCounts[strings.Clone(name)] = true
+		return
+	}
+	if m.toolCalls == nil {
+		m.toolCalls = make(map[string]string)
+	}
+	if prior, exists := m.toolCalls[key]; exists {
+		if prior != name {
+			m.partial = true
+		}
+		return
+	}
+	if len(m.toolCalls) >= requestMetadataMaxToolCalls {
+		m.partial = true
+		return
+	}
+	m.toolCalls[strings.Clone(key)] = strings.Clone(name)
+}
+
+func toolCallKey(index, id gjson.Result) string {
+	if id.Type == gjson.String && len(id.Str) > 0 && len(id.Str) <= requestMetadataMaxNameBytes-len("id:") {
+		return "id:" + id.Str
+	}
+	if index.Type == gjson.Number && len(index.Raw) <= 20 {
+		return "#" + index.Raw
+	}
+	return ""
 }
 
 func (m *requestMetadata) acceptResponse(data []byte) {
@@ -271,14 +315,15 @@ func (m *requestMetadata) acceptResponse(data []byte) {
 		case "message":
 			m.seen = true
 			m.terminal = true
-			for _, block := range payload.Get("content").Array() {
-				m.acceptClaudeTool(block)
+			for i, block := range payload.Get("content").Array() {
+				m.acceptClaudeTool(block, "#"+strconv.Itoa(i))
 			}
 		case "message_start", "content_block_delta", "message_delta", "content_block_stop":
 			m.seen = true
 		case "content_block_start":
 			m.seen = true
-			m.acceptClaudeTool(payload.Get("content_block"))
+			block := payload.Get("content_block")
+			m.acceptClaudeTool(block, toolCallKey(payload.Get("index"), block.Get("id")))
 		case "message_stop":
 			m.seen, m.terminal = true, true
 		}
@@ -291,19 +336,28 @@ func (m *requestMetadata) acceptResponse(data []byte) {
 			if document.Get("candidates").IsArray() {
 				m.seen = true
 			}
-			for _, candidate := range document.Get("candidates").Array() {
+			for ci, candidate := range document.Get("candidates").Array() {
 				if candidate.Get("finishReason").String() != "" {
 					m.terminal = true
 				}
-				for _, part := range candidate.Get("content.parts").Array() {
+				for pi, part := range candidate.Get("content.parts").Array() {
+					key := ""
+					if !m.stream && len(documents) == 1 {
+						key = strconv.Itoa(ci) + ":" + strconv.Itoa(pi)
+					}
 					if function := part.Get("functionCall"); function.IsObject() {
 						if name := function.Get("name"); name.Type == gjson.String && name.String() != "" {
-							m.addTool(name.String())
+							if key == "" {
+								key = toolCallKey(gjson.Result{}, function.Get("id"))
+							}
+							m.observeToolCall(name.String(), key)
 						} else {
 							m.partial = true
 						}
 					}
-					if part.Get("executableCode").IsObject() || part.Get("codeExecutionResult").IsObject() {
+					if part.Get("executableCode").IsObject() {
+						m.observeToolCall("code_execution", key)
+					} else if part.Get("codeExecutionResult").IsObject() {
 						m.addTool("code_execution")
 					}
 				}
@@ -318,7 +372,8 @@ func (m *requestMetadata) acceptResponse(data []byte) {
 			m.seen = true
 		}
 		if eventType == "response.output_item.added" || eventType == "response.output_item.done" {
-			m.acceptResponsesTool(payload.Get("item"), eventType == "response.output_item.done")
+			item := payload.Get("item")
+			m.acceptResponsesTool(item, eventType == "response.output_item.done", toolCallKey(payload.Get("output_index"), item.Get("id")))
 		}
 		if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "response.cancelled" || eventType == "response.canceled" {
 			m.terminal = true
@@ -330,8 +385,13 @@ func (m *requestMetadata) acceptResponse(data []byte) {
 			if status := payload.Get("status").String(); status == "incomplete" || status == "failed" {
 				m.partial = true
 			}
-			for _, item := range output.Array() {
-				m.acceptResponsesTool(item, true)
+			items := output.Array()
+			if len(items) > 0 {
+				// A final output snapshot already includes its added/done notifications.
+				m.toolCalls, m.unknownToolCounts = nil, nil
+			}
+			for i, item := range items {
+				m.acceptResponsesTool(item, true, "#"+strconv.Itoa(i))
 			}
 		}
 	}
@@ -372,27 +432,27 @@ func (m *requestMetadata) acceptChatName(key string, name gjson.Result, fragment
 	m.chatNames[key] = strings.Clone(value)
 }
 
-func (m *requestMetadata) acceptClaudeTool(block gjson.Result) {
+func (m *requestMetadata) acceptClaudeTool(block gjson.Result, key string) {
 	if kind := block.Get("type").String(); kind == "tool_use" || kind == "server_tool_use" {
 		if name := block.Get("name"); name.Type == gjson.String && name.String() != "" {
-			m.addTool(name.String())
+			m.observeToolCall(name.String(), key)
 		} else {
 			m.partial = true
 		}
 	}
 }
 
-func (m *requestMetadata) acceptResponsesTool(item gjson.Result, complete bool) {
+func (m *requestMetadata) acceptResponsesTool(item gjson.Result, complete bool, key string) {
 	kind := item.Get("type").String()
 	switch kind {
 	case "function_call", "custom_tool_call", "mcp_call":
 		if name := item.Get("name"); name.Type == gjson.String && name.String() != "" {
-			m.addTool(name.String())
+			m.observeToolCall(name.String(), key)
 		} else if complete {
 			m.partial = true
 		}
 	case "web_search_call", "file_search_call", "code_interpreter_call", "computer_call", "image_generation_call", "local_shell_call", "shell_call", "apply_patch_call":
-		m.addTool(strings.TrimSuffix(kind, "_call"))
+		m.observeToolCall(strings.TrimSuffix(kind, "_call"), key)
 	}
 }
 
@@ -471,12 +531,12 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 		}
 		metadata.acceptSSELine(nil)
 	}
-	for _, name := range metadata.chatNames {
+	for key, name := range metadata.chatNames {
 		if name == "" {
 			metadata.partial = true
 			continue
 		}
-		metadata.addTool(name)
+		metadata.observeToolCall(name, key)
 	}
 	if metadata.seen || metadata.partial {
 		state := "complete"
@@ -486,6 +546,30 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 		names := append([]string{}, metadata.names...)
 		slices.Sort(names)
 		other.SetPublic("invoked_tools", names)
+		if state == "complete" && len(metadata.toolCalls) > 0 {
+			counts := make(map[string]int)
+			// Some compatible streams switch between ID-only and index-only
+			// notifications. Without the final output array, these keys cannot
+			// establish whether both notifications represent distinct calls.
+			firstKind := make(map[string]byte)
+			for key, name := range metadata.toolCalls {
+				if metadata.unknownToolCounts[name] {
+					continue
+				}
+				if metadata.stream && (key[0] == '#' || strings.HasPrefix(key, "id:")) {
+					if kind, ok := firstKind[name]; ok && kind != key[0] {
+						firstKind[name] = 0
+						delete(counts, name)
+						continue
+					}
+					firstKind[name] = key[0]
+				}
+				counts[name]++
+			}
+			if len(counts) > 0 {
+				other.SetPublic("invoked_tool_counts", counts)
+			}
+		}
 		other.SetPublic("tool_observation", state)
 	}
 }

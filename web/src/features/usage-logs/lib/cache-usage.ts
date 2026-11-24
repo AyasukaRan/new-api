@@ -40,14 +40,14 @@ export function getLogCacheUsage(
   ].filter((value): value is number => value != null)
   // Twelve-hour tokens are a subset of cache writes; never add them again.
   const write = writes.length ? Math.max(...writes) : null
-  let total = count(other?.input_tokens_total)
+  const separateCache =
+    other?.usage_semantic === 'anthropic' ||
+    (!other?.usage_semantic && (other?.claude || (splitWrite ?? 0) > 0))
+  const reportedTotal = count(other?.input_tokens_total)
+  let total = reportedTotal
   if (total == null || total === 0) {
     total = count(promptTokens)
-    if (
-      total != null &&
-      (other?.usage_semantic === 'anthropic' ||
-        (!other?.usage_semantic && (other?.claude || (splitWrite ?? 0) > 0)))
-    ) {
+    if (total != null && separateCache) {
       total += (read ?? 0) + (write ?? 0)
     }
   }
@@ -59,5 +59,22 @@ export function getLogCacheUsage(
     count(promptTokens) != null
       ? (100 * read) / total
       : null
-  return { total, read, write, percent }
+  // Anthropic reports ordinary input separately. Text settlement always logs
+  // cache_ratio and cache_tokens, but omits a zero normalized write count.
+  const recordedTextUsage = other?.cache_ratio != null && read != null
+  let uncached = separateCache ? count(promptTokens) : null
+  if (
+    total != null &&
+    read != null &&
+    (write != null || recordedTextUsage || read === total)
+  ) {
+    uncached = count(total - read - (write ?? 0))
+  }
+  // With separate Anthropic input, missing cache counts can make the
+  // historical fallback only a subtotal. Do not use it as a chart denominator.
+  const completeTotal =
+    !separateCache ||
+    (reportedTotal ?? 0) > 0 ||
+    (read != null && write != null)
+  return { total, read, write, percent, uncached, completeTotal }
 }

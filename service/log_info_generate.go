@@ -311,6 +311,25 @@ func appendFinalRequestFormat(relayInfo *relaycommon.RelayInfo, other *model.Log
 	}
 }
 
+// Reasoning is a subset of generated output. The currently supported provider
+// DTOs do not distinguish a missing reasoning count from a reported zero.
+func appendReasoningTokenCount(other *model.LogOther, reasoning, output int) {
+	if reasoning > 0 && reasoning <= output {
+		other.SetPublic("reasoning_tokens", reasoning)
+	}
+}
+
+func appendTextReasoningTokens(other *model.LogOther, usage *dto.Usage, output int) {
+	if usage == nil {
+		return
+	}
+	reasoning := usage.CompletionTokenDetails.ReasoningTokens
+	if details := usage.OutputTokensDetails; details != nil && details.ReasoningTokens != 0 {
+		reasoning = details.ReasoningTokens
+	}
+	appendReasoningTokenCount(other, reasoning, output)
+}
+
 func GenerateWssOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage, modelRatio, groupRatio, completionRatio, audioRatio, audioCompletionRatio, modelPrice, userGroupRatio float64) *model.LogOther {
 	info := GenerateTextOtherInfo(ctx, relayInfo, modelRatio, groupRatio, completionRatio, 0, 0.0, modelPrice, userGroupRatio)
 	if relayInfo.PriceData.ChannelPricing {
@@ -320,6 +339,7 @@ func GenerateWssOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 			info.SetPublic("cached_tokens_details", usage.InputTokenDetails.CachedTokensDetails)
 		}
 	}
+	appendReasoningTokenCount(info, usage.OutputTokenDetails.ReasoningTokens, usage.OutputTokens)
 	info.SetPublic("ws", true)
 	info.SetPublic("audio_input", usage.InputTokenDetails.AudioTokens)
 	info.SetPublic("audio_output", usage.OutputTokenDetails.AudioTokens)
@@ -332,6 +352,7 @@ func GenerateWssOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 
 func GenerateAudioOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, modelRatio, groupRatio, completionRatio, audioRatio, audioCompletionRatio, modelPrice, userGroupRatio float64) *model.LogOther {
 	info := GenerateTextOtherInfo(ctx, relayInfo, modelRatio, groupRatio, completionRatio, 0, 0.0, modelPrice, userGroupRatio)
+	appendTextReasoningTokens(info, usage, usage.CompletionTokens)
 	info.SetPublic("audio", true)
 	info.SetPublic("audio_input", usage.PromptTokensDetails.AudioTokens)
 	info.SetPublic("audio_output", usage.CompletionTokenDetails.AudioTokens)

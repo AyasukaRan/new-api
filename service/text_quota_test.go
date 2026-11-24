@@ -1082,6 +1082,41 @@ func TestCalculateTextQuotaSummaryNormalizesOpenAIResponsesBillingUsageDetails(t
 	require.Equal(t, 90, summary.Quota)
 }
 
+func TestReportedReasoningTokensForConsumeLog(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		usage *dto.Usage
+		want  int
+	}{
+		{"chat", &dto.Usage{CompletionTokens: 20, CompletionTokenDetails: dto.OutputTokenDetails{ReasoningTokens: 5}}, 5},
+		{"responses", &dto.Usage{BillingUsage: dto.NewOpenAIResponsesBillingUsage(&dto.Usage{OutputTokens: 17, OutputTokensDetails: &dto.OutputTokenDetails{ReasoningTokens: 7}})}, 7},
+		{"gemini", &dto.Usage{BillingUsage: dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{CandidatesTokenCount: 12, ThoughtsTokenCount: 4})}, 4},
+		{"anthropic no breakdown", &dto.Usage{BillingUsage: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{OutputTokens: 5})}, 0},
+		{"reasoning absent", &dto.Usage{CompletionTokens: 9}, 0},
+		{"exceeds output", &dto.Usage{CompletionTokens: 5, CompletionTokenDetails: dto.OutputTokenDetails{ReasoningTokens: 9}}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := effectiveBillingUsage(tc.usage)
+			require.NotNil(t, usage)
+			other := model.NewLogOther()
+			appendTextReasoningTokens(other, usage, usage.CompletionTokens)
+			if tc.want == 0 {
+				assert.NotContains(t, other.Snapshot(), "reasoning_tokens")
+			} else {
+				other.SetAdmin("private", true)
+				for _, role := range []int{common.RoleCommonUser, common.RoleAdminUser} {
+					record := &model.Log{Other: other.JSONString()}
+					model.FormatLogList([]*model.Log{record}, role, true)
+					var fields map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(record.Other, &fields))
+					assert.Equal(t, float64(tc.want), fields["reasoning_tokens"])
+					assert.Equal(t, role == common.RoleAdminUser, fields["admin_info"] != nil)
+				}
+			}
+		})
+	}
+}
+
 func TestUsageBillingPathForLog(t *testing.T) {
 	require.Equal(t, usageBillingPathAnthropic, usageBillingPathForLog(true, &dto.Usage{
 		BillingUsage: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{InputTokens: 1}),
