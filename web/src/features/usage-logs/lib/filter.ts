@@ -55,6 +55,13 @@ export function buildSearchParams(
         ...(commonFilters.token && { token: commonFilters.token }),
         ...(commonFilters.group && { group: commonFilters.group }),
         ...(commonFilters.username && { username: commonFilters.username }),
+        ...(commonFilters.reasoningEffort && {
+          reasoningEffort: commonFilters.reasoningEffort,
+        }),
+        ...(commonFilters.clientTool && {
+          clientTool: commonFilters.clientTool,
+        }),
+        ...(commonFilters.ip && { ip: commonFilters.ip }),
         ...(commonFilters.requestId && { requestId: commonFilters.requestId }),
         ...(commonFilters.upstreamRequestId && {
           upstreamRequestId: commonFilters.upstreamRequestId,
@@ -85,4 +92,34 @@ export function buildSearchParams(
  */
 export function getLogCategoryLabel(category: LogCategory): string {
   return LOG_CATEGORY_LABELS[category]
+}
+
+const columnKeys = {
+  channel: ['channel'],
+  identity: ['username', 'token', 'group'],
+  model: ['model'],
+  reasoning: ['reasoningEffort'],
+  source: ['clientTool', 'ip'],
+} as const
+export type LogFilterColumn = keyof typeof columnKeys
+export type LogColumnFilterKey = (typeof columnKeys)[LogFilterColumn][number]
+export type LogColumnFilterValues = Partial<Record<LogColumnFilterKey, string>>
+
+export function isValidLogChannelFilter(value?: string) {
+  const text = value?.trim() ?? ''
+  return (
+    !text ||
+    (/^\d+$/.test(text) &&
+      Number(text) > 0 &&
+      Number.isSafeInteger(Number(text)))
+  )
+}
+
+export function getLogColumnFilterKeys(
+  column: LogFilterColumn,
+  isAdmin: boolean
+) {
+  return columnKeys[column].filter(
+    (key) => isAdmin || !['channel', 'username', 'clientTool'].includes(key)
+  )
 }

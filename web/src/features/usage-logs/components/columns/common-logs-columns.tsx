@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef, HeaderContext } from '@tanstack/react-table'
 import { FileSearch, GitBranch, KeyRound, Sparkles } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -55,6 +55,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { LOG_TYPE_ALL_VALUE, LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
+import type { LogFilterColumn } from '../../lib/filter'
 import {
   formatModelName,
   decodeBillingExprB64,
@@ -81,6 +82,7 @@ import type {
 } from '../../types'
 import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { LogCostDisplay } from '../log-cost-display'
+import { LogHeaderFilter } from '../log-header-filter'
 import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
 import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
@@ -374,13 +376,22 @@ function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
   )
 }
 
+const filterColumns: Partial<Record<string, LogFilterColumn>> = {
+  channel: 'channel',
+  token_name: 'identity',
+  model_name: 'model',
+  reasoning_effort: 'reasoning',
+  request_source: 'source',
+}
+
 export function useCommonLogsColumns(
   isAdmin: boolean,
   onShowDetails: (selection: UsageLogDetailSelection) => void,
   source: LogSource = 'usage',
   showBillingSource = false,
   compact = false,
-  inlineEvents = false
+  inlineEvents = false,
+  headerFilters = false
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
   const currency = useSystemConfigStore((state) => state.config.currency)
@@ -968,6 +979,32 @@ export function useCommonLogsColumns(
       },
     })
 
+    if (headerFilters) {
+      for (const column of columns) {
+        const id =
+          column.id ??
+          ('accessorKey' in column ? String(column.accessorKey) : '')
+        const filter = filterColumns[id]
+        const title = column.header
+        if (!filter || typeof title !== 'string') continue
+        column.meta = {
+          ...column.meta,
+          headerAction: ({ table }: HeaderContext<UsageLog, unknown>) => (
+            <LogHeaderFilter
+              column={filter}
+              title={title}
+              isAdmin={isAdmin}
+              logs={table.options.data}
+              withReasoning={
+                compact &&
+                filter === 'model' &&
+                table.getColumn('reasoning_effort')?.getIsVisible() === true
+              }
+            />
+          ),
+        }
+      }
+    }
     return columns
     // Log formatters read currency settings from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -980,5 +1017,6 @@ export function useCommonLogsColumns(
     currency,
     compact,
     inlineEvents,
+    headerFilters,
   ])
 }

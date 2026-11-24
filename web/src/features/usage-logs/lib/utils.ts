@@ -199,6 +199,15 @@ export function buildApiParams(config: {
     ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
     ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
+    ...(config.source !== 'test' && searchParams.reasoningEffort
+      ? { reasoning_effort: String(searchParams.reasoningEffort) }
+      : {}),
+    ...(config.source !== 'test' && isAdmin && searchParams.clientTool
+      ? { client_tool: String(searchParams.clientTool) }
+      : {}),
+    ...(config.source !== 'test' && searchParams.ip
+      ? { ip: String(searchParams.ip) }
+      : {}),
     ...(isAdmin && searchParams.channel
       ? { channel: Number(searchParams.channel) || 0 }
       : {}),

@@ -55,6 +55,7 @@ interface LogsFilterToolbarProps<TData> {
   hasActiveFilters: boolean
   hasAdvancedActiveFilters?: boolean
   advancedFilterCount?: number
+  searchDisabled?: boolean
   searchLoading?: boolean
   onReset: () => void
   onSearch: () => void
@@ -177,7 +178,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
               <Button
                 type='button'
                 onClick={props.onSearch}
-                disabled={props.searchLoading}
+                disabled={props.searchLoading || props.searchDisabled}
                 aria-busy={props.searchLoading}
               >
                 {props.searchLoading && <Loader2 className='animate-spin' />}
@@ -234,7 +235,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
               <Button
                 type='button'
                 onClick={handleMobileSearch}
-                disabled={props.searchLoading}
+                disabled={props.searchLoading || props.searchDisabled}
               >
                 {props.searchLoading && <Loader2 className='animate-spin' />}
                 {t('Search')}
@@ -286,7 +287,7 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
           <Button
             type='button'
             onClick={props.onSearch}
-            disabled={props.searchLoading}
+            disabled={props.searchLoading || props.searchDisabled}
           >
             {props.searchLoading && <Loader2 className='animate-spin' />}
             {t('Search')}

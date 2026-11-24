@@ -376,6 +376,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
             isCommon ? (
               <CommonLogsFilterBar
                 table={table}
+                columnFiltersInHeader={
+                  commonUsage && !isMobile && layout !== 'cards'
+                }
                 onLiveTotal={view?.exactTotal}
               />
             ) : (

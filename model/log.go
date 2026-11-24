@@ -623,7 +623,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 }
 
 // LogFilter is the usage-log search shared by the log list and the log export.
-// Username and Channel are administrator filters.
+// Username, Channel, UpstreamRequestId, and ClientTool are administrator filters.
 type LogFilter struct {
 	Live          bool // Opt into stable list keys or the corresponding exact statistics count.
 	AdminSelfView bool // set by the dashboard from the authenticated account; never bound from the query
@@ -633,6 +633,9 @@ type LogFilter struct {
 	StartTimestamp    int64
 	EndTimestamp      int64
 	ModelName         string
+	ReasoningEffort   string
+	ClientTool        string
+	IP                string
 	Username          string
 	TokenName         string
 	Channel           int
@@ -706,6 +709,15 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	}
 	if tx, err = filterLogsByUsername(tx, f.Username); err != nil {
 		return nil, err
+	}
+	if f.IP != "" {
+		tx = tx.Where("logs.ip = ?", f.IP)
+	}
+	if f.ReasoningEffort != "" {
+		tx = filterLogMetadataText(tx, "reasoning_effort", f.ReasoningEffort)
+	}
+	if f.ClientTool != "" {
+		tx = filterLogMetadataText(tx, "client_tool", f.ClientTool)
 	}
 	if f.TokenName != "" {
 		tx = tx.Where("logs.token_name = ?", f.TokenName)

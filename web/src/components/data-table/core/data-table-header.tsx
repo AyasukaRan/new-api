@@ -63,7 +63,17 @@ export function DataTableHeader<TData>({
               )}
               style={getHeaderSizeStyle(header, applyHeaderSize)}
             >
-              {renderHeaderContent(header)}
+              {header.column.columnDef.meta?.headerAction &&
+              !header.isPlaceholder ? (
+                <div className='inline-flex items-center gap-1'>
+                  {renderHeaderContent(header)}
+                  {header.column.columnDef.meta.headerAction(
+                    header.getContext()
+                  )}
+                </div>
+              ) : (
+                renderHeaderContent(header)
+              )}
               {shouldRenderColumnResizer(table, header) && (
                 <div
                   role='separator'

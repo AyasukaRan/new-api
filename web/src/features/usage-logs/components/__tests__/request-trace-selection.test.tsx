@@ -199,6 +199,55 @@ function renderLogs(
   }
 }
 
+test('column filters apply across pages and clear only their own fields', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(false, '/usage-logs/common?page=2&username=fp')
+  const modelFilter = await screen.findByRole('button', {
+    name: 'Filter · Model',
+  })
+  await user.click(modelFilter)
+  const model = await screen.findByRole('combobox', { name: 'Model Name' })
+  await user.type(model, 'off-page-model')
+  expect(router.state.location.search).toMatchObject({
+    page: 2,
+    username: 'fp',
+  })
+  await user.click(screen.getByRole('button', { name: 'Apply' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      page: 1,
+      username: 'fp',
+      model: 'off-page-model',
+    })
+  )
+  await waitFor(() =>
+    expect(
+      vi.mocked(api.get).mock.calls.some(([path]) => {
+        const url = new URL(path, 'http://localhost')
+        return (
+          url.pathname === '/api/log/' &&
+          url.searchParams.get('model_name') === 'off-page-model'
+        )
+      })
+    ).toBe(true)
+  )
+  await user.click(screen.getByRole('button', { name: 'Filter · Model (1)' }))
+  await user.click(screen.getByRole('button', { name: 'Clear' }))
+  await waitFor(() =>
+    expect(router.state.location.search.model).toBeUndefined()
+  )
+  expect(router.state.location.search.username).toBe('fp')
+
+  await user.click(screen.getByRole('button', { name: 'Filter · Channel' }))
+  const channel = screen.getByLabelText('Channel ID')
+  await user.type(channel, '-1{Enter}')
+  expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'Enter a positive integer'
+  )
+  expect(router.state.location.search.channel).toBeUndefined()
+})
+
 test.each(['desktop', 'mobile'] as const)(
   'keeps the selected %s trace open as refreshed logs move it off the current page',
   async (layout) => {

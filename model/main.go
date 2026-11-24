@@ -414,6 +414,9 @@ func migrateDB() error {
 // reaching that function when LOG_SQL_DSN is unset, and these tables must exist
 // in that default deployment too.
 func migrateLogSideTables() error {
+	if err := MigrateLogFilterIndexes(); err != nil {
+		return err
+	}
 	if err := MigrateAuditLogs(); err != nil {
 		return err
 	}

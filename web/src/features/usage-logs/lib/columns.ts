@@ -46,7 +46,8 @@ export function useColumnsByCategory(
     source,
     showBillingSource,
     compact,
-    source === 'usage'
+    source === 'usage',
+    logCategory === 'common' && source === 'usage'
   )
   const drawingColumns = useDrawingLogsColumns(isAdmin)
   const taskColumns = useTaskLogsColumns(isAdmin, isRoot)

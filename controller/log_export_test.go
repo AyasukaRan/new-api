@@ -125,6 +125,15 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			require.NoError(t, model.LOG_DB.Raw(versionSQL).Scan(&version).Error)
 			t.Logf("log database: %s %s", tc.kind, version)
 			now := time.Now().Unix()
+			// Verify a fresh install, then restore the previous released log schema
+			// so old and malformed rows exercise the online upgrade below.
+			if tc.kind == "postgres" {
+				for range 2 {
+					require.NoError(t, model.MigrateLogFilterIndexes())
+				}
+				require.NoError(t, model.LOG_DB.Exec("DROP INDEX idx_logs_client_tool_time_v1, idx_logs_reasoning_effort_time_v1").Error)
+				require.NoError(t, model.LOG_DB.Exec("DROP FUNCTION new_api_log_text_v1(text,text)").Error)
+			}
 			seedExportLogs(t, mainDB, model.LOG_DB, now)
 			query := fmt.Sprintf("start_timestamp=%d&end_timestamp=%d", now-2*24*3600, now+3600)
 
@@ -324,6 +333,61 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				wrongTime := fmt.Sprintf("created_at=%d&request_id=&ref=%s", now, legacyMeta["admin_info"]["request_body_ref"])
 				assert.Equal(t, false, callLogHandler(t, GetLogRequestBody, 3, common.RoleAdminUser, wrongTime)[0]["success"])
 
+			})
+			t.Run("header filters", func(t *testing.T) {
+				const addr = "2001:db8::42"
+				const client = "CLI_100%"
+				const query = "model_name=header-fixture"
+				rows := []model.Log{
+					{UserId: 78, RequestId: "before-upgrade", Other: `{"reasoning_effort":"high","client_tool":"CLI_100%"}`},
+					{UserId: 78, RequestId: "nested-only", Other: `{"reasoning_effort":"low","admin_info":{"client_tool":"CLI_100%"}}`},
+					{UserId: 78, RequestId: "broken-json", Other: `{"reasoning_effort":"high"`},
+					{UserId: 79, RequestId: "other-account", Other: `{"client_tool":"cli_100%","reasoning_effort":"high"}`},
+				}
+				var refs []model.LiveLogRef
+				for i := range rows {
+					row := &rows[i]
+					row.Id = 90051 + i
+					row.Type, row.ModelName, row.CreatedAt, row.Ip = model.LogTypeConsume, "header-fixture", now, addr
+					require.NoError(t, model.LOG_DB.Create(row).Error)
+					refs = append(refs, model.LiveLogRef{ID: row.Id, RequestID: row.RequestId, CreatedAt: row.CreatedAt, UserID: row.UserId})
+				}
+				for range 2 {
+					require.NoError(t, model.MigrateLogFilterIndexes())
+				}
+				match := query + "&client_tool=CLI_100%25&reasoning_effort=high&ip=" + addr
+				filtered := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, match)[0]
+				require.Equal(t, true, filtered["success"])
+				data := filtered["data"].(map[string]any)
+				require.EqualValues(t, 1, data["total"])
+				assert.Equal(t, "before-upgrade", data["items"].([]any)[0].(map[string]any)["request_id"])
+				export := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, match)
+				require.Len(t, export, 2)
+				assert.Equal(t, []any{"before-upgrade"}, exportedRequestIds(export))
+				miss := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&ip=203.0.113.88")
+				require.Len(t, miss, 1)
+				assert.Equal(t, true, miss[0]["success"])
+				stats := callLogHandler(t, GetLogsStat, 3, common.RoleAdminUser, match+"&live_total=1")[0]
+				require.Equal(t, true, stats["success"])
+				assert.EqualValues(t, 1, stats["data"].(map[string]any)["live_total"])
+				changes, omitted, err := model.GetChangedLogs(t.Context(), model.LogFilter{ClientTool: client, ReasoningEffort: "high", IP: addr}, 0, common.RoleAdminUser, true, 10, refs)
+				require.NoError(t, err)
+				require.Len(t, changes, 1)
+				assert.Equal(t, 0, omitted)
+				assert.Equal(t, "before-upgrade", changes[0].RequestId)
+				// An owner can filter their IP and effort, but cannot infer client
+				// classification through list, stats or export.
+				private := query + "&reasoning_effort=high&ip=" + addr + "&client_tool=nonexistent"
+				self := callLogHandler(t, GetUserLogs, 78, common.RoleCommonUser, private)[0]
+				require.Equal(t, true, self["success"])
+				assert.EqualValues(t, 1, self["data"].(map[string]any)["total"])
+				own := callLogHandler(t, ExportUserLogs, 78, common.RoleCommonUser, private)
+				require.Len(t, own, 2)
+				assert.Equal(t, []any{"before-upgrade"}, exportedRequestIds(own))
+				assert.NotContains(t, own[0]["other"], "client_tool")
+				ownStats := callLogHandler(t, GetLogsSelfStat, 78, common.RoleCommonUser, private+"&live_total=1")[0]
+				require.Equal(t, true, ownStats["success"])
+				assert.EqualValues(t, 1, ownStats["data"].(map[string]any)["live_total"])
 			})
 			t.Run("live changes", func(t *testing.T) {
 				first := model.Log{Id: 88001, UserId: 81, CreatedAt: now - 1, ModelName: "live-test", Type: model.LogTypeError, RequestId: "multi-attempt", ChannelId: 9, UpstreamRequestId: "private-upstream", Other: `{"admin_info":{"request_body":"sensitive input"},"root_info":{"secret":"root-only"}}`}

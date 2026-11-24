@@ -16,11 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import '@tanstack/react-table'
+import type { HeaderContext } from '@tanstack/react-table'
+import type { ReactNode } from 'react'
 
 declare module '@tanstack/react-table' {
   interface ColumnMeta<_TData, _TValue> {
     label?: string
+    headerAction?: (context: HeaderContext<_TData, _TValue>) => ReactNode
     displayFields?: { id: string; label: string }[]
     description?: string
     className?: string
