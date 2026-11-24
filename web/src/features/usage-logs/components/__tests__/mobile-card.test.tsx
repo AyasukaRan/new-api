@@ -31,6 +31,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { usageLogSchema, type UsageLog } from '../../data/schema'
+import type { UsageLogDetailSelection } from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { UsageLogsMobileList } from '../usage-logs-mobile-card'
@@ -67,7 +68,8 @@ function Fixture(props: {
   logs?: UsageLog[]
   loading?: boolean
 }) {
-  const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
+  const [selectedLog, setSelectedLog] =
+    useState<UsageLogDetailSelection | null>(null)
   const context = useUsageLogsContext()
   const columns = useCommonLogsColumns(
     props.admin ?? true,
@@ -100,7 +102,8 @@ function Fixture(props: {
       />
       {selectedLog && (
         <DetailsDialog
-          log={selectedLog}
+          log={selectedLog.log}
+          initialView={selectedLog.initialView}
           source={context.logSource}
           isAdmin={props.admin ?? true}
           isRoot={false}

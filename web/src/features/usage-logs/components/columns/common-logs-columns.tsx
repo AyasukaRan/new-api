@@ -73,7 +73,11 @@ import {
   getLogTypeConfig,
   isPerCallBilling,
 } from '../../lib/utils'
-import type { LogOtherData, LogSource } from '../../types'
+import type {
+  LogOtherData,
+  LogSource,
+  UsageLogDetailSelection,
+} from '../../types'
 import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { LogCostDisplay } from '../log-cost-display'
 import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
@@ -371,7 +375,7 @@ export function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
 
 export function useCommonLogsColumns(
   isAdmin: boolean,
-  onShowDetails: (log: UsageLog) => void,
+  onShowDetails: (selection: UsageLogDetailSelection) => void,
   source: LogSource = 'usage',
   showBillingSource = false,
   compact = false,
@@ -899,7 +903,7 @@ export function useCommonLogsColumns(
             <button
               type='button'
               className='group flex max-w-[200px] items-center gap-1 text-left text-xs'
-              onClick={() => onShowDetails(log)}
+              onClick={() => onShowDetails({ log, initialView: 'technical' })}
               title={t('Click to view full details')}
             >
               {detailPreview}
@@ -933,7 +937,7 @@ export function useCommonLogsColumns(
               label={`${t('Details')} · ${log.request_id || `#${log.id}`}`}
               tooltip={t('View details')}
               aria-haspopup='dialog'
-              onClick={() => onShowDetails(log)}
+              onClick={() => onShowDetails({ log, initialView: 'overview' })}
               className='size-8 rounded-sm border-0 p-0 hover:bg-transparent dark:hover:bg-transparent pointer-coarse:size-11'
             >
               <FileSearch aria-hidden='true' className='size-4' />

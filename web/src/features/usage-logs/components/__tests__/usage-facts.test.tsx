@@ -79,6 +79,7 @@ function renderDetails(other: LogOtherData, promptTokens = 0): QueryClient {
   render(
     <QueryClientProvider client={queryClient}>
       <DetailsDialog
+        initialView='technical'
         log={{ ...makeLog(other), prompt_tokens: promptTokens }}
         isAdmin={false}
         isRoot={false}

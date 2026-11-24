@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState, type ReactElement } from 'react'
+import { useState, type ReactElement, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -29,19 +29,23 @@ import { isViolationFeeLog } from '../lib/format'
 import { isTimingLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { LogChargeDetails } from './log-charge-details'
+import { LogRequestOverview } from './log-request-overview'
 import { LogTimingDetails } from './log-timing-details'
 
-export function LogMetricsDetailDialog(props: {
+type RequestMetricProps = {
   log: UsageLog
   other: LogOtherData | null
   isAdmin: boolean
-  initialTab: 'cost' | 'timing'
-  trigger: ReactElement
-}) {
+}
+
+export function LogRequestDetailTabs(
+  props: RequestMetricProps & {
+    initialTab: 'overview' | 'cost' | 'timing' | 'technical'
+    children?: ReactNode
+  }
+) {
   const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
-  const hasTiming = isTimingLogType(props.log.type)
-  const charge = open && (
+  const charge = (
     <LogChargeDetails
       log={props.log}
       other={props.other}
@@ -52,6 +56,65 @@ export function LogMetricsDetailDialog(props: {
       }
     />
   )
+  if (!isTimingLogType(props.log.type)) return charge
+  const hasCharge =
+    props.log.type !== LOG_TYPE_ENUM.ERROR ||
+    props.log.quota > 0 ||
+    props.initialTab === 'cost'
+  return (
+    <Tabs defaultValue={props.initialTab} className='gap-3'>
+      <div className='border-border bg-popover sticky top-0 z-10 overflow-x-auto border-b'>
+        <TabsList
+          variant='line'
+          aria-label={t('Request details')}
+          className='gap-1 sm:gap-3'
+        >
+          <TabsTrigger value='overview'>{t('Overview')}</TabsTrigger>
+          {hasCharge && (
+            <TabsTrigger value='cost'>{t('Cost breakdown')}</TabsTrigger>
+          )}
+          <TabsTrigger value='timing'>{t('Timing breakdown')}</TabsTrigger>
+          {props.children && (
+            <TabsTrigger value='technical'>
+              {t('Technical details')}
+            </TabsTrigger>
+          )}
+        </TabsList>
+      </div>
+      <TabsContent value='overview'>
+        <LogRequestOverview
+          log={props.log}
+          other={props.other}
+          isAdmin={props.isAdmin}
+        />
+      </TabsContent>
+      {hasCharge && (
+        <TabsContent value='cost' className='mx-auto w-full max-w-xl'>
+          {charge}
+        </TabsContent>
+      )}
+      <TabsContent value='timing' className='mx-auto w-full max-w-xl'>
+        <LogTimingDetails
+          log={props.log}
+          other={props.other}
+          isAdmin={props.isAdmin}
+        />
+      </TabsContent>
+      {props.children && (
+        <TabsContent value='technical'>{props.children}</TabsContent>
+      )}
+    </Tabs>
+  )
+}
+
+export function LogMetricsDetailDialog(
+  props: RequestMetricProps & {
+    initialTab: 'cost' | 'timing'
+    trigger: ReactElement
+  }
+) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
   return (
     <Dialog
       open={open}
@@ -65,35 +128,16 @@ export function LogMetricsDetailDialog(props: {
         .filter(Boolean)
         .join(' · ')}
       descriptionClassName='break-all font-mono text-xs tabular-nums'
-      contentClassName='max-h-[min(46.25rem,calc(100dvh-1rem))] gap-2.5 sm:max-w-[33.75rem]'
+      contentClassName='max-h-[min(88dvh,var(--dialog-available-height))] gap-3 sm:max-w-xl sm:has-[[data-slot=log-request-overview]]:max-w-[min(96vw,64rem)]'
     >
-      {open &&
-        (hasTiming ? (
-          <Tabs defaultValue={props.initialTab} className='gap-4'>
-            <div className='border-border bg-popover sticky top-0 z-10 border-b'>
-              <TabsList
-                variant='line'
-                aria-label={t('Request details')}
-                className='gap-4'
-              >
-                <TabsTrigger value='cost'>{t('Cost breakdown')}</TabsTrigger>
-                <TabsTrigger value='timing'>
-                  {t('Timing breakdown')}
-                </TabsTrigger>
-              </TabsList>
-            </div>
-            <TabsContent value='cost'>{charge}</TabsContent>
-            <TabsContent value='timing'>
-              <LogTimingDetails
-                log={props.log}
-                other={props.other}
-                isAdmin={props.isAdmin}
-              />
-            </TabsContent>
-          </Tabs>
-        ) : (
-          charge
-        ))}
+      {open && (
+        <LogRequestDetailTabs
+          log={props.log}
+          other={props.other}
+          isAdmin={props.isAdmin}
+          initialTab={props.initialTab}
+        />
+      )}
     </Dialog>
   )
 }

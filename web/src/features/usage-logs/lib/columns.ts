@@ -25,8 +25,7 @@ import { useMemo } from 'react'
 import { useCommonLogsColumns } from '../components/columns/common-logs-columns'
 import { useDrawingLogsColumns } from '../components/columns/drawing-logs-columns'
 import { useTaskLogsColumns } from '../components/columns/task-logs-columns'
-import type { UsageLog } from '../data/schema'
-import type { LogCategory, LogSource } from '../types'
+import type { LogCategory, LogSource, UsageLogDetailSelection } from '../types'
 
 /**
  * Get column definitions based on log category
@@ -36,7 +35,7 @@ export function useColumnsByCategory(
   logCategory: LogCategory,
   isAdmin: boolean,
   isRoot: boolean,
-  onShowDetails: (log: UsageLog) => void,
+  onShowDetails: (selection: UsageLogDetailSelection) => void,
   source: LogSource = 'usage',
   showBillingSource = false,
   compact = false,

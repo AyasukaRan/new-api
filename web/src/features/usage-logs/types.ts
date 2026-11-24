@@ -36,6 +36,11 @@ import type { LogTimePreset } from './lib/time-range'
 export type LogCategory = 'common' | 'drawing' | 'task'
 export type LogSource = 'usage' | 'test'
 
+export type UsageLogDetailSelection = {
+  log: UsageLog
+  initialView: 'overview' | 'technical'
+}
+
 // ============================================================================
 // Filter Types
 // ============================================================================

@@ -466,8 +466,8 @@ test('shows only reasoning in owner details even when cached data contains admin
       onOpenChange={() => undefined}
     />
   )
-  expect(screen.getAllByText('Reasoning: high')).toHaveLength(1)
-  expect(screen.queryByText('Reasoning Effort')).not.toBeInTheDocument()
+  expect(screen.getByText('Reasoning Effort')).toBeVisible()
+  expect(screen.getByText('high')).toBeVisible()
   expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
   expect(screen.queryByText(/Tool:/)).not.toBeInTheDocument()
   expect(

@@ -121,7 +121,9 @@ import {
   USAGE_BILLING_PATH,
   type LogOtherData,
   type LogSource,
+  type UsageLogDetailSelection,
 } from '../../types'
+import { LogRequestDetailTabs } from '../log-metrics-detail-dialog'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { RequestFailureSummary } from '../request-failure-summary'
@@ -704,6 +706,7 @@ function LegacyCapturedRequestBody(props: {
 }
 
 interface DetailsDialogProps {
+  initialView?: UsageLogDetailSelection['initialView']
   source?: LogSource
   log: UsageLog
   isAdmin: boolean
@@ -712,12 +715,13 @@ interface DetailsDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-export function DetailsDialog(props: DetailsDialogProps) {
+function LogTechnicalDetails(
+  props: DetailsDialogProps & { other: LogOtherData | null }
+) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
-  const other = parseLogOther(props.log.other)
-  const typeConfig = getLogTypeConfig(props.log.type, props.source)
+  const other = props.other
   const createdAt = formatTimestampToDate(props.log.created_at)
 
   const isViolation = isViolationFeeLog(other)
@@ -864,32 +868,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
     useChannel && useChannel.length > 0 ? useChannel.join(' → ') : undefined
 
   return (
-    <Dialog
-      open={props.open}
-      onOpenChange={props.onOpenChange}
-      title={
-        <>
-          {t('Log Details')}
-          <StatusBadge
-            label={t(typeConfig.label)}
-            variant={typeConfig.color as StatusBadgeProps['variant']}
-            size='sm'
-            copyable={false}
-          />
-        </>
-      }
-      description={t('View the complete details for this log entry')}
-      contentClassName={cn(
-        'min-w-0 overflow-hidden',
-        'max-sm:max-h-(--dialog-available-height) max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
-        isTieredBilling ? 'sm:max-w-4xl lg:max-w-5xl' : 'sm:max-w-lg'
-      )}
-      headerClassName='max-sm:gap-1'
-      titleClassName='flex items-center gap-2 text-base'
-      descriptionClassName='sr-only'
-      contentHeight='min(72dvh, 720px)'
-      bodyClassName='pr-2 sm:pr-4'
-    >
+    <section aria-label={t('Log Details')}>
       <div className='w-full max-w-full min-w-0 space-y-2.5 overflow-x-hidden py-1 sm:space-y-3'>
         <RequestMetadataTags
           isAdmin={props.isAdmin}
@@ -1681,6 +1660,62 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </div>
         )}
       </div>
+    </section>
+  )
+}
+
+export function DetailsDialog(props: DetailsDialogProps) {
+  const { t } = useTranslation()
+  const typeConfig = getLogTypeConfig(props.log.type, props.source)
+  const requestOverview =
+    props.source !== 'test' && isTimingLogType(props.log.type)
+  const other = parseLogOther(props.log.other)
+  const isTieredBilling = other?.billing_mode === 'tiered_expr'
+  return (
+    <Dialog
+      open={props.open}
+      onOpenChange={props.onOpenChange}
+      title={
+        <>
+          {t('Log Details')}
+          <StatusBadge
+            label={t(typeConfig.label)}
+            variant={typeConfig.color as StatusBadgeProps['variant']}
+            size='sm'
+            copyable={false}
+          />
+        </>
+      }
+      description={t('View the complete details for this log entry')}
+      contentClassName={cn(
+        'min-w-0 overflow-hidden',
+        'max-sm:max-h-(--dialog-available-height) max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
+        requestOverview || isTieredBilling
+          ? 'sm:max-w-[min(96vw,64rem)]'
+          : 'sm:max-w-lg'
+      )}
+      headerClassName='max-sm:gap-1'
+      titleClassName='flex items-center gap-2 pe-8 text-base'
+      descriptionClassName='sr-only'
+      contentHeight={
+        requestOverview ? 'min(78dvh, 52rem)' : 'min(72dvh, 720px)'
+      }
+      bodyClassName='px-1'
+    >
+      {props.open &&
+        (requestOverview ? (
+          <LogRequestDetailTabs
+            key={props.log.request_id || props.log.id}
+            log={props.log}
+            other={other}
+            isAdmin={props.isAdmin}
+            initialTab={props.initialView ?? 'overview'}
+          >
+            <LogTechnicalDetails {...props} other={other} />
+          </LogRequestDetailTabs>
+        ) : (
+          <LogTechnicalDetails {...props} other={other} />
+        ))}
     </Dialog>
   )
 }

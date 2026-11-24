@@ -16,8 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
@@ -81,5 +82,31 @@ export function DetailSection(props: {
         {props.children}
       </div>
     </div>
+  )
+}
+
+export function LogOverviewCard(props: {
+  title: string
+  className?: string
+  children: ReactNode
+}) {
+  const titleId = useId()
+  return (
+    <Card
+      size='sm'
+      role='region'
+      aria-labelledby={titleId}
+      className={cn(
+        'bg-muted/65 ring-border/50 dark:bg-foreground/[0.045] min-w-0 gap-3 rounded-xl ring-1 ring-inset',
+        props.className
+      )}
+    >
+      <CardHeader>
+        <h3 id={titleId} className='text-sm leading-5 font-semibold'>
+          {props.title}
+        </h3>
+      </CardHeader>
+      <CardContent className='min-w-0'>{props.children}</CardContent>
+    </Card>
   )
 }

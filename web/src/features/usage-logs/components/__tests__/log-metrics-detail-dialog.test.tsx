@@ -33,6 +33,9 @@ test('opens the selected receipt, switches tabs on the same request and resets o
     type: 2,
     content: '',
     model_name: 'deepseek-flash',
+    request_id: 'local-receipt-17',
+    prompt_tokens: 64,
+    completion_tokens: 16,
     quota: 100,
     use_time: 2,
   })
@@ -51,6 +54,15 @@ test('opens the selected receipt, switches tabs on the same request and resets o
   expect(within(dialog).getByText(/deepseek-flash/)).toBeVisible()
   const timing = within(dialog).getByRole('tab', { name: 'Timing breakdown' })
   expect(timing).toHaveAttribute('aria-selected', 'true')
+  await user.click(within(dialog).getByRole('tab', { name: 'Overview' }))
+  const overview = within(dialog).getByRole('tabpanel', { name: 'Overview' })
+  expect(within(overview).getByText('local-receipt-17')).toBeVisible()
+  expect(
+    within(overview).getByRole('img', { name: 'Token distribution' })
+  ).toBeVisible()
+  expect(
+    within(overview).getByRole('region', { name: 'Billing Details' })
+  ).toBeVisible()
   await user.click(within(dialog).getByRole('tab', { name: 'Cost breakdown' }))
   expect(
     within(dialog).getByRole('tabpanel', { name: 'Cost breakdown' })

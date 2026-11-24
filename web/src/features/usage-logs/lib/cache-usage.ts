@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { UsageLog } from '../data/schema'
 import type { LogOtherData } from '../types'
 
 function count(value?: number): number | null {
@@ -77,4 +78,31 @@ export function getLogCacheUsage(
     (reportedTotal ?? 0) > 0 ||
     (read != null && write != null)
   return { total, read, write, percent, uncached, completeTotal }
+}
+
+export function getLogTokenTotals(
+  log: Pick<UsageLog, 'prompt_tokens' | 'completion_tokens'>,
+  other: LogOtherData | null
+) {
+  const cache = getLogCacheUsage(log.prompt_tokens, other)
+  const completion = log.completion_tokens
+  const hasUsage =
+    log.prompt_tokens > 0 ||
+    completion > 0 ||
+    other?.input_tokens_total != null ||
+    cache.read != null ||
+    cache.write != null ||
+    other?.reasoning_tokens != null
+  const output =
+    hasUsage && Number.isSafeInteger(completion) && completion >= 0
+      ? completion
+      : null
+  const total =
+    cache.completeTotal &&
+    cache.total != null &&
+    output != null &&
+    Number.isSafeInteger(cache.total + output)
+      ? cache.total + output
+      : null
+  return { cache, output, total, hasUsage }
 }

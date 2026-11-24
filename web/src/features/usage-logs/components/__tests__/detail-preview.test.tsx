@@ -54,7 +54,11 @@ import {
 } from '@/stores/system-config-store'
 
 import type { UsageLog } from '../../data/schema'
-import type { LogOtherData, LogSource } from '../../types'
+import type {
+  LogOtherData,
+  LogSource,
+  UsageLogDetailSelection,
+} from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { DetailsDialog } from '../dialogs/details-dialog'
 
@@ -102,7 +106,8 @@ function DetailPreview(props: {
   columnId?: 'content' | 'prompt_tokens' | 'created_at' | 'request_details'
   createdAt?: number
 }) {
-  const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
+  const [selectedLog, setSelectedLog] =
+    useState<UsageLogDetailSelection | null>(null)
   const table = useReactTable({
     data: [
       { ...makeLog(props.other, props.type), created_at: props.createdAt ?? 1 },
@@ -121,7 +126,8 @@ function DetailPreview(props: {
       {selectedLog && (
         <DetailsDialog
           open
-          log={selectedLog}
+          log={selectedLog.log}
+          initialView={selectedLog.initialView}
           source={props.source}
           isAdmin={props.isAdmin}
           isRoot={false}
@@ -957,6 +963,7 @@ describe('request content disclosure in log details', () => {
     const { rerender } = render(
       <DetailsDialog
         log={first}
+        initialView='technical'
         isAdmin
         isRoot={false}
         open
@@ -972,6 +979,7 @@ describe('request content disclosure in log details', () => {
     rerender(
       <DetailsDialog
         log={second}
+        initialView='technical'
         isAdmin
         isRoot={false}
         open

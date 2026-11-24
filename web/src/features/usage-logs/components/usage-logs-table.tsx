@@ -50,7 +50,7 @@ import { useColumnsByCategory } from '../lib/columns'
 import { getLogMetadata } from '../lib/format'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import { fetchLogsByCategory } from '../lib/utils'
-import type { LogCategory } from '../types'
+import type { LogCategory, UsageLogDetailSelection } from '../types'
 import { hasLogEventDetail } from './columns/common-logs-columns'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
 import { DetailsDialog } from './dialogs/details-dialog'
@@ -96,7 +96,8 @@ interface UsageLogsTableProps {
 
 export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   const { t } = useTranslation()
-  const [selectedLog, setSelectedLog] = useState<UsageLog | null>(null)
+  const [selectedLog, setSelectedLog] =
+    useState<UsageLogDetailSelection | null>(null)
   const isCommon = logCategory === 'common'
   const tableArea = useRef<HTMLDivElement>(null)
   const [layout, setLayout] = useState<'cards' | 'compact' | 'wide'>('wide')
@@ -433,7 +434,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       </div>
       {selectedLog && (
         <DetailsDialog
-          log={selectedLog}
+          log={selectedLog.log}
+          initialView={selectedLog.initialView}
           source={logSource}
           isAdmin={isAdmin}
           isRoot={isRoot}

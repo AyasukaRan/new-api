@@ -289,7 +289,8 @@ test.each([
           />
         </QueryClientProvider>
       )
-      expect(await screen.findByText('(FRT: 437ms)')).toBeVisible()
+      expect(await screen.findByText('First token')).toBeVisible()
+      expect(screen.getByText('437ms')).toBeVisible()
     } finally {
       client.clear()
     }
