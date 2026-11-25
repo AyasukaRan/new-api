@@ -55,8 +55,8 @@ export function LogUsernameFilter(props: FilterInputProps) {
         id={props.caption?.id}
         inlineSuggestions={props.inlineSuggestions}
         openOnFocus={!props.inlineSuggestions}
-        options={users.map(({ username }) => ({
-          label: username,
+        options={users.map(({ username, label }) => ({
+          label,
           value: username,
         }))}
         allowCustomValue

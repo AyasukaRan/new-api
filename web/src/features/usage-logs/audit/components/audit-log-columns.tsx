@@ -162,13 +162,24 @@ export function useAuditLogColumns(
         accessorKey: 'success',
         header: t('Result'),
         size: 82,
-        cell: ({ row }) => (
-          <StatusBadge
-            label={row.original.success ? t('Success') : t('Failed')}
-            variant={row.original.success ? 'success' : 'danger'}
-            copyable={false}
-          />
-        ),
+        cell: ({ row }) => {
+          if (row.original.success_recorded === false) {
+            return (
+              <StatusBadge
+                label={t('Not recorded')}
+                variant='neutral'
+                copyable={false}
+              />
+            )
+          }
+          return (
+            <StatusBadge
+              label={row.original.success ? t('Success') : t('Failed')}
+              variant={row.original.success ? 'success' : 'danger'}
+              copyable={false}
+            />
+          )
+        },
         meta: { label: t('Result'), mobileBadge: true },
       },
       {

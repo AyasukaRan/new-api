@@ -134,7 +134,7 @@ it('shows administrator cost and signed profit from the complete filtered statis
   const get = vi.spyOn(api, 'get').mockResolvedValue(response())
   await renderStats({
     search:
-      '?page=4&pageSize=20&model=model-a&channel=3&username=fp&requestId=req-1&upstreamRequestId=upstream-1&type=%5B%222%22%5D&token=main&group=default&startTime=1000000&endTime=2000000',
+      '?page=4&pageSize=20&model=model-a&channel=3&username=fp&requestId=req-1&upstreamRequestId=upstream-1&result=success&token=main&group=default&startTime=1000000&endTime=2000000',
   })
   expect(await screen.findByText('$1.3')).toBeVisible()
   expect(screen.getByText('-$0.3')).toBeVisible()
@@ -146,7 +146,8 @@ it('shows administrator cost and signed profit from the complete filtered statis
     username: 'fp',
     request_id: 'req-1',
     upstream_request_id: 'upstream-1',
-    type: '2',
+    category: 'model',
+    result: 'success',
     token_name: 'main',
     group: 'default',
     start_timestamp: '1000',

@@ -94,7 +94,7 @@ async function renderMobileFilter() {
     routeTree: root.addChildren([auth.addChildren([logs])]),
     history: createMemoryHistory({
       initialEntries: [
-        '/usage-logs/common?page=3&type=%5B%222%22%5D&group=default',
+        '/usage-logs/common?page=3&result=success&group=default',
       ],
     }),
   })
@@ -139,7 +139,7 @@ it('applies the selected mobile date range directly and resets pagination while 
     expect(router.state.location.search).toMatchObject({
       page: 1,
       group: 'default',
-      type: ['2'],
+      result: 'success',
       startTime: new Date('2026-09-07T09:30').getTime(),
       endTime: new Date('2026-09-08T17:45').getTime(),
     })
@@ -155,7 +155,9 @@ it('applies mobile drawer filters only when Search is pressed', async () => {
     within(dialog).getByPlaceholderText('Model Name'),
     'gemini-3.7-flash'
   )
-  expect(within(dialog).getByRole('combobox', { name: 'Type' })).toBeVisible()
+  expect(
+    within(dialog).queryByRole('combobox', { name: 'Type' })
+  ).not.toBeInTheDocument()
   expect(within(dialog).queryByLabelText('Endpoint')).not.toBeInTheDocument()
   await user.click(
     within(dialog).getByRole('combobox', { name: 'Response mode' })

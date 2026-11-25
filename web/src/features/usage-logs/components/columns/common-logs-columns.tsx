@@ -68,6 +68,7 @@ import {
   getRetryDecisionReason,
   isFailedStreamResponse,
 } from '../../lib/format'
+import { summarizeRequestFailure } from '../../lib/request-failure-summary'
 import {
   isDisplayableLogType,
   isTimingLogType,
@@ -86,9 +87,9 @@ import { LogHeaderFilter } from '../log-header-filter'
 import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
 import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
+import { RequestPluginLogMarker } from '../request-plugin-record'
 import { StreamModeCell } from '../timing-metrics-cell'
 import { TokenPerformanceCell } from '../token-performance-cell'
-import { RequestPluginLogMarker } from '../request-plugin-record'
 import { useUsageLogsContext } from '../usage-logs-provider'
 
 interface DetailSegment {
@@ -267,14 +268,13 @@ function buildTypeDetailSegments(
               'cacheCreate12hPrice',
             ].includes(entry.field)
         )
-        .map(
-          (entry): DetailSegment =>
-            entry.unit
-              ? tierDetailSegment(
-                  tieredSummary.tier.label || t('Default'),
-                  `${t(entry.shortLabel)} ${formatPriceCompact(entry.price)}/${t(entry.unit)}`
-                )
-              : { text: `${t(entry.shortLabel)} ${formatPrice(entry.price)}` }
+        .map((entry): DetailSegment =>
+          entry.unit
+            ? tierDetailSegment(
+                tieredSummary.tier.label || t('Default'),
+                `${t(entry.shortLabel)} ${formatPriceCompact(entry.price)}/${t(entry.unit)}`
+              )
+            : { text: `${t(entry.shortLabel)} ${formatPrice(entry.price)}` }
         )
       if (otherEntries.length > 0) {
         segments.push({
@@ -378,7 +378,6 @@ function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
 }
 
 const filterColumns: Partial<Record<string, LogFilterColumn>> = {
-  created_at: 'time',
   is_stream: 'transport',
   channel: 'channel',
   token_name: 'identity',
@@ -634,7 +633,9 @@ export function useCommonLogsColumns(
               actualModel={model.actualModel}
               responseModel={model.responseModel}
             />
-            {requestPlugins?.length ? <RequestPluginLogMarker items={requestPlugins} /> : null}
+            {requestPlugins?.length ? (
+              <RequestPluginLogMarker items={requestPlugins} />
+            ) : null}
             {compact && (
               <div className='flex w-full max-w-full flex-wrap items-center gap-1 [contain:inline-size] empty:hidden'>
                 {table.getState().columnVisibility.reasoning_effort !==
@@ -865,10 +866,13 @@ export function useCommonLogsColumns(
           other?.stream_status?.end_error ||
           renderLogContent(other, t) ||
           log.content ||
-          t('Request failed')
+          other?.stream_status?.errors?.at(-1)
+        const failure = summarizeRequestFailure(failureReason, other)
         detailPreview = (
           <span className='flex min-w-0 flex-col gap-0.5 leading-snug'>
-            <span className='text-destructive truncate'>{failureReason}</span>
+            <span className='text-destructive truncate'>
+              {t(failure.label)}
+            </span>
             {retryReason && (
               <span className='text-muted-foreground truncate'>
                 {retryReason}

@@ -59,8 +59,8 @@ export function ConversationFilterBar(props: {
     meta: { errorToast: false },
   })
 
-  const userOptions = users.map(({ id, username }) => ({
-    label: username,
+  const userOptions = users.map(({ id, label }) => ({
+    label,
     value: String(id),
   }))
   if (userLabel && !userOptions.some((o) => o.value === String(userLabel.id))) {

@@ -27,10 +27,10 @@ import { StatusBadge } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatTimestampToDate } from '@/lib/format'
-import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
 import { taskActionMapper, taskStatusMapper } from '../../lib/mappers'
+import { summarizeRequestFailure } from '../../lib/request-failure-summary'
 import type { TaskLog } from '../../types'
 import { TaskDetailsDialog } from '../dialogs/task-details-dialog'
 import { PluginAuthorLink } from '../plugin-author-link'
@@ -68,7 +68,7 @@ function TaskDetailsCell(props: {
         </button>
         {props.log.fail_reason ? (
           <span className='max-w-full truncate text-xs text-red-600 dark:text-red-400'>
-            {translateServerText(t, props.log.fail_reason)}
+            {t(summarizeRequestFailure(props.log.fail_reason).label)}
           </span>
         ) : null}
       </div>

@@ -16,13 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { getRouteApi, useNavigate } from '@tanstack/react-router'
+import { getRouteApi } from '@tanstack/react-router'
 import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
 import type { NavGroup } from '@/components/layout/types'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Toggle } from '@/components/ui/toggle'
 import { CacheStatsDialog } from '@/features/system-settings/general/channel-affinity/cache-stats-dialog'
 import { useSidebarConfig } from '@/hooks/use-sidebar-config'
 import { useAuthStore } from '@/stores/auth-store'
@@ -48,7 +49,7 @@ const TASK_LOG_SECTIONS = ['drawing', 'task'] as const
 const SECTION_META: Record<UsageLogsSectionId, { titleKey: string }> = {
   test: { titleKey: 'Test Logs' },
   common: {
-    titleKey: 'Common Logs',
+    titleKey: 'Model Logs',
   },
   drawing: {
     titleKey: 'Drawing Logs',
@@ -60,8 +61,9 @@ const SECTION_META: Record<UsageLogsSectionId, { titleKey: string }> = {
 
 function UsageLogsContent() {
   const { t } = useTranslation()
-  const navigate = useNavigate()
+  const navigate = route.useNavigate()
   const params = route.useParams()
+  const search = route.useSearch()
   const activeCategory: UsageLogsSectionId =
     params.section && isUsageLogsSectionId(params.section)
       ? params.section
@@ -122,6 +124,8 @@ function UsageLogsContent() {
   )
 
   const isTest = activeCategory === 'test'
+  const isModelLog = activeCategory === 'common'
+  const result = search.result ?? 'all'
   const isTask = activeCategory === 'drawing' || activeCategory === 'task'
   const pageMeta = isTask ? SECTION_META.task : SECTION_META[activeCategory]
   const showTaskSwitcher = isTask && visibleSections.length > 1
@@ -134,11 +138,54 @@ function UsageLogsContent() {
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
           {!isTask && <LogMetricLegend isAdmin={isAdminView} />}
-          {canManageScope && (
+          {canManageScope && isModelLog && (
+            <Toggle
+              size='sm'
+              pressed={viewScope === 'self'}
+              onPressedChange={(pressed) =>
+                setViewScope(pressed ? 'self' : 'all')
+              }
+              aria-label={t('Only Mine')}
+            >
+              {t('Only Mine')}
+            </Toggle>
+          )}
+          {canManageScope && !isModelLog && (
             <Tabs value={viewScope} onValueChange={handleViewScopeChange}>
               <TabsList>
                 <TabsTrigger value='all'>{t('All')}</TabsTrigger>
                 <TabsTrigger value='self'>{t('Only Mine')}</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
+          {isModelLog && (
+            <Tabs
+              value={result}
+              onValueChange={(value) => {
+                if (
+                  value !== 'all' &&
+                  value !== 'success' &&
+                  value !== 'failure'
+                ) {
+                  return
+                }
+                void navigate({
+                  to: '/usage-logs/$section',
+                  params: { section: 'common' },
+                  search: (previous) => ({
+                    ...previous,
+                    result: value === 'all' ? undefined : value,
+                    type: undefined,
+                    page: 1,
+                  }),
+                  resetScroll: false,
+                })
+              }}
+            >
+              <TabsList aria-label={t('Request result')}>
+                <TabsTrigger value='all'>{t('All')}</TabsTrigger>
+                <TabsTrigger value='success'>{t('Success')}</TabsTrigger>
+                <TabsTrigger value='failure'>{t('Failed')}</TabsTrigger>
               </TabsList>
             </Tabs>
           )}
@@ -158,7 +205,7 @@ function UsageLogsContent() {
             )}
             <div className='min-h-0 flex-1'>
               <UsageLogsTable
-                key={`${activeCategory}:${viewScope}`}
+                key={`${activeCategory}:${viewScope}:${isModelLog ? result : ''}`}
                 logCategory={isTest ? 'common' : activeCategory}
               />
             </div>

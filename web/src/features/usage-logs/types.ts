@@ -248,6 +248,17 @@ export interface LogInputAnalysis {
 }
 
 export interface LogOtherData {
+  status_code?: number
+  error_code?: string
+  error_type?: string
+  error_summary?: {
+    label: string
+    rule_id?: string
+    matched: boolean
+    status_code?: number
+    context_limit?: number
+    requested_tokens?: number
+  }
   admin_info?: {
     user_agent?: string
     cost?: LogCostEstimate
@@ -634,6 +645,8 @@ export interface TaskArtifactsResponse {
 export interface GetLogsParams {
   live?: 1
   source?: LogSource
+  category?: 'model'
+  result?: 'success' | 'failure'
   p?: number
   page_size?: number
   type?: number
@@ -675,6 +688,8 @@ export interface GetLogsResponse {
 export interface GetLogStatsParams {
   live_total?: 1
   source?: LogSource
+  category?: 'model'
+  result?: 'success' | 'failure'
   type?: number
   username?: string
   token_name?: string

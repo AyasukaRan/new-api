@@ -19,30 +19,34 @@ const (
 	AuditCategorySecurity    = "security"
 	AuditCategoryOperation   = "operation"
 	AuditCategoryAccessToken = "access_token"
+	AuditCategoryBilling     = "billing"
+	AuditCategorySystem      = "system"
+	AuditCategoryOther       = "other"
 )
 
 // AuditLog is retained independently of usage logs and their cleanup/TTL policy.
 // TokenRef identifies a PAT generation without storing its bearer credential.
 type AuditLog struct {
-	Id         int        `json:"id"`
-	EventId    string     `json:"event_id" gorm:"type:varchar(64);uniqueIndex;index:idx_audit_time_event,priority:2"`
-	UserId     int        `json:"user_id" gorm:"index:idx_audit_user_time,priority:1"`
-	Username   string     `json:"username" gorm:"type:varchar(64);index"`
-	ActorRole  int        `json:"actor_role"` // Immutable role of the actor when the event began, not the log owner.
-	CreatedAt  int64      `json:"created_at" gorm:"type:bigint;index:idx_audit_user_time,priority:2;index:idx_audit_token_time,priority:2;index;index:idx_audit_time_event,priority:1"`
-	Category   string     `json:"category" gorm:"type:varchar(24);index"`
-	Action     string     `json:"action" gorm:"type:varchar(128)"`
-	TokenRef   string     `json:"token_ref" gorm:"type:varchar(64);index:idx_audit_token_time,priority:1"`
-	AuthMethod string     `json:"auth_method" gorm:"type:varchar(24)"`
-	Ip         string     `json:"ip" gorm:"type:varchar(64)"`
-	UserAgent  string     `json:"user_agent" gorm:"type:varchar(512)"`
-	Method     string     `json:"method" gorm:"type:varchar(16)"`
-	Route      string     `json:"route" gorm:"type:varchar(255)"`
-	Status     int        `json:"status"`
-	Success    bool       `json:"success"`
-	RequestId  string     `json:"request_id" gorm:"type:varchar(64);index"`
-	Content    string     `json:"content" gorm:"type:text"`
-	Other      AuditOther `json:"other" gorm:"type:json"`
+	Id              int        `json:"id"`
+	EventId         string     `json:"event_id" gorm:"type:varchar(64);uniqueIndex;index:idx_audit_time_event,priority:2"`
+	UserId          int        `json:"user_id" gorm:"index:idx_audit_user_time,priority:1"`
+	Username        string     `json:"username" gorm:"type:varchar(64);index"`
+	ActorRole       int        `json:"actor_role"` // Immutable role of the actor when the event began, not the log owner.
+	CreatedAt       int64      `json:"created_at" gorm:"type:bigint;index:idx_audit_user_time,priority:2;index:idx_audit_token_time,priority:2;index;index:idx_audit_time_event,priority:1"`
+	Category        string     `json:"category" gorm:"type:varchar(24);index"`
+	Action          string     `json:"action" gorm:"type:varchar(128)"`
+	TokenRef        string     `json:"token_ref" gorm:"type:varchar(64);index:idx_audit_token_time,priority:1"`
+	AuthMethod      string     `json:"auth_method" gorm:"type:varchar(24)"`
+	Ip              string     `json:"ip" gorm:"type:varchar(64)"`
+	UserAgent       string     `json:"user_agent" gorm:"type:varchar(512)"`
+	Method          string     `json:"method" gorm:"type:varchar(16)"`
+	Route           string     `json:"route" gorm:"type:varchar(255)"`
+	Status          int        `json:"status"`
+	Success         bool       `json:"success"`
+	SuccessRecorded *bool      `json:"success_recorded,omitempty" gorm:"-"`
+	RequestId       string     `json:"request_id" gorm:"type:varchar(64);index"`
+	Content         string     `json:"content" gorm:"type:text"`
+	Other           AuditOther `json:"other" gorm:"type:json"`
 }
 
 type AuditLogFilter struct {
@@ -181,9 +185,33 @@ func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*Audit
 		return nil, 0, err
 	}
 	logs := make([]*AuditLog, 0)
-	if err := query.Order("created_at DESC").Order("event_id DESC").Offset(start).Limit(limit).Find(&logs).Error; err != nil {
+	legacy := legacyAuditLogQuery(filter, viewerRole)
+	var legacyTotal int64
+	if err := legacy.Count(&legacyTotal).Error; err != nil {
 		return nil, 0, err
 	}
+	page := query
+	if legacyTotal > 0 {
+		// Page both stores together in the database. Loading every preceding
+		// page in Go would grow memory usage with the requested page number.
+		other := "other"
+		if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
+			other = "CAST(other AS text)"
+		} else if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+			other = "toJSONString(other)"
+		}
+		columns := "id, event_id, user_id, username, actor_role, created_at, category, action, token_ref, auth_method, ip, user_agent, method, route, status, success, request_id, content, " + other + " AS other"
+		page = LOG_DB.WithContext(query.Statement.Context).Table("(? UNION ALL ?) AS audit_entries", query.Select(columns), legacy.Select(legacyAuditLogColumns()))
+	}
+	if err := page.Order("created_at DESC").Order("event_id DESC").Offset(start).Limit(limit).Find(&logs).Error; err != nil {
+		return nil, 0, err
+	}
+	if legacyTotal > 0 {
+		if err := fillLegacyAuditMetadata(logs); err != nil {
+			return nil, 0, err
+		}
+	}
+	total += legacyTotal
 	visibility := logOtherVisibilityUser
 	if !filter.SelfView && viewerRole >= common.RoleRootUser {
 		visibility = logOtherVisibilityRoot
@@ -200,6 +228,99 @@ func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*Audit
 		}
 	}
 	return logs, total, nil
+}
+
+func fillLegacyAuditMetadata(entries []*AuditLog) error {
+	byEvent := make(map[string]*AuditLog)
+	ids := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.EventId, "legacy-") {
+			entry.SuccessRecorded = new(bool)
+			byEvent[entry.EventId] = entry
+			ids = append(ids, entry.Id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var rows []Log
+	if err := LOG_DB.Select("id", "created_at", "request_id", "other").Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		entry := byEvent[fmt.Sprintf("legacy-%d-%d-%s", row.Id, row.CreatedAt, row.RequestId)]
+		if entry == nil {
+			continue
+		}
+		// Decode only known audit fields; malformed historical metadata does
+		// not hide the event. The common visibility projection runs afterwards.
+		var other AuditOther
+		if common.UnmarshalJsonStr(row.Other, &other) == nil {
+			entry.Other = other
+		}
+	}
+	return nil
+}
+
+// Historical account events remain in logs for accounting consumers. Expose
+// them in the audit page without copying, deleting, or reclassifying stored rows.
+// Legacy administrative/login events have no trustworthy actor role, so only
+// root can see them; self and administrator views retain the existing boundary.
+func legacyAuditLogQuery(filter AuditLogFilter, viewerRole int) *gorm.DB {
+	query := LOG_DB.Model(&Log{}).Table(LOG_DB.NamingStrategy.TableName("logs") + " AS logs")
+	types := []int{LogTypeTopup, LogTypeSystem, LogTypeRefund}
+	if viewerRole >= common.RoleRootUser && !filter.SelfView {
+		types = append(types, LogTypeUnknown, LogTypeManage, LogTypeLogin)
+	}
+	query = query.Where("logs.type IN ?", types)
+	switch filter.Category {
+	case AuditCategoryBilling:
+		query = query.Where("logs.type IN ?", []int{LogTypeTopup, LogTypeRefund})
+	case AuditCategorySystem:
+		query = query.Where("logs.type = ?", LogTypeSystem)
+	case AuditCategoryOperation:
+		query = query.Where("logs.type = ?", LogTypeManage)
+	case AuditCategoryLogin:
+		query = query.Where("logs.type = ?", LogTypeLogin)
+	case AuditCategoryOther:
+		query = query.Where("logs.type = ?", LogTypeUnknown)
+	case "":
+	default:
+		query = query.Where("1 = 0")
+	}
+	// Historical business entries do not carry a PAT identity or a failure
+	// result. Do not invent either when applying audit filters.
+	if filter.TokenRef != "" || filter.Success != nil {
+		query = query.Where("1 = 0")
+	}
+	if filter.UserId > 0 {
+		query = query.Where("logs.user_id = ?", filter.UserId)
+	}
+	if filter.Username != "" {
+		query = query.Where("logs.username = ?", filter.Username)
+	}
+	if filter.RequestId != "" {
+		query = query.Where("logs.request_id = ?", filter.RequestId)
+	}
+	if filter.StartTimestamp > 0 {
+		query = query.Where("logs.created_at >= ?", filter.StartTimestamp)
+	}
+	if filter.EndTimestamp > 0 {
+		query = query.Where("logs.created_at <= ?", filter.EndTimestamp)
+	}
+	return query
+}
+
+func legacyAuditLogColumns() string {
+	eventID := "'legacy-' || CAST(logs.id AS text) || '-' || CAST(logs.created_at AS text) || '-' || COALESCE(logs.request_id, '')"
+	if common.UsingLogDatabase(common.DatabaseTypeMySQL) {
+		eventID = "CONCAT('legacy-', logs.id, '-', logs.created_at, '-', COALESCE(logs.request_id, ''))"
+	} else if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		eventID = "concat('legacy-', toString(logs.id), '-', toString(logs.created_at), '-', ifNull(logs.request_id, ''))"
+	}
+	return "logs.id, " + eventID + " AS event_id, logs.user_id, logs.username, 0 AS actor_role, logs.created_at, " +
+		"CASE logs.type WHEN 1 THEN 'billing' WHEN 6 THEN 'billing' WHEN 4 THEN 'system' WHEN 3 THEN 'operation' WHEN 7 THEN 'login' ELSE 'other' END AS category, " +
+		"'' AS action, '' AS token_ref, '' AS auth_method, logs.ip, '' AS user_agent, '' AS method, '' AS route, 0 AS status, FALSE AS success, logs.request_id, logs.content, '{}' AS other"
 }
 
 // UserAccessTokenStatus describes the legacy users.access_token credential.
@@ -263,7 +384,7 @@ func MigrateAuditLogs() error {
 }
 
 func ValidAuditCategory(category string) bool {
-	return category == "" || category == AuditCategoryLogin || category == AuditCategorySecurity || category == AuditCategoryOperation || category == AuditCategoryAccessToken
+	return category == "" || category == AuditCategoryLogin || category == AuditCategorySecurity || category == AuditCategoryOperation || category == AuditCategoryAccessToken || category == AuditCategoryBilling || category == AuditCategorySystem || category == AuditCategoryOther
 }
 
 func ValidTokenFingerprint(value string) bool {

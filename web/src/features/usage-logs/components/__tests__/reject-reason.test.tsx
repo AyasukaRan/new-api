@@ -180,3 +180,20 @@ test('legacy failures without retry or timing metadata show no invented retry re
   expect(screen.queryByText('First token')).not.toBeInTheDocument()
   expect(screen.queryByText('Why retry stopped')).not.toBeInTheDocument()
 })
+
+test('context overflow details keep the complete original error and extracted token limits', () => {
+  const error =
+    "status_code=400, This model's maximum context length is 1048576 tokens. However, you requested 1770481 tokens (1770481 in the messages, 0 in the completion). Please reduce the length of the messages or completion. (request_id: historical-request)"
+  render(<RequestFailureSummary error={error} />)
+
+  expect(screen.getByText('Context length exceeded')).toBeVisible()
+  expect(screen.getByText('Context limit')).toBeVisible()
+  expect(screen.getByText('1,048,576')).toBeVisible()
+  expect(screen.getByText('Requested tokens')).toBeVisible()
+  expect(screen.getByText('1,770,481')).toBeVisible()
+  expect(screen.getByText('Original error')).toBeVisible()
+  expect(screen.getByText(error)).toBeVisible()
+  expect(
+    screen.getByRole('button', { name: 'Copy to clipboard' })
+  ).toBeVisible()
+})

@@ -95,11 +95,19 @@ export function AuditLogDetailsDialog(props: { entry: AuditLog }) {
           </p>
         )}
         <div className='flex flex-wrap items-center gap-2 text-xs'>
-          <StatusBadge
-            label={props.entry.success ? t('Success') : t('Failed')}
-            variant={props.entry.success ? 'success' : 'danger'}
-            copyable={false}
-          />
+          {props.entry.success_recorded === false ? (
+            <StatusBadge
+              label={t('Not recorded')}
+              variant='neutral'
+              copyable={false}
+            />
+          ) : (
+            <StatusBadge
+              label={props.entry.success ? t('Success') : t('Failed')}
+              variant={props.entry.success ? 'success' : 'danger'}
+              copyable={false}
+            />
+          )}
           {Number.isFinite(props.entry.created_at) && (
             <span className='text-muted-foreground tabular-nums'>
               {dayjs.unix(props.entry.created_at).format('YYYY-MM-DD HH:mm:ss')}

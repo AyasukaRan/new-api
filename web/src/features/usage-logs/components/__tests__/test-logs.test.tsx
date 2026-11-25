@@ -120,7 +120,7 @@ async function renderLogs(section: string, role = 100) {
     test: 'Test Logs',
     audit: 'Audit Logs',
     conversations: 'Conversation Records',
-    common: 'Common Logs',
+    common: 'Model Logs',
   }
   let heading = titles[section]
   if (role < 10 && ['test', 'audit', 'conversations'].includes(section)) {
@@ -197,6 +197,73 @@ it('keeps the independent test page and its filters on test-only API requests', 
   expect(
     logRequests.every((url) => url.searchParams.get('source') === 'test')
   ).toBe(true)
+})
+
+it('filters Model Logs by request result and preserves the personal scope without adding a result column', async () => {
+  const get = vi.spyOn(api, 'get').mockImplementation(async (path) => {
+    const url = new URL(path, 'http://localhost')
+    if (url.pathname === '/api/group/') {
+      return { data: { success: true, data: ['default'] } }
+    }
+    if (url.pathname.endsWith('/stat')) {
+      return { data: { success: true, data: { quota: 0, rpm: 0, tpm: 0 } } }
+    }
+    return { data: { success: true, data: { items: [usageLog], total: 1 } } }
+  })
+  const router = await renderLogs('common')
+  const user = userEvent.setup()
+  expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute(
+    'aria-selected',
+    'true'
+  )
+  expect(
+    screen.queryByRole('columnheader', { name: 'Result' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('tab', { name: 'Failed' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      result: 'failure',
+      page: 1,
+    })
+  )
+  await waitFor(() =>
+    expect(
+      get.mock.calls.some(([path]) => {
+        const url = new URL(path, 'http://localhost')
+        return (
+          url.pathname === '/api/log/' &&
+          url.searchParams.get('category') === 'model' &&
+          url.searchParams.get('result') === 'failure'
+        )
+      })
+    ).toBe(true)
+  )
+  await user.click(screen.getByRole('button', { name: 'Only Mine' }))
+  expect(screen.getByRole('button', { name: 'Only Mine' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  await user.click(screen.getByRole('tab', { name: 'Success' }))
+  await waitFor(() =>
+    expect(
+      get.mock.calls.some(([path]) => {
+        const url = new URL(path, 'http://localhost')
+        return (
+          url.pathname === '/api/log/self' &&
+          url.searchParams.get('category') === 'model' &&
+          url.searchParams.get('result') === 'success'
+        )
+      })
+    ).toBe(true)
+  )
+  await user.click(screen.getByRole('tab', { name: 'All' }))
+  await waitFor(() =>
+    expect(router.state.location.search.result).toBeUndefined()
+  )
+  expect(screen.getByRole('button', { name: 'Only Mine' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
 })
 
 it('does not show usage rows while the separate test page is loading', async () => {
@@ -314,7 +381,7 @@ it('discarding the administrator role also discards cached personal log rows', a
           success: true,
           data: {
             items: [
-              { ...usageLog, type: 3, content: 'historical-management-row' },
+              { ...usageLog, type: 5, content: 'historical-model-error' },
             ],
             total: 1,
           },
@@ -324,17 +391,15 @@ it('discarding the administrator role also discards cached personal log rows', a
     return { data: { success: true, data: { items: [], total: 0 } } }
   })
   await renderLogs('common', 10)
-  await userEvent.click(screen.getByRole('tab', { name: 'Only Mine' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Only Mine' }))
   await userEvent.click(
-    await screen.findByRole('button', { name: 'historical-management-row' })
+    await screen.findByRole('button', { name: /Details · #82/ })
   )
   expect(await screen.findByRole('dialog')).toBeVisible()
   await act(() =>
     useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
   )
-  expect(
-    screen.queryByRole('button', { name: 'historical-management-row' })
-  ).not.toBeInTheDocument()
+  expect(screen.queryByText('historical-model-error')).not.toBeInTheDocument()
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   await act(() =>
     resolve?.({ data: { success: true, data: { items: [], total: 0 } } })

@@ -32,6 +32,7 @@ import { useTranslation } from 'react-i18next'
 import { TruncatedCell } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
+import { formatAdminUserLabel } from '@/features/users/lib/admin-nickname'
 import { toIntlLocale } from '@/i18n/languages'
 import { cn } from '@/lib/utils'
 
@@ -101,6 +102,10 @@ export function LogAccountCell({
   const other = getLogMetadata(log)
   const displayable = isDisplayableLogType(log.type)
   const token = displayable && logTokenName(log, t)
+  const account =
+    isAdmin && sensitiveVisible
+      ? formatAdminUserLabel(log.username, log.user_admin_nickname)
+      : undefined
   return (
     <div className='flex max-w-full min-w-0 flex-col items-start justify-center gap-[3px] text-xs leading-snug'>
       {isAdmin && log.username && (
@@ -117,8 +122,8 @@ export function LogAccountCell({
             className='text-muted-foreground size-3.5 shrink-0'
             aria-hidden
           />
-          <span className='truncate'>
-            {sensitiveVisible ? log.username : '••••'}
+          <span className='truncate' title={account}>
+            {account ?? '••••'}
           </span>
         </button>
       )}

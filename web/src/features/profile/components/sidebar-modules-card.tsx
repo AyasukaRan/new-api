@@ -100,7 +100,7 @@ export function SidebarModulesCard() {
         },
         {
           key: 'log',
-          title: t('Usage Logs'),
+          title: t('Model Logs'),
           description: t('API usage records'),
         },
         {

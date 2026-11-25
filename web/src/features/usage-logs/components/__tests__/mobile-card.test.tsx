@@ -524,7 +524,7 @@ it('opens the shared pagination evidence from a mobile log', async () => {
   expect(within(dialog).getByText('qpdf/12.2.0')).toBeVisible()
 })
 
-it('keeps first-token timing and retry-stop explanation on a failed stream card', () => {
+it('summarizes a failed stream while keeping timing, retry-stop explanation, and the original error in details', async () => {
   renderLogs({
     admin: false,
     logs: [
@@ -549,10 +549,23 @@ it('keeps first-token timing and retry-stop explanation on a failed stream card'
     ],
   })
   expect(screen.getByText('437ms')).toBeVisible()
-  expect(screen.getByText('Upstream temporarily unavailable')).toBeVisible()
+  expect(screen.getByText('Upstream unavailable')).toBeVisible()
+  expect(
+    screen.queryByText('Upstream temporarily unavailable')
+  ).not.toBeInTheDocument()
   expect(
     screen.getByText(
       'Response content has already been sent; retrying could duplicate output'
     )
+  ).toBeVisible()
+
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: /Details · #1/ }))
+  const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+  await user.click(
+    within(dialog).getByRole('tab', { name: 'Technical details' })
+  )
+  expect(
+    within(dialog).getByText('Upstream temporarily unavailable')
   ).toBeVisible()
 })

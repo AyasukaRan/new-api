@@ -23,7 +23,7 @@ import type { PermissionResourceDef } from '@/lib/admin-permissions'
 import dayjs from '@/lib/dayjs'
 import { ROLE } from '@/lib/roles'
 
-import { renderAuditContent } from '../../lib/format'
+import { renderAuditContent, renderLogContent } from '../../lib/format'
 import { buildQuotaAuditOperation } from '../../lib/quota-audit-operation'
 import type { LogOtherData } from '../../types'
 import type { AuditLog } from '../api'
@@ -397,6 +397,25 @@ export function buildAuditDetails(
   const op = isAuditDetailObject(metadata.op) ? metadata.op : {}
   const action = typeof op.action === 'string' ? op.action : entry.action || ''
   const params = isAuditDetailObject(op.params) ? { ...op.params } : {}
+  const contentParts: NonNullable<LogOtherData['content_parts']> = []
+  if (Array.isArray(metadata.content_parts)) {
+    for (const part of metadata.content_parts) {
+      if (!isAuditDetailObject(part) || typeof part.key !== 'string') continue
+      const partParams: Record<string, string | number | boolean> = {}
+      if (isAuditDetailObject(part.params)) {
+        for (const [key, value] of Object.entries(part.params)) {
+          if (
+            typeof value === 'string' ||
+            typeof value === 'number' ||
+            typeof value === 'boolean'
+          ) {
+            partParams[key] = value
+          }
+        }
+      }
+      contentParts.push({ key: part.key, params: partParams })
+    }
+  }
   const tokenOperation = buildTokenAuditOperation(
     action,
     params,
@@ -409,7 +428,8 @@ export function buildAuditDetails(
     entry.success,
     t
   )
-  const operation = tokenOperation ?? quotaOperation
+  const operation =
+    entry.success_recorded === false ? null : (tokenOperation ?? quotaOperation)
   const summaryParams: NonNullable<NonNullable<LogOtherData['op']>['params']> =
     {}
   for (const [key, value] of Object.entries(params)) {
@@ -440,7 +460,11 @@ export function buildAuditDetails(
   if (entry.category === 'login') fallback = t('Login')
   if (entry.category === 'security') fallback = t('Account security')
   if (entry.category === 'access_token') fallback = t('Access Token')
-  const summary =
+  if (entry.category === 'billing') fallback = t('Billing')
+  if (entry.category === 'system') fallback = t('System')
+  const structuredContent = renderLogContent({ content_parts: contentParts }, t)
+  let summary =
+    structuredContent ||
     renderAuditContent(
       {
         op: { action, params: summaryParams },
@@ -453,7 +477,11 @@ export function buildAuditDetails(
         },
       },
       t
-    ) || (entry.content && entry.content !== action ? entry.content : fallback)
+    ) ||
+    (entry.content && entry.content !== action ? entry.content : fallback)
+  if (entry.success_recorded === false) {
+    summary = structuredContent || entry.content || fallback
+  }
   const admin = isAuditDetailObject(metadata.admin_info)
     ? metadata.admin_info
     : {}

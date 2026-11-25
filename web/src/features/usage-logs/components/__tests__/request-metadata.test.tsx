@@ -63,6 +63,7 @@ const log = usageLogSchema.parse({
   content: '',
   model_name: 'deepseek-v4-pro',
   username: 'account-user',
+  user_admin_nickname: 'Private account alias',
   token_name: 'token-1',
   group: 'DeepSeek',
   ip: '192.0.2.25',
@@ -212,7 +213,10 @@ test('explains the partial observation icon on hover alongside recorded tool cal
     <RequestMetadataTags
       isAdmin
       field='invoked_tools'
-      metadata={{ invoked_tools: ['exec_command'], tool_observation: 'partial' }}
+      metadata={{
+        invoked_tools: ['exec_command'],
+        tool_observation: 'partial',
+      }}
     />
   )
   expect(
@@ -309,7 +313,11 @@ test('groups the account, request source, transport and token metrics into disti
   )
   expect(cell('reasoning_effort')).toHaveTextContent('high')
   const account = within(cell('token_name'))
-  for (const text of [log.username, log.token_name, log.group]) {
+  for (const text of [
+    'Private account alias · account-user',
+    log.token_name,
+    log.group,
+  ]) {
     expect(account.getByText(text)).toBeVisible()
   }
   const source = within(cell('request_source'))
@@ -456,7 +464,9 @@ test.each([false, true])(
     expect(screen.queryByText('Codex CLI')).not.toBeInTheDocument()
     expect(screen.queryByText(/exec_command/)).not.toBeInTheDocument()
     expect(screen.queryByText('codex-tui/1.0')).not.toBeInTheDocument()
-    expect(screen.queryByText(log.username)).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/Private account alias|account-user/)
+    ).not.toBeInTheDocument()
     expect(screen.getByText(log.ip)).toBeVisible()
     expect(screen.getByText(log.token_name)).toBeVisible()
     expect(screen.getByText('SSE')).toBeVisible()

@@ -35,6 +35,7 @@ import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
 import { formatDuration } from '../../lib/format'
+import { summarizeRequestFailure } from '../../lib/request-failure-summary'
 import { FailReasonDialog } from '../dialogs/fail-reason-dialog'
 
 /**
@@ -213,10 +214,8 @@ export function createFailReasonColumn<T>(config: {
     ),
     cell: function FailReasonCell({ row }) {
       const { t } = useTranslation()
-      const failReason = translateServerText(
-        t,
-        row.getValue(accessorKey) as string
-      )
+      const originalError = row.getValue(accessorKey) as string
+      const failReason = translateServerText(t, originalError)
       const [dialogOpen, setDialogOpen] = useState(false)
 
       if (!failReason) {
@@ -232,7 +231,7 @@ export function createFailReasonColumn<T>(config: {
             title={cellTitle}
           >
             <span className='truncate leading-snug text-red-600 group-hover:underline dark:text-red-400'>
-              {failReason}
+              {t(summarizeRequestFailure(originalError).label)}
             </span>
           </button>
           <FailReasonDialog

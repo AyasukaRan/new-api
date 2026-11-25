@@ -20,6 +20,10 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { getUsers, searchUsers } from '@/features/users/api'
+import {
+  formatAdminUserLabel,
+  getAdminNickname,
+} from '@/features/users/lib/admin-nickname'
 import { useDebounce } from '@/hooks'
 import { useModelAccessScope } from '@/hooks/use-model-access-scope'
 import { requireServerSuccess } from '@/lib/server-error-message'
@@ -40,7 +44,11 @@ export function useLogUserOptions() {
         ? await searchUsers({ ...page, keyword })
         : await getUsers(page)
       const users = requireServerSuccess(response).data?.items ?? []
-      return users.map(({ id, username }) => ({ id, username }))
+      return users.map(({ id, username, remark }) => ({
+        id,
+        username,
+        label: formatAdminUserLabel(username, getAdminNickname(remark)),
+      }))
     },
   })
   return {

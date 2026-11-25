@@ -38,6 +38,7 @@ export interface AuditLog {
   route: string
   status: number
   success: boolean
+  success_recorded?: boolean
   request_id: string
   content: string
   other: Record<string, unknown> | null

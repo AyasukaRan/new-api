@@ -20,6 +20,7 @@ import { SystemBehaviorSection } from '../general/system-behavior-section'
 import { EmailSettingsSection } from '../integrations/email-settings-section'
 import { MonitoringSettingsSection } from '../integrations/monitoring-settings-section'
 import { WorkerSettingsSection } from '../integrations/worker-settings-section'
+import { ErrorRecognitionSection } from '../maintenance/error-recognition-section'
 import { LogSettingsSection } from '../maintenance/log-settings-section'
 import { PerformanceSection } from '../maintenance/performance-section'
 import { RequestSourceRulesSection } from '../maintenance/request-source-rules-section'
@@ -124,6 +125,13 @@ const OPERATIONS_SECTIONS = [
     titleKey: 'Request source recognition',
     build: (settings: OperationsSettings) => (
       <RequestSourceRulesSection value={settings.RequestSourceRules} />
+    ),
+  },
+  {
+    id: 'error-recognition',
+    titleKey: 'Error recognition',
+    build: (settings: OperationsSettings) => (
+      <ErrorRecognitionSection value={settings.ErrorRecognitionRules} />
     ),
   },
   {

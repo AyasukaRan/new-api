@@ -131,6 +131,8 @@ export function AuditLogFilterBar(props: {
             { value: 'login', label: t('Login') },
             { value: 'security', label: t('Account security') },
             { value: 'operation', label: t('Operation audit') },
+            { value: 'billing', label: t('Billing') },
+            { value: 'system', label: t('System') },
             { value: 'access_token', label: t('Access Token') },
           ]}
           onChange={(value) =>

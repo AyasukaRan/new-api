@@ -219,6 +219,8 @@ func SetApiRouter(router *gin.Engine) {
 			optionRoute.GET("/request_source_rules/builtins", controller.GetBuiltinRequestSourceRules)
 			optionRoute.GET("/request_source_rules/lookup", middleware.DisableCache(), controller.LookupRequestSource)
 			optionRoute.GET("/request_source_rules/unidentified", middleware.DisableCache(), controller.GetUnidentifiedRequestSources)
+			optionRoute.GET("/error_recognition_rules/inventory", middleware.DisableCache(), controller.GetErrorRecognitionInventory)
+			optionRoute.POST("/error_recognition_rules/preview", controller.PreviewErrorRecognition)
 			optionRoute.GET("/request_policy", controller.GetRequestPolicy)
 			optionRoute.PATCH("/request_policy", controller.UpdateRequestPolicy)
 			optionRoute.PUT("/", controller.UpdateOption)

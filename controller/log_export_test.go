@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,246 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			orphan := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query+"&username=bob")
 			require.Len(t, orphan, 2)
 			assert.Equal(t, "bob", orphan[0]["username"])
+
+			t.Run("model result and audit separation", func(t *testing.T) {
+				require.NoError(t, model.MigrateLogFilterIndexes())
+				require.NoError(t, model.MigrateLogFilterIndexes(), "result function migration is repeatable")
+				require.NoError(t, model.MigrateAuditLogs())
+				const userID = 731
+				fixtures := []struct {
+					id, result, other string
+					typ               int
+				}{
+					{"plain", "success", `{}`, model.LogTypeConsume},
+					{"completed", "success", `{"stream_status":{"status":"error","response_status":"completed","end_error":"recovered"}}`, model.LogTypeConsume},
+					{"normal", "success", `{"stream_status":{"status":"ok","end_error":"recovered"}}`, model.LogTypeConsume},
+					{"soft", "success", `{"stream_status":{"status":"error","error_count":2}}`, model.LogTypeConsume},
+					{"broken-metadata", "success", `{`, model.LogTypeConsume},
+					{"upstream-failed", "failure", `{}`, model.LogTypeError},
+					{"broken-failure", "failure", `{"admin_info":{"secret":"private-fragment"},"broken":`, model.LogTypeError},
+					{"partial", "failure", `{"stream_status":{"response_status":"incomplete"}}`, model.LogTypeConsume},
+					{"normal-transport-incomplete", "failure", `{"stream_status":{"status":"ok","response_status":"incomplete"}}`, model.LogTypeConsume},
+					{"normal-transport-failed", "failure", `{"stream_status":{"status":"ok","response_status":"failed"}}`, model.LogTypeConsume},
+					{"timeout", "failure", `{"stream_status":{"end_reason":"timeout"}}`, model.LogTypeConsume},
+					{"cancelled", "failure", `{"stream_status":{"response_status":"cancelled"}}`, model.LogTypeConsume},
+					{"topup", "", `{"content_parts":[{"key":"Credit {{value}}","params":{"value":9007199254740993}}],"root_info":{"secret":"private-root"},"admin_info":{"admin_username":"private-admin"}}`, model.LogTypeTopup},
+					{"system", "", `{}`, model.LogTypeSystem},
+					{"refund", "", `{}`, model.LogTypeRefund},
+					{"manage", "", `{}`, model.LogTypeManage},
+					{"login", "", `{}`, model.LogTypeLogin},
+					{"unknown", "", `{}`, model.LogTypeUnknown},
+					{"probe", "", `{}`, model.LogTypeTestConsume},
+					{"old-probe", "", `{}`, model.LogTypeConsume},
+				}
+				var refs []model.LiveLogRef
+				var malformedLog model.Log
+				wantIDs := map[string][]any{"": {}, "success": {}, "failure": {}}
+				quota := map[string]int{}
+				for i, fixture := range fixtures {
+					row := model.Log{Id: 973100 + i, UserId: userID, Username: "model-audit-owner", Type: fixture.typ, CreatedAt: now - int64(i), ModelName: "model-audit-fixture", RequestId: "model-audit-" + fixture.id, Other: fixture.other, Quota: 7, Content: "account event " + fixture.id}
+					if fixture.id == "old-probe" {
+						row.TokenName, row.Content = "模型测试", "模型测试"
+					}
+					if fixture.id == "broken-failure" {
+						row.Content = "status_code=429, rate limit"
+						malformedLog = row
+					}
+					require.NoError(t, model.LOG_DB.Create(&row).Error)
+					refs = append(refs, model.LiveLogRef{ID: row.Id, UserID: userID, CreatedAt: row.CreatedAt, RequestID: row.RequestId})
+					if fixture.result != "" {
+						wantIDs[""] = append(wantIDs[""], row.RequestId)
+						wantIDs[fixture.result] = append(wantIDs[fixture.result], row.RequestId)
+						if fixture.typ == model.LogTypeConsume {
+							quota[""] += row.Quota
+							quota[fixture.result] += row.Quota
+						}
+					}
+				}
+				for _, result := range []string{"", "success", "failure"} {
+					params := query + "&category=model&model_name=model-audit-fixture&result=" + result
+					for _, endpoint := range []gin.HandlerFunc{GetAllLogs, GetUserLogs} {
+						response := callLogHandler(t, endpoint, userID, common.RoleAdminUser, params)[0]
+						require.Equal(t, true, response["success"], response)
+						page := response["data"].(map[string]any)
+						assert.EqualValues(t, len(wantIDs[result]), page["total"], result)
+						for _, value := range page["items"].([]any) {
+							entry := value.(map[string]any)
+							failed := slices.Contains(wantIDs["failure"], entry["request_id"])
+							assert.Equal(t, failed, strings.Contains(entry["other"].(string), `"error_summary"`), entry["request_id"])
+						}
+					}
+					for _, endpoint := range []gin.HandlerFunc{ExportAllLogs, ExportUserLogs} {
+						response := callLogHandler(t, endpoint, userID, common.RoleAdminUser, params)
+						assert.ElementsMatch(t, wantIDs[result], exportedRequestIds(response), result)
+					}
+					for _, endpoint := range []gin.HandlerFunc{GetLogsStat, GetLogsSelfStat} {
+						response := callLogHandler(t, endpoint, userID, common.RoleAdminUser, params+"&live_total=1")[0]
+						require.Equal(t, true, response["success"], response)
+						data := response["data"].(map[string]any)
+						assert.EqualValues(t, quota[result], data["quota"], result)
+						assert.EqualValues(t, len(wantIDs[result]), data["live_total"], result)
+					}
+					filter := model.LogFilter{Category: "model", Result: result}
+					for _, owner := range []int{0, userID} {
+						changes, omitted, err := model.GetChangedLogs(t.Context(), filter, owner, common.RoleAdminUser, true, 100, refs)
+						require.NoError(t, err)
+						assert.Zero(t, omitted)
+						ids := make([]any, 0, len(changes))
+						for _, entry := range changes {
+							ids = append(ids, entry.RequestId)
+						}
+						assert.ElementsMatch(t, wantIDs[result], ids, result)
+					}
+				}
+				previousRules := operation_setting.ErrorRecognitionRulesJSONString()
+				t.Cleanup(func() { require.NoError(t, operation_setting.LoadErrorRecognitionRulesJSON(previousRules)) })
+				for _, ruleCase := range []struct {
+					rules, label string
+					matched      bool
+				}{
+					{`[]`, "Request failed", false},
+					{`[{"name":"custom-limit","enabled":true,"label":"Configured limit","match":"contains","pattern":"rate limit"}]`, "Configured limit", true},
+				} {
+					require.NoError(t, operation_setting.LoadErrorRecognitionRulesJSON(ruleCase.rules))
+					var projected []model.Log
+					for _, endpoint := range []gin.HandlerFunc{GetAllLogs, GetUserLogs} {
+						response := callLogHandler(t, endpoint, userID, common.RoleRootUser, "category=model&request_id="+malformedLog.RequestId)[0]
+						require.Equal(t, true, response["success"], response)
+						items := response["data"].(map[string]any)["items"].([]any)
+						require.Len(t, items, 1)
+						entry := items[0].(map[string]any)
+						projected = append(projected, model.Log{Content: entry["content"].(string), Other: entry["other"].(string)})
+					}
+					for _, owner := range []int{0, userID} {
+						changed, _, err := model.GetChangedLogs(t.Context(), model.LogFilter{Category: "model", RequestId: malformedLog.RequestId}, owner, common.RoleRootUser, true, 10, refs)
+						require.NoError(t, err)
+						require.Len(t, changed, 1)
+						projected = append(projected, *changed[0])
+					}
+					for _, entry := range projected {
+						var metadata map[string]common.RawMessage
+						require.NoError(t, common.UnmarshalJsonStr(entry.Other, &metadata))
+						require.Len(t, metadata, 1, "malformed fragments cannot survive the response projection")
+						var summary operation_setting.ErrorSummary
+						require.NoError(t, common.Unmarshal(metadata["error_summary"], &summary))
+						assert.Equal(t, ruleCase.label, summary.Label)
+						assert.Equal(t, ruleCase.matched, summary.Matched)
+						assert.Equal(t, malformedLog.Content, entry.Content)
+					}
+				}
+				require.NoError(t, operation_setting.LoadErrorRecognitionRulesJSON(previousRules))
+				var storedMalformed model.Log
+				require.NoError(t, model.LOG_DB.Where("request_id = ?", malformedLog.RequestId).Take(&storedMalformed).Error)
+				assert.Equal(t, malformedLog.Other, storedMalformed.Other)
+				assert.Equal(t, malformedLog.Content, storedMalformed.Content)
+				for _, endpoint := range []gin.HandlerFunc{GetAllLogs, GetUserLogs, ExportAllLogs, ExportUserLogs, GetLogsStat, GetLogsSelfStat, StreamAllLogChanges, StreamUserLogChanges} {
+					response := callLogHandler(t, endpoint, userID, common.RoleAdminUser, "category=model&result=invalid")[0]
+					assert.Equal(t, false, response["success"], response)
+				}
+				conflictingSource := callLogHandler(t, GetAllLogs, userID, common.RoleAdminUser, "category=model&source=test")[0]
+				assert.Equal(t, false, conflictingSource["success"], "model requests cannot opt back into legacy probes")
+				model.RecordAuditLog(nil, model.AuditLog{UserId: userID, Username: "model-audit-owner", ActorRole: common.RoleCommonUser, CreatedAt: now - 10, EventId: "native-audit", Category: model.AuditCategoryOperation, Content: "native audit", Success: true})
+				for _, role := range []int{common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
+					filter := model.AuditLogFilter{UserId: userID}
+					first, total, err := model.GetAuditLogs(filter, 0, 2, role)
+					require.NoError(t, err)
+					wantTotal := 4
+					if role == common.RoleRootUser {
+						wantTotal = 7
+					}
+					assert.EqualValues(t, wantTotal, total)
+					second, _, err := model.GetAuditLogs(filter, 2, 20, role)
+					require.NoError(t, err)
+					seen := map[string]bool{}
+					for _, entry := range append(first, second...) {
+						assert.False(t, seen[entry.EventId], entry.EventId)
+						seen[entry.EventId] = true
+						assert.Equal(t, userID, entry.UserId)
+						assert.NotContains(t, entry.Content, "probe")
+					}
+					assert.Len(t, seen, wantTotal)
+				}
+				filter := model.AuditLogFilter{UserId: userID, Category: model.AuditCategoryBilling}
+				billing, total, err := model.GetAuditLogs(filter, 0, 20, common.RoleCommonUser)
+				require.NoError(t, err)
+				assert.EqualValues(t, 2, total)
+				assert.Len(t, billing, 2)
+				for _, entry := range billing {
+					require.NotNil(t, entry.SuccessRecorded)
+					assert.False(t, *entry.SuccessRecorded)
+					assert.Nil(t, entry.Other.RootInfo)
+					assert.Nil(t, entry.Other.AdminInfo)
+					if entry.RequestId == "model-audit-topup" {
+						assert.Contains(t, string(entry.Other.ContentParts), "9007199254740993")
+					}
+				}
+				for _, success := range []bool{false, true} {
+					filter.Success = &success
+					_, total, err = model.GetAuditLogs(filter, 0, 20, common.RoleRootUser)
+					require.NoError(t, err)
+					assert.Zero(t, total, "unknown legacy outcomes do not match either result")
+				}
+				filter.Success = nil
+				filter.TokenRef = model.AccessTokenFingerprint("unrelated")
+				_, total, err = model.GetAuditLogs(filter, 0, 20, common.RoleRootUser)
+				require.NoError(t, err)
+				assert.Zero(t, total)
+			})
+			t.Run("nickname privacy", func(t *testing.T) {
+				const username = "nick-fixture"
+				const nickname = "Private alias"
+				user := model.User{Id: 701, Username: username, DisplayName: "Public profile", Remark: " \r\n  Private alias  \r\nInternal notes", AffCode: "nick701"}
+				require.NoError(t, mainDB.Create(&user).Error)
+				row := model.Log{Id: 77701, UserId: user.Id, Username: "old-name", ModelName: "nickname-model", RequestId: "nickname-fixture", CreatedAt: now, Type: model.LogTypeConsume, TokenId: 77701}
+				orphan := model.Log{Id: 77702, UserId: 702, Username: "archived", ModelName: row.ModelName, RequestId: "nickname-orphan", CreatedAt: now - 1, Type: model.LogTypeConsume}
+				require.NoError(t, model.LOG_DB.Create(&row).Error)
+				require.NoError(t, model.LOG_DB.Create(&orphan).Error)
+				matched, total, err := model.SearchUsers(nickname, "", nil, nil, 0, 5)
+				require.NoError(t, err)
+				require.EqualValues(t, 1, total)
+				require.Len(t, matched, 1)
+				assert.Equal(t, username, matched[0].Username)
+
+				filter := model.LogFilter{ModelName: row.ModelName}
+				admin, _, err := model.GetAllLogs(filter, 0, 20)
+				require.NoError(t, err)
+				require.Len(t, admin, 2)
+				assert.Equal(t, nickname, admin[0].UserAdminNickname)
+				assert.Equal(t, username, admin[0].Username)
+				assert.Equal(t, "archived", admin[1].Username)
+				assert.Empty(t, admin[1].UserAdminNickname)
+				encoded, err := common.Marshal(admin)
+				require.NoError(t, err)
+				assert.NotContains(t, string(encoded), "Internal notes")
+
+				ref := []model.LiveLogRef{{ID: row.Id, CreatedAt: row.CreatedAt, RequestID: row.RequestId}}
+				require.NoError(t, mainDB.Model(&user).UpdateColumn("remark", "Renamed").Error)
+				live, _, err := model.GetChangedLogs(t.Context(), filter, 0, common.RoleAdminUser, true, 10, ref)
+				require.NoError(t, err)
+				require.Len(t, live, 1)
+				assert.Equal(t, "Renamed", live[0].UserAdminNickname)
+				for _, role := range []int{common.RoleCommonUser, common.RoleAdminUser} {
+					self := callLogHandler(t, GetUserLogs, user.Id, role, "model_name="+row.ModelName)[0]
+					require.Equal(t, true, self["success"])
+					items := self["data"].(map[string]any)["items"].([]any)
+					require.Len(t, items, 1)
+					assert.NotContains(t, items[0].(map[string]any), "user_admin_nickname")
+					live, _, err := model.GetChangedLogs(t.Context(), filter, user.Id, role, true, 10, ref)
+					require.NoError(t, err)
+					require.Len(t, live, 1)
+					assert.Empty(t, live[0].UserAdminNickname)
+				}
+				tokenRows, err := model.GetLogByTokenId(row.TokenId)
+				require.NoError(t, err)
+				require.Len(t, tokenRows, 1)
+				assert.Empty(t, tokenRows[0].UserAdminNickname)
+				own := callLogHandler(t, ExportUserLogs, user.Id, common.RoleCommonUser, "model_name="+row.ModelName)
+				require.Len(t, own, 2)
+				assert.NotContains(t, own[0], "user_admin_nickname")
+				export := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, "model_name="+row.ModelName)
+				require.Len(t, export, 3)
+				assert.NotContains(t, export[0], "user_admin_nickname")
+			})
 
 			for _, log := range []model.Log{
 				{UserId: 1, Username: "alice", CreatedAt: now - 3600, Type: model.LogTypeConsume, ModelName: "gpt-a", RequestId: "backfill-tie"},

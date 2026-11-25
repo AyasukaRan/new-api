@@ -83,6 +83,23 @@ END; $$`
 				return err
 			}
 		}
+		if err := db.Raw("SELECT to_regprocedure('new_api_log_result_v1(text,bigint)') IS NOT NULL").Scan(&installed).Error; err != nil {
+			return err
+		}
+		if !installed {
+			query := `CREATE FUNCTION new_api_log_result_v1(metadata text, log_type bigint)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE facts jsonb;
+BEGIN
+	facts := NULLIF(metadata, '')::jsonb;
+	RETURN ` + logResultCaseSQL("log_type") + `;
+EXCEPTION WHEN data_exception OR program_limit_exceeded THEN
+	RETURN CASE WHEN log_type = 5 THEN 'failure' ELSE 'success' END;
+END; $$`
+			if err := db.Exec(query).Error; err != nil {
+				return err
+			}
+		}
 		indexes := []struct{ name, expression string }{
 			{"idx_logs_reasoning_effort_time_v1", "left(new_api_log_text_v1(other, 'reasoning_effort'), 128)"},
 			{"idx_logs_client_tool_time_v1", "left(new_api_log_text_v1(other, 'client_tool'), 128)"},

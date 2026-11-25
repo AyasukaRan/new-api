@@ -31,16 +31,20 @@ import { useAuthStore } from '@/stores/auth-store'
 
 const logTypeValues = ['0', '1', '2', '3', '4', '5', '6', '7'] as const
 const logTypeSearchSchema = z
-  .preprocess((value) => {
-    if (value == null || value === '') return undefined
-    return Array.isArray(value) ? value : [value]
-  }, z.array(z.enum(logTypeValues)).optional())
+  .preprocess(
+    (value) => {
+      if (value == null || value === '') return undefined
+      return Array.isArray(value) ? value : [value]
+    },
+    z.array(z.enum(logTypeValues)).optional()
+  )
   .catch([])
 
 const usageLogsSearchSchema = z.object({
   page: z.number().optional().catch(1),
   pageSize: z.number().optional().catch(undefined),
   type: logTypeSearchSchema.optional(),
+  result: z.enum(['all', 'success', 'failure']).optional().catch(undefined),
   filter: z.string().optional().catch(''),
   model: z.string().optional().catch(''),
   token: z.string().optional().catch(''),
@@ -49,7 +53,10 @@ const usageLogsSearchSchema = z.object({
   username: z.string().optional().catch(''),
   reasoningEffort: z.string().optional().catch(''),
   clientTool: z.string().optional().catch(''),
-  responseTransport: z.enum(LOG_RESPONSE_TRANSPORTS).optional().catch(undefined),
+  responseTransport: z
+    .enum(LOG_RESPONSE_TRANSPORTS)
+    .optional()
+    .catch(undefined),
   requestPath: z
     .string()
     .trim()

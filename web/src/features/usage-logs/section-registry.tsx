@@ -25,7 +25,7 @@ const USAGE_LOGS_SECTIONS = [
   { id: 'test', titleKey: 'Test Logs', build: () => null },
   {
     id: 'common',
-    titleKey: 'Common Logs',
+    titleKey: 'Model Logs',
     build: () => null, // Content is rendered directly in the page component
   },
   {

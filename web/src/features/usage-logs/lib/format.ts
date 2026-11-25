@@ -28,12 +28,12 @@ import {
   UNIT_PRICE_LABELS,
   type BillingUnit,
 } from '@/features/pricing/lib/billing-expression/types'
-import { policyLabel } from '@/features/system-settings/request-policies/policy-label'
-import { formatNumber, formatUseTime } from '@/lib/format'
 import {
   getCachePriceLabels,
   getTierCachePricingMode,
 } from '@/features/pricing/lib/cache-pricing'
+import { policyLabel } from '@/features/system-settings/request-policies/policy-label'
+import { formatNumber, formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 
 import type { UsageLog } from '../data/schema'
@@ -736,13 +736,14 @@ export function getRetryDecisionReason(
 export function isFailedStreamResponse(
   status: LogOtherData['stream_status']
 ): boolean {
-  if (!status || status.status === 'ok') return false
+  if (!status) return false
   if (status.response_status === 'completed') return false
   if (
     ['failed', 'incomplete', 'cancelled'].includes(status.response_status ?? '')
   ) {
     return true
   }
+  if (status.status === 'ok') return false
   return (
     Boolean(status.end_error) ||
     ['timeout', 'client_gone', 'scanner_error', 'panic', 'ping_fail'].includes(

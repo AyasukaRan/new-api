@@ -20,6 +20,7 @@ import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
+import { formatAdminUserLabel } from '@/features/users/lib/admin-nickname'
 import { toIntlLocale } from '@/i18n/languages'
 import {
   formatNumber,
@@ -158,7 +159,12 @@ export function LogRequestInfoCards(props: {
       <RequestInfoCard
         title={t('Request information')}
         fields={[
-          { label: t('Account'), value: isAdmin && log.username },
+          {
+            label: t('Account'),
+            value:
+              isAdmin &&
+              formatAdminUserLabel(log.username, log.user_admin_nickname),
+          },
           {
             label: t('Token Name'),
             value: log.token_name && logTokenName(log, t),

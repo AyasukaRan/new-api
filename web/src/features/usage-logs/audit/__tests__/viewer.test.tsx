@@ -422,6 +422,61 @@ function renderViewer(scope: 'all' | 'self' = 'self') {
   )
 }
 
+it('shows historical billing with an unrecorded result and supports billing and system category filters', async () => {
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        total: 1,
+        items: [
+          {
+            event_id: 'legacy-log-7',
+            created_at: 1788600600,
+            username: 'customer',
+            category: 'billing',
+            action: '',
+            success: false,
+            success_recorded: false,
+            content: 'Historical top-up',
+            other: null,
+          },
+        ],
+      },
+    },
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <AuditLogViewer scope='self' />
+    </QueryClientProvider>
+  )
+  const row = await screen.findByRole('row', { name: /Historical top-up/ })
+  expect(within(row).getByText('Not recorded')).toBeVisible()
+  expect(within(row).queryByText('Failed')).not.toBeInTheDocument()
+  expect(within(row).queryByText('Success')).not.toBeInTheDocument()
+  const user = userEvent.setup()
+  await user.click(within(row).getByRole('button', { name: 'Details' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Log Details' })
+  expect(within(dialog).getByText('Historical top-up')).toBeVisible()
+  expect(within(dialog).getByText('Not recorded')).toBeVisible()
+  expect(within(dialog).queryByText('Failed')).not.toBeInTheDocument()
+  await user.keyboard('{Escape}')
+  for (const [label, value] of [
+    ['Billing', 'billing'],
+    ['System', 'system'],
+  ]) {
+    await user.click(screen.getByRole('combobox', { name: 'Category' }))
+    await user.click(await screen.findByRole('option', { name: label }))
+    await waitFor(() =>
+      expect(get).toHaveBeenLastCalledWith('/api/audit/self', {
+        params: expect.objectContaining({ category: value, p: 1 }),
+      })
+    )
+  }
+})
+
 it('filters own access history by result, generation and time and resets pagination', async () => {
   const get = vi.spyOn(api, 'get').mockResolvedValue({
     data: { success: true, data: { items: [], total: 45 } },

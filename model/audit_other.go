@@ -11,12 +11,13 @@ import (
 // AuditOther is the structured metadata stored with an audit event. Privileged
 // fields are separate so API projections can remove them without re-encoding JSON.
 type AuditOther struct {
-	Op          *AuditOperation   `json:"op,omitempty"`
-	AdminInfo   *AuditAdminInfo   `json:"admin_info,omitempty"`
-	AuditInfo   *AuditRequestInfo `json:"audit_info,omitempty"`
-	RootInfo    AuditFields       `json:"root_info,omitempty"`
-	LoginMethod string            `json:"login_method,omitempty"`
-	UserAgent   string            `json:"user_agent,omitempty"`
+	ContentParts common.RawMessage `json:"content_parts,omitempty"`
+	Op           *AuditOperation   `json:"op,omitempty"`
+	AdminInfo    *AuditAdminInfo   `json:"admin_info,omitempty"`
+	AuditInfo    *AuditRequestInfo `json:"audit_info,omitempty"`
+	RootInfo     AuditFields       `json:"root_info,omitempty"`
+	LoginMethod  string            `json:"login_method,omitempty"`
+	UserAgent    string            `json:"user_agent,omitempty"`
 }
 
 type AuditOperation struct {

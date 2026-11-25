@@ -26,6 +26,7 @@ import { Dialog } from '@/components/dialog'
 import { StatusBadge } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import { formatAdminUserLabel } from '@/features/users/lib/admin-nickname'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatLogQuota } from '@/lib/format'
 
@@ -75,7 +76,10 @@ export function CommonLogMobileCard<TData>(props: {
     },
     user: {
       label: t('User'),
-      value: log.username,
+      value:
+        isAdminView && context.sensitiveVisible
+          ? formatAdminUserLabel(log.username, log.user_admin_nickname)
+          : log.username,
       visible: isAdminView && props.cells.has('token_name') && !!log.username,
       sensitive: true,
     },

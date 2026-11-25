@@ -25,13 +25,7 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 import { getCoreRowModel, useReactTable } from '@tanstack/react-table'
-import {
-  cleanup,
-  render,
-  screen,
-  waitFor,
-  within,
-} from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 
@@ -54,7 +48,7 @@ function FilterFixture() {
   )
 }
 
-async function renderFilter() {
+async function renderFilter(search = '') {
   vi.spyOn(api, 'get').mockImplementation(async (url) => {
     if (url === '/api/group/') return { data: { success: true, data: [] } }
     const data =
@@ -71,7 +65,9 @@ async function renderFilter() {
   })
   const router = createRouter({
     routeTree: root.addChildren([auth.addChildren([logs])]),
-    history: createMemoryHistory({ initialEntries: ['/usage-logs/common'] }),
+    history: createMemoryHistory({
+      initialEntries: [`/usage-logs/common${search}`],
+    }),
   })
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -81,7 +77,7 @@ async function renderFilter() {
       <RouterProvider router={router} />
     </QueryClientProvider>
   )
-  await screen.findByRole('combobox', { name: 'Type' })
+  await screen.findByPlaceholderText('Model Name')
   return router
 }
 
@@ -91,56 +87,23 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it('marks only retired log types as deprecated while keeping historical filters selectable', async () => {
-  useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
-  const router = await renderFilter()
-  await userEvent.click(screen.getByRole('combobox', { name: 'Type' }))
-  for (const label of ['Manage', 'Login']) {
+it.each([1, 10])(
+  'keeps non-model log types out of the model filters for role %i',
+  async (role) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'viewer', role })
+    const router = await renderFilter('?result=failure&type=%5B%223%22%5D')
     expect(
-      within(
-        screen.getByRole('option', { name: new RegExp(`^${label}`) })
-      ).getByText('Deprecated')
-    ).toBeVisible()
-  }
-  for (const label of [
-    'All Types',
-    'Top-up',
-    'Consume',
-    'System',
-    'Error',
-    'Refund',
-  ]) {
-    expect(
-      within(screen.getByRole('option', { name: label })).queryByText(
-        'Deprecated'
-      )
+      screen.queryByRole('combobox', { name: 'Type' })
     ).not.toBeInTheDocument()
+    await userEvent.type(screen.getByPlaceholderText('Model Name'), 'model-a')
+    await userEvent.click(screen.getByRole('button', { name: 'Search' }))
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        result: 'failure',
+        model: 'model-a',
+        page: 1,
+      })
+    )
+    expect(router.state.location.search.type).toBeUndefined()
   }
-  await userEvent.click(screen.getByRole('option', { name: /^Manage/ }))
-  expect(screen.getByRole('combobox', { name: 'Type' })).toHaveTextContent(
-    'Deprecated'
-  )
-  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
-  await waitFor(() =>
-    expect(router.state.location.search).toMatchObject({ type: ['3'], page: 1 })
-  )
-  await userEvent.click(screen.getByRole('combobox', { name: 'Type' }))
-  await userEvent.click(screen.getByRole('option', { name: /^Login/ }))
-  await userEvent.click(screen.getByRole('button', { name: 'Search' }))
-  await waitFor(() =>
-    expect(router.state.location.search).toMatchObject({ type: ['7'], page: 1 })
-  )
-})
-
-it('hides historical audit filters from regular users and still offers usage records', async () => {
-  useAuthStore.getState().auth.setUser({ id: 1, username: 'alice', role: 1 })
-  await renderFilter()
-  await userEvent.click(screen.getByRole('combobox', { name: 'Type' }))
-  expect(screen.getByRole('option', { name: 'Consume' })).toBeVisible()
-  expect(
-    screen.queryByRole('option', { name: /^Manage/ })
-  ).not.toBeInTheDocument()
-  expect(
-    screen.queryByRole('option', { name: /^Login/ })
-  ).not.toBeInTheDocument()
-})
+)

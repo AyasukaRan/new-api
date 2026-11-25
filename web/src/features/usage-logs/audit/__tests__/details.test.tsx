@@ -78,6 +78,36 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+it('localizes historical structured content without inventing an operation outcome', async () => {
+  const i18n = createInstance()
+  await i18n.init({
+    lng: 'zh',
+    resources: {
+      zh: {
+        translation: { 'Account credited {{amount}}': '账户入账 {{amount}}' },
+      },
+    },
+  })
+  const detail = buildAuditDetails(
+    {
+      ...entry,
+      category: 'billing',
+      action: '',
+      success: false,
+      success_recorded: false,
+      content: 'Account credited 10',
+      other: {
+        content_parts: [
+          { key: 'Account credited {{amount}}', params: { amount: 10 } },
+        ],
+      },
+    },
+    i18n.t
+  )
+  expect(detail.summary).toBe('账户入账 10')
+  expect(detail.operation).toBeNull()
+})
+
 it.each([
   [100, 'root'],
   [10, 'admin'],

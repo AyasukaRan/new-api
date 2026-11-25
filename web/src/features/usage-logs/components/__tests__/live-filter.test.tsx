@@ -263,7 +263,7 @@ it('disables automatic ranges after applying manually chosen fixed dates', async
 
 it('keeps saved filters and a pending model draft when automatic refresh is paused and resumed', async () => {
   const { router } = await renderFilter(
-    '?timeRange=today&model=saved-model&group=default&token=main&type=%5B%222%22%5D'
+    '?timeRange=today&model=saved-model&group=default&token=main&result=success'
   )
   const user = userEvent.setup()
   const model = screen.getByPlaceholderText('Model Name')
@@ -277,7 +277,7 @@ it('keeps saved filters and a pending model draft when automatic refresh is paus
       model: 'saved-model',
       group: 'default',
       token: 'main',
-      type: ['2'],
+      result: 'success',
     })
   )
   expect(toggle).toHaveAttribute('aria-pressed', 'false')
@@ -290,7 +290,7 @@ it('keeps saved filters and a pending model draft when automatic refresh is paus
       model: 'saved-model',
       group: 'default',
       token: 'main',
-      type: ['2'],
+      result: 'success',
       endTime: new Date(2026, 10, 12, 12, 36, 26).getTime(),
     })
   )

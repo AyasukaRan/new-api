@@ -42,6 +42,7 @@ import {
   USER_ROLES,
   isUserDeleted,
 } from '../constants'
+import { getAdminNickname } from '../lib/admin-nickname'
 import type { User } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
 import { UserQuotaCell } from './user-quota-cell'
@@ -100,7 +101,7 @@ export function useUsersColumns(): ColumnDef<User>[] {
         cell: ({ row }) => {
           const username = row.getValue('username') as string
           const displayName = row.original.display_name
-          const remark = row.original.remark
+          const nickname = getAdminNickname(row.original.remark)
 
           return (
             <div className='flex min-w-[160px] flex-col gap-1'>
@@ -108,7 +109,7 @@ export function useUsersColumns(): ColumnDef<User>[] {
                 <LongText className='max-w-[140px] text-sm font-normal'>
                   {username}
                 </LongText>
-                {remark && (
+                {nickname && nickname !== username && (
                   <Tooltip>
                     <TooltipTrigger
                       render={
@@ -119,10 +120,12 @@ export function useUsersColumns(): ColumnDef<User>[] {
                         />
                       }
                     >
-                      <LongText className='max-w-[80px]'>{remark}</LongText>
+                      <span className='max-w-[110px] truncate'>{nickname}</span>
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p className='text-xs'>{remark}</p>
+                      <p className='max-w-64 text-xs [overflow-wrap:anywhere] whitespace-pre-wrap'>
+                        {row.original.remark}
+                      </p>
                     </TooltipContent>
                   </Tooltip>
                 )}

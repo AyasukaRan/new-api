@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Pencil } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
@@ -113,6 +113,7 @@ export function UsersMutateDrawer({
   currentRow,
 }: UsersMutateDrawerProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const isUpdate = !!currentRow
   const { triggerRefresh, requestVerification } = useUsers()
   const currentUser = useAuthStore((s) => s.auth.user)
@@ -240,6 +241,15 @@ export function UsersMutateDrawer({
         : await createUser(payload, proofToken)
 
       if (result.success) {
+        if (
+          currentRow &&
+          (currentRow.remark ?? '') !== (payload.remark ?? '')
+        ) {
+          void queryClient.invalidateQueries({
+            queryKey: ['log-username-options'],
+          })
+          void queryClient.invalidateQueries({ queryKey: ['logs'] })
+        }
         toast.success(
           isUpdate
             ? t(SUCCESS_MESSAGES.USER_UPDATED)
@@ -496,16 +506,15 @@ export function UsersMutateDrawer({
                     name='remark'
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{t('Remark')}</FormLabel>
+                        <FormLabel>{t('Admin nickname')}</FormLabel>
                         <FormControl>
-                          <Textarea
-                            {...field}
-                            placeholder={t(
-                              'Admin notes (only visible to admins)'
-                            )}
-                            rows={3}
-                          />
+                          <Textarea {...field} maxLength={255} rows={3} />
                         </FormControl>
+                        <FormDescription>
+                          {t(
+                            'The first nonempty line is the nickname. Only administrators can see these notes.'
+                          )}
+                        </FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}

@@ -31,11 +31,9 @@ import {
 } from '@/components/ui/tooltip'
 import { useMediaQuery } from '@/hooks'
 
-import { LOG_TYPE_ALL_VALUE } from '../constants'
 import { useLiveLogRange } from '../hooks/use-live-log-range'
 import {
   buildSearchParams,
-  getLogTypeValue,
   isValidLogChannelFilter,
   type LogColumnFilterKey,
 } from '../lib/filter'
@@ -61,7 +59,6 @@ const route = getRouteApi('/_authenticated/usage-logs/$section')
 type CommonLogDraft = {
   sourceKey: string
   filters: CommonLogFilters
-  logType: string
 }
 
 function buildSearchSourceKey(values: {
@@ -80,7 +77,6 @@ function buildSearchSourceKey(values: {
   ip?: unknown
   requestId?: unknown
   upstreamRequestId?: unknown
-  type?: unknown
 }) {
   return [
     values.timeRange,
@@ -98,7 +94,6 @@ function buildSearchSourceKey(values: {
     values.ip,
     values.requestId,
     values.upstreamRequestId,
-    Array.isArray(values.type) ? values.type.join(',') : values.type,
   ]
     .map((value) => String(value ?? ''))
     .join('\u001f')
@@ -168,7 +163,6 @@ export function CommonLogsFilterBar<TData>(
       ip: searchParams.ip,
       requestId: searchParams.requestId,
       upstreamRequestId: searchParams.upstreamRequestId,
-      type: searchParams.type,
     }
     const filters: CommonLogFilters = {
       timeRange: livePreset,
@@ -192,7 +186,6 @@ export function CommonLogsFilterBar<TData>(
     return {
       sourceKey: buildSearchSourceKey(sourceValues),
       filters,
-      logType: getLogTypeValue(searchParams.type),
     }
   }, [
     livePreset,
@@ -210,7 +203,6 @@ export function CommonLogsFilterBar<TData>(
     searchParams.ip,
     searchParams.requestId,
     searchParams.upstreamRequestId,
-    searchParams.type,
   ])
   const [draft, setDraft] = useState<CommonLogDraft>(() => searchState)
   const activeDraft =
@@ -230,7 +222,6 @@ export function CommonLogsFilterBar<TData>(
       searchState.filters.endTime,
     ]
   )
-  const logType = activeDraft.logType
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
@@ -240,7 +231,6 @@ export function CommonLogsFilterBar<TData>(
         return {
           sourceKey: searchState.sourceKey,
           filters: { ...base.filters, [field]: value },
-          logType: base.logType,
         }
       })
     },
@@ -269,7 +259,7 @@ export function CommonLogsFilterBar<TData>(
           autoRefresh: nextFilters.timeRange
             ? searchParams.autoRefresh
             : undefined,
-          type: isTest ? undefined : [logType],
+          result: isTest ? undefined : searchParams.result,
           page: 1,
         },
       })
@@ -280,12 +270,12 @@ export function CommonLogsFilterBar<TData>(
       filters,
       isAdmin,
       isTest,
-      logType,
       navigate,
       queryClient,
       section,
       searchParams.pageSize,
       searchParams.autoRefresh,
+      searchParams.result,
     ]
   )
 
@@ -298,14 +288,12 @@ export function CommonLogsFilterBar<TData>(
     }
     const resetSearch = {
       timeRange: 'today' as const,
-      type: isTest ? undefined : [LOG_TYPE_ALL_VALUE],
       startTime: start.getTime(),
       endTime: end.getTime(),
     }
     setDraft({
       sourceKey: buildSearchSourceKey(resetSearch),
       filters: resetFilters,
-      logType: LOG_TYPE_ALL_VALUE,
     })
 
     navigate({
@@ -318,7 +306,7 @@ export function CommonLogsFilterBar<TData>(
     })
     queryClient.invalidateQueries({ queryKey: ['logs'] })
     queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-  }, [isTest, navigate, queryClient, section])
+  }, [navigate, queryClient, section])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -334,9 +322,7 @@ export function CommonLogsFilterBar<TData>(
   const reasoningInToolbar = !isTest && inToolbar('reasoning_effort')
   const sourceInToolbar = !isTest && inToolbar('request_source')
   const modelInToolbar = inToolbar('model_name')
-  const typeInToolbar = !isTest && inToolbar('created_at')
   const transportInToolbar = !isTest && inToolbar('is_stream')
-  const hasTypeFilter = logType !== LOG_TYPE_ALL_VALUE
   const expandedFilterCount = [
     accountInToolbar && filters.token,
     isAdmin && accountInToolbar && filters.username,
@@ -353,7 +339,7 @@ export function CommonLogsFilterBar<TData>(
     filters.token,
     filters.model,
     filters.group,
-    hasTypeFilter,
+    !isTest && searchParams.result && searchParams.result !== 'all',
     isAdmin && filters.username,
     isAdmin && filters.channel,
     !isTest && filters.reasoningEffort,
@@ -414,7 +400,6 @@ export function CommonLogsFilterBar<TData>(
           setDraft({
             sourceKey: searchState.sourceKey,
             filters: nextFilters,
-            logType,
           })
           if (isMobile) {
             handleApply(nextFilters)
@@ -470,17 +455,11 @@ export function CommonLogsFilterBar<TData>(
   const columnFieldProps = {
     inlineSuggestions,
     isAdmin,
-    values: { ...filters, type: logType },
+    values: filters,
     onChange: (field: LogColumnFilterKey, value: string) => {
       if (field !== 'type') {
         handleChange(field, value)
-        return
       }
-      setDraft((current) => {
-        const base =
-          current.sourceKey === searchState.sourceKey ? current : searchState
-        return { ...base, logType: value }
-      })
     },
     onKeyDown: handleKeyDown,
     maskClass: sensitiveInputClass,
@@ -497,9 +476,6 @@ export function CommonLogsFilterBar<TData>(
       onValueChange={(value) => handleChange('group', value)}
       onKeyDown={handleKeyDown}
     />
-  )
-  const typeFilter = (
-    <LogColumnFilterFields column='time' {...columnFieldProps} />
   )
   const advancedFilters = (
     <>
@@ -570,7 +546,6 @@ export function CommonLogsFilterBar<TData>(
           {dateRangeFilter}
           {modelInToolbar && modelFilter}
           {accountInToolbar && groupFilter}
-          {typeInToolbar && typeFilter}
         </>
       }
       advancedFilters={advancedFilters}
@@ -579,7 +554,6 @@ export function CommonLogsFilterBar<TData>(
         <>
           {modelFilter}
           {groupFilter}
-          {!isTest && typeFilter}
           {advancedFilters}
         </>
       }

@@ -258,42 +258,22 @@ test('column filters apply across pages and clear only their own fields', async 
   expect(router.state.location.search.channel).toBeUndefined()
 })
 
-test('filters error logs from the Time header and preserves the other filters when cleared', async () => {
-  const user = userEvent.setup()
-  const { router } = renderLogs(
-    false,
-    '/usage-logs/common?page=2&group=default&type=%5B%220%22%5D'
-  )
-  const button = await screen.findByRole('button', { name: 'Filter · Time' })
+test('the Time header no longer exposes the replaced log-type filter', async () => {
+  renderLogs(false, '/usage-logs/common?group=default&result=failure')
+  await screen.findByRole('button', { name: 'Filter · Model' })
+  expect(
+    screen.queryByRole('button', { name: 'Filter · Time' })
+  ).not.toBeInTheDocument()
   expect(
     screen.queryByRole('combobox', { name: 'Type' })
   ).not.toBeInTheDocument()
-  button.focus()
-  await user.keyboard('{Enter}')
-  await user.click(screen.getByRole('combobox', { name: 'Type' }))
-  await user.click(await screen.findByRole('option', { name: 'Error' }))
-  await user.click(screen.getByRole('button', { name: 'Apply' }))
-  await waitFor(() =>
-    expect(router.state.location.search).toMatchObject({
-      type: ['5'],
-      group: 'default',
-      page: 1,
-    })
-  )
-  await user.click(screen.getByRole('button', { name: 'Filter · Time (1)' }))
-  await user.click(screen.getByRole('button', { name: 'Clear' }))
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Filter · Time' })).toBeVisible()
-  )
-  expect(router.state.location.search.type).toBeUndefined()
-  expect(router.state.location.search.group).toBe('default')
 })
 
 test('can select a protocol and enter an off-page endpoint from an empty log table', async () => {
   const user = userEvent.setup()
   const { router } = renderLogs(
     false,
-    '/usage-logs/common?page=2&type=%5B%225%22%5D',
+    '/usage-logs/common?page=2&result=failure',
     undefined,
     []
   )
@@ -309,7 +289,7 @@ test('can select a protocol and enter an off-page endpoint from an empty log tab
   await user.click(within(panel).getByRole('button', { name: 'Apply' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
-      type: ['5'],
+      result: 'failure',
       responseTransport: 'sse',
       requestPath: '/v1/responses',
       page: 1,
@@ -335,7 +315,7 @@ test('can select a protocol and enter an off-page endpoint from an empty log tab
     expect(router.state.location.search.responseTransport).toBeUndefined()
   )
   expect(router.state.location.search.requestPath).toBeUndefined()
-  expect(router.state.location.search.type).toEqual(['5'])
+  expect(router.state.location.search.result).toBe('failure')
 })
 
 test('keeps transport filters editable in the toolbar when the column is hidden', async () => {
@@ -792,7 +772,7 @@ test('resumes with the applied filters and cursor then drops the old stream on a
     await waitFor(() =>
       expect(calls()[1]?.[1]?.params).toMatchObject({ cursor: '20' })
     )
-    await user.click(screen.getByRole('tab', { name: 'Only Mine' }))
+    await user.click(screen.getByRole('button', { name: 'Only Mine' }))
     expect(await screen.findByText('model-100')).toBeVisible()
     expect(screen.queryByText('model-20')).not.toBeInTheDocument()
     expect(calls()[1][1]?.signal?.aborted).toBe(true)

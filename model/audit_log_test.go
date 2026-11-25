@@ -68,10 +68,12 @@ func TestAuditLogSortIndexDatabaseMatrix(t *testing.T) {
 						require.NoError(t, db.Exec("SET LOCAL search_path TO ?", clause.Table{Name: schemaName}).Error)
 					} else {
 						t.Cleanup(func() { assert.NoError(t, db.Migrator().DropTable(&AuditLog{})) })
+						t.Cleanup(func() { assert.NoError(t, db.Migrator().DropTable(&Log{})) })
 					}
 					previousLogDB := LOG_DB
 					LOG_DB = db
 					t.Cleanup(func() { LOG_DB = previousLogDB })
+					require.NoError(t, db.AutoMigrate(&Log{}))
 					require.NoError(t, MigrateAuditLogs())
 					if upgrade {
 						require.NoError(t, db.Migrator().DropIndex(&AuditLog{}, "idx_audit_time_event"))

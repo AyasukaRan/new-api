@@ -30,6 +30,10 @@ func streamLogChanges(c *gin.Context, all bool) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), lifetime)
 	defer cancel()
 	filter := logFilterFromQuery(c, all)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if filter.Source != model.LogSourceUsage {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return

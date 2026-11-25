@@ -69,6 +69,7 @@ type Log struct {
 	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
 	Content           string `json:"content"`
 	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
+	UserAdminNickname string `json:"user_admin_nickname,omitempty" gorm:"-"`
 	TokenName         string `json:"token_name" gorm:"index;default:''"`
 	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
 	Quota             int    `json:"quota" gorm:"default:0"`
@@ -206,6 +207,7 @@ func assignDisplayLogIds(logs []*Log, startIdx int) {
 
 func formatUserLogs(logs []*Log, startIdx int) {
 	for i := range logs {
+		appendLogErrorSummary(logs[i])
 		logs[i].ChannelName = ""
 		logs[i].UpstreamRequestId = ""
 		logs[i].Other = formatLogOtherJSON(logs[i].Other, logOtherVisibilityUser)
@@ -235,6 +237,7 @@ func FormatLogList(logs []*Log, role int, deferBody bool) {
 		visibility = logOtherVisibilityAdmin
 	}
 	for _, log := range logs {
+		appendLogErrorSummary(log)
 		if visibility == logOtherVisibilityUser {
 			log.UpstreamRequestId = ""
 		}
@@ -315,7 +318,7 @@ func GetLogByTokenId(tokenId int) (logs []*Log, err error) {
 		return nil, err
 	}
 	formatUserLogs(logs, 0)
-	return logs, resolveLogUsernames(logs)
+	return logs, resolveLogUsers(logs, false)
 }
 
 func RecordLog(userId int, logType int, content *common.Message) {
@@ -652,6 +655,8 @@ type LogFilter struct {
 	AdminSelfView bool // set by the dashboard from the authenticated account; never bound from the query
 
 	Source            LogSource
+	Category          string // "model" selects relay requests without changing legacy account-history APIs.
+	Result            string // Empty, "success", or "failure"; shared by snapshots, exports, stats, and SSE.
 	Type              int
 	StartTimestamp    int64
 	EndTimestamp      int64
@@ -721,7 +726,16 @@ func filterLogsByUsername(tx *gorm.DB, username string) (*gorm.DB, error) {
 
 func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	var err error
+	if err = f.Validate(); err != nil {
+		return nil, err
+	}
 	tx = applyLogSourceFilter(tx, f.Source)
+	if f.Category == "model" || f.Result != "" {
+		tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeError})
+	}
+	if f.Result != "" {
+		tx = tx.Where(logResultFilterSQL()+" = ?", f.Result)
+	}
 	if f.Type != LogTypeUnknown {
 		if f.Source == LogSourceTest && (f.Type == LogTypeConsume || f.Type == LogTypeTestConsume) {
 			tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeTestConsume})
@@ -787,44 +801,55 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	return tx, nil
 }
 
-// The main database may be separate from the log database. Resolve names in
-// batches and keep the recorded name when the account no longer exists.
-func currentLogUsernames(ctx context.Context, ids []int) (map[int]string, error) {
-	names := make(map[int]string, len(ids))
+type logUserIdentity struct {
+	Id       int
+	Username string
+	Remark   string
+}
+
+// The main database may be separate from the log database. Only administrator
+// log views select the private note, and only its first nonempty line is used.
+func currentLogUsers(ctx context.Context, ids []int, includeAdminNickname bool) (map[int]logUserIdentity, error) {
+	users := make(map[int]logUserIdentity, len(ids))
+	columns := []string{"id", "username"}
+	if includeAdminNickname {
+		columns = append(columns, "remark")
+	}
 	for batch := range slices.Chunk(ids, 500) {
-		var users []struct {
-			Id       int
-			Username string
-		}
-		if err := DB.WithContext(ctx).Model(&User{}).Select("id", "username").Where("id IN ?", batch).Find(&users).Error; err != nil {
+		var records []logUserIdentity
+		if err := DB.WithContext(ctx).Model(&User{}).Select(columns).Where("id IN ?", batch).Find(&records).Error; err != nil {
 			return nil, err
 		}
-		for _, user := range users {
-			names[user.Id] = user.Username
+		for _, user := range records {
+			first, _, _ := strings.Cut(strings.TrimSpace(user.Remark), "\n")
+			user.Remark = strings.TrimSpace(first)
+			users[user.Id] = user
 		}
 	}
-	return names, nil
+	return users, nil
 }
 
-func (l *Log) useCurrentUsername(names map[int]string) {
-	if name, ok := names[l.UserId]; ok {
-		l.Username = name
+func (l *Log) useCurrentUser(users map[int]logUserIdentity) {
+	user, ok := users[l.UserId]
+	l.UserAdminNickname = user.Remark
+	if ok {
+		l.Username = user.Username
 	}
 }
 
-func resolveLogUsernames(logs []*Log) error {
+func resolveLogUsers(logs []*Log, includeAdminNickname bool) error {
 	ids := types.NewSet[int]()
 	for _, log := range logs {
 		if log.UserId > 0 {
 			ids.Add(log.UserId)
 		}
 	}
-	names, err := currentLogUsernames(context.Background(), ids.Items())
+	users, err := currentLogUsers(context.Background(), ids.Items(), includeAdminNickname)
 	if err != nil {
 		return err
 	}
 	for _, log := range logs {
-		log.useCurrentUsername(names)
+		log.useCurrentUser(users)
 	}
 	return nil
 }
@@ -856,7 +881,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	if err := resolveLogChannels(logs); err != nil {
 		return nil, 0, err
 	}
-	return logs, total, resolveLogUsernames(logs)
+	return logs, total, resolveLogUsers(logs, true)
 }
 
 func resolveLogChannels(logs []*Log) error {
@@ -937,7 +962,7 @@ func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*L
 		keyLiveLogs(logs)
 	}
 	formatUserLogs(logs, startIdx)
-	return logs, total, resolveLogUsernames(logs)
+	return logs, total, resolveLogUsers(logs, false)
 }
 
 // StreamAllLogs calls fn with each log matching filter, newest first, as an
@@ -960,7 +985,7 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 		Where("logs.user_id > ?", 0).Pluck("user_id", &userIDs).Error; err != nil {
 		return err
 	}
-	names, err := currentLogUsernames(ctx, userIDs)
+	users, err := currentLogUsers(ctx, userIDs, false)
 	if err != nil {
 		return err
 	}
@@ -984,7 +1009,7 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 		}
 	}
 	return streamLogs(tx, "logs.created_at desc, logs.id desc", func(log *Log) error {
-		log.useCurrentUsername(names)
+		log.useCurrentUser(users)
 		log.ChannelName = channelNames[log.ChannelId]
 		log.Other = formatLogOtherJSON(log.Other, visibility)
 		return fn(log)
@@ -998,7 +1023,7 @@ func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*
 	if err != nil {
 		return err
 	}
-	names, err := currentLogUsernames(ctx, []int{userId})
+	users, err := currentLogUsers(ctx, []int{userId}, false)
 	if err != nil {
 		return err
 	}
@@ -1006,7 +1031,7 @@ func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*
 	return streamLogs(tx, "logs.id desc", func(log *Log) error {
 		count++
 		log.Id = count
-		log.useCurrentUsername(names)
+		log.useCurrentUser(users)
 		log.ChannelName = ""
 		log.UpstreamRequestId = ""
 		log.Other = formatLogOtherJSON(log.Other, logOtherVisibilityUser)

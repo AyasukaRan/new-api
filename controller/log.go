@@ -24,6 +24,8 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	filter := model.LogFilter{
 		Source:            model.LogSourceUsage,
+		Category:          c.Query("category"),
+		Result:            c.Query("result"),
 		AdminSelfView:     c.GetInt("role") >= common.RoleAdminUser,
 		Type:              logType,
 		StartTimestamp:    startTimestamp,
@@ -68,6 +70,10 @@ func limitLogTimeRange(startTimestamp int64, endTimestamp int64) (int64, error) 
 func GetAllLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	filter := logFilterFromQuery(c, true)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if filter.Source != model.LogSourceUsage && filter.Source != model.LogSourceTest {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return
@@ -114,6 +120,10 @@ func GetLogRequestBody(c *gin.Context) {
 func GetUserLogs(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	filter := logFilterFromQuery(c, false)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if c.GetInt("role") < common.RoleAdminUser {
 		startTimestamp, err := limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp)
 		if err != nil {
@@ -157,6 +167,10 @@ func ExportUserLogs(c *gin.Context) {
 // range.
 func exportLogs(c *gin.Context, all bool) {
 	filter := logFilterFromQuery(c, all)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if filter.Source != model.LogSourceUsage && filter.Source != model.LogSourceTest {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return
@@ -249,6 +263,10 @@ func GetLogByKey(c *gin.Context) {
 
 func GetLogsStat(c *gin.Context) {
 	filter := logFilterFromQuery(c, true)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if filter.Source != model.LogSourceUsage && filter.Source != model.LogSourceTest {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "invalid log source"})
 		return
@@ -264,6 +282,10 @@ func GetLogsStat(c *gin.Context) {
 
 func GetLogsSelfStat(c *gin.Context) {
 	filter := logFilterFromQuery(c, false)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if c.GetInt("role") < common.RoleAdminUser {
 		start, err := limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp)
 		if err != nil {

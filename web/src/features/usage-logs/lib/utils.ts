@@ -193,9 +193,16 @@ export function buildApiParams(config: {
   // Build base params from search params
   const params: GetLogsParams = {
     ...(isAdmin && config.source === 'test' ? { source: 'test' } : {}),
+    ...(config.source !== 'test' ? { category: 'model' } : {}),
+    ...(config.source !== 'test' &&
+    (searchParams.result === 'success' || searchParams.result === 'failure')
+      ? { result: searchParams.result }
+      : {}),
     p: page,
     page_size: pageSize,
-    ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
+    ...(config.source === 'test' && searchParams.type
+      ? { type: processType(searchParams.type) }
+      : {}),
     ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
     ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
@@ -236,7 +243,7 @@ export function buildApiParams(config: {
 
       switch (id) {
         case 'type':
-          params.type = processType(value)
+          if (config.source === 'test') params.type = processType(value)
           break
         case 'model_name':
           params.model_name = String(value)

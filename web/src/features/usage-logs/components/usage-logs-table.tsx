@@ -44,11 +44,7 @@ import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
-import {
-  DEFAULT_LOGS_DATA,
-  LOG_TYPE_ALL_VALUE,
-  LOG_TYPE_ENUM,
-} from '../constants'
+import { DEFAULT_LOGS_DATA, LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
 import { useLiveUsageLogs } from '../hooks/use-live-usage-logs'
 import { useUsageLogHistory } from '../hooks/use-usage-log-history'
@@ -98,16 +94,6 @@ function getColumnVisibilityStorageKey(
   viewAccess: LogsViewAccess
 ): string {
   return `usage-logs:${logCategory}:${viewAccess}:column-visibility`
-}
-
-function deserializeLogTypeFilter(value: unknown): unknown[] {
-  let values: unknown[] = []
-  if (Array.isArray(value)) {
-    values = value
-  } else if (value) {
-    values = [value]
-  }
-  return values.filter((item) => String(item) !== LOG_TYPE_ALL_VALUE)
 }
 
 interface UsageLogsTableProps {
@@ -216,12 +202,6 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     pagination: { defaultPage: 1, defaultPageSize: isMobile ? 20 : 100 },
     globalFilter: { enabled: false },
     columnFilters: [
-      {
-        columnId: 'created_at',
-        searchKey: 'type',
-        type: 'array' as const,
-        deserialize: deserializeLogTypeFilter,
-      },
       { columnId: 'model_name', searchKey: 'model', type: 'string' as const },
       { columnId: 'token_name', searchKey: 'token', type: 'string' as const },
       { columnId: 'group', searchKey: 'group', type: 'string' as const },

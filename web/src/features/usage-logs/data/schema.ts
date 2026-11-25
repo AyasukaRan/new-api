@@ -31,6 +31,7 @@ export const usageLogSchema = z.object({
   type: z.number(),
   content: z.string(),
   username: z.string().default(''),
+  user_admin_nickname: z.string().optional(),
   token_name: z.string().default(''),
   model_name: z.string().default(''),
   quota: z.number().default(0),

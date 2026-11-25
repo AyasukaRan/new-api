@@ -312,5 +312,5 @@ func GetChangedLogs(ctx context.Context, filter LogFilter, ownUserID, role int, 
 		}
 		FormatLogList(rows, role, compact)
 	}
-	return rows, total - len(rows), resolveLogUsernames(rows)
+	return rows, total - len(rows), resolveLogUsers(rows, ownUserID == 0 && role >= common.RoleAdminUser)
 }

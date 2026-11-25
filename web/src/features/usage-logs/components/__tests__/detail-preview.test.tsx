@@ -1113,11 +1113,7 @@ describe('request content disclosure in log details', () => {
     expect(screen.queryByText('Legacy summary')).not.toBeInTheDocument()
     expect(screen.queryByText(/Truncated for storage/)).not.toBeInTheDocument()
     const dialog = within(screen.getByRole('dialog'))
-    for (const name of [
-      'Overview',
-      'Cost breakdown',
-      'Technical details',
-    ]) {
+    for (const name of ['Overview', 'Cost breakdown', 'Technical details']) {
       await userEvent.click(dialog.getByRole('tab', { name }))
       expect(
         dialog.getByRole('button', { name: 'View request trace' })
@@ -1289,33 +1285,49 @@ describe('request content disclosure in log details', () => {
   )
 })
 
-test('failed request previews retain the safe error and the retry stop reason', () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  })
-  try {
-    render(
-      <QueryClientProvider client={queryClient}>
-        <DetailPreview
-          isAdmin={false}
-          type={5}
-          other={{
-            content_parts: [{ key: 'Upstream temporarily unavailable' }],
-            retry_decision: {
-              action: 'stop',
-              reason: 'response_already_started',
-            },
-          }}
-        />
-      </QueryClientProvider>
-    )
-    expect(screen.getByText('Upstream temporarily unavailable')).toBeVisible()
-    expect(
-      screen.getByText(
-        'Response content has already been sent; retrying could duplicate output'
+test.each([
+  ['Upstream temporarily unavailable', 'Upstream unavailable'],
+  [
+    "status_code=400, This model's maximum context length is 1048576 tokens. However, you requested 1770481 tokens (1770481 in the messages, 0 in the completion). Please reduce the length of the messages or completion. (request_id: historical-request)",
+    'Context length exceeded',
+  ],
+])(
+  'failed request previews summarize %s and keep the original in details',
+  async (error, label) => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <DetailPreview
+            isAdmin={false}
+            type={5}
+            other={{
+              content_parts: [{ key: error }],
+              retry_decision: {
+                action: 'stop',
+                reason: 'response_already_started',
+              },
+            }}
+          />
+        </QueryClientProvider>
       )
-    ).toBeVisible()
-  } finally {
-    queryClient.clear()
+      expect(screen.getByText(label)).toBeVisible()
+      expect(screen.queryByText(error)).not.toBeInTheDocument()
+      expect(
+        screen.getByText(
+          'Response content has already been sent; retrying could duplicate output'
+        )
+      ).toBeVisible()
+      await userEvent.click(
+        screen.getByRole('button', { name: new RegExp(label) })
+      )
+      const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+      expect(within(dialog).getByText('Original error')).toBeVisible()
+      expect(within(dialog).getByText(error)).toBeVisible()
+    } finally {
+      queryClient.clear()
+    }
   }
-})
+)

@@ -59,6 +59,7 @@ func InitOptionMap() {
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
 	common.OptionMap["LogRequestBodyEnabled"] = strconv.FormatBool(common.LogRequestBodyEnabled)
 	common.OptionMap[operation_setting.RequestSourceRulesOptionKey] = operation_setting.RequestSourceRulesJSONString()
+	common.OptionMap[operation_setting.ErrorRecognitionRulesOptionKey] = operation_setting.ErrorRecognitionRulesJSONString()
 	common.OptionMap["RequestTraceEnabled"] = strconv.FormatBool(common.RequestTraceEnabled)
 	common.OptionMap["RequestTraceRetentionDays"] = strconv.Itoa(common.RequestTraceRetentionDays)
 	common.OptionMap["RequestTraceMaxBytes"] = strconv.Itoa(common.RequestTraceMaxBytes)
@@ -255,7 +256,7 @@ func SyncOptions(frequency int) {
 
 func updatesRequestRules(values map[string]string) bool {
 	for key := range values {
-		if key == ratio_setting.UserAllowedGroupsOption || key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+		if key == ratio_setting.UserAllowedGroupsOption || key == operation_setting.RequestSourceRulesOptionKey || key == operation_setting.ErrorRecognitionRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 			return true
 		}
 	}
@@ -274,6 +275,9 @@ func validateOptionValue(key string, value string) error {
 	}
 	if key == operation_setting.RequestSourceRulesOptionKey {
 		return operation_setting.ValidateRequestSourceRulesJSON(value)
+	}
+	if key == operation_setting.ErrorRecognitionRulesOptionKey {
+		return operation_setting.ValidateErrorRecognitionRulesJSON(value)
 	}
 	if key == billing_setting.DeletedModelsOption {
 		return fmt.Errorf("unsupported pricing field: %s", key)
@@ -345,7 +349,7 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
-	if key == "ChannelModelPricing" || key == ratio_setting.UserAllowedGroupsOption || key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+	if key == "ChannelModelPricing" || key == ratio_setting.UserAllowedGroupsOption || key == operation_setting.RequestSourceRulesOptionKey || key == operation_setting.ErrorRecognitionRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 		return UpdateOptionsBulk(map[string]string{key: value})
 	}
 	if IsRequestPolicyOption(key) {
@@ -482,6 +486,13 @@ func updateOptionMap(key string, value string) (err error) {
 			return err
 		}
 		common.OptionMap[key] = operation_setting.RequestSourceRulesJSONString()
+		return nil
+	}
+	if key == operation_setting.ErrorRecognitionRulesOptionKey {
+		if err := operation_setting.LoadErrorRecognitionRulesJSON(value); err != nil {
+			return err
+		}
+		common.OptionMap[key] = operation_setting.ErrorRecognitionRulesJSONString()
 		return nil
 	}
 	common.OptionMap[key] = value

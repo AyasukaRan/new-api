@@ -26,6 +26,7 @@ import {
 
 const defaultOperationsSettings: OperationsSettings = {
   RequestSourceRules: '[]',
+  ErrorRecognitionRules: '',
   DefaultCollapseSidebar: false,
   DemoSiteEnabled: false,
   SelfUseModeEnabled: false,

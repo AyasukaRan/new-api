@@ -91,7 +91,7 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             icon: Key,
           },
           {
-            title: t('Usage Logs'),
+            title: t('Model Logs'),
             url: '/usage-logs/common',
             icon: FileText,
           },

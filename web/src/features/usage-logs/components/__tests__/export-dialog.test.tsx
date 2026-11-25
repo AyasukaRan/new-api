@@ -225,6 +225,7 @@ it('downloads the streamed logs of the current filters as CSV from a subpath dep
     search: {
       ...range,
       model: 'gpt-4o',
+      result: 'success',
       responseTransport: 'ws',
       requestPath: '/v1/responses',
     },
@@ -240,6 +241,8 @@ it('downloads the streamed logs of the current filters as CSV from a subpath dep
   const params = new URL(String(url), 'http://localhost').searchParams
   expect(String(url)).toMatch(/^\/new-api\/api\/log\/self\/export\?/)
   expect(params.get('model_name')).toBe('gpt-4o')
+  expect(params.get('category')).toBe('model')
+  expect(params.get('result')).toBe('success')
   expect(params.get('response_transport')).toBe('ws')
   expect(params.has('request_path')).toBe(false)
   expect(params.get('start_timestamp')).toBe(

@@ -154,17 +154,17 @@ describe('audit log sidebar entry', () => {
       .flatMap((group) => group.items)
       .map((item) => item.title)
     expect(titles).not.toContain('Audit Logs')
-    expect(titles).toContain('Usage Logs')
+    expect(titles).toContain('Model Logs')
   })
 
-  it('legacy configurations show a separate Audit Logs link immediately after Usage Logs', () => {
+  it('legacy configurations show a separate Audit Logs link immediately after Model Logs', () => {
     const { result } = sidebarFor(
       { console: { enabled: true, log: true } },
       { console: { enabled: true, log: true } }
     )
     const items =
       result.current.find((group) => group.id === 'general')?.items ?? []
-    const usageIndex = items.findIndex((item) => item.title === 'Usage Logs')
+    const usageIndex = items.findIndex((item) => item.title === 'Model Logs')
     expect(items[usageIndex + 1]).toMatchObject({
       title: 'Audit Logs',
       url: '/usage-logs/audit',
@@ -192,12 +192,12 @@ describe('audit log sidebar entry', () => {
     }
   )
 
-  it('hiding Usage Logs does not hide the independently configured Audit Logs entry', () => {
+  it('hiding Model Logs does not hide the independently configured Audit Logs entry', () => {
     const { result } = sidebarFor({ console: { enabled: true, log: false } })
     const titles = result.current
       .flatMap((group) => group.items)
       .map((item) => item.title)
-    expect(titles).not.toContain('Usage Logs')
+    expect(titles).not.toContain('Model Logs')
     expect(titles).toContain('Audit Logs')
   })
 })
