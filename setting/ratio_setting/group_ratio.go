@@ -3,11 +3,14 @@ package ratio_setting
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/types"
 )
+
+const UserAllowedGroupsOption = "group_ratio_setting.user_allowed_groups"
 
 var defaultGroupRatio = map[string]float64{
 	"default": 1,
@@ -27,10 +30,46 @@ var groupGroupRatioMap = types.NewRWMap[string, map[string]float64]()
 
 var defaultGroupSpecialUsableGroup = map[string]map[string]string{}
 
+// AccountGroupAllowlist validates replacements before publishing them to request handlers.
+type AccountGroupAllowlist struct {
+	*types.RWMap[int, []string]
+}
+
+func CheckUserAllowedGroups(data []byte) error {
+	var accounts map[int][]string
+	if err := common.Unmarshal(data, &accounts); err != nil {
+		return err
+	}
+	if accounts == nil {
+		return errors.New("an account group allowlist must be a JSON object")
+	}
+	for id, groups := range accounts {
+		if id < 1 || groups == nil {
+			return errors.New("account group rules require a positive user ID and a group list")
+		}
+		for _, group := range groups {
+			if group == "" || strings.TrimSpace(group) != group {
+				return errors.New("account group names must be nonempty and trimmed")
+			}
+		}
+	}
+	return nil
+}
+
+func (a AccountGroupAllowlist) UnmarshalJSON(data []byte) error {
+	// RWMap replaces its contents during decoding. Reject invalid input first
+	// so a malformed setting cannot silently remove existing restrictions.
+	if err := CheckUserAllowedGroups(data); err != nil {
+		return err
+	}
+	return a.RWMap.UnmarshalJSON(data)
+}
+
 type GroupRatioSetting struct {
 	GroupRatio              *types.RWMap[string, float64]            `json:"group_ratio"`
 	GroupGroupRatio         *types.RWMap[string, map[string]float64] `json:"group_group_ratio"`
 	GroupSpecialUsableGroup *types.RWMap[string, map[string]string]  `json:"group_special_usable_group"`
+	UserAllowedGroups       AccountGroupAllowlist                    `json:"user_allowed_groups"`
 }
 
 var groupRatioSetting GroupRatioSetting
@@ -44,6 +83,7 @@ func init() {
 
 	groupRatioSetting = GroupRatioSetting{
 		GroupSpecialUsableGroup: groupSpecialUsableGroup,
+		UserAllowedGroups:       AccountGroupAllowlist{types.NewRWMap[int, []string]()},
 		GroupRatio:              groupRatioMap,
 		GroupGroupRatio:         groupGroupRatioMap,
 	}

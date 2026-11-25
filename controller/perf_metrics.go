@@ -24,7 +24,7 @@ func monitorScopeForViewer(c *gin.Context, hours int) perfmetrics.QueryParams {
 		params.AllowedGroups = append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
 		return params
 	}
-	usable := service.GetUserVisibleGroups(common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+	usable := service.GetAccountVisibleGroups(c.GetInt("id"), common.GetContextKeyString(c, constant.ContextKeyUserGroup))
 	params.AllowedGroups = lo.Keys(usable)
 	if len(params.AllowedGroups) == 0 {
 		return params

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -51,10 +53,29 @@ func GetUserUsableGroups(userGroup string) map[string]string {
 	return groupsCopy
 }
 
-// GetUserVisibleGroups returns the routes offered by the catalog and group
-// pickers. The optional auto selector has no group ratio of its own.
-func GetUserVisibleGroups(userGroup string) map[string]string {
+// An omitted account inherits its normal grants; a present empty list denies all groups.
+func AccountGroupAllowed(userID int, group string) bool {
+	allowed, restricted := ratio_setting.GetGroupRatioSetting().UserAllowedGroups.Get(userID)
+	return !restricted || slices.Contains(allowed, group)
+}
+
+func HasAccountGroupRestriction(userID int) bool {
+	_, restricted := ratio_setting.GetGroupRatioSetting().UserAllowedGroups.Get(userID)
+	return restricted
+}
+
+func GetAccountUsableGroups(userID int, userGroup string) map[string]string {
 	groups := GetUserUsableGroups(userGroup)
+	if allowed, restricted := ratio_setting.GetGroupRatioSetting().UserAllowedGroups.Get(userID); restricted {
+		maps.DeleteFunc(groups, func(group, _ string) bool { return !slices.Contains(allowed, group) })
+	}
+	return groups
+}
+
+// GetAccountVisibleGroups returns the routes offered by the catalog and group
+// pickers. The optional auto selector has no group ratio of its own.
+func GetAccountVisibleGroups(userID int, userGroup string) map[string]string {
+	groups := GetAccountUsableGroups(userID, userGroup)
 	for group := range groups {
 		if group != "auto" && !ratio_setting.ContainsGroupRatio(group) {
 			delete(groups, group)
@@ -68,46 +89,28 @@ func GroupInUserUsableGroups(userGroup, groupName string) bool {
 	return ok
 }
 
-func IsUserSelectableGroup(userGroup, groupName string) bool {
+func IsAccountSelectableGroup(userID int, userGroup, groupName string) bool {
 	if groupName == "" || groupName == "auto" {
 		return false
 	}
-	return GroupInUserUsableGroups(userGroup, groupName) && ratio_setting.ContainsGroupRatio(groupName)
+	return AccountGroupAllowed(userID, groupName) && GroupInUserUsableGroups(userGroup, groupName) && ratio_setting.ContainsGroupRatio(groupName)
 }
 
-// GetUserAutoGroup 根据用户分组获取自动分组设置
-func GetUserAutoGroup(userGroup string) []string {
-	autoGroups := make([]string, 0)
-	seen := make(map[string]struct{})
-	for _, group := range setting.GetAutoGroups() {
-		if !IsUserSelectableGroup(userGroup, group) {
-			continue
-		}
-		if _, ok := seen[group]; ok {
-			continue
-		}
-		seen[group] = struct{}{}
-		autoGroups = append(autoGroups, group)
-	}
-	return autoGroups
+func GetAccountAutoGroups(userID int, userGroup string) []string {
+	groups := setting.GetAutoGroups()
+	return accountAutoGroups(userID, userGroup, groups, len(groups))
 }
 
-// FilterUserTokenAutoGroups applies current permissions before the current
-// per-token limit. It intentionally does not fall back to the global Auto list.
-func FilterUserTokenAutoGroups(userGroup string, groups []string) []string {
-	maxCount := setting.GetMaxTokenAutoGroups()
-	filtered := make([]string, 0, min(len(groups), maxCount))
-	seen := make(map[string]struct{})
+func accountAutoGroups(userID int, userGroup string, groups []string, limit int) []string {
+	visible := GetAccountVisibleGroups(userID, userGroup)
+	filtered := make([]string, 0, min(len(groups), limit))
 	for _, group := range groups {
-		if !IsUserSelectableGroup(userGroup, group) {
+		if _, ok := visible[group]; !ok || group == "auto" || group == "" {
 			continue
 		}
-		if _, ok := seen[group]; ok {
-			continue
-		}
-		seen[group] = struct{}{}
 		filtered = append(filtered, group)
-		if len(filtered) == maxCount {
+		delete(visible, group)
+		if len(filtered) == limit {
 			break
 		}
 	}
@@ -120,13 +123,13 @@ func FilterUserTokenAutoGroups(userGroup string, groups []string) []string {
 func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
 	value, ok := common.GetContextKey(c, constant.ContextKeyTokenAutoGroups)
 	if !ok {
-		return GetUserAutoGroup(userGroup)
+		return GetAccountAutoGroups(c.GetInt("id"), userGroup)
 	}
 	groups, ok := value.([]string)
 	if !ok {
 		return []string{}
 	}
-	return FilterUserTokenAutoGroups(userGroup, groups)
+	return accountAutoGroups(c.GetInt("id"), userGroup, groups, setting.GetMaxTokenAutoGroups())
 }
 
 // GetGroupsEnabledModels 按 groups 顺序获取各分组启用的模型并去重

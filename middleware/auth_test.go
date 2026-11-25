@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
@@ -411,6 +412,38 @@ func TestTokenAuthRejectsKeysOfDeletedUser(t *testing.T) {
 				response := request(path, key)
 				assert.Equal(t, http.StatusUnauthorized, response.Code, path)
 				assert.Contains(t, response.Body.String(), `"message":"无效的令牌`, path)
+			}
+		})
+	}
+}
+
+func TestAccountGroupAllowlistRejectsExistingKeysAtRelay(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	require.NoError(t, i18n.Init())
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}))
+	t.Setenv("LOG_SQL_DSN", "")
+	require.NoError(t, model.InitLogDB())
+	owner := createMiddlewarePATUser(t, "group-policy", "account-policy-fixture")
+	list := ratio_setting.GetGroupRatioSetting().UserAllowedGroups
+	old := list.MarshalJSONString()
+	t.Cleanup(func() { require.NoError(t, list.UnmarshalJSON([]byte(old))) })
+
+	router := gin.New()
+	router.GET("/v1/models", TokenAuth(), func(c *gin.Context) { c.Status(http.StatusOK) })
+	for _, group := range []string{"", "default"} {
+		t.Run("stored_"+group, func(t *testing.T) {
+			key := "accountgrouptestkey" + group
+			require.NoError(t, model.DB.Create(&model.Token{UserId: owner.Id, Key: key, Group: group, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+			for _, tt := range []struct {
+				groups []string
+				status int
+			}{{[]string{"default"}, http.StatusOK}, {[]string{"another"}, http.StatusForbidden}, {[]string{}, http.StatusForbidden}} {
+				list.Set(owner.Id, tt.groups)
+				r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+				r.Header.Set("Authorization", "Bearer sk-"+key)
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, r)
+				assert.Equal(t, tt.status, w.Code, tt.groups)
 			}
 		})
 	}

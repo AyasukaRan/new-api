@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -69,4 +70,43 @@ func TestGetRequestAutoGroupsDoesNotFallBackAfterPermissionChange(t *testing.T) 
 	groups := GetRequestAutoGroups(ctx, "default")
 
 	assert.Empty(t, groups)
+}
+
+func TestAccountGroupRestrictionsApplyToCatalogAndAutoRouting(t *testing.T) {
+	configureRequestAutoGroupsTest(t)
+	const restrictedID, blockedID = 504, 505
+	policy := ratio_setting.GetGroupRatioSetting().UserAllowedGroups
+	original := policy.MarshalJSONString()
+	t.Cleanup(func() { require.NoError(t, policy.UnmarshalJSON([]byte(original))) })
+	raw := `{"504":["vip","svip","private"],"505":[]}`
+	require.NoError(t, ratio_setting.CheckUserAllowedGroups([]byte(raw)))
+	require.NoError(t, config.UpdateConfigFromMap(ratio_setting.GetGroupRatioSetting(), map[string]string{"user_allowed_groups": raw}))
+	exported, err := config.ConfigToMap(ratio_setting.GetGroupRatioSetting())
+	require.NoError(t, err)
+	require.JSONEq(t, raw, exported["user_allowed_groups"])
+	ctx := newRequestAutoGroupsContext()
+	ctx.Set("id", restrictedID)
+
+	assert.Equal(t, map[string]string{"vip": "VIP", "svip": "SVIP"}, GetAccountVisibleGroups(restrictedID, "default"))
+	assert.False(t, IsAccountSelectableGroup(restrictedID, "default", "private"))
+	assert.False(t, AccountGroupAllowed(restrictedID, "default"))
+	assert.False(t, AccountGroupAllowed(restrictedID, "auto"))
+	assert.True(t, HasAccountGroupRestriction(blockedID))
+	assert.Empty(t, GetAccountVisibleGroups(blockedID, "default"))
+	assert.False(t, HasAccountGroupRestriction(0))
+	assert.Len(t, GetAccountVisibleGroups(0, "default"), 3)
+	assert.True(t, IsAccountSelectableGroup(506, "default", "default"))
+	assert.Equal(t, []string{"vip", "svip"}, GetRequestAutoGroups(ctx, "default"))
+
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"private", "default", "svip", "svip", "vip"})
+	assert.Equal(t, []string{"svip", "vip"}, GetRequestAutoGroups(ctx, "default"))
+	require.NoError(t, policy.UnmarshalJSON([]byte(`{"504":[]}`)))
+	assert.Empty(t, GetRequestAutoGroups(ctx, "default"))
+	for _, invalid := range []string{`null`, `{"504":42}`, `{"504":null}`} {
+		require.Error(t, ratio_setting.CheckUserAllowedGroups([]byte(invalid)))
+		require.NoError(t, config.UpdateConfigFromMap(ratio_setting.GetGroupRatioSetting(), map[string]string{"user_allowed_groups": invalid}))
+		assert.Empty(t, GetAccountVisibleGroups(restrictedID, "default"))
+	}
+	require.NoError(t, policy.UnmarshalJSON([]byte(`{}`)))
+	assert.Equal(t, []string{"default", "svip"}, GetRequestAutoGroups(ctx, "default"))
 }

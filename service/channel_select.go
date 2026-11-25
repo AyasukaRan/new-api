@@ -336,6 +336,15 @@ type ChannelSelectError struct {
 // filters. The group the channel was chosen from is returned for auto-group
 // callers. The caller still applies SetupContextForSelectedChannel.
 func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam) (*model.Channel, string, *ChannelSelectError) {
+	usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	if retry != nil && retry.TokenGroup != "" {
+		usingGroup = retry.TokenGroup
+	}
+	if !AccountGroupAllowed(c.GetInt("id"), usingGroup) {
+		return nil, "", &ChannelSelectError{
+			StatusCode: http.StatusForbidden, Code: types.ErrorCodeAccessDenied, MessageID: i18n.MsgDistributorGroupAccessDenied,
+		}
+	}
 	constraints := GetChannelConstraints(c)
 	if pin, found, overridden := constraints.ResolvedPin(); found {
 		for _, lost := range overridden {
@@ -352,14 +361,11 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			return nil, "", pinnedChannelUnavailable(pin, http.StatusForbidden, i18n.MsgDistributorChannelDisabled)
 		}
 		selectGroup := ""
-		usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
-		if retry != nil && retry.TokenGroup != "" {
-			usingGroup = retry.TokenGroup
-		}
 		// Existing unscoped pins and model-less lifecycle operations retain their
 		// model behavior. Multi-key auto pins still need a concrete allowed group.
-		checkModelScope := modelName != "" && channel.HasGroupModelLimits()
-		if checkModelScope || channel.ChannelInfo.IsMultiKey && usingGroup == "auto" {
+		restrictedAccount := HasAccountGroupRestriction(c.GetInt("id"))
+		checkModelScope := modelName != "" && (restrictedAccount || channel.HasGroupModelLimits())
+		if restrictedAccount || checkModelScope || channel.ChannelInfo.IsMultiKey && usingGroup == "auto" {
 			hasAllowedGroup := false
 			var groupProbeError *model.ChannelProbeError
 			groups := []string{usingGroup}
@@ -430,7 +436,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		return channel, selectGroup, nil
 	}
 
-	usingGroup := retry.TokenGroup
+	usingGroup = retry.TokenGroup
 	var channel *model.Channel
 	var selectGroup string
 	affinityChannelID := 0

@@ -232,3 +232,108 @@ func TestGetTokenAutoGroupsReturnsFullFilteredGlobalOrderAndLimit(t *testing.T) 
 	assert.Equal(t, []string{"vip", "default"}, data.Groups)
 	assert.Equal(t, 1, data.MaxCount)
 }
+
+func restrictTestAccountGroups(t *testing.T, userID int, groups ...string) {
+	t.Helper()
+	access := ratio_setting.GetGroupRatioSetting().UserAllowedGroups
+	original := access.ReadAll()
+	access.Set(userID, groups)
+	t.Cleanup(func() {
+		access.Clear()
+		access.AddAll(original)
+	})
+}
+
+func TestRestrictedAccountTokenGroupAssignment(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `["default","vip"]`)
+	user := setupTokenAutoGroupsControllerTest(t)
+	restrictTestAccountGroups(t, user.Id, "vip")
+	for _, group := range []string{"", "default", "auto", "vip"} {
+		request := baseAutoTokenRequest("restricted-" + group)
+		request["group"] = group
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, "/api/token/", request, user.Id)
+		AddToken(ctx)
+		assert.Equal(t, group == "vip", decodeAPIResponse(t, recorder).Success, "create group %q", group)
+	}
+	var token model.Token
+	require.NoError(t, model.DB.Where("user_id = ?", user.Id).Take(&token).Error)
+	require.Equal(t, "vip", token.Group)
+	request := baseAutoTokenRequest("reassign")
+	request["id"], request["group"] = token.Id, "default"
+	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/", request, user.Id)
+	UpdateToken(ctx)
+	assert.False(t, decodeAPIResponse(t, recorder).Success)
+	require.NoError(t, model.DB.First(&token, token.Id).Error)
+	assert.Equal(t, "vip", token.Group)
+
+	legacy := seedToken(t, model.DB, user.Id, "old default", "restricted-test-key")
+	ctx, recorder = newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/?status_only=true",
+		map[string]any{"id": legacy.Id, "status": common.TokenStatusDisabled}, user.Id)
+	UpdateToken(ctx)
+	require.True(t, decodeAPIResponse(t, recorder).Success)
+	require.NoError(t, model.DB.First(legacy, legacy.Id).Error)
+	assert.Equal(t, common.TokenStatusDisabled, legacy.Status)
+}
+
+func TestRestrictedAccountMarketplaceAndModelDiscovery(t *testing.T) {
+	const userID = 101
+	db := setupModelListControllerTestDB(t)
+	configureTokenAutoGroupsTest(t, "5", `["public","official"]`)
+	restrictTestAccountGroups(t, userID, "official")
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"official":"Official","public":"Also public","auto":"Auto"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"official":1,"public":1}`))
+	withSelfUseModeEnabled(t)
+	oldPrices := ratio_setting.ChannelModelPricing2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(oldPrices))
+		model.InvalidatePricingCache()
+	})
+	require.NoError(t, ratio_setting.UpdateChannelModelPricingByJSONString(`{"shared-scope-model":{"1":{"model_price":1},"2":{"model_price":99}}}`))
+	for _, channel := range []model.Channel{
+		{Id: 1, Name: "official", Group: "official", Models: "shared-scope-model", Key: "fixture", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled},
+		{Id: 2, Name: "other", Group: "public", Models: "shared-scope-model,gpt-4", Key: "fixture", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled},
+	} {
+		require.NoError(t, db.Create(&channel).Error)
+		require.NoError(t, channel.AddAbilities(db))
+	}
+	model.InvalidatePricingCache()
+	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodGet, "/api/pricing", nil, userID)
+	GetPricing(ctx)
+	var response struct {
+		Success bool               `json:"success"`
+		Data    []model.Pricing    `json:"data"`
+		Groups  map[string]string  `json:"usable_group"`
+		Ratios  map[string]float64 `json:"group_ratio"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Equal(t, map[string]string{"official": "Official"}, response.Groups)
+	assert.Equal(t, map[string]float64{"official": 1}, response.Ratios)
+	require.Len(t, response.Data, 1)
+	row := response.Data[0]
+	assert.Equal(t, "shared-scope-model", row.ModelName)
+	assert.Equal(t, []string{"official"}, row.EnableGroup)
+	require.Len(t, row.ChannelPricingVariants, 1)
+	assert.Equal(t, []string{"official"}, row.ChannelPricingVariants[0].EnableGroup)
+	assert.Equal(t, 1.0, row.ChannelPricingVariants[0].ModelPrice)
+
+	for _, name := range []string{"shared-scope-model", "gpt-4"} {
+		ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodGet, "/v1/models/"+name, nil, userID)
+		common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "official")
+		ctx.Params = gin.Params{{Key: "model", Value: name}}
+		RetrieveModel(ctx, constant.ChannelTypeOpenAI)
+		var item struct {
+			ID    string `json:"id"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &item))
+		if name == "gpt-4" {
+			assert.Empty(t, item.ID)
+			assert.Equal(t, "model_not_found", item.Error.Code)
+		} else {
+			assert.Equal(t, name, item.ID)
+		}
+	}
+}

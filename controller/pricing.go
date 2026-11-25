@@ -19,7 +19,7 @@ func GetPricing(c *gin.Context) {
 	// The pricing route's auth middleware supplies the current account group.
 	group := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 	groupRatio := ratio_setting.GetGroupRatioCopy()
-	usableGroup := service.GetUserVisibleGroups(group)
+	usableGroup := service.GetAccountVisibleGroups(c.GetInt("id"), group)
 	pricing = filterPricingByUsableGroups(pricing, usableGroup)
 	for g := range groupRatio {
 		if _, ok := usableGroup[g]; !ok {
@@ -59,7 +59,7 @@ func GetPricing(c *gin.Context) {
 		"group_ratio":        groupRatio,
 		"usable_group":       usableGroup,
 		"supported_endpoint": endpoints,
-		"auto_groups":        service.GetUserAutoGroup(group),
+		"auto_groups":        service.GetAccountAutoGroups(c.GetInt("id"), group),
 		"pricing_version":    "a42d372ccf0b5dd13ecf71203521f9d2",
 	})
 }

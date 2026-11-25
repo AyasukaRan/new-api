@@ -263,6 +263,11 @@ func updatesRequestSourceOptions(values map[string]string) bool {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == ratio_setting.UserAllowedGroupsOption {
+		if err := ratio_setting.CheckUserAllowedGroups([]byte(value)); err != nil {
+			return common.NewMessage("Invalid parameters")
+		}
+	}
 	if strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 		_, err := operation_setting.ParseBuiltinRequestSourceOption(key, value)
 		return err
@@ -340,7 +345,7 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
-	if key == "ChannelModelPricing" || key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+	if key == "ChannelModelPricing" || key == ratio_setting.UserAllowedGroupsOption || key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 		return UpdateOptionsBulk(map[string]string{key: value})
 	}
 	if IsRequestPolicyOption(key) {

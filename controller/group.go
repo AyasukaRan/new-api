@@ -25,7 +25,7 @@ func GetGroups(c *gin.Context) {
 func GetUserGroups(c *gin.Context) {
 	usableGroups := make(map[string]map[string]any)
 	userGroup := c.GetString("user_group")
-	for group, description := range service.GetUserVisibleGroups(userGroup) {
+	for group, description := range service.GetAccountVisibleGroups(c.GetInt("id"), userGroup) {
 		if group == "auto" {
 			usableGroups[group] = map[string]any{"ratio": "auto", "desc": setting.GetUsableGroupDescription("auto")}
 			continue

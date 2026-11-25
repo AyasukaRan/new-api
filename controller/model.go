@@ -211,26 +211,23 @@ func getModelListGroups(c *gin.Context) (modelListGroups, error) {
 		}
 	}
 
+	groups := modelListGroups{userGroup: userGroup, tokenGroup: tokenGroup}
+	group := tokenGroup
+	if group == "" {
+		group = userGroup
+	}
+	if !service.AccountGroupAllowed(c.GetInt("id"), group) {
+		return groups, nil
+	}
 	if tokenGroup == "auto" {
-		return modelListGroups{
-			userGroup:   userGroup,
-			tokenGroup:  tokenGroup,
-			ownerGroups: service.GetRequestAutoGroups(c, userGroup),
-		}, nil
+		groups.ownerGroups = service.GetRequestAutoGroups(c, userGroup)
+	} else {
+		groups.ownerGroups = []string{group}
 	}
-
-	group := userGroup
-	if tokenGroup != "" {
-		group = tokenGroup
-	}
-	return modelListGroups{
-		userGroup:   userGroup,
-		tokenGroup:  tokenGroup,
-		ownerGroups: []string{group},
-	}, nil
+	return groups, nil
 }
 
-func ListModels(c *gin.Context, modelType int) {
+func discoverableTokenModels(c *gin.Context) ([]dto.OpenAIModels, error) {
 	acceptUnsetRatioModel := operation_setting.SelfUseModeEnabled
 	if !acceptUnsetRatioModel {
 		userId := c.GetInt("id")
@@ -245,11 +242,7 @@ func ListModels(c *gin.Context, modelType int) {
 	userModelNames := make([]string, 0)
 	groups, err := getModelListGroups(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "get user group failed",
-		})
-		return
+		return nil, err
 	}
 	ownerGroups := groups.ownerGroups
 	modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
@@ -284,6 +277,16 @@ func ListModels(c *gin.Context, modelType int) {
 	userOpenAiModels := make([]dto.OpenAIModels, 0, len(userModelNames))
 	for _, modelName := range userModelNames {
 		userOpenAiModels = append(userOpenAiModels, buildOpenAIModel(modelName, ownerByModel))
+	}
+
+	return userOpenAiModels, nil
+}
+
+func ListModels(c *gin.Context, modelType int) {
+	userOpenAiModels, err := discoverableTokenModels(c)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "get user group failed"})
+		return
 	}
 
 	switch modelType {
@@ -365,7 +368,16 @@ func EnabledListModels(c *gin.Context) {
 
 func RetrieveModel(c *gin.Context, modelType int) {
 	modelId := c.Param("model")
-	if aiModel, ok := openAIModelsMap[modelId]; ok {
+	aiModel, ok := openAIModelsMap[modelId]
+	if service.HasAccountGroupRestriction(c.GetInt("id")) {
+		models, err := discoverableTokenModels(c)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "get user group failed"})
+			return
+		}
+		aiModel, ok = lo.Find(models, func(candidate dto.OpenAIModels) bool { return candidate.Id == modelId })
+	}
+	if ok {
 		switch modelType {
 		case constant.ChannelTypeAnthropic:
 			c.JSON(200, dto.AnthropicModel{
