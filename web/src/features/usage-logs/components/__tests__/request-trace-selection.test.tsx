@@ -406,6 +406,17 @@ test('opens the identity filter without obscuring its fields and selects a usern
   await user.keyboard('{ArrowDown}{Enter}')
   expect(username).toHaveValue('recent-user')
   expect(username).toHaveAttribute('aria-expanded', 'false')
+  for (const [name, input] of [
+    ['Username', username],
+    ['Token Name', token],
+    ['Group', group],
+  ] as const) {
+    const label = fields.getByText(name, { selector: 'label' })
+    expect(label).toBeVisible()
+    expect(label).toHaveProperty('control', input)
+  }
+  await user.click(fields.getByText('Token Name', { selector: 'label' }))
+  expect(token).toHaveFocus()
   expect(router.state.location.search.username).toBeUndefined()
   await user.click(fields.getByRole('button', { name: 'Apply' }))
   await waitFor(() =>

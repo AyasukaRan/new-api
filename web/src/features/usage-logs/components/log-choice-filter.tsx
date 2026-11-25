@@ -37,6 +37,7 @@ import { LogsFilterField } from './logs-filter-toolbar'
 import { useLogsViewScope } from './usage-logs-provider'
 
 export function LogChoiceFilter(props: {
+  caption?: { id: string; text: string }
   field: 'type' | 'responseTransport'
   value?: string
   onChange: (value: string) => void
@@ -74,13 +75,14 @@ export function LogChoiceFilter(props: {
     'Only used to find historical logs. New records are available in Audit Logs.'
   )
   return (
-    <LogsFilterField>
+    <LogsFilterField caption={props.caption}>
       <Select
         items={items}
         value={value}
         onValueChange={(next) => props.onChange(next ?? defaultValue)}
       >
         <SelectTrigger
+          id={props.caption?.id}
           aria-label={label}
           aria-description={
             selected?.deprecated ? deprecatedTypeDescription : undefined
@@ -88,7 +90,8 @@ export function LogChoiceFilter(props: {
         >
           <SelectValue className='min-w-0'>
             <span className='truncate'>
-              {(value === '' ? label : selected?.label) ?? label}
+              {(value === '' && !props.caption ? label : selected?.label) ??
+                label}
             </span>
             {selected?.deprecated && (
               <Badge

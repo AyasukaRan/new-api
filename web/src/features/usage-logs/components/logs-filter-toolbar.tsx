@@ -37,6 +37,7 @@ import {
   DrawerTrigger,
 } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
 
@@ -66,10 +67,11 @@ interface LogsFilterFieldProps {
   children: ReactNode
   wide?: boolean
   className?: string
+  caption?: { id: string; text: string }
 }
 
 export function LogsFilterField(props: LogsFilterFieldProps) {
-  return (
+  const control = (
     <div
       className={cn(
         'min-w-0 [&_[data-slot=select-trigger]]:w-full [&_[data-slot=select-trigger]]:text-sm [&_[data-slot=select-value]]:leading-5',
@@ -78,6 +80,19 @@ export function LogsFilterField(props: LogsFilterFieldProps) {
       )}
     >
       {props.children}
+    </div>
+  )
+  if (!props.caption) return control
+
+  return (
+    <div className='grid grid-cols-[minmax(0,4.75rem)_minmax(0,1fr)] items-start gap-x-2.5'>
+      <Label
+        htmlFor={props.caption.id}
+        className='text-muted-foreground min-h-9 text-xs leading-snug'
+      >
+        {props.caption.text}
+      </Label>
+      {control}
     </div>
   )
 }

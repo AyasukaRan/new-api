@@ -155,37 +155,49 @@ export function LogHeaderFilter(props: {
       </PopoverTrigger>
       <PopoverContent
         align='start'
-        className='max-h-(--available-height) w-64 gap-3 overflow-y-auto overscroll-contain p-3'
+        sideOffset={6}
+        collisionPadding={8}
+        className='max-h-(--available-height) w-80 max-w-(--available-width) gap-0 overflow-hidden rounded-xl p-0'
       >
-        <PopoverTitle>{props.title}</PopoverTitle>
+        <PopoverTitle className='flex shrink-0 items-center gap-2 border-b px-4 py-3 text-sm font-semibold'>
+          <ListFilter
+            aria-hidden='true'
+            className='text-muted-foreground size-4'
+          />
+          {props.title}
+        </PopoverTitle>
         <form
-          className='grid gap-2'
+          className='flex min-h-0 flex-col'
           onSubmit={(event) => {
             event.preventDefault()
             apply(draft)
           }}
         >
-          {columns.map((column) => (
-            <LogColumnFilterFields
-              inlineSuggestions
-              key={column}
-              column={column}
-              isAdmin={props.isAdmin}
-              values={draft}
-              suggestions={suggestions}
-              maskClass={
-                sensitiveVisible ? undefined : '[-webkit-text-security:disc]'
-              }
-              onChange={(key, value) =>
-                setDraft((prev) => ({ ...prev, [key]: value }))
-              }
-            />
-          ))}
-          <div className='mt-1 flex items-center justify-end gap-2'>
+          <div className='grid min-h-0 gap-2.5 overflow-y-auto overscroll-contain px-4 py-3.5 [&_:is(input,[data-slot=select-trigger])]:h-9 [&_:is(input,[data-slot=select-trigger])]:rounded-md [&_:is(input,[data-slot=select-trigger]):focus-visible]:ring-1'>
+            {columns.map((column) => (
+              <LogColumnFilterFields
+                showLabels
+                inlineSuggestions
+                key={column}
+                column={column}
+                isAdmin={props.isAdmin}
+                values={draft}
+                suggestions={suggestions}
+                maskClass={
+                  sensitiveVisible ? undefined : '[-webkit-text-security:disc]'
+                }
+                onChange={(key, value) =>
+                  setDraft((prev) => ({ ...prev, [key]: value }))
+                }
+              />
+            ))}
+          </div>
+          <div className='bg-muted/25 flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2.5'>
             <Button
               type='button'
               variant='ghost'
               size='sm'
+              className='text-muted-foreground -ms-2 rounded-md'
               disabled={!active && !keys.some((key) => draft[key])}
               onClick={() => apply({})}
             >
@@ -194,6 +206,7 @@ export function LogHeaderFilter(props: {
             <Button
               type='submit'
               size='sm'
+              className='min-w-16 rounded-md'
               disabled={!isValidLogChannelFilter(draft.channel)}
             >
               {t('Apply')}

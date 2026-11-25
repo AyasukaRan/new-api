@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
-import type { KeyboardEventHandler } from 'react'
+import { useId, type KeyboardEventHandler } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ComboboxInput } from '@/components/ui/combobox-input'
@@ -38,6 +38,7 @@ import { LogChoiceFilter } from './log-choice-filter'
 import { LogsFilterField, LogsFilterInput } from './logs-filter-toolbar'
 
 type FilterInputProps = {
+  caption?: { id: string; text: string }
   value?: string
   onValueChange: (value: string) => void
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>
@@ -49,8 +50,9 @@ export function LogUsernameFilter(props: FilterInputProps) {
   const { t } = useTranslation()
   const { users, loading, setSearch } = useLogUserOptions()
   return (
-    <LogsFilterField className={props.maskClass}>
+    <LogsFilterField caption={props.caption} className={props.maskClass}>
       <ComboboxInput
+        id={props.caption?.id}
         inlineSuggestions={props.inlineSuggestions}
         openOnFocus={!props.inlineSuggestions}
         options={users.map(({ username }) => ({
@@ -60,7 +62,7 @@ export function LogUsernameFilter(props: FilterInputProps) {
         allowCustomValue
         showEmptyOnOpen
         aria-label={t('Username')}
-        placeholder={t('Username')}
+        placeholder={props.caption ? t('All users') : t('Username')}
         emptyText={loading ? t('Loading...') : t('No matching results')}
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={props.maskClass}
@@ -93,8 +95,9 @@ export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
   const loading = props.isAdmin ? adminGroups.isLoading : userGroups.isLoading
 
   return (
-    <LogsFilterField className={props.maskClass}>
+    <LogsFilterField caption={props.caption} className={props.maskClass}>
       <ComboboxInput
+        id={props.caption?.id}
         inlineSuggestions={props.inlineSuggestions}
         openOnFocus={!props.inlineSuggestions}
         options={groups
@@ -106,7 +109,7 @@ export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
         allowCustomValue
         showEmptyOnOpen
         aria-label={t('Group')}
-        placeholder={t('Group')}
+        placeholder={props.caption ? t('All Groups') : t('Group')}
         emptyText={loading ? t('Loading...') : t('No group found.')}
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={props.maskClass}
@@ -129,6 +132,8 @@ const effortSuggestions = [
   'max',
 ]
 const fieldLabels = {
+  type: 'Type',
+  responseTransport: 'Response mode',
   channel: 'Channel ID',
   token: 'Token Name',
   username: 'Username',
@@ -147,14 +152,21 @@ export function LogColumnFilterFields(props: {
   onChange: (key: LogColumnFilterKey, value: string) => void
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>
   maskClass?: string
+  showLabels?: boolean
   inlineSuggestions?: boolean
   suggestions?: Partial<Record<LogColumnFilterKey, string[]>>
 }) {
   const { t } = useTranslation()
+  const id = useId()
   return (
     <>
       {getLogColumnFilterKeys(props.column, props.isAdmin).map((key) => {
+        const label = t(fieldLabels[key])
+        const caption = props.showLabels
+          ? { id: `${id}-${key}`, text: label }
+          : undefined
         const input = {
+          caption,
           value: props.values[key] ?? '',
           onValueChange: (value: string) => props.onChange(key, value),
           onKeyDown: props.onKeyDown,
@@ -165,6 +177,7 @@ export function LogColumnFilterFields(props: {
           return (
             <LogChoiceFilter
               key={key}
+              caption={caption}
               field={key}
               value={input.value}
               onChange={input.onValueChange}
@@ -180,7 +193,7 @@ export function LogColumnFilterFields(props: {
 
         const invalid =
           key === 'channel' && !isValidLogChannelFilter(input.value)
-        const label = t(fieldLabels[key])
+        const placeholder = props.showLabels ? t('Search...') : label
         const mask = ['token', 'clientTool', 'ip'].includes(key)
           ? props.maskClass
           : undefined
@@ -191,15 +204,16 @@ export function LogColumnFilterFields(props: {
             : suggestions
 
         return (
-          <LogsFilterField key={key}>
+          <LogsFilterField key={key} caption={caption}>
             {options.length ? (
               <ComboboxInput
+                id={caption?.id}
                 inlineSuggestions={props.inlineSuggestions}
                 openOnFocus={!props.inlineSuggestions}
                 allowCustomValue
                 aria-label={label}
                 aria-invalid={invalid || undefined}
-                placeholder={label}
+                placeholder={placeholder}
                 options={options.map((value) => ({ value, label: value }))}
                 className={mask ? `h-8 text-sm ${mask}` : 'h-8 text-sm'}
                 popupClassName={mask}
@@ -209,9 +223,10 @@ export function LogColumnFilterFields(props: {
               />
             ) : (
               <LogsFilterInput
+                id={caption?.id}
                 aria-label={label}
                 aria-invalid={invalid || undefined}
-                placeholder={label}
+                placeholder={placeholder}
                 inputMode={key === 'channel' ? 'numeric' : undefined}
                 className={mask}
                 value={input.value}
