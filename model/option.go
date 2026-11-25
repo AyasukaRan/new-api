@@ -27,7 +27,7 @@ type Option struct {
 	Value string `json:"value"`
 }
 
-var requestSourceRulesMutationMu sync.Mutex
+var requestRulesMutationMu sync.Mutex
 
 func AllOption() ([]*Option, error) {
 	var options []*Option
@@ -217,8 +217,8 @@ func LoadOptionsFromDatabase() error {
 	defer passkeyOptionMutex.Unlock()
 	modelPricingMutationMu.Lock()
 	defer modelPricingMutationMu.Unlock()
-	requestSourceRulesMutationMu.Lock()
-	defer requestSourceRulesMutationMu.Unlock()
+	requestRulesMutationMu.Lock()
+	defer requestRulesMutationMu.Unlock()
 	options, err := AllOption()
 	if err != nil {
 		return err
@@ -253,9 +253,9 @@ func SyncOptions(frequency int) {
 	}
 }
 
-func updatesRequestSourceOptions(values map[string]string) bool {
+func updatesRequestRules(values map[string]string) bool {
 	for key := range values {
-		if key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
+		if key == ratio_setting.UserAllowedGroupsOption || key == operation_setting.RequestSourceRulesOptionKey || strings.HasPrefix(key, operation_setting.BuiltinRequestSourceOptionPrefix) {
 			return true
 		}
 	}
@@ -423,9 +423,9 @@ func UpdateOptionsBulk(values map[string]string) error {
 		defer modelPricingMutationMu.Unlock()
 	}
 	// Keep database publication and periodic reload ordered for the same rules.
-	if updatesRequestSourceOptions(values) {
-		requestSourceRulesMutationMu.Lock()
-		defer requestSourceRulesMutationMu.Unlock()
+	if updatesRequestRules(values) {
+		requestRulesMutationMu.Lock()
+		defer requestRulesMutationMu.Unlock()
 	}
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		for k, v := range values {

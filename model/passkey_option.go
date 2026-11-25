@@ -104,9 +104,9 @@ func UpdatePasskeyDomainOptions(values map[string]string, preview bool, confirma
 		modelPricingMutationMu.Lock()
 		defer modelPricingMutationMu.Unlock()
 	}
-	if updatesRequestSourceOptions(values) {
-		requestSourceRulesMutationMu.Lock()
-		defer requestSourceRulesMutationMu.Unlock()
+	if updatesRequestRules(values) {
+		requestRulesMutationMu.Lock()
+		defer requestRulesMutationMu.Unlock()
 	}
 	values = maps.Clone(values)
 	for key, value := range values {
