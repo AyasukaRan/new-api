@@ -75,6 +75,11 @@ import { SummaryCards } from './summary-cards'
 import { UptimePanel } from './uptime-panel'
 
 const GatewayDiagnostics = lazy(() => import('./gateway-diagnostics'))
+const RequestOriginMap = lazy(() =>
+  import('./request-origin-map').then((module) => ({
+    default: module.RequestOriginMap,
+  }))
+)
 
 const UsageTrend = lazy(() =>
   import('./usage-trend').then((module) => ({ default: module.UsageTrend }))
@@ -663,6 +668,9 @@ export function OverviewDashboard() {
               <GatewayDiagnostics overview />
             </Suspense>
           )}
+          <Suspense fallback={<Skeleton className='h-80 w-full' />}>
+            <RequestOriginMap />
+          </Suspense>
           <Suspense fallback={<Skeleton className='h-72 w-full' />}>
             <UsageTrend />
           </Suspense>

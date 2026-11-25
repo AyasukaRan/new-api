@@ -1,0 +1,101 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
+.origin-world-map {
+  --origin-water: color-mix(in srgb, var(--muted) 14%, transparent);
+  --origin-land: color-mix(in srgb, var(--muted-foreground) 17%, var(--card));
+  --origin-edge: color-mix(in srgb, var(--muted-foreground) 24%, transparent);
+  background: radial-gradient(
+    ellipse at 50% 48%,
+    var(--origin-water),
+    transparent 72%
+  );
+}
+.origin-map-grid {
+  stroke: var(--border);
+  stroke-width: 0.45;
+  opacity: 0.5;
+}
+.origin-map-land {
+  fill: var(--origin-land);
+  stroke: var(--origin-edge);
+  stroke-width: 0.55;
+}
+.origin-map-marker {
+  cursor: pointer;
+}
+.origin-map-dot {
+  fill: var(--primary);
+  stroke: var(--card);
+  stroke-width: 1;
+}
+.origin-map-halo {
+  fill: var(--primary);
+  opacity: 0.12;
+}
+.origin-map-halo-selected {
+  opacity: 0.28;
+}
+.origin-map-focus {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1;
+  opacity: 0;
+}
+.origin-map-marker:focus-visible .origin-map-focus,
+.origin-map-marker:hover .origin-map-focus {
+  opacity: 0.8;
+}
+.origin-map-pulse {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1.4;
+  animation: origin-request-pulse 2.4s ease-out both;
+}
+.origin-map-pulse-delayed {
+  animation-delay: 0.35s;
+}
+.origin-map-flash {
+  fill: var(--primary);
+  animation: origin-request-flash 2.4s ease-out both;
+}
+@keyframes origin-request-pulse {
+  from {
+    r: 4;
+    opacity: 0.9;
+  }
+  to {
+    r: 28;
+    opacity: 0;
+  }
+}
+@keyframes origin-request-flash {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .origin-map-pulse,
+  .origin-map-flash {
+    animation: none;
+    display: none;
+  }
+}

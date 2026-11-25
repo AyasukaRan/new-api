@@ -382,6 +382,10 @@ func SetApiRouter(router *gin.Engine) {
 		}
 
 		dataRoute := apiRouter.Group("/data")
+		dataRoute.GET("/origins", middleware.DisableCache(), middleware.AdminAuth(), controller.GetAllRequestOrigins)
+		dataRoute.GET("/origins/self", middleware.DisableCache(), middleware.UserAuth(), controller.GetUserRequestOrigins)
+		dataRoute.GET("/origins/stream", middleware.DisableCache(), middleware.AdminAuth(), controller.StreamAllRequestOrigins)
+		dataRoute.GET("/origins/self/stream", middleware.DisableCache(), middleware.UserAuth(), controller.StreamUserRequestOrigins)
 		dataRoute.GET("/perf-metrics/summary", middleware.DisableCache(), middleware.AdminAuth(), controller.GetDashboardPerfMetricsSummary)
 		dataRoute.GET("/", middleware.AdminAuth(), controller.GetAllQuotaDates)
 		dataRoute.GET("/users", middleware.AdminAuth(), controller.GetQuotaDatesByUser)

@@ -121,6 +121,11 @@ const LazyCallSources = lazy(() =>
 const LazyGatewayDiagnostics = lazy(
   () => import('./components/overview/gateway-diagnostics')
 )
+const LazyRequestOriginMap = lazy(() =>
+  import('./components/overview/request-origin-map').then((module) => ({
+    default: module.RequestOriginMap,
+  }))
+)
 const LazyUsageEfficiency = lazy(() =>
   import('./components/overview/usage-efficiency').then((m) => ({
     default: m.UsageEfficiency,
@@ -498,6 +503,9 @@ export function Dashboard() {
                   </Suspense>
                 )}
               </div>
+              <Suspense fallback={<ModelChartsFallback />}>
+                <LazyRequestOriginMap params={modelParams} />
+              </Suspense>
               {isAdmin && !modelFilters.username?.trim() && (
                 <Suspense fallback={<ModelChartsFallback />}>
                   <LazyGatewayDiagnostics />

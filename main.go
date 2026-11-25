@@ -104,6 +104,9 @@ func main() {
 	}
 	wsmanager.StartSubscriber(context.Background())
 	model.StartLiveLogFeed(context.Background())
+	// Verify the local GeoIP file in the background before the first map view,
+	// without delaying relay startup when the optional database is large.
+	go common.DefaultGeoIPResolver().Status()
 
 	// Warm pricing after channel cache initialization so Advanced Custom
 	// endpoint inference can read cached route settings on first request.
