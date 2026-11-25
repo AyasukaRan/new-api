@@ -34,6 +34,7 @@ import { cn } from '@/lib/utils'
 import { isResponseModelMismatch } from '../lib/response-model'
 import type { LogOtherData } from '../types'
 import { DetailRow } from './dialogs/log-detail-layout'
+import { LogFilterValue, useLogValueFilter } from './log-value-filter'
 
 interface ModelBadgeProps {
   modelName: string
@@ -42,6 +43,7 @@ interface ModelBadgeProps {
   className?: string
   wrapText?: boolean
   onInspect?: () => void
+  filterValue?: string
 }
 
 function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
@@ -86,6 +88,7 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
 
 export function ModelBadge(props: ModelBadgeProps) {
   const { t } = useTranslation()
+  const filter = useLogValueFilter('model', props.filterValue, props.modelName)
   const mismatch = isResponseModelMismatch(props.responseModel)
   const responseModelLabel =
     mismatch && props.responseModel
@@ -106,7 +109,7 @@ export function ModelBadge(props: ModelBadgeProps) {
             props.responseModel.requested_model))
     )
 
-  if (!hasDetails) {
+  if (!hasDetails && !filter) {
     if (props.onInspect) {
       return (
         <CopyButton
@@ -125,7 +128,7 @@ export function ModelBadge(props: ModelBadgeProps) {
 
   const content = (
     <>
-      <ModelBadgeContent {...props} copyable={false} />
+      {!filter && <ModelBadgeContent {...props} copyable={false} />}
       {mismatch && (
         <StatusBadge
           icon={AlertTriangle}
@@ -134,7 +137,7 @@ export function ModelBadge(props: ModelBadgeProps) {
           copyable={false}
         />
       )}
-      {!mismatch && props.actualModel && (
+      {!mismatch && (props.actualModel || filter) && (
         <Route
           className='text-muted-foreground size-3 shrink-0'
           aria-hidden='true'
@@ -143,21 +146,17 @@ export function ModelBadge(props: ModelBadgeProps) {
     </>
   )
 
-  if (props.onInspect) {
-    return (
-      <Button
-        variant='ghost'
-        aria-label={modelLabel}
-        aria-haspopup='dialog'
-        onClick={props.onInspect}
-        className='h-auto min-h-8 max-w-full min-w-0 flex-wrap justify-start gap-1 px-0 py-0 text-left font-normal whitespace-normal'
-      >
-        {content}
-      </Button>
-    )
-  }
-
-  return (
+  const details = props.onInspect ? (
+    <Button
+      variant='ghost'
+      aria-label={modelLabel}
+      aria-haspopup='dialog'
+      onClick={props.onInspect}
+      className='h-auto min-h-8 max-w-full min-w-0 flex-wrap justify-start gap-1 px-0 py-0 text-left font-normal whitespace-normal'
+    >
+      {content}
+    </Button>
+  ) : (
     <Popover>
       <PopoverTrigger
         render={
@@ -195,6 +194,27 @@ export function ModelBadge(props: ModelBadgeProps) {
         )}
       </PopoverContent>
     </Popover>
+  )
+
+  if (!filter) return details
+
+  return (
+    <span className='group/log-model inline-flex max-w-full min-w-0 items-center gap-1'>
+      <LogFilterValue
+        field='model'
+        value={props.filterValue}
+        label={props.modelName}
+      >
+        <ModelBadgeContent {...props} copyable={false} />
+      </LogFilterValue>
+      {hasDetails && details}
+      <CopyButton
+        value={props.modelName}
+        aria-label={t('Copy {{field}}', { field: t('Model') })}
+        className='size-4 opacity-0 group-hover/log-model:opacity-100 focus-visible:opacity-100'
+        iconClassName='size-3'
+      />
+    </span>
   )
 }
 

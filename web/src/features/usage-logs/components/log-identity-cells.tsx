@@ -29,9 +29,11 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { CopyButton } from '@/components/copy-button'
 import { TruncatedCell } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
 import { formatAdminUserLabel } from '@/features/users/lib/admin-nickname'
 import { toIntlLocale } from '@/i18n/languages'
 import { cn } from '@/lib/utils'
@@ -40,16 +42,19 @@ import type { UsageLog } from '../data/schema'
 import { getLogMetadata, logTokenName } from '../lib/format'
 import { isDisplayableLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
+import { LogFilterValue, useLogValueFilter } from './log-value-filter'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 export function LogGroupLabel({
   group,
   other,
   visible,
+  filterValue,
 }: {
   group: string
   other: LogOtherData | null
   visible: boolean
+  filterValue?: string
 }) {
   const { t, i18n } = useTranslation()
   const ratio = [other?.user_group_ratio, other?.group_ratio].find(
@@ -60,12 +65,18 @@ export function LogGroupLabel({
     <div className='text-muted-foreground inline-flex max-w-full min-w-0 items-center gap-1.5 text-xs'>
       <Tags aria-hidden className='size-3.5 shrink-0' />
       {group && (
-        <GroupBadge
-          group={visible ? group : '••••'}
-          type='text'
-          size='sm'
-          className='text-muted-foreground dark:text-muted-foreground max-w-36 truncate text-xs font-normal'
-        />
+        <LogFilterValue
+          field='group'
+          value={visible ? filterValue : undefined}
+          label={group}
+        >
+          <GroupBadge
+            group={visible ? group : '••••'}
+            type='text'
+            size='sm'
+            className='text-muted-foreground dark:text-muted-foreground max-w-36 truncate text-xs font-normal'
+          />
+        </LogFilterValue>
       )}
       {ratio != null && (
         <span
@@ -106,40 +117,76 @@ export function LogAccountCell({
     isAdmin && sensitiveVisible
       ? formatAdminUserLabel(log.username, log.user_admin_nickname)
       : undefined
+  const usernameFilter = useLogValueFilter(
+    'username',
+    isAdmin && sensitiveVisible ? log.username : undefined,
+    account
+  )
+  const tokenFilter = useLogValueFilter(
+    'token',
+    sensitiveVisible && displayable ? log.token_name : undefined
+  )
   return (
     <div className='flex max-w-full min-w-0 flex-col items-start justify-center gap-[3px] text-xs leading-snug'>
       {isAdmin && log.username && (
-        <button
-          type='button'
-          className='hover:text-primary inline-flex max-w-full items-center gap-1.5 text-[13px] font-semibold'
-          onClick={(e) => {
-            e.stopPropagation()
-            setSelectedUserId(log.user_id)
-            setUserInfoDialogOpen(true)
-          }}
-        >
-          <UserRound
-            className='text-muted-foreground size-3.5 shrink-0'
-            aria-hidden
-          />
-          <span className='truncate' title={account}>
-            {account ?? '••••'}
-          </span>
-        </button>
+        <div className='inline-flex max-w-full items-center gap-1.5 text-[13px] font-semibold'>
+          <Button
+            variant='ghost'
+            aria-label={usernameFilter ? t('User Information') : undefined}
+            className='hover:text-primary h-auto min-w-0 gap-1.5 p-0 text-[13px] font-semibold'
+            onClick={(e) => {
+              e.stopPropagation()
+              setSelectedUserId(log.user_id)
+              setUserInfoDialogOpen(true)
+            }}
+          >
+            <UserRound
+              className='text-muted-foreground size-3.5 shrink-0'
+              aria-hidden
+            />
+            {!usernameFilter && (
+              <span className='truncate' title={account}>
+                {account ?? '••••'}
+              </span>
+            )}
+          </Button>
+          {usernameFilter && (
+            <LogFilterValue
+              field='username'
+              value={log.username}
+              label={account}
+            >
+              <span className='truncate'>{account}</span>
+            </LogFilterValue>
+          )}
+        </div>
       )}
       {token && (
-        <div className='text-muted-foreground inline-flex max-w-full items-center gap-1.5'>
+        <div className='group/log-token text-muted-foreground inline-flex max-w-full items-center gap-1.5'>
           <KeyRound aria-hidden className='size-3.5 shrink-0' />
-          <StatusBadge
-            type='text'
-            size='sm'
-            showDot={false}
-            variant='neutral'
-            className='text-muted-foreground dark:text-muted-foreground text-xs font-normal'
-            copyable={sensitiveVisible && !!log.token_name}
-            copyText={sensitiveVisible ? log.token_name : undefined}
-            label={sensitiveVisible ? token : '••••'}
-          />
+          <LogFilterValue
+            field='token'
+            value={sensitiveVisible ? log.token_name : undefined}
+          >
+            <StatusBadge
+              type='text'
+              size='sm'
+              showDot={false}
+              variant='neutral'
+              className='text-muted-foreground dark:text-muted-foreground text-xs font-normal'
+              copyable={!tokenFilter && sensitiveVisible && !!log.token_name}
+              copyText={sensitiveVisible ? log.token_name : undefined}
+              label={sensitiveVisible ? token : '••••'}
+            />
+          </LogFilterValue>
+          {tokenFilter && (
+            <CopyButton
+              value={log.token_name}
+              aria-label={t('Copy {{field}}', { field: t('Token') })}
+              className='size-4 opacity-0 group-hover/log-token:opacity-100 focus-visible:opacity-100'
+              iconClassName='size-3'
+            />
+          )}
         </div>
       )}
       {displayable && (
@@ -147,6 +194,7 @@ export function LogAccountCell({
           group={log.group || other?.group || ''}
           other={other}
           visible={sensitiveVisible}
+          filterValue={log.group}
         />
       )}
     </div>
@@ -176,6 +224,14 @@ export function LogSourceCell({
     typeof other?.client_tool === 'string' ? other.client_tool.trim() : ''
   const ClientIcon = (sensitiveVisible && clientIcons.get(client)) || Terminal
   const hasClient = isAdmin && isDisplayableLogType(log.type)
+  const clientFilter = useLogValueFilter(
+    'clientTool',
+    sensitiveVisible ? client : undefined
+  )
+  const ipFilter = useLogValueFilter(
+    'ip',
+    sensitiveVisible ? log.ip : undefined
+  )
   const details = [
     {
       id: 'user_agent',
@@ -197,9 +253,14 @@ export function LogSourceCell({
       {hasClient && visibility.client_tool !== false && (
         <div className='flex min-w-0 items-center gap-1.5 text-[13px] font-medium'>
           <ClientIcon aria-label={t('Client')} className='size-4 shrink-0' />
-          <TruncatedCell tabIndex={0}>
-            {sensitiveVisible ? client || t('Unidentified source') : '••••'}
-          </TruncatedCell>
+          <LogFilterValue
+            field='clientTool'
+            value={sensitiveVisible ? client : undefined}
+          >
+            <TruncatedCell tabIndex={clientFilter ? undefined : 0}>
+              {sensitiveVisible ? client || t('Unidentified source') : '••••'}
+            </TruncatedCell>
+          </LogFilterValue>
         </div>
       )}
       {details.map(
@@ -217,14 +278,19 @@ export function LogSourceCell({
                 {short}
               </span>
               {typeof value === 'string' && value.trim() ? (
-                <TruncatedCell
-                  tabIndex={0}
-                  cellClassName={cn(
-                    id === 'user_agent' && 'text-muted-foreground'
-                  )}
+                <LogFilterValue
+                  field='ip'
+                  value={sensitiveVisible && id === 'ip' ? value : undefined}
                 >
-                  {sensitiveVisible ? value : '••••'}
-                </TruncatedCell>
+                  <TruncatedCell
+                    tabIndex={id === 'ip' && ipFilter ? undefined : 0}
+                    cellClassName={cn(
+                      id === 'user_agent' && 'text-muted-foreground'
+                    )}
+                  >
+                    {sensitiveVisible ? value : '••••'}
+                  </TruncatedCell>
+                </LogFilterValue>
               ) : (
                 <span
                   className='text-muted-foreground/70'

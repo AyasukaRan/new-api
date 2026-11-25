@@ -29,11 +29,13 @@ import { Button } from '@/components/ui/button'
 import { formatAdminUserLabel } from '@/features/users/lib/admin-nickname'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { formatLogQuota } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 import type { UsageLog } from '../data/schema'
 import { formatModelName, getLogMetadata, logTokenName } from '../lib/format'
 import { isDisplayableLogType, isTimingLogType } from '../lib/utils'
 import { LogGroupLabel } from './log-identity-cells'
+import { useLogValueFilter } from './log-value-filter'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { RequestMetadataTags } from './request-metadata-tags'
 import { TokenPerformanceCell } from './token-performance-cell'
@@ -107,7 +109,26 @@ export function CommonLogMobileCard<TData>(props: {
     selected?.visible && (!selected.sensitive || context.sensitiveVisible)
       ? selected
       : undefined
-  const metadata: FieldName[] = ['user', 'channel', 'token', 'group']
+  const fieldFilters = {
+    user: useLogValueFilter(
+      'username',
+      isAdminView ? log.username : undefined,
+      fields.user.value
+    ),
+    channel: useLogValueFilter(
+      'channel',
+      log.channel > 0 ? String(log.channel) : undefined,
+      fields.channel.value
+    ),
+    token: useLogValueFilter('token', log.token_name),
+    group: useLogValueFilter('group', log.group),
+  }
+  const metadata: (keyof typeof fieldFilters)[] = [
+    'user',
+    'channel',
+    'token',
+    'group',
+  ]
   const visibleMetadata = metadata.filter((id) => fields[id].visible)
   const timeCell = props.cells.get('created_at')
   const costCell = props.cells.get('quota')
@@ -124,6 +145,7 @@ export function CommonLogMobileCard<TData>(props: {
             <div className='min-w-0 flex-[1_1_10rem]'>
               <ModelBadge
                 modelName={model.name}
+                filterValue={log.model_name}
                 actualModel={model.actualModel}
                 responseModel={model.responseModel}
                 wrapText
@@ -191,6 +213,7 @@ export function CommonLogMobileCard<TData>(props: {
         <div className='grid min-w-0 grid-cols-2 gap-x-4 gap-y-0.5'>
           {visibleMetadata.map((id) => {
             const field = fields[id]
+            const filter = fieldFilters[id]
             let fieldContent = <span className='truncate'>{field.value}</span>
             if (id === 'group') {
               fieldContent = (
@@ -233,15 +256,37 @@ export function CommonLogMobileCard<TData>(props: {
                   )}
                 </span>
                 {context.sensitiveVisible ? (
-                  <Button
-                    variant='ghost'
-                    aria-label={`${field.label}: ${field.value}`}
-                    aria-haspopup='dialog'
-                    onClick={() => setSelectedField(id)}
-                    className='text-foreground h-auto min-h-8 min-w-0 flex-1 shrink justify-start px-0 py-1 text-left text-sm font-normal'
-                  >
-                    {fieldContent}
-                  </Button>
+                  <>
+                    <Button
+                      variant='ghost'
+                      aria-label={
+                        filter?.['aria-label'] ??
+                        `${field.label}: ${field.value}`
+                      }
+                      aria-pressed={filter?.['aria-pressed']}
+                      aria-haspopup={filter ? undefined : 'dialog'}
+                      title={filter?.title}
+                      onClick={filter?.onClick ?? (() => setSelectedField(id))}
+                      className={cn(
+                        'text-foreground h-auto min-h-8 min-w-0 flex-1 shrink justify-start px-0 py-1 text-left text-sm font-normal',
+                        filter?.active && 'bg-primary/10 ring-primary/25 ring-1'
+                      )}
+                    >
+                      {fieldContent}
+                    </Button>
+                    {filter && (
+                      <Button
+                        variant='ghost'
+                        size='icon'
+                        className='size-8 shrink-0'
+                        aria-label={`${t('Details')}: ${field.label}`}
+                        aria-haspopup='dialog'
+                        onClick={() => setSelectedField(id)}
+                      >
+                        <ChevronRight aria-hidden className='size-3.5' />
+                      </Button>
+                    )}
+                  </>
                 ) : (
                   <span className='min-w-0 py-1.5'>••••</span>
                 )}

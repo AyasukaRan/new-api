@@ -23,7 +23,11 @@ import { useTranslation } from 'react-i18next'
 import { BadgeListCell } from '@/components/data-table'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -32,6 +36,7 @@ import { getReasoningEffortVariant } from '../lib/format'
 import { getLogToolIcon } from '../lib/tool-icon'
 import type { LogOtherData } from '../types'
 import { LogMetricPopover } from './log-metric-popover'
+import { LogFilterValue } from './log-value-filter'
 
 /** Only observed calls and explicit legacy per-call counters identify an invocation count. */
 function toolInvocationCount(name: string, metadata: LogOtherData) {
@@ -158,21 +163,23 @@ export function RequestMetadataTags(props: {
   if (props.field === 'reasoning_effort' && effort) {
     const variant = getReasoningEffortVariant(effort)
     return (
-      <StatusBadge
-        label={effort}
-        title={t('Reasoning: {{effort}}', { effort })}
-        copyable={false}
-        className={cn(
-          'h-5 min-w-[7.5ch] max-w-full justify-center rounded-sm px-1.5 font-mono text-[11px] font-semibold',
-          variant === 'orange' &&
-            'bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-200',
-          variant === 'yellow' &&
-            'bg-violet-100 text-violet-800 dark:bg-violet-300/15 dark:text-violet-200',
-          variant === 'green' &&
-            'bg-emerald-100 text-emerald-800 dark:bg-emerald-300/15 dark:text-emerald-200',
-          variant === 'grey' && 'bg-muted text-muted-foreground'
-        )}
-      />
+      <LogFilterValue field='reasoningEffort' value={effort}>
+        <StatusBadge
+          label={effort}
+          title={t('Reasoning: {{effort}}', { effort })}
+          copyable={false}
+          className={cn(
+            'h-5 min-w-[7.5ch] max-w-full justify-center rounded-sm px-1.5 font-mono text-[11px] font-semibold',
+            variant === 'orange' &&
+              'bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-200',
+            variant === 'yellow' &&
+              'bg-violet-100 text-violet-800 dark:bg-violet-300/15 dark:text-violet-200',
+            variant === 'green' &&
+              'bg-emerald-100 text-emerald-800 dark:bg-emerald-300/15 dark:text-emerald-200',
+            variant === 'grey' && 'bg-muted text-muted-foreground'
+          )}
+        />
+      </LogFilterValue>
     )
   }
 

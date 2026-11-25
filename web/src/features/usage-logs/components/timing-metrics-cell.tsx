@@ -42,6 +42,7 @@ import {
 } from '../lib/format'
 import { isConsumeLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
+import { LogFilterValue } from './log-value-filter'
 
 /**
  * Softened fills for the full-height timing bar. The bar sits directly beside
@@ -227,24 +228,38 @@ export function StreamModeCell({
   } else {
     label = t('Non-streamed response')
   }
+  let filterTransport: string | undefined = transport
+  if (metadata?.is_task) {
+    filterTransport = metadata.task_sync ? 'sync' : 'async'
+  } else if (preparedSse) {
+    filterTransport = 'sse'
+  } else if (!filterTransport) {
+    filterTransport = isStream ? 'unknown' : 'non_streamed'
+  }
   const badge = (
-    <StatusBadge
+    <LogFilterValue
+      field='responseTransport'
+      value={filterTransport}
       label={label}
-      copyable={false}
-      className={cn(
-        'h-5 justify-center rounded-md px-1.5 font-mono text-[11px] font-semibold',
-        !metadata?.is_task &&
-          transport === 'sse' &&
-          'bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200',
-        !metadata?.is_task &&
-          transport === 'ws' &&
-          'bg-sky-100 text-sky-800 dark:bg-sky-400/15 dark:text-sky-200',
-        (metadata?.is_task || !transport || transport === 'http') &&
-          'bg-muted text-muted-foreground',
-        preparedSse &&
-          'border-muted-foreground/55 border border-dashed bg-transparent'
-      )}
-    />
+    >
+      <StatusBadge
+        label={label}
+        copyable={false}
+        className={cn(
+          'h-5 justify-center rounded-md px-1.5 font-mono text-[11px] font-semibold',
+          !metadata?.is_task &&
+            transport === 'sse' &&
+            'bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200',
+          !metadata?.is_task &&
+            transport === 'ws' &&
+            'bg-sky-100 text-sky-800 dark:bg-sky-400/15 dark:text-sky-200',
+          (metadata?.is_task || !transport || transport === 'http') &&
+            'bg-muted text-muted-foreground',
+          preparedSse &&
+            'border-muted-foreground/55 border border-dashed bg-transparent'
+        )}
+      />
+    </LogFilterValue>
   )
   return (
     <div className='inline-flex max-w-full items-center gap-1'>

@@ -50,12 +50,18 @@ import { useLiveUsageLogs } from '../hooks/use-live-usage-logs'
 import { useUsageLogHistory } from '../hooks/use-usage-log-history'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
+import { getLogValueFilterKeys } from '../lib/filter'
 import { getLogMetadata } from '../lib/format'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import { fetchLogsByCategory } from '../lib/utils'
 import type { LogCategory, UsageLogDetailSelection } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
 import { DetailsDialog } from './dialogs/details-dialog'
+import {
+  LogValueFilterProvider,
+  LogValueFilterChips,
+  type LogValueFilterKey,
+} from './log-value-filter'
 import { TaskLogsFilterBar } from './task-logs-filter-bar'
 import { UsageLogsMobileList } from './usage-logs-mobile-card'
 import { useLogsViewScope, type LogsViewAccess } from './usage-logs-provider'
@@ -279,6 +285,25 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     isAdmin
   )
   const { clearHistory } = history
+  const filterByValue = useCallback(
+    (field: LogValueFilterKey, value: string) => {
+      if (!commonUsage || !getLogValueFilterKeys(isAdmin).includes(field)) {
+        return
+      }
+      clearHistory()
+      if (scrollArea.current) scrollArea.current.scrollTop = 0
+      previousScrollTop.current = 0
+      void navigate({
+        search: (previous) => ({
+          ...previous,
+          [field]: previous[field] === value ? undefined : value,
+          page: 1,
+        }),
+        resetScroll: false,
+      })
+    },
+    [commonUsage, isAdmin, clearHistory, navigate]
+  )
   const { view, showLatest } = useLiveUsageLogs({
     snapshot: isPlaceholderData ? undefined : data?.live,
     preset,
@@ -417,82 +442,94 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           }
         }}
       >
-        <DataTablePage
-          table={table}
-          compactPagination={isCommon && (isMobile || layout === 'cards')}
-          mobileLayout={isCommon ? isMobile || layout === 'cards' : undefined}
-          columns={columns as ColumnDef<Record<string, unknown>>[]}
-          isLoading={isLoadingData}
-          isFetching={isFetching}
-          emptyTitle={t('No Logs Found')}
-          emptyDescription={
-            logSource === 'test'
-              ? t(
-                  'No test logs available. Successful model tests with usage data will appear here.'
-                )
-              : t(
-                  'No usage logs available. Logs will appear here once API calls are made.'
-                )
-          }
-          skeletonKeyPrefix='usage-log-skeleton'
-          applyHeaderSize={!isCommon}
-          uniformCellText={!isCommon}
-          getColumnClassName={getColumnClassName}
-          tableClassName={
-            isCommon
-              ? cn(
-                  'rounded-none border-0',
-                  styles.grid,
-                  layout === 'compact' &&
-                    table.getColumn('model_name')?.getIsVisible() &&
-                    styles.compact
-                )
-              : '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
-          }
-          mobile={
-            <UsageLogsMobileList
-              table={table}
-              isLoading={isLoadingData}
-              logCategory={logCategory}
-            />
-          }
-          toolbar={
-            isCommon ? (
-              <CommonLogsFilterBar
-                table={table}
-                columnFiltersInHeader={
-                  commonUsage && !isMobile && layout !== 'cards'
-                }
-                onLiveTotal={view?.exactTotal}
-              />
-            ) : (
-              <TaskLogsFilterBar table={table} logCategory={logCategory} />
-            )
-          }
-          renderRow={(row) => {
-            const logType = (row.original as Record<string, unknown>).type as
-              | number
-              | undefined
-            let tintClass =
-              isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
-            if (isCommon && isAdmin) {
-              const other = getLogMetadata(row.original as UsageLog)
-              if (other?.admin_info?.quota_saturation) {
-                tintClass = quotaSaturationRowTint
-              }
+        <LogValueFilterProvider
+          enabled={commonUsage}
+          isAdmin={isAdmin}
+          values={searchParams}
+          onFilter={filterByValue}
+        >
+          <DataTablePage
+            table={table}
+            compactPagination={isCommon && (isMobile || layout === 'cards')}
+            mobileLayout={isCommon ? isMobile || layout === 'cards' : undefined}
+            columns={columns as ColumnDef<Record<string, unknown>>[]}
+            isLoading={isLoadingData}
+            isFetching={isFetching}
+            emptyTitle={t('No Logs Found')}
+            emptyDescription={
+              logSource === 'test'
+                ? t(
+                    'No test logs available. Successful model tests with usage data will appear here.'
+                  )
+                : t(
+                    'No usage logs available. Logs will appear here once API calls are made.'
+                  )
             }
-
-            return (
-              <DataTableRow
-                key={row.id}
-                row={row}
-                className={cn('transition-colors', tintClass)}
-                getColumnClassName={getColumnClassName}
-                cellRenderColumns={table.options.columns}
+            skeletonKeyPrefix='usage-log-skeleton'
+            applyHeaderSize={!isCommon}
+            uniformCellText={!isCommon}
+            getColumnClassName={getColumnClassName}
+            tableClassName={
+              isCommon
+                ? cn(
+                    'rounded-none border-0',
+                    styles.grid,
+                    layout === 'compact' &&
+                      table.getColumn('model_name')?.getIsVisible() &&
+                      styles.compact
+                  )
+                : '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
+            }
+            mobile={
+              <UsageLogsMobileList
+                table={table}
+                isLoading={isLoadingData}
+                logCategory={logCategory}
               />
-            )
-          }}
-        />
+            }
+            toolbar={
+              isCommon ? (
+                <>
+                  <CommonLogsFilterBar
+                    table={table}
+                    columnFiltersInHeader={
+                      commonUsage && !isMobile && layout !== 'cards'
+                    }
+                    onLiveTotal={view?.exactTotal}
+                  />
+                  <LogValueFilterChips />
+                </>
+              ) : (
+                <TaskLogsFilterBar table={table} logCategory={logCategory} />
+              )
+            }
+            renderRow={(row) => {
+              const logType = (row.original as Record<string, unknown>).type as
+                | number
+                | undefined
+              let tintClass =
+                isCommon && logType != null
+                  ? (logTypeRowTint[logType] ?? '')
+                  : ''
+              if (isCommon && isAdmin) {
+                const other = getLogMetadata(row.original as UsageLog)
+                if (other?.admin_info?.quota_saturation) {
+                  tintClass = quotaSaturationRowTint
+                }
+              }
+
+              return (
+                <DataTableRow
+                  key={row.id}
+                  row={row}
+                  className={cn('transition-colors', tintClass)}
+                  getColumnClassName={getColumnClassName}
+                  cellRenderColumns={table.options.columns}
+                />
+              )
+            }}
+          />
+        </LogValueFilterProvider>
         {view?.pending || view?.reset ? (
           <div className='pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-center'>
             <Button

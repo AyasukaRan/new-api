@@ -22,6 +22,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Action } from '@/components/ai-elements/actions'
+import { CopyButton } from '@/components/copy-button'
 import { TruncatedCell } from '@/components/data-table'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
@@ -85,6 +86,7 @@ import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { LogCostDisplay } from '../log-cost-display'
 import { LogHeaderFilter } from '../log-header-filter'
 import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
+import { LogFilterValue, useLogValueFilter } from '../log-value-filter'
 import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { RequestPluginLogMarker } from '../request-plugin-record'
@@ -457,6 +459,15 @@ export function useCommonLogsColumns(
           const { sensitiveVisible, setAffinityTarget, setAffinityDialogOpen } =
             useUsageLogsContext()
           const log = row.original
+          const filter = useLogValueFilter(
+            'channel',
+            sensitiveVisible &&
+              isDisplayableLogType(log.type) &&
+              log.channel > 0
+              ? String(log.channel)
+              : undefined,
+            log.channel_name
+          )
 
           if (!isDisplayableLogType(log.type)) return null
 
@@ -489,15 +500,22 @@ export function useCommonLogsColumns(
                     <div className='flex max-w-full min-w-0 flex-col gap-0.5' />
                   }
                 >
-                  <div className='inline-flex w-fit max-w-full items-center gap-1.5'>
-                    <StatusBadge
-                      label={channelIdDisplay}
-                      type='text'
-                      copyText={String(log.channel)}
-                      size='sm'
-                      showDot={false}
-                      className='text-foreground dark:text-foreground font-mono text-xs font-semibold'
-                    />
+                  <div className='group/log-channel inline-flex w-fit max-w-full items-center gap-1.5'>
+                    <LogFilterValue
+                      field='channel'
+                      value={filter ? String(log.channel) : undefined}
+                      label={log.channel_name}
+                    >
+                      <StatusBadge
+                        label={channelIdDisplay}
+                        type='text'
+                        copyText={String(log.channel)}
+                        copyable={!filter}
+                        size='sm'
+                        showDot={false}
+                        className='text-foreground dark:text-foreground font-mono text-xs font-semibold'
+                      />
+                    </LogFilterValue>
                     {showMultiKeyIndex && (
                       <StatusBadge
                         label={String(multiKeyIndex)}
@@ -563,11 +581,27 @@ export function useCommonLogsColumns(
                         <Sparkles className='size-3' />
                       </button>
                     )}
+                    {filter && (
+                      <CopyButton
+                        value={String(log.channel)}
+                        aria-label={t('Copy {{field}}', {
+                          field: t('Channel'),
+                        })}
+                        className='size-4 opacity-0 group-hover/log-channel:opacity-100 focus-visible:opacity-100'
+                        iconClassName='size-3'
+                      />
+                    )}
                   </div>
                   {log.channel_name && (
-                    <span className='text-muted-foreground truncate text-[11px]'>
-                      {channelName}
-                    </span>
+                    <LogFilterValue
+                      field='channel'
+                      value={filter ? String(log.channel) : undefined}
+                      label={log.channel_name}
+                    >
+                      <span className='text-muted-foreground truncate text-[11px]'>
+                        {channelName}
+                      </span>
+                    </LogFilterValue>
                   )}
                 </TooltipTrigger>
                 <TooltipContent>
@@ -630,6 +664,7 @@ export function useCommonLogsColumns(
             <ModelBadge
               wrapText
               modelName={model.name}
+              filterValue={row.original.model_name}
               actualModel={model.actualModel}
               responseModel={model.responseModel}
             />
@@ -754,9 +789,14 @@ export function useCommonLogsColumns(
                 isDisplayableLogType(log.type) &&
                 log.type !== LOG_TYPE_ENUM.REFUND &&
                 other?.request_path && (
-                  <TruncatedCell cellClassName='text-muted-foreground max-w-full font-mono text-xs'>
-                    {other.request_path}
-                  </TruncatedCell>
+                  <LogFilterValue
+                    field='requestPath'
+                    value={other.request_path.split('?', 1)[0]}
+                  >
+                    <TruncatedCell cellClassName='text-muted-foreground max-w-full font-mono text-xs'>
+                      {other.request_path}
+                    </TruncatedCell>
+                  </LogFilterValue>
                 )}
             </div>
           )

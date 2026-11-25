@@ -41,7 +41,7 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { UsageLogs } from '../..'
-import { usageLogSchema } from '../../data/schema'
+import { usageLogSchema, type UsageLog } from '../../data/schema'
 
 function entry(id: number) {
   return usageLogSchema.parse({
@@ -71,20 +71,22 @@ function renderLogs(
   path = '/usage-logs/common',
   content?: string | ((id: number) => string),
   initialIds = [11, 10],
-  olderIds?: number[]
+  olderIds?: number[],
+  recordOverrides?: Partial<UsageLog>
 ) {
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'tester', role: ROLE.ADMIN })
   let records = initialIds.map(entry).map((record) => ({
     ...record,
+    ...recordOverrides,
     content:
       typeof content === 'function'
         ? content(record.id)
         : (content ?? record.content),
   }))
   let liveTotal = 0
-  const selfRecords = [entry(100)]
+  const selfRecords = [{ ...entry(100), ...recordOverrides }]
   const defaultTotal = path.includes('page=2') ? 205 : 2
   const initialTotal = olderIds
     ? new Set([...initialIds, ...olderIds]).size
@@ -256,6 +258,161 @@ test('column filters apply across pages and clear only their own fields', async 
     'Enter a positive integer'
   )
   expect(router.state.location.search.channel).toBeUndefined()
+})
+
+test('row values combine filters, replace or remove one field, and preserve the selected time and result', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?page=2&pageSize=50&startTime=1788840000000&endTime=1788926400000&result=failure',
+    undefined,
+    [11, 10],
+    undefined,
+    {
+      username: 'alice',
+      user_admin_nickname: 'Operations',
+      token_name: 'work-key',
+      group: 'premium',
+    }
+  )
+  await user.click(
+    (
+      await screen.findAllByRole('button', {
+        name: 'Filter · Username: Operations · alice',
+      })
+    )[0]
+  )
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      page: 1,
+      pageSize: 50,
+      startTime: 1788840000000,
+      endTime: 1788926400000,
+      result: 'failure',
+      username: 'alice',
+    })
+  )
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  const model = await screen.findByRole('button', {
+    name: 'Filter · Model Name: model-11',
+  })
+  model.focus()
+  await user.keyboard('{Enter}')
+  await user.click(
+    (
+      await screen.findAllByRole('button', { name: 'Filter · Group: premium' })
+    )[0]
+  )
+  await user.click(
+    (
+      await screen.findAllByRole('button', {
+        name: 'Filter · Token Name: work-key',
+      })
+    )[0]
+  )
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      username: 'alice',
+      model: 'model-11',
+      group: 'premium',
+      token: 'work-key',
+      page: 1,
+    })
+  )
+  await waitFor(() =>
+    expect(
+      vi.mocked(api.get).mock.calls.some(([path]) => {
+        const url = new URL(path, 'http://localhost')
+        return (
+          url.pathname === '/api/log/' &&
+          url.searchParams.get('username') === 'alice' &&
+          url.searchParams.get('model_name') === 'model-11' &&
+          url.searchParams.get('group') === 'premium' &&
+          url.searchParams.get('token_name') === 'work-key'
+        )
+      })
+    ).toBe(true)
+  )
+  await user.click(
+    screen.getByRole('button', { name: 'Filter · Model Name: model-10' })
+  )
+  await waitFor(() =>
+    expect(router.state.location.search.model).toBe('model-10')
+  )
+  await user.click(
+    screen.getByRole('button', {
+      name: 'Remove filter · Model Name: model-10',
+      pressed: true,
+    })
+  )
+  await waitFor(() =>
+    expect(router.state.location.search.model).toBeUndefined()
+  )
+  await user.click(
+    within(screen.getByRole('group', { name: 'Filters' })).getByRole('button', {
+      name: 'Remove filter · Username: alice',
+    })
+  )
+  await waitFor(() =>
+    expect(router.state.location.search.username).toBeUndefined()
+  )
+  expect(router.state.location.search).toMatchObject({
+    token: 'work-key',
+    group: 'premium',
+    result: 'failure',
+    startTime: 1788840000000,
+    endTime: 1788926400000,
+  })
+})
+
+test('row shortcuts respect hidden values and the personal view', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?username=alice',
+    undefined,
+    [11],
+    undefined,
+    {
+      username: 'alice',
+      user_admin_nickname: 'Operations',
+      token_name: 'work-key',
+      channel: 7,
+    }
+  )
+  await screen.findByRole('button', {
+    name: 'Remove filter · Username: Operations · alice',
+  })
+  await user.click(screen.getByRole('button', { name: 'Hide' }))
+  expect(
+    screen.queryByRole('button', {
+      name: /(?:Filter|Remove filter) · Username:.*alice/,
+    })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Filter · Token Name: work-key' })
+  ).not.toBeInTheDocument()
+  expect(
+    within(screen.getByRole('group', { name: 'Filters' })).getByRole('button')
+  ).toHaveAccessibleName('Remove filter · Username: ••••')
+  expect(router.state.location.search.username).toBe('alice')
+  await user.click(screen.getByRole('button', { name: 'Show' }))
+  await user.click(screen.getByRole('button', { name: 'Only Mine' }))
+  await screen.findByText('model-100')
+  expect(
+    screen.queryByRole('button', {
+      name: /(?:Filter|Remove filter) · Username:/,
+    })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: /Filter · Channel ID:/ })
+  ).not.toBeInTheDocument()
+  await user.click(
+    screen.getByRole('button', { name: 'Filter · Model Name: model-100' })
+  )
+  await waitFor(() =>
+    expect(router.state.location.search.model).toBe('model-100')
+  )
 })
 
 test('the Time header no longer exposes the replaced log-type filter', async () => {

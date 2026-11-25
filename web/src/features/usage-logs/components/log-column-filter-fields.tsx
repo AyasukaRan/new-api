@@ -29,6 +29,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import { useLogUserOptions } from '../hooks/use-log-user-options'
 import {
   getLogColumnFilterKeys,
+  logColumnFilterLabels,
   isValidLogChannelFilter,
   type LogColumnFilterKey,
   type LogColumnFilterValues,
@@ -131,20 +132,6 @@ const effortSuggestions = [
   'xhigh',
   'max',
 ]
-const fieldLabels = {
-  type: 'Type',
-  responseTransport: 'Response mode',
-  channel: 'Channel ID',
-  token: 'Token Name',
-  username: 'Username',
-  group: 'Group',
-  model: 'Model Name',
-  reasoningEffort: 'Reasoning Effort',
-  clientTool: 'Client',
-  ip: 'IP Address',
-  requestPath: 'Endpoint',
-} as const
-
 export function LogColumnFilterFields(props: {
   column: LogFilterColumn
   isAdmin: boolean
@@ -161,7 +148,7 @@ export function LogColumnFilterFields(props: {
   return (
     <>
       {getLogColumnFilterKeys(props.column, props.isAdmin).map((key) => {
-        const label = t(fieldLabels[key])
+        const label = t(logColumnFilterLabels[key])
         const caption = props.showLabels
           ? { id: `${id}-${key}`, text: label }
           : undefined

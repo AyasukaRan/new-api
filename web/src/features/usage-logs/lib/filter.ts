@@ -126,6 +126,26 @@ export type LogFilterColumn = keyof typeof columnKeys
 export type LogColumnFilterKey = (typeof columnKeys)[LogFilterColumn][number]
 export type LogColumnFilterValues = Partial<Record<LogColumnFilterKey, string>>
 
+export const logColumnFilterLabels = {
+  type: 'Type',
+  responseTransport: 'Response mode',
+  channel: 'Channel ID',
+  token: 'Token Name',
+  username: 'Username',
+  group: 'Group',
+  model: 'Model Name',
+  reasoningEffort: 'Reasoning Effort',
+  clientTool: 'Client',
+  ip: 'IP Address',
+  requestPath: 'Endpoint',
+} as const
+
+export function getLogValueFilterKeys(isAdmin: boolean) {
+  return (Object.keys(columnKeys) as LogFilterColumn[])
+    .flatMap((column) => getLogColumnFilterKeys(column, isAdmin))
+    .filter((key) => key !== 'type')
+}
+
 export function isValidLogChannelFilter(value?: string) {
   const text = value?.trim() ?? ''
   return (
