@@ -1,0 +1,25 @@
+name: Build home image
+
+on:
+  push:
+    branches: [ran]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: home-110-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'AyasukaRan/new-api' && github.ref == 'refs/heads/ran'
+    runs-on: [self-hosted, linux, x64, home-110]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build and verify the home image
+        run: bash deploy/home/build.sh
