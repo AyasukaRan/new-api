@@ -317,7 +317,7 @@ export function RequestOriginMap(props: {
         />
       ) : (
         <>
-          <div className='grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_17rem]'>
+          <div className='grid min-w-0 grid-cols-1 xl:grid-cols-[minmax(0,7fr)_minmax(17rem,3fr)]'>
             <div className='relative min-w-0 px-3 pt-3 pb-2 sm:px-5'>
               <div className='relative z-10 mb-2 flex flex-wrap gap-x-6 gap-y-2 text-xs'>
                 <span className='text-muted-foreground'>
@@ -339,7 +339,7 @@ export function RequestOriginMap(props: {
                   </strong>
                 </span>
               </div>
-              <div className='relative mx-auto aspect-[2/1] max-h-[440px] w-full'>
+              <div className='relative mx-auto aspect-[2/1] max-h-[680px] w-full'>
                 <OriginMapCanvas
                   points={points.slice(0, 500)}
                   pulses={pulses}
