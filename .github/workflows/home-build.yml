@@ -1,4 +1,4 @@
-name: Build home image
+name: Build and publish home image
 
 on:
   push:
@@ -16,6 +16,9 @@ jobs:
   build:
     if: github.repository == 'AyasukaRan/new-api' && github.ref == 'refs/heads/ran'
     runs-on: [self-hosted, linux, x64, home-110]
+    permissions:
+      contents: read
+      packages: write
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -23,3 +26,30 @@ jobs:
           persist-credentials: false
       - name: Build and verify the home image
         run: bash deploy/home/build.sh
+      - name: Publish verified image to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/ghcr.XXXXXXXX")
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+          registry="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="ran-${GITHUB_SHA:0:9}"
+          docker tag "new-api:$version" "$registry:$version"
+          docker push "$registry:$version"
+          digest=$(docker buildx imagetools inspect "$registry:$version" --format '{{.Manifest.Digest}}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'Published `%s:%s` at `%s`.\n' "$registry" "$version" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+          # A rerun of an older commit should publish only its version tag.
+          head_sha=$(curl --fail --silent --show-error --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git/ref/heads/ran" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          if [[ "$head_sha" == "$GITHUB_SHA" ]]; then
+            docker buildx imagetools create --prefer-index=false --tag "$registry:ran" "$registry@$digest"
+            [[ "$(docker buildx imagetools inspect "$registry:ran" --format '{{.Manifest.Digest}}')" == "$digest" ]]
+            printf 'Updated `%s:ran` to the same digest.\n' "$registry" >> "$GITHUB_STEP_SUMMARY"
+          fi
