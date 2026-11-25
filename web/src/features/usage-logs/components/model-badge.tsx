@@ -211,7 +211,10 @@ export function ModelBadge(props: ModelBadgeProps) {
       <CopyButton
         value={props.modelName}
         aria-label={t('Copy {{field}}', { field: t('Model') })}
-        className='size-4 opacity-0 group-hover/log-model:opacity-100 focus-visible:opacity-100'
+        className={cn(
+          'size-4 opacity-0 group-hover/log-model:opacity-100 focus-visible:opacity-100',
+          props.onInspect && 'size-8 opacity-100'
+        )}
         iconClassName='size-3'
       />
     </span>
