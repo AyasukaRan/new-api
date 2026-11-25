@@ -178,7 +178,9 @@ test('leaves old records without metadata unlabelled instead of claiming no tool
   expect(screen.queryByText('No tools invoked')).not.toBeInTheDocument()
 })
 
-test('distinguishes confirmed empty tool output from a partial observation', () => {
+test('distinguishes confirmed empty tools from a partial observation and explains the icon on focus', async () => {
+  const user = userEvent.setup()
+  const label = 'Tool details incomplete'
   const view = render(
     <RequestMetadataTags
       isAdmin
@@ -187,6 +189,7 @@ test('distinguishes confirmed empty tool output from a partial observation', () 
     />
   )
   expect(screen.getByText('No tools invoked')).toBeInTheDocument()
+  expect(screen.queryByRole('img', { name: label })).not.toBeInTheDocument()
   view.rerender(
     <RequestMetadataTags
       isAdmin
@@ -194,8 +197,30 @@ test('distinguishes confirmed empty tool output from a partial observation', () 
       expanded
     />
   )
-  expect(screen.getByText('Tool details incomplete')).toBeInTheDocument()
+  const indicator = screen.getByRole('img', { name: label })
+  expect(screen.queryByText(label)).not.toBeInTheDocument()
   expect(screen.queryByText('No tools invoked')).not.toBeInTheDocument()
+  await user.tab()
+  expect(indicator).toHaveFocus()
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(label)
+})
+
+test('explains the partial observation icon on hover alongside recorded tool calls', async () => {
+  const user = userEvent.setup()
+  const label = 'Tool details incomplete'
+  render(
+    <RequestMetadataTags
+      isAdmin
+      field='invoked_tools'
+      metadata={{ invoked_tools: ['exec_command'], tool_observation: 'partial' }}
+    />
+  )
+  expect(
+    screen.getByRole('button', { name: 'Tool: exec_command' })
+  ).toBeVisible()
+  expect(screen.queryByText(label)).not.toBeInTheDocument()
+  await user.hover(screen.getByRole('img', { name: label }))
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(label)
 })
 
 test('shows two tools and lets keyboard users expand the remaining tool names', async () => {

@@ -150,8 +150,13 @@ test.each([
     const { rerender } = render(
       <LogRequestInfoCards log={log} other={metadata} isAdmin />
     )
-    expect(screen.getByText(label)).toBeVisible()
+    const observation =
+      state === 'partial'
+        ? screen.getByRole('img', { name: label })
+        : screen.getByText(label)
+    expect(observation).toBeVisible()
     rerender(<LogRequestInfoCards log={log} other={metadata} isAdmin={false} />)
+    expect(screen.queryByRole('img', { name: label })).not.toBeInTheDocument()
     expect(screen.queryByText(label)).not.toBeInTheDocument()
   }
 )

@@ -16,13 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Brain, Terminal, Wrench } from 'lucide-react'
+import { Brain, Terminal, Unlink, Wrench } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { BadgeListCell } from '@/components/data-table'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -179,11 +180,26 @@ export function RequestMetadataTags(props: {
     return null
   }
 
+  const incompleteTools = partial && (
+    <Tooltip>
+      <TooltipTrigger
+        render={<span role='img' tabIndex={0} />}
+        aria-label={t('Tool details incomplete')}
+        className='text-warning focus-visible:ring-ring inline-flex size-6 shrink-0 cursor-help items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none'
+      >
+        <Unlink aria-hidden className='size-4' />
+      </TooltipTrigger>
+      <TooltipContent role='tooltip'>
+        {t('Tool details incomplete')}
+      </TooltipContent>
+    </Tooltip>
+  )
+
   if (
     props.field === 'invoked_tools' &&
     !props.expanded &&
     adminMetadata &&
-    tools.length > 0
+    (tools.length > 0 || partial)
   ) {
     return (
       <div
@@ -213,14 +229,7 @@ export function RequestMetadataTags(props: {
             +{tools.length - 3}
           </ToolCallPopover>
         )}
-        {partial && (
-          <span
-            title={t('Tool details incomplete')}
-            aria-label={t('Tool details incomplete')}
-          >
-            …
-          </span>
-        )}
+        {incompleteTools}
       </div>
     )
   }
@@ -286,13 +295,7 @@ export function RequestMetadataTags(props: {
             />
           </div>
         ))}
-      {partial && (
-        <StatusBadge
-          label={t('Tool details incomplete')}
-          variant='orange'
-          copyable={false}
-        />
-      )}
+      {incompleteTools}
       {noTools && (
         <span className='text-muted-foreground text-xs'>
           {t('No tools invoked')}
