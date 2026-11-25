@@ -213,12 +213,14 @@ export function ErrorHistoryInventory(props: {
       )}
       {query.data && (
         <StaticDataTable
+          tableClassName='max-sm:min-w-3xl'
           data={groups.slice(0, visible)}
           emptyContent={t('No matching errors')}
           columns={[
             {
               id: 'pattern',
               header: t('Error pattern'),
+              className: 'max-sm:min-w-72',
               cell: (row) => (
                 <code className='block max-w-xl text-xs wrap-anywhere whitespace-pre-wrap'>
                   {row.pattern}

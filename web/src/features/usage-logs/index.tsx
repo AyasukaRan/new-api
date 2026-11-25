@@ -132,11 +132,11 @@ function UsageLogsContent() {
 
   return (
     <>
-      <SectionPageLayout fixedContent>
+      <SectionPageLayout fixedContent stackActionsOnMobile>
         <SectionPageLayout.Title>
           {t(pageMeta.titleKey)}
         </SectionPageLayout.Title>
-        <SectionPageLayout.Actions>
+        <SectionPageLayout.Actions className='max-sm:w-full'>
           {!isTask && <LogMetricLegend isAdmin={isAdminView} />}
           {canManageScope && isModelLog && (
             <Toggle
