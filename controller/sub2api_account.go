@@ -78,7 +78,7 @@ func GetSub2APIChannel(c *gin.Context) {
 		return
 	}
 	if !model.Sub2APIStorageReady() {
-		common.ApiSuccess(c, gin.H{"encryption_ready": false, "accounts": []any{}, "keys": []any{}})
+		common.ApiSuccess(c, gin.H{"encryption_ready": false, "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": []any{}, "keys": []any{}})
 		return
 	}
 	accounts, err := model.ListSub2APIAccounts(channelID)
@@ -121,7 +121,7 @@ func GetSub2APIChannel(c *gin.Context) {
 	if accounts == nil {
 		accounts = []model.Sub2APIAccount{}
 	}
-	common.ApiSuccess(c, gin.H{"encryption_ready": service.Sub2APIEncryptionReady(), "accounts": accounts, "keys": rows})
+	common.ApiSuccess(c, gin.H{"encryption_ready": service.Sub2APIEncryptionReady(), "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": accounts, "keys": rows})
 }
 
 // ManageSub2APIChannel handles the narrow authenticated account operations.
@@ -131,7 +131,7 @@ func ManageSub2APIChannel(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !sub2APISecureEntry(c.Request) {
+	if !sub2APIManagementAllowed(c.Request) {
 		sub2APIManagementError(c, &service.Sub2APIError{Code: "SUB2API_SECURE_ENTRY_REQUIRED"})
 		return
 	}
@@ -220,6 +220,11 @@ func ManageSub2APIChannel(c *gin.Context) {
 	}
 	recordManageAudit(c, "channel.update", map[string]any{"id": channelID, "source": "sub2api", "action": action, "account_id": input.AccountID, "changed_fields": []string{"sub2api_account"}})
 	common.ApiSuccess(c, result)
+}
+
+func sub2APIManagementAllowed(request *http.Request) bool {
+	// HTTP compatibility is deployment-only; it does not make the connection secure.
+	return sub2APISecureEntry(request) || common.GetEnvOrDefaultBool("SUB2API_ALLOW_HTTP_MANAGEMENT", false)
 }
 
 // Only a TLS terminator explicitly configured for this credential endpoint may

@@ -1195,7 +1195,7 @@ describe('request content disclosure in log details', () => {
     useAuthStore.getState().auth.reset()
   })
 
-  test('opens captured prompts on demand and distinguishes local estimates from recorded usage', async () => {
+  test('shows input statistics without prompt bodies in overview and technical details', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValue({
       data: {
         success: true,
@@ -1234,11 +1234,22 @@ describe('request content disclosure in log details', () => {
     const card = within(screen.getByRole('region', { name: 'Token Breakdown' }))
     expect(get).not.toHaveBeenCalled()
     await userEvent.click(
-      card.getByRole('button', { name: 'Input composition and prompts' })
+      card.getByRole('button', { name: /^Input composition/ })
     )
+    expect(await card.findByText('≈ 30')).toBeVisible()
+    expect(card.getByText('System prompt')).toBeVisible()
+    expect(card.getByText('20')).toBeVisible()
+    expect(card.getByText('Developer instructions')).toBeVisible()
+    expect(card.getByText('10')).toBeVisible()
     expect(
-      await card.findByText('System line 1 System line 2')
-    ).toHaveTextContent('System line 1 System line 2')
+      card.queryByText('System line 1 System line 2')
+    ).not.toBeInTheDocument()
+    expect(card.queryByText('Developer text')).not.toBeInTheDocument()
+    expect(
+      card.queryByRole('button', {
+        name: /System prompt|Developer instructions|Copy to clipboard/,
+      })
+    ).not.toBeInTheDocument()
     expect(get).toHaveBeenCalledWith(
       '/api/log/input_analysis',
       expect.objectContaining({
@@ -1253,13 +1264,31 @@ describe('request content disclosure in log details', () => {
       card.getByText('Referenced history is outside this request.')
     ).toBeVisible()
     await userEvent.click(
-      card.getByRole('button', { name: /Developer instructions/ })
+      screen.getByRole('tab', { name: 'Technical details' })
     )
-    expect(card.getByText('Developer text')).toBeVisible()
+    const technical = within(
+      screen.getByRole('tabpanel', { name: 'Technical details' })
+    )
+    await userEvent.click(
+      technical.getByRole('button', { name: 'Input composition' })
+    )
+    expect(await technical.findByText('≈ 30')).toBeVisible()
+    expect(
+      technical.queryByText('System line 1 System line 2')
+    ).not.toBeInTheDocument()
+    expect(technical.queryByText('Developer text')).not.toBeInTheDocument()
+    expect(
+      technical.queryByRole('button', {
+        name: /System prompt|Developer instructions|Copy to clipboard/,
+      })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'View request trace' })
+    ).toBeVisible()
     view.rerender(<DetailsDialog {...props} isAdmin={false} />)
     expect(screen.queryByText('Developer text')).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Input composition and prompts' })
+      screen.queryByRole('button', { name: 'Input composition' })
     ).not.toBeInTheDocument()
   })
 

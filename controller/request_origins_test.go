@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -206,5 +207,108 @@ func TestRequestOriginsGeoIP(t *testing.T) {
 		after, status := resolver.Lookup("8.8.8.8")
 		assert.Equal(t, "located", status)
 		assert.Equal(t, first, after, "a corrupt replacement must retain the last verified database")
+	})
+}
+
+type requestOriginFixtureResolver map[string]common.GeoIPLocation
+
+func (r requestOriginFixtureResolver) Status() (bool, int64) { return true, 100 }
+
+func (r requestOriginFixtureResolver) Lookup(ip string) (common.GeoIPLocation, string) {
+	if location, exists := r[ip]; exists {
+		return location, "located"
+	}
+	return common.GeoIPLocation{}, ip
+}
+
+func TestRequestOriginsCityAggregation(t *testing.T) {
+	t.Run("municipal districts join their documented city and retain the main city point", func(t *testing.T) {
+		resolver := requestOriginFixtureResolver{
+			"11.0.0.1": {CountryCode: "CN", Country: "China", Region: "Beijing", City: "Beijing", Latitude: 39.9, Longitude: 116.4},
+			"11.0.0.2": {CountryCode: "CN", Country: "China", Region: "Beijing", City: "Jinrongjie (Xicheng District)", Latitude: 39.91, Longitude: 116.36},
+			"11.0.0.3": {CountryCode: "CN", Country: "China", Region: "Shanghai", City: "Pudong (Pudong Xinqu)", Latitude: 31.22, Longitude: 121.54},
+			"11.0.0.4": {CountryCode: "CN", Country: "China", Region: "Shanghai", City: "Shanghai", Latitude: 31.23, Longitude: 121.47},
+			"11.0.0.5": {CountryCode: "CN", Country: "China", Region: "Shanghai", City: "Changning", Latitude: 31.22, Longitude: 121.42},
+			"11.0.0.6": {CountryCode: "CN", Country: "China", Region: "Hunan", City: "Changning", Latitude: 26.4, Longitude: 112.4},
+		}
+		rows := []model.RequestOriginRow{
+			{Ip: "11.0.0.1", CreatedAt: 10}, {Ip: "11.0.0.2", CreatedAt: 20},
+			{Ip: "11.0.0.3", CreatedAt: 30}, {Ip: "11.0.0.4", CreatedAt: 15},
+			{Ip: "11.0.0.5", CreatedAt: 40}, {Ip: "11.0.0.6", CreatedAt: 35},
+			{Ip: "private", CreatedAt: 41}, {Ip: "invalid", CreatedAt: 42}, {Ip: "unmapped", CreatedAt: 43},
+		}
+		result := aggregateRequestOrigins(rows, resolver)
+		require.Len(t, result.Points, 3)
+		assert.Equal(t, 9, result.Total)
+		assert.Equal(t, 6, result.Located)
+		assert.Equal(t, 3, result.Unmapped)
+		assert.Equal(t, 1, result.Private)
+		assert.Equal(t, 1, result.Invalid)
+		assert.EqualValues(t, 10, result.SampleStart)
+		assert.Equal(t, "Shanghai", result.Points[0].City)
+		assert.Equal(t, 3, result.Points[0].Count)
+		assert.EqualValues(t, 40, result.Points[0].LastSeen)
+		assert.Equal(t, resolver["11.0.0.4"], result.Points[0].GeoIPLocation)
+		assert.Equal(t, "Beijing", result.Points[1].City)
+		assert.Equal(t, 2, result.Points[1].Count)
+		assert.EqualValues(t, 20, result.Points[1].LastSeen)
+		assert.Equal(t, resolver["11.0.0.1"], result.Points[1].GeoIPLocation)
+		assert.Equal(t, resolver["11.0.0.6"], result.Points[2].GeoIPLocation)
+		reversed := slices.Clone(rows)
+		slices.Reverse(reversed)
+		assert.Equal(t, result.Points, aggregateRequestOrigins(reversed, resolver).Points)
+
+		// The snapshot and a district-only live batch identify the same city.
+		pulse := aggregateRequestOrigins(rows[2:3], resolver)
+		require.Len(t, pulse.Points, 1)
+		assert.Equal(t, result.Points[0].LocationID, pulse.Points[0].LocationID)
+		assert.Equal(t, "Shanghai", pulse.Points[0].City)
+	})
+
+	t.Run("city identity excludes coordinates but retains country and region", func(t *testing.T) {
+		resolver := requestOriginFixtureResolver{
+			"11.0.0.1": {CountryCode: "CN", Country: "China", Region: "Guangdong", City: "Shenzhen", Latitude: 22.5, Longitude: 114.0},
+			"11.0.0.2": {CountryCode: "cn", Country: "China", Region: " Guangdong ", City: " shenzhen ", Latitude: 22.6, Longitude: 114.1},
+			"11.0.0.3": {CountryCode: "US", Country: "United States", Region: "Illinois", City: "Springfield", Latitude: 39.8, Longitude: -89.6},
+			"11.0.0.4": {CountryCode: "US", Country: "United States", Region: "Massachusetts", City: "Springfield", Latitude: 42.1, Longitude: -72.6},
+			"11.0.0.5": {CountryCode: "CA", Country: "Canada", Region: "Manitoba", City: "Springfield", Latitude: 49.9, Longitude: -96.8},
+			"11.0.0.6": {CountryCode: "US", Country: "United States", Region: "Shanghai", City: "Changning", Latitude: 35, Longitude: -100},
+		}
+		rows := []model.RequestOriginRow{
+			{Ip: "11.0.0.1", CreatedAt: 1}, {Ip: "11.0.0.2", CreatedAt: 2},
+			{Ip: "11.0.0.3", CreatedAt: 3}, {Ip: "11.0.0.4", CreatedAt: 4},
+			{Ip: "11.0.0.5", CreatedAt: 5}, {Ip: "11.0.0.6", CreatedAt: 6},
+		}
+		result := aggregateRequestOrigins(rows, resolver)
+		require.Len(t, result.Points, 5)
+		assert.Equal(t, 2, result.Points[0].Count)
+		assert.Equal(t, "Shenzhen", result.Points[0].City)
+		assert.EqualValues(t, 2, result.Points[0].LastSeen)
+		for _, point := range result.Points[1:] {
+			assert.Equal(t, 1, point.Count)
+			if point.CountryCode == "US" && point.Region == "Shanghai" {
+				assert.Equal(t, "Changning", point.City)
+			}
+		}
+	})
+
+	t.Run("incomplete city identity keeps distinct unknown locations", func(t *testing.T) {
+		resolver := requestOriginFixtureResolver{
+			"11.0.0.1": {CountryCode: "CN", Country: "China", Region: "Guangdong", Latitude: 22.5, Longitude: 114.0},
+			"11.0.0.2": {CountryCode: "CN", Country: "China", Region: "Guangdong", Latitude: 23.1, Longitude: 113.3},
+			"11.0.0.3": {City: "Springfield", Latitude: 39.8, Longitude: -89.6},
+			"11.0.0.4": {City: "Springfield", Latitude: 42.1, Longitude: -72.6},
+			"11.0.0.5": {CountryCode: "US", Country: "United States", City: "Springfield", Latitude: 39.8, Longitude: -89.6},
+			"11.0.0.6": {CountryCode: "US", Country: "United States", City: "Springfield", Latitude: 42.1, Longitude: -72.6},
+		}
+		result := aggregateRequestOrigins([]model.RequestOriginRow{
+			{Ip: "11.0.0.1", CreatedAt: 1}, {Ip: "11.0.0.2", CreatedAt: 2},
+			{Ip: "11.0.0.3", CreatedAt: 3}, {Ip: "11.0.0.4", CreatedAt: 4},
+			{Ip: "11.0.0.5", CreatedAt: 5}, {Ip: "11.0.0.6", CreatedAt: 6},
+		}, resolver)
+		require.Len(t, result.Points, 6)
+		for _, point := range result.Points {
+			assert.Equal(t, 1, point.Count)
+		}
 	})
 }

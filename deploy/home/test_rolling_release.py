@@ -348,6 +348,79 @@ class RollingReleaseTests(unittest.TestCase):
             self.assertEqual(list(root.iterdir()), [])
             self.assertFalse(json.loads(output.getvalue())['deployment_performed'])
 
+    def test_http_sub2api_option_is_bound_to_resume_and_defaults_off(self):
+        flow = object.__new__(release.Rollout)
+        for saved, supplied in ((False, True), (True, False), (None, True)):
+            with self.subTest(saved=saved, supplied=supplied):
+                flow.state = {'trusted_https_proxy': None}
+                if saved is not None:
+                    flow.state['allow_http_sub2api_management'] = saved
+                flow.args = argparse.Namespace(trusted_https_proxy=None, allow_http_sub2api_management=supplied)
+                with self.assertRaisesRegex(RuntimeError, 'http_sub2api_management_changed'):
+                    flow.guard()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for options in ([], ['--allow-http-sub2api-management']):
+                with self.subTest(options=options), patch.object(release, 'preflight', return_value=(None, None, None, {})), \
+                        patch.object(release, 'initialize', side_effect=AssertionError('mutation')), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(release.main(['--release', str(root / 'release.json'), '--backup', str(root / 'backup.json'),
+                                                   '--state', str(root / 'state.json'), *options]), 0)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_http_sub2api_option_only_changes_candidate_and_preserves_rollback(self):
+        key = 'SUB2API_ALLOW_HTTP_MANAGEMENT'
+        for enabled, existing in ((False, None), (True, None), (False, 'true'), (True, 'false')):
+            with self.subTest(enabled=enabled, existing=existing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                old = app('old', 'old-container')
+                old['Config']['Env'].append('NODE_NAME=fixture')
+                old['State']['Health'] = {'Status': 'healthy'}
+                if existing is not None:
+                    old['Config']['Env'].append(key + '=' + existing)
+                old_env = release.environment(old['Config']['Env'])
+                original = {'name': 'fixture', 'services': {'new-api': {'environment': old_env, 'image': 'old'}}}
+                compose, env, template = (root / name for name in ('compose', 'env', 'template'))
+                compose.write_bytes(release.json_bytes(original))
+                env.write_bytes(b'UNCHANGED=fixture\n')
+                template.write_bytes(b'fixture')
+                args = argparse.Namespace(state=root / 'state.json', release=root / 'release/release.json', backup=root / 'backup.json',
+                                          trusted_https_proxy=None, allow_http_sub2api_management=enabled)
+                raw_index = b'<html>fixture</html>'
+                dist = root / 'candidate/web/dist'
+                dist.mkdir(parents=True)
+                (dist / 'index.html').write_bytes(raw_index)
+                receipt = {'image': 'new', 'image_id': 'new', 'runtime_base_id': 'old', 'version': 'new',
+                           'entry_assets': {}, 'index_sha256': hashlib.sha256(raw_index).hexdigest()}
+                args.release.parent.mkdir()
+                args.release.write_bytes(release.json_bytes(receipt))
+                with patch.object(release, 'preflight', return_value=(receipt, compose.read_bytes(), old, {'old_version': 'old'})), \
+                        patch.object(release, 'COMPOSE', compose), patch.object(release, 'ENV', env), \
+                        patch.object(release, 'EDGE_TEMPLATE', template), patch.object(release, 'command', return_value=''):
+                    state = release.initialize(args)
+                self.assertIs(state['allow_http_sub2api_management'], enabled)
+                self.assertEqual(release.read_json(compose), original)
+                self.assertEqual(env.read_bytes(), b'UNCHANGED=fixture\n')
+                flow = release.Rollout(args, state)
+                flow.release = receipt
+                for filename, service_name, container_name in (('compose.final', 'new-api', release.APP),
+                                                                 ('compose.bridge', 'new-api-bridge', release.BRIDGE)):
+                    saved = release.read_json(flow.private / filename)['services'][service_name]['environment']
+                    self.assertEqual(saved.get(key), 'true' if enabled else existing)
+                    candidate = copy.deepcopy(old)
+                    candidate['Image'] = 'new'
+                    candidate['Config']['Env'] = saved
+                    if container_name == release.BRIDGE:
+                        candidate['HostConfig']['PortBindings'] = {}
+                    with patch.object(release, 'inspect', return_value=candidate), \
+                            patch.object(release, 'fetch', side_effect=lambda _item, path: b'{"success":true,"data":{"version":"new"}}' if path == '/api/status' else raw_index):
+                        flow.ready(container_name)
+                with patch.object(release, 'inspect', return_value=old), \
+                        patch.object(release, 'fetch', return_value=b'{"success":true,"data":{"version":"old"}}'):
+                    flow.ready(release.APP, old=True)
+                self.assertEqual(release.read_json(flow.private / 'app.before.json'), old)
+                self.assertEqual(release.read_json(flow.private / 'compose.before'), original)
+
     def test_different_journals_share_one_exclusive_release_lock(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

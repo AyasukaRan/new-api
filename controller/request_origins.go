@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -37,10 +38,18 @@ type requestOriginSnapshot struct {
 	GeoIPUpdatedAt int64                `json:"geoip_updated_at"`
 }
 
-func aggregateRequestOrigins(rows []model.RequestOriginRow, resolver *common.GeoIPResolver) requestOriginSnapshot {
+type requestOriginResolver interface {
+	Status() (bool, int64)
+	Lookup(string) (common.GeoIPLocation, string)
+}
+
+func aggregateRequestOrigins(rows []model.RequestOriginRow, resolver requestOriginResolver) requestOriginSnapshot {
 	result := requestOriginSnapshot{Points: make([]requestOriginPoint, 0), Total: len(rows)}
 	result.GeoIPAvailable, result.GeoIPUpdatedAt = resolver.Status()
-	points := make(map[common.GeoIPLocation]int)
+	points := make(map[common.GeoIPLocation]struct {
+		index   int
+		primary bool
+	})
 	for _, row := range rows {
 		if result.SampleStart == 0 || row.CreatedAt < result.SampleStart {
 			result.SampleStart = row.CreatedAt
@@ -57,16 +66,58 @@ func aggregateRequestOrigins(rows []model.RequestOriginRow, resolver *common.Geo
 			continue
 		}
 		result.Located++
-		index, exists := points[location]
-		if !exists {
-			key := fmt.Sprintf("%s/%s/%s/%g/%g", location.CountryCode, location.Region, location.City, location.Latitude, location.Longitude)
-			id := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))[:16]
-			index = len(result.Points)
-			points[location] = index
-			result.Points = append(result.Points, requestOriginPoint{GeoIPLocation: location, LocationID: id})
+		location.CountryCode = strings.ToUpper(strings.TrimSpace(location.CountryCode))
+		location.Country = strings.TrimSpace(location.Country)
+		location.Region = strings.TrimSpace(location.Region)
+		location.City = strings.TrimSpace(location.City)
+		municipality := ""
+		if location.CountryCode == "CN" {
+			// A municipality subdivision is city-level evidence; district names
+			// alone are ambiguous and must never identify their parent city.
+			switch strings.ToLower(location.Region) {
+			case "beijing", "北京", "北京市":
+				municipality = "Beijing"
+			case "shanghai", "上海", "上海市":
+				municipality = "Shanghai"
+			case "tianjin", "天津", "天津市":
+				municipality = "Tianjin"
+			case "chongqing", "重庆", "重庆市":
+				municipality = "Chongqing"
+			}
 		}
-		result.Points[index].Count++
-		result.Points[index].LastSeen = max(result.Points[index].LastSeen, row.CreatedAt)
+		primary := municipality == "" || strings.EqualFold(location.City, municipality) || strings.EqualFold(location.City, location.Region)
+		if municipality != "" {
+			location.Region, location.City = municipality, municipality
+		}
+		identity := location
+		identity.Country = strings.ToLower(identity.Country)
+		identity.Region = strings.ToLower(identity.Region)
+		identity.City = strings.ToLower(identity.City)
+		if identity.CountryCode != "" {
+			identity.Country = ""
+		}
+		if identity.City != "" && identity.Region != "" && (identity.CountryCode != "" || identity.Country != "") {
+			identity.Latitude, identity.Longitude = 0, 0
+		}
+		point, exists := points[identity]
+		if !exists {
+			key := fmt.Sprintf("%q/%q/%q/%q/%g/%g", identity.CountryCode, identity.Country, identity.Region, identity.City, identity.Latitude, identity.Longitude)
+			id := fmt.Sprintf("%x", sha256.Sum256([]byte(key)))[:16]
+			point.index, point.primary = len(result.Points), primary
+			result.Points = append(result.Points, requestOriginPoint{GeoIPLocation: location, LocationID: id})
+		} else {
+			current := result.Points[point.index].GeoIPLocation
+			// Prefer an explicit city record, then a deterministic recorded point
+			// rather than letting request order move the marker among districts.
+			earlierPoint := location.Latitude < current.Latitude || (location.Latitude == current.Latitude && location.Longitude < current.Longitude)
+			if (primary && !point.primary) || (primary == point.primary && earlierPoint) {
+				result.Points[point.index].GeoIPLocation = location
+				point.primary = primary
+			}
+		}
+		points[identity] = point
+		result.Points[point.index].Count++
+		result.Points[point.index].LastSeen = max(result.Points[point.index].LastSeen, row.CreatedAt)
 	}
 	slices.SortFunc(result.Points, func(a, b requestOriginPoint) int {
 		if order := cmp.Compare(b.Count, a.Count); order != 0 {

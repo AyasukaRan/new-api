@@ -97,6 +97,7 @@ export function Sub2APISettings(props: {
     gcTime: 0,
     meta: { errorToast: false },
   })
+  const managementAllowed = query.data?.management_allowed === true
   const mutation = useMutation({
     mutationFn: (request: {
       action: Sub2APIAction
@@ -143,7 +144,7 @@ export function Sub2APISettings(props: {
   ) => {
     if (
       channelId === null ||
-      !secureTransport ||
+      !managementAllowed ||
       props.disabled ||
       props.hasUnsavedChanges ||
       operation.current
@@ -224,7 +225,7 @@ export function Sub2APISettings(props: {
 
   const status = query.data
   const locked =
-    !secureTransport || props.disabled || props.hasUnsavedChanges || busy
+    !managementAllowed || props.disabled || props.hasUnsavedChanges || busy
   const key =
     status.keys.find((item) => item.key_identity === selectedKey) ??
     status.keys[0]
@@ -276,7 +277,7 @@ export function Sub2APISettings(props: {
           </Button>
         </div>
       </div>
-      {!secureTransport && (
+      {!managementAllowed && (
         <Alert>
           <AlertDescription>
             {t(
@@ -284,6 +285,11 @@ export function Sub2APISettings(props: {
             )}
           </AlertDescription>
         </Alert>
+      )}
+      {managementAllowed && !secureTransport && (
+        <p className='text-muted-foreground text-xs'>
+          {t('HTTP management is enabled. Use a trusted network.')}
+        </p>
       )}
       {props.hasUnsavedChanges && (
         <p className='text-muted-foreground text-xs'>
@@ -497,6 +503,9 @@ export function Sub2APISettings(props: {
           key={`${channelId}:${connectMode}`}
           channelId={channelId}
           mode={connectMode}
+          managementAllowed={
+            managementAllowed && !props.disabled && !props.hasUnsavedChanges
+          }
           onClose={() => setConnectMode(null)}
           onDone={invalidate}
         />

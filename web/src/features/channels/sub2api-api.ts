@@ -59,6 +59,7 @@ export interface Sub2APIKey {
 
 export interface Sub2APIStatus {
   encryption_ready: boolean
+  management_allowed: boolean
   accounts: Sub2APIAccount[]
   keys: Sub2APIKey[]
 }

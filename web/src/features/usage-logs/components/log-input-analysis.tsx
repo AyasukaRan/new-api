@@ -21,7 +21,6 @@ import { ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { CopyButton } from '@/components/copy-button'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import {
@@ -53,7 +52,7 @@ export function LogInputAnalysis(props: InputAnalysisProps) {
   return (
     <Collapsible open={open} onOpenChange={setOpen} className='min-w-0'>
       <CollapsibleTrigger className='group flex w-full items-center justify-between gap-2 py-2 text-start text-sm font-medium'>
-        {t('Input composition and prompts')}
+        {t('Input composition')}
         <ChevronDown
           aria-hidden='true'
           className='text-muted-foreground size-4 shrink-0 group-aria-expanded:rotate-180'
@@ -138,7 +137,6 @@ function RecordedInputAnalysis(
         color: names[key][1],
         count: category.count,
         value: category.estimated_tokens,
-        texts: category.texts,
       },
     ]
   })
@@ -160,7 +158,7 @@ function RecordedInputAnalysis(
             </span>
           </div>
           <LogBreakdownBar
-            label={t('Input composition and prompts')}
+            label={t('Input composition')}
             total={data.estimated_tokens}
             segments={rows}
           />
@@ -170,64 +168,26 @@ function RecordedInputAnalysis(
             <span className='text-muted-foreground text-end'>
               {t('Estimated tokens')}
             </span>
-            {rows.map(({ key, label, color, count, value, texts }) => {
-              const summary = (
-                <>
-                  <span className='flex min-w-0 items-center gap-1.5'>
-                    <span
-                      aria-hidden='true'
-                      className={`size-2 shrink-0 rounded-full ${color}`}
-                    />
-                    {label}
-                    {!!texts?.length && (
-                      <ChevronDown
-                        aria-hidden='true'
-                        className='text-muted-foreground size-3 shrink-0 group-aria-expanded:rotate-180'
-                      />
-                    )}
-                  </span>
-                  <span className='text-muted-foreground text-end tabular-nums'>
-                    {formatNumber(count, locale)}
-                  </span>
-                  <span className='text-end tabular-nums'>
-                    {formatNumber(value, locale)}
-                  </span>
-                </>
-              )
-              const rowClass =
-                'col-span-full grid grid-cols-subgrid items-center py-1.5 text-start'
-              if (!texts?.length || (key !== 'system' && key !== 'developer')) {
-                return (
-                  <div key={key} className={rowClass}>
-                    {summary}
-                  </div>
-                )
-              }
-              const prompt = texts.join('\n\n')
-              return (
-                <Collapsible
-                  key={key}
-                  defaultOpen={key === 'system'}
-                  className='col-span-full grid min-w-0 grid-cols-subgrid'
-                >
-                  <CollapsibleTrigger className={`group ${rowClass}`}>
-                    {summary}
-                  </CollapsibleTrigger>
-                  <CollapsibleContent className='col-span-full min-w-0 space-y-2'>
-                    <div className='bg-muted/60 relative rounded-md px-3 py-2'>
-                      <CopyButton
-                        className='absolute end-1 top-1 size-6'
-                        value={prompt}
-                        aria-label={`${t('Copy to clipboard')} · ${label}`}
-                      />
-                      <pre className='max-h-64 overflow-auto pe-6 [font-family:inherit] text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap'>
-                        {prompt}
-                      </pre>
-                    </div>
-                  </CollapsibleContent>
-                </Collapsible>
-              )
-            })}
+            {rows.map(({ key, label, color, count, value }) => (
+              <div
+                key={key}
+                className='col-span-full grid grid-cols-subgrid items-center py-1.5 text-start'
+              >
+                <span className='flex min-w-0 items-center gap-1.5'>
+                  <span
+                    aria-hidden='true'
+                    className={`size-2 shrink-0 rounded-full ${color}`}
+                  />
+                  {label}
+                </span>
+                <span className='text-muted-foreground text-end tabular-nums'>
+                  {formatNumber(count, locale)}
+                </span>
+                <span className='text-end tabular-nums'>
+                  {formatNumber(value, locale)}
+                </span>
+              </div>
+            ))}
           </div>
         </>
       )}

@@ -296,6 +296,8 @@ class Rollout:
     def guard(self):
         check(self.state.get('trusted_https_proxy') == self.args.trusted_https_proxy,
               'trusted_https_proxy_changed')
+        check(self.state.get('allow_http_sub2api_management', False) == self.args.allow_http_sub2api_management,
+              'http_sub2api_management_changed')
         check(digest(self.args.release) == self.state['release_sha256']
               and digest(self.args.backup) == self.state['backup_sha256'], 'receipt_changed')
         check(digest(self.args.release.parent / 'gates.json') == self.state['gates_sha256']
@@ -329,6 +331,8 @@ class Rollout:
             values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
             if self.state.get('trusted_https_proxy'):
                 values['SUB2API_TRUSTED_HTTPS_PROXIES'] = self.state['trusted_https_proxy']
+            if self.state.get('allow_http_sub2api_management'):
+                values['SUB2API_ALLOW_HTTP_MANAGEMENT'] = 'true'
             mount = document_pages_mount(self.release)
             if mount is not None:
                 values['DEEPSEEK_DOCUMENT_PAGES_SOCKET'] = '/run/document-pages/pages.sock'
@@ -533,6 +537,7 @@ class Rollout:
 def initialize(args):
     release, original, app, state = preflight(args.release, args.backup)
     state['trusted_https_proxy'] = args.trusted_https_proxy
+    state['allow_http_sub2api_management'] = args.allow_http_sub2api_management
     private = args.state.with_suffix('.private')
     private.mkdir(mode=0o700)
     for name, content in {'compose.before': original, 'env.before': ENV.read_bytes(), 'app.before.json': json_bytes(app),
@@ -547,6 +552,8 @@ def initialize(args):
     values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
     if args.trusted_https_proxy:
         values['SUB2API_TRUSTED_HTTPS_PROXIES'] = args.trusted_https_proxy
+    if args.allow_http_sub2api_management:
+        values['SUB2API_ALLOW_HTTP_MANAGEMENT'] = 'true'
     if document_pages_mount(release) is not None:
         check('DEEPSEEK_DOCUMENT_PAGES_SOCKET' not in values and not any(
               '/run/document-pages' in str(v) for v in service.get('volumes', [])), 'document_pages_already_configured')
@@ -580,6 +587,8 @@ def main(argv=None):
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--drain-timeout', type=float, default=20)
     parser.add_argument('--trusted-https-proxy', help='Explicitly trust only the current home edge peer for HTTPS metadata')
+    parser.add_argument('--allow-http-sub2api-management', action='store_true',
+                        help='Explicitly allow Sub2API management over HTTP in the new home app and bridge')
     args = parser.parse_args(argv)
     args.release, args.backup, args.state = args.release.resolve(), args.backup.resolve(), args.state.resolve()
     os.umask(0o077)

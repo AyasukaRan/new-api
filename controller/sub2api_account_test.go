@@ -39,11 +39,53 @@ import (
 const sub2APITestKey = "sk-sub2api-fixture-one"
 const sub2APITestOtherKey = "sk-sub2api-fixture-two"
 
+func TestSub2APIManagementHTTPCompatibility(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name, allowHTTP, scheme, forwarded, trusted string
+		allowed                                     bool
+	}{
+		{name: "HTTP disabled by default", scheme: "http"},
+		{name: "HTTP explicitly disabled", scheme: "http", allowHTTP: "false"},
+		{name: "invalid setting stays disabled", scheme: "http", allowHTTP: "invalid"},
+		{name: "HTTP compatibility enabled", scheme: "http", allowHTTP: "true", allowed: true},
+		{name: "direct TLS", scheme: "https", allowed: true},
+		{name: "forged forwarding header", scheme: "http", forwarded: "https"},
+		{name: "trusted TLS terminator", scheme: "http", forwarded: "https", trusted: "192.0.2.12/32", allowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SUB2API_ALLOW_HTTP_MANAGEMENT", tc.allowHTTP)
+			t.Setenv("SUB2API_TRUSTED_HTTPS_PROXIES", tc.trusted)
+			request := httptest.NewRequest(http.MethodPost, tc.scheme+"://gateway.example/channel/1/sub2api/login", strings.NewReader(`{}`))
+			request.RemoteAddr = "192.0.2.12:1234"
+			request.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			request.Header.Set("SUB2API_ALLOW_HTTP_MANAGEMENT", "true")
+			assert.Equal(t, tc.allowed, sub2APIManagementAllowed(request))
+			router := gin.New()
+			router.POST("/channel/:id/sub2api/login", ManageSub2APIChannel)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			var result struct {
+				Success bool   `json:"success"`
+				Code    string `json:"code"`
+			}
+			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+			assert.False(t, result.Success, "transport compatibility must not grant authentication")
+			if tc.allowed {
+				assert.Equal(t, "AUTH_UNAUTHORIZED", result.Code)
+			} else {
+				assert.Equal(t, "SUB2API_SECURE_ENTRY_REQUIRED", result.Code)
+			}
+		})
+	}
+}
+
 // The same public contracts run against all supported main databases. The
 // upgrade fixture creates existing users/channels before adding the new tables.
 func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []struct{ name, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		t.Run(dialect.name, func(t *testing.T) {
+			t.Setenv("SUB2API_ALLOW_HTTP_MANAGEMENT", "")
 			if dialect.env != "" && os.Getenv(dialect.env) == "" {
 				t.Skip("set " + dialect.env + " to run this database")
 			}
@@ -397,6 +439,20 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			assert.Contains(t, response.Body.String(), `"success":false`)
 			get := sub2APITestRequest(t, identity, channel.Id, "", nil, "")
 			assert.Contains(t, get.Body.String(), `"upstream_api_key_id":71`)
+			assert.Contains(t, get.Body.String(), `"management_allowed":true`)
+			httpStatus := sub2APITestRequest(t, identity, channel.Id, "", nil, "", false)
+			assert.Contains(t, httpStatus.Body.String(), `"management_allowed":false`)
+			t.Setenv("SUB2API_ALLOW_HTTP_MANAGEMENT", "true")
+			httpStatus = sub2APITestRequest(t, identity, channel.Id, "", nil, "", false)
+			assert.Contains(t, httpStatus.Body.String(), `"management_allowed":true`)
+			response = sub2APITestRequest(t, identity, channel.Id, "keys", keyPayload, "", false)
+			assert.Contains(t, response.Body.String(), `"success":false`, "HTTP compatibility still requires step-up")
+			proof = issueSecurityEnrollmentProof(t, identity, sub2APITestOperation(t, channel.Id, "keys", 0, keyIdentity), service.VerificationMethodPassword)
+			response = sub2APITestRequest(t, identity, channel.Id, "keys", keyPayload, proof, false)
+			assert.Contains(t, response.Body.String(), `"success":true`, response.Body.String())
+			response = sub2APITestRequest(t, identity, channel.Id, "keys", keyPayload, proof, false)
+			assert.Contains(t, response.Body.String(), `"success":false`, "HTTP compatibility does not allow proof replay")
+			t.Setenv("SUB2API_ALLOW_HTTP_MANAGEMENT", "")
 			assert.NotContains(t, get.Body.String(), "rotated-access")
 			assert.NotContains(t, get.Body.String(), sub2APITestKey)
 			assert.Contains(t, get.Body.String(), "The Sub2API response is incomplete or invalid.")
@@ -492,7 +548,7 @@ func sub2APIBillingRefFromLog(t *testing.T, c *gin.Context, info *relaycommon.Re
 	return metadata.AdminInfo.Ref
 }
 
-func sub2APITestRequest(t *testing.T, identity service.AuthIdentity, channelID int, action string, payload any, proof string) *httptest.ResponseRecorder {
+func sub2APITestRequest(t *testing.T, identity service.AuthIdentity, channelID int, action string, payload any, proof string, secureEntry ...bool) *httptest.ResponseRecorder {
 	t.Helper()
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
@@ -515,7 +571,9 @@ func sub2APITestRequest(t *testing.T, identity service.AuthIdentity, channelID i
 	encoded, err := common.Marshal(payload)
 	require.NoError(t, err)
 	request := httptest.NewRequest(method, strings.ReplaceAll(route, ":id", strconv.Itoa(channelID)), bytes.NewReader(encoded))
-	request.TLS = &tls.ConnectionState{}
+	if len(secureEntry) == 0 || secureEntry[0] {
+		request.TLS = &tls.ConnectionState{}
+	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Security-Proof", proof)
 	response := httptest.NewRecorder()

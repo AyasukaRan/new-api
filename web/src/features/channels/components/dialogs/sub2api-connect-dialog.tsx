@@ -45,12 +45,12 @@ import { FieldsStep } from './plugin-login-steps'
 export function Sub2APIConnectDialog(props: {
   channelId: number
   mode: 'login' | 'import'
+  managementAllowed: boolean
   onClose: () => void
   onDone: () => void
 }) {
   const { t } = useTranslation()
   const formId = useId()
-  const secureTransport = window.location.protocol === 'https:'
   const verification = useSecureVerification()
   const cancelVerification = verification.cancel
   const operation = useRef<AbortController | null>(null)
@@ -89,7 +89,9 @@ export function Sub2APIConnectDialog(props: {
   )
 
   const submit = async (input: PluginLoginInput) => {
-    if (!secureTransport || !('fields' in input) || operation.current) return
+    if (!props.managementAllowed || !('fields' in input) || operation.current) {
+      return
+    }
     const current = new AbortController()
     operation.current = current
     setBusy(true)
@@ -238,7 +240,7 @@ export function Sub2APIConnectDialog(props: {
             <Button
               type='submit'
               form={formId}
-              disabled={busy || !secureTransport}
+              disabled={busy || !props.managementAllowed}
             >
               {t('Continue')}
             </Button>
@@ -251,7 +253,7 @@ export function Sub2APIConnectDialog(props: {
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
-          {!secureTransport && (
+          {!props.managementAllowed && (
             <Alert>
               <AlertDescription>
                 {t(
@@ -260,8 +262,8 @@ export function Sub2APIConnectDialog(props: {
               </AlertDescription>
             </Alert>
           )}
-          {secureTransport && busy && <LoadingState inline size='sm' />}
-          {secureTransport && !busy && (
+          {props.managementAllowed && busy && <LoadingState inline size='sm' />}
+          {props.managementAllowed && !busy && (
             <FieldsStep
               fields={fields}
               formId={formId}

@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { generateKeyPairSync } from 'node:crypto'
+import {
+  createDecipheriv,
+  generateKeyPairSync,
+  privateDecrypt,
+} from 'node:crypto'
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
@@ -38,7 +42,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import type { Sub2APIStatus } from '../../sub2api-api'
 import { Sub2APISettings } from '../sub2api-settings'
 
-const { publicKey } = generateKeyPairSync('rsa', {
+const { publicKey, privateKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
   publicKeyEncoding: { type: 'spki', format: 'pem' },
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
@@ -52,6 +56,7 @@ beforeEach(() => {
   useAuthStore.getState().auth.setUser({ id: 77, username: 'admin', role: 100 })
   status = {
     encryption_ready: true,
+    management_allowed: true,
     accounts: [
       {
         id: 1,
@@ -224,6 +229,9 @@ test('login encrypts credentials, completes upstream 2FA, and refreshes the boun
   })
   const { onChannelSubmit } = renderSettings()
   await user.click(await screen.findByRole('button', { name: 'Add account' }))
+  expect(
+    screen.queryByText('HTTP management is enabled. Use a trusted network.')
+  ).not.toBeInTheDocument()
   await user.type(screen.getByLabelText(/Email/), 'second@example.com')
   await user.type(screen.getByLabelText(/Password/), 'upstream-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
@@ -457,21 +465,116 @@ test('failed login clears passwords and surfaces the safe error without creating
   expect(screen.queryByText('second@example.com')).not.toBeInTheDocument()
 })
 
-test('HTTP management is read-only and cannot open a credential form', async () => {
-  vi.stubGlobal('location', new URL('http://gateway.example'))
-  const post = serveActions()
-  renderSettings()
-  expect(
-    await screen.findByText(
-      'Use the HTTPS management address to connect a Sub2API account.'
+test.each([false, undefined])(
+  'HTTP management stays read-only when the server permission is %s',
+  async (allowed) => {
+    vi.stubGlobal('location', new URL('http://gateway.example'))
+    Object.assign(status, { management_allowed: allowed })
+    const post = serveActions()
+    renderSettings()
+    expect(
+      await screen.findByText(
+        'Use the HTTPS management address to connect a Sub2API account.'
+      )
+    ).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Add account' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Import tokens' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeDisabled()
+    expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
+    expect(post).not.toHaveBeenCalled()
+  }
+)
+
+test.each(['login', 'import'] as const)(
+  'explicitly allowed HTTP %s keeps proof and real encryption without Web Crypto',
+  async (mode) => {
+    vi.stubGlobal('location', new URL('http://gateway.example'))
+    vi.stubGlobal('crypto', {
+      getRandomValues: globalThis.crypto.getRandomValues.bind(
+        globalThis.crypto
+      ),
+    })
+    const user = userEvent.setup()
+    const post = serveActions(() => ({ requires_2fa: false, account_id: 1 }))
+    const { onChannelSubmit } = renderSettings()
+    expect(
+      await screen.findByText(
+        'HTTP management is enabled. Use a trusted network.'
+      )
+    ).toBeVisible()
+    const open = screen.getByRole('button', {
+      name: mode === 'login' ? 'Add account' : 'Import tokens',
+    })
+    expect(open).toBeEnabled()
+    await user.click(open)
+    const accessToken = `upstream-access-${'A'.repeat(300)}`
+    if (mode === 'login') {
+      await user.type(screen.getByLabelText(/Email/), 'first@example.com')
+      await user.type(screen.getByLabelText(/Password/), 'upstream-password')
+    } else {
+      await user.type(screen.getByLabelText(/Access token/), accessToken)
+      await user.type(
+        screen.getByLabelText(/Refresh token/),
+        'upstream-refresh'
+      )
+    }
+    await user.click(screen.getByRole('button', { name: 'Continue' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     )
-  ).toBeVisible()
-  expect(screen.getByRole('button', { name: 'Add account' })).toBeDisabled()
-  expect(screen.getByRole('button', { name: 'Import tokens' })).toBeDisabled()
-  expect(screen.getByRole('button', { name: 'Sync now' })).toBeDisabled()
-  expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
-  expect(post).not.toHaveBeenCalled()
-})
+    const call = post.mock.calls.find(([path]) => path === `${url}/${mode}`)
+    expect(call).toBeDefined()
+    expect(call?.[2]).toMatchObject({
+      headers: { 'X-Security-Proof': 'scoped-proof' },
+      singleUseAuthorization: true,
+    })
+    const payload = call?.[1] as Record<string, string>
+    expect(payload.encryption_key_id).toBe('key-1')
+    expect(JSON.stringify(payload)).not.toMatch(
+      /upstream-password|upstream-access|upstream-refresh/
+    )
+    if (mode === 'login') {
+      const plaintext = privateDecrypt(
+        { key: privateKey, oaepHash: 'sha256' },
+        Buffer.from(payload.password_encrypted, 'base64')
+      ).toString()
+      expect(plaintext).toBe('upstream-password')
+    } else {
+      const [version, wrapped, nonce, body] =
+        payload.credential_encrypted.split('.')
+      expect(version).toBe('v2')
+      const secret = privateDecrypt(
+        {
+          key: privateKey,
+          oaepHash: 'sha256',
+          oaepLabel: Buffer.from('password-v2'),
+        },
+        Buffer.from(wrapped, 'base64')
+      )
+      const encrypted = Buffer.from(body, 'base64')
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        secret,
+        Buffer.from(nonce, 'base64')
+      )
+      decipher.setAAD(Buffer.from('password-v2:key-1'))
+      decipher.setAuthTag(encrypted.subarray(-16))
+      const plaintext = Buffer.concat([
+        decipher.update(encrypted.subarray(0, -16)),
+        decipher.final(),
+      ]).toString()
+      expect(JSON.parse(plaintext)).toEqual({
+        access_token: accessToken,
+        refresh_token: 'upstream-refresh',
+      })
+    }
+    expect(onChannelSubmit).not.toHaveBeenCalled()
+    await user.click(open)
+    expect(
+      screen.getByLabelText(mode === 'login' ? /Password/ : /Access token/)
+    ).toHaveValue('')
+  }
+)
 
 test('an expired upstream 2FA flow returns to an empty login form', async () => {
   const user = userEvent.setup()
