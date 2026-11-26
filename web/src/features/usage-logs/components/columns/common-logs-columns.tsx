@@ -382,7 +382,9 @@ function hasLogEventDetail(log: UsageLog, isAdmin: boolean): boolean {
 const filterColumns: Partial<Record<string, LogFilterColumn>> = {
   is_stream: 'transport',
   channel: 'channel',
-  token_name: 'identity',
+  username: 'user',
+  token_name: 'token',
+  group: 'group',
   model_name: 'model',
   reasoning_effort: 'reasoning',
   request_source: 'source',
@@ -644,14 +646,38 @@ export function useCommonLogsColumns(
       })
     }
 
+    if (source === 'usage' && isAdmin) {
+      columns.push({
+        accessorKey: 'username',
+        header: t('User'),
+        cell: ({ row }) => (
+          <LogAccountCell log={row.original} isAdmin field='user' />
+        ),
+        size: 120,
+      })
+    }
     columns.push({
       accessorKey: 'token_name',
-      header: isAdmin ? t('User / Token') : t('Token'),
+      header: source !== 'usage' && isAdmin ? t('User / Token') : t('Token'),
       cell: ({ row }) => (
-        <LogAccountCell log={row.original} isAdmin={isAdmin} />
+        <LogAccountCell
+          log={row.original}
+          isAdmin={isAdmin}
+          field={source === 'usage' ? 'token' : undefined}
+        />
       ),
-      size: 155,
+      size: source === 'usage' ? 120 : 155,
     })
+    if (source === 'usage') {
+      columns.push({
+        accessorKey: 'group',
+        header: t('Group'),
+        cell: ({ row }) => (
+          <LogAccountCell log={row.original} isAdmin={isAdmin} field='group' />
+        ),
+        size: 160,
+      })
+    }
     columns.push({
       accessorKey: 'model_name',
       header: t('Model'),

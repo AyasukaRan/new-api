@@ -69,6 +69,7 @@ export function LogGroupLabel({
           field='group'
           value={visible ? filterValue : undefined}
           label={group}
+          className='shrink'
         >
           <GroupBadge
             group={visible ? group : '••••'}
@@ -103,9 +104,11 @@ export function LogGroupLabel({
 export function LogAccountCell({
   log,
   isAdmin,
+  field,
 }: {
   log: UsageLog
   isAdmin: boolean
+  field?: 'user' | 'token' | 'group'
 }) {
   const { t } = useTranslation()
   const { sensitiveVisible, setSelectedUserId, setUserInfoDialogOpen } =
@@ -127,8 +130,15 @@ export function LogAccountCell({
     sensitiveVisible && displayable ? log.token_name : undefined
   )
   return (
-    <div className='flex max-w-full min-w-0 flex-col items-start justify-center gap-[3px] text-xs leading-snug'>
-      {isAdmin && log.username && (
+    <div
+      className={cn(
+        'flex max-w-full min-w-0 flex-col items-start justify-center gap-[3px] text-xs leading-snug',
+        field && 'w-max',
+        (field === 'user' || field === 'token') && 'max-w-28',
+        field === 'group' && 'max-w-40'
+      )}
+    >
+      {(!field || field === 'user') && isAdmin && log.username && (
         <div className='inline-flex max-w-full items-center gap-1.5 text-[13px] font-semibold'>
           <Button
             variant='ghost'
@@ -155,18 +165,20 @@ export function LogAccountCell({
               field='username'
               value={log.username}
               label={account}
+              className='shrink'
             >
               <span className='truncate'>{account}</span>
             </LogFilterValue>
           )}
         </div>
       )}
-      {token && (
+      {(!field || field === 'token') && token && (
         <div className='group/log-token text-muted-foreground inline-flex max-w-full items-center gap-1.5'>
           <KeyRound aria-hidden className='size-3.5 shrink-0' />
           <LogFilterValue
             field='token'
             value={sensitiveVisible ? log.token_name : undefined}
+            className='shrink'
           >
             <StatusBadge
               type='text'
@@ -189,7 +201,7 @@ export function LogAccountCell({
           )}
         </div>
       )}
-      {displayable && (
+      {(!field || field === 'group') && displayable && (
         <LogGroupLabel
           group={log.group || other?.group || ''}
           other={other}

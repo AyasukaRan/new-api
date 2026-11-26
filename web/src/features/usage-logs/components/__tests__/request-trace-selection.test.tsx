@@ -503,59 +503,107 @@ test('keeps transport filters editable in the toolbar when the column is hidden'
   )
 })
 
-test('opens the identity filter without obscuring its fields and selects a username inline', async () => {
+test('persists independent identity columns and keeps hidden user and token filters editable', async () => {
+  const user = userEvent.setup()
+  const storageKey = 'usage-logs:common:admin:column-visibility'
+  localStorage.setItem(storageKey, JSON.stringify({ token_name: false }))
+  const { router } = renderLogs(
+    false,
+    '/usage-logs/common?username=alice&token=work&group=premium'
+  )
+  await screen.findByRole('columnheader', { name: /^User(?: |$)/ })
+  expect(
+    screen.getByRole('columnheader', { name: /^Group(?: |$)/ })
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('columnheader', { name: /^Token(?: Filter|$)/ })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Column settings' }))
+  expect(
+    screen.getByRole('menuitemcheckbox', { name: 'User' })
+  ).toHaveAttribute('aria-checked', 'true')
+  expect(
+    screen.getByRole('menuitemcheckbox', { name: 'Token' })
+  ).toHaveAttribute('aria-checked', 'false')
+  expect(
+    screen.getByRole('menuitemcheckbox', { name: 'Group' })
+  ).toHaveAttribute('aria-checked', 'true')
+  await user.click(screen.getByRole('menuitemcheckbox', { name: 'User' }))
+  await user.keyboard('{Escape}')
+  expect(
+    screen.queryByRole('columnheader', { name: /^User(?: |$)/ })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.getByRole('columnheader', { name: /^Group(?: |$)/ })
+  ).toBeVisible()
+  await waitFor(() =>
+    expect(JSON.parse(localStorage.getItem(storageKey) || '{}')).toMatchObject({
+      username: false,
+      token_name: false,
+    })
+  )
+  const expand = screen.queryByRole('button', { name: /^Expand/ })
+  if (expand) await user.click(expand)
+  expect(screen.getByRole('combobox', { name: 'Username' })).toHaveValue(
+    'alice'
+  )
+  expect(screen.getByRole('textbox', { name: 'Token Name' })).toHaveValue(
+    'work'
+  )
+  expect(
+    screen.queryByRole('combobox', { name: 'Group' })
+  ).not.toBeInTheDocument()
+  expect(router.state.location.search).toMatchObject({
+    username: 'alice',
+    token: 'work',
+    group: 'premium',
+  })
+})
+
+test('filters user, token and group from their own columns without replacing the other conditions', async () => {
   const user = userEvent.setup()
   const { router } = renderLogs()
-  await user.click(
-    await screen.findByRole('button', { name: 'Filter · User / Token' })
-  )
-  const panel = await screen.findByRole('dialog', { name: 'User / Token' })
-  const fields = within(panel)
-  const username = fields.getByRole('combobox', { name: 'Username' })
-  const token = fields.getByRole('textbox', { name: 'Token Name' })
-  const group = fields.getByRole('combobox', { name: 'Group' })
+  await user.click(await screen.findByRole('button', { name: 'Filter · User' }))
+  let panel = await screen.findByRole('dialog', { name: 'User' })
+  const username = within(panel).getByRole('combobox', { name: 'Username' })
   await waitFor(() => expect(username).toHaveFocus())
   expect(username).toHaveAttribute('aria-expanded', 'false')
-  expect(fields.queryByRole('listbox')).not.toBeInTheDocument()
-  expect(fields.getByRole('button', { name: 'Apply' })).toBeEnabled()
-  await user.tab()
-  expect(token).toHaveFocus()
-  await user.keyboard('work')
-  await user.tab()
-  expect(group).toHaveFocus()
-  expect(group).toHaveAttribute('aria-expanded', 'false')
-  await user.click(group)
-  await user.click(await fields.findByRole('option', { name: 'premium' }))
+  expect(within(panel).queryByRole('listbox')).not.toBeInTheDocument()
+  expect(
+    within(panel).queryByRole('textbox', { name: 'Token Name' })
+  ).not.toBeInTheDocument()
+  expect(
+    within(panel).queryByRole('combobox', { name: 'Group' })
+  ).not.toBeInTheDocument()
   await user.click(username)
-  expect(
-    await fields.findByRole('option', { name: 'recent-user' })
-  ).toBeVisible()
-  const suggestions = fields.getByRole('listbox')
-  expect(username.closest('form')).toContainElement(suggestions)
-  expect(
-    suggestions.compareDocumentPosition(token) &
-      Node.DOCUMENT_POSITION_FOLLOWING
-  ).toBeTruthy()
-  await user.keyboard('{Escape}')
-  expect(username).toHaveValue('')
-  await user.keyboard('{ArrowDown}')
-  await fields.findByRole('option', { name: 'recent-user' })
-  await user.keyboard('{ArrowDown}{Enter}')
-  expect(username).toHaveValue('recent-user')
-  expect(username).toHaveAttribute('aria-expanded', 'false')
-  for (const [name, input] of [
-    ['Username', username],
-    ['Token Name', token],
-    ['Group', group],
-  ] as const) {
-    const label = fields.getByText(name, { selector: 'label' })
-    expect(label).toBeVisible()
-    expect(label).toHaveProperty('control', input)
-  }
-  await user.click(fields.getByText('Token Name', { selector: 'label' }))
-  expect(token).toHaveFocus()
-  expect(router.state.location.search.username).toBeUndefined()
-  await user.click(fields.getByRole('button', { name: 'Apply' }))
+  await user.click(
+    await within(panel).findByRole('option', { name: 'recent-user' })
+  )
+  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
+  await waitFor(() =>
+    expect(router.state.location.search.username).toBe('recent-user')
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Filter · Token' }))
+  panel = await screen.findByRole('dialog', { name: 'Token' })
+  const token = within(panel).getByRole('textbox', { name: 'Token Name' })
+  expect(within(panel).queryByRole('combobox')).not.toBeInTheDocument()
+  await user.type(token, 'work')
+  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      username: 'recent-user',
+      token: 'work',
+    })
+  )
+
+  await user.click(screen.getByRole('button', { name: 'Filter · Group' }))
+  panel = await screen.findByRole('dialog', { name: 'Group' })
+  await user.click(within(panel).getByRole('combobox', { name: 'Group' }))
+  await user.click(
+    await within(panel).findByRole('option', { name: 'premium' })
+  )
+  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       username: 'recent-user',
@@ -563,6 +611,17 @@ test('opens the identity filter without obscuring its fields and selects a usern
       group: 'premium',
     })
   )
+
+  await user.click(screen.getByRole('button', { name: 'Filter · Token (1)' }))
+  panel = await screen.findByRole('dialog', { name: 'Token' })
+  await user.click(within(panel).getByRole('button', { name: 'Clear' }))
+  await waitFor(() =>
+    expect(router.state.location.search.token).toBeUndefined()
+  )
+  expect(router.state.location.search).toMatchObject({
+    username: 'recent-user',
+    group: 'premium',
+  })
 })
 
 test('keeps client suggestions within the source form when clearing both fields', async () => {
@@ -778,9 +837,9 @@ test('appends the next filtered page at the bottom, preserving the visible rows 
 
   const user = userEvent.setup()
   await user.click(
-    screen.getByRole('button', { name: /^Filter · User \/ Token/ })
+    screen.getByRole('button', { name: /^Filter · User(?: \(\d+\))?$/ })
   )
-  const identityFilter = screen.getByRole('dialog', { name: 'User / Token' })
+  const identityFilter = screen.getByRole('dialog', { name: 'User' })
   await user.click(
     within(identityFilter).getByRole('button', { name: 'Clear' })
   )

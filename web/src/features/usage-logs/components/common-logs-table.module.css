@@ -85,8 +85,25 @@
 .grid td[data-column-id='model_name'] {
   max-width: 16rem;
 }
+.grid
+  table:has(th[data-column-id='group'])
+  th:is(
+    [data-column-id='username'],
+    [data-column-id='token_name'],
+    [data-column-id='group']
+  ) {
+  width: 1%;
+}
 .grid td[data-column-id='token_name'] {
   max-width: 13rem;
+}
+.grid
+  table:has(th[data-column-id='group'])
+  :is(td[data-column-id='username'], td[data-column-id='token_name']) {
+  max-width: 7rem;
+}
+.grid td[data-column-id='group'] {
+  max-width: 10rem;
 }
 
 .compact

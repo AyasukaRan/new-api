@@ -292,7 +292,7 @@ it('hides sensitive names and disables full-text inspection when privacy is enab
 it('respects hidden columns and omits admin fields in the self view', () => {
   renderLogs({
     admin: false,
-    visibility: { token_name: false, model_name: false },
+    visibility: { token_name: false, group: false, model_name: false },
   })
   expect(
     screen.queryByRole('button', {
@@ -300,6 +300,28 @@ it('respects hidden columns and omits admin fields in the self view', () => {
     })
   ).not.toBeInTheDocument()
   expect(screen.queryByText('enterprise-production')).not.toBeInTheDocument()
+})
+
+it.each([
+  ['username', 'User', 'production-admin'],
+  ['token_name', 'Token', 'backend-production-token'],
+  ['group', 'Group', 'enterprise-production'],
+])('hides only the %s identity field on mobile', (column, label, value) => {
+  renderLogs({ visibility: { [column]: false } })
+  expect(
+    screen.queryByRole('button', { name: `${label}: ${value}` })
+  ).not.toBeInTheDocument()
+  for (const [otherColumn, otherLabel, otherValue] of [
+    ['username', 'User', 'production-admin'],
+    ['token_name', 'Token', 'backend-production-token'],
+    ['group', 'Group', 'enterprise-production'],
+  ]) {
+    if (otherColumn !== column) {
+      expect(
+        screen.getByRole('button', { name: `${otherLabel}: ${otherValue}` })
+      ).toBeVisible()
+    }
+  }
 })
 
 it('keeps input, output and cache quantities readable without empty metric cells', () => {

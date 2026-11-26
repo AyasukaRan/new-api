@@ -303,7 +303,7 @@ test('wraps complete long tool names in details and ignores malformed or duplica
   expect(screen.queryByText(/Reasoning:/)).not.toBeInTheDocument()
 })
 
-test('groups the account, request source, transport and token metrics into distinct cells', () => {
+test('separates user, token and group while preserving request source and token metrics', () => {
   useAuthStore.getState().auth.setUser({ id: 1, username: 'admin', role: 10 })
   renderWithQueries(<LogSurface mobile={false} isAdmin />)
   const cell = (name: string) => screen.getByRole('cell', { name })
@@ -312,14 +312,14 @@ test('groups the account, request source, transport and token metrics into disti
     /Codex CLI|high|exec_command/
   )
   expect(cell('reasoning_effort')).toHaveTextContent('high')
-  const account = within(cell('token_name'))
-  for (const text of [
-    'Private account alias · account-user',
-    log.token_name,
-    log.group,
-  ]) {
-    expect(account.getByText(text)).toBeVisible()
-  }
+  expect(cell('username')).toHaveTextContent(
+    'Private account alias · account-user'
+  )
+  expect(cell('username')).not.toHaveTextContent(log.token_name)
+  expect(cell('token_name')).toHaveTextContent(log.token_name)
+  expect(cell('token_name')).not.toHaveTextContent(log.group)
+  expect(cell('group')).toHaveTextContent(log.group)
+  expect(cell('group')).not.toHaveTextContent(log.username)
   const source = within(cell('request_source'))
   for (const text of ['Codex CLI', 'codex-tui/1.0', log.ip]) {
     expect(source.getByText(text)).toBeVisible()
@@ -490,6 +490,9 @@ test('updates the column picker when an admin switches from all logs to personal
   renderWithQueries(<SwitchScope />)
   await user.click(screen.getByRole('button', { name: 'View' }))
   expect(screen.getByRole('menuitemcheckbox', { name: 'Tools' })).toBeVisible()
+  for (const name of ['User', 'Token', 'Group']) {
+    expect(screen.getByRole('menuitemcheckbox', { name })).toBeVisible()
+  }
   await user.keyboard('{Escape}')
   await user.click(screen.getByRole('button', { name: 'Personal logs' }))
   await user.click(screen.getByRole('button', { name: 'View' }))
@@ -502,6 +505,11 @@ test('updates the column picker when an admin switches from all logs to personal
   expect(
     screen.queryByRole('menuitemcheckbox', { name: 'Client' })
   ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('menuitemcheckbox', { name: 'User' })
+  ).not.toBeInTheDocument()
+  expect(screen.getByRole('menuitemcheckbox', { name: 'Token' })).toBeVisible()
+  expect(screen.getByRole('menuitemcheckbox', { name: 'Group' })).toBeVisible()
 })
 
 test('shows only reasoning in owner details even when cached data contains admin tags', () => {

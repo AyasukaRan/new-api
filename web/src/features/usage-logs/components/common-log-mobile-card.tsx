@@ -57,7 +57,7 @@ export function CommonLogMobileCard<TData>(props: {
 }) {
   const { t } = useTranslation()
   const context = useUsageLogsContext()
-  const { isAdminView } = useLogsViewScope()
+  const { isAdminView, logSource } = useLogsViewScope()
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = getLogMetadata(log)
@@ -82,7 +82,10 @@ export function CommonLogMobileCard<TData>(props: {
         isAdminView && context.sensitiveVisible
           ? formatAdminUserLabel(log.username, log.user_admin_nickname)
           : log.username,
-      visible: isAdminView && props.cells.has('token_name') && !!log.username,
+      visible:
+        isAdminView &&
+        props.cells.has(logSource === 'usage' ? 'username' : 'token_name') &&
+        !!log.username,
       sensitive: true,
     },
     channel: {
@@ -100,7 +103,10 @@ export function CommonLogMobileCard<TData>(props: {
     group: {
       label: t('Group'),
       value: group,
-      visible: displayable && props.cells.has('token_name') && !!group,
+      visible:
+        displayable &&
+        props.cells.has(logSource === 'usage' ? 'group' : 'token_name') &&
+        !!group,
       sensitive: true,
     },
   }

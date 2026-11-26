@@ -317,15 +317,17 @@ export function CommonLogsFilterBar<TData>(
 
   const inToolbar = (id: string) =>
     !props.columnFiltersInHeader || !props.table.getColumn(id)?.getIsVisible()
-  const accountInToolbar = inToolbar('token_name')
+  const tokenInToolbar = inToolbar('token_name')
+  const userInToolbar = isAdmin && inToolbar(isTest ? 'token_name' : 'username')
+  const groupInToolbar = inToolbar(isTest ? 'token_name' : 'group')
   const channelInToolbar = isAdmin && inToolbar('channel')
   const reasoningInToolbar = !isTest && inToolbar('reasoning_effort')
   const sourceInToolbar = !isTest && inToolbar('request_source')
   const modelInToolbar = inToolbar('model_name')
   const transportInToolbar = !isTest && inToolbar('is_stream')
   const expandedFilterCount = [
-    accountInToolbar && filters.token,
-    isAdmin && accountInToolbar && filters.username,
+    tokenInToolbar && filters.token,
+    userInToolbar && filters.username,
     channelInToolbar && filters.channel,
     reasoningInToolbar && filters.reasoningEffort,
     isAdmin && sourceInToolbar && filters.clientTool,
@@ -479,7 +481,7 @@ export function CommonLogsFilterBar<TData>(
   )
   const advancedFilters = (
     <>
-      {accountInToolbar && (
+      {tokenInToolbar && (
         <LogsFilterField>
           <LogsFilterInput
             placeholder={t('Token Name')}
@@ -491,7 +493,7 @@ export function CommonLogsFilterBar<TData>(
           />
         </LogsFilterField>
       )}
-      {accountInToolbar && isAdmin && (
+      {userInToolbar && (
         <LogUsernameFilter
           inlineSuggestions={inlineSuggestions}
           value={filters.username}
@@ -545,7 +547,7 @@ export function CommonLogsFilterBar<TData>(
         <>
           {dateRangeFilter}
           {modelInToolbar && modelFilter}
-          {accountInToolbar && groupFilter}
+          {groupInToolbar && groupFilter}
         </>
       }
       advancedFilters={advancedFilters}
