@@ -18,11 +18,12 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
-import { useEffect, useEffectEvent, useMemo, useState } from 'react'
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { isDomesticRequestOrigin } from '../lib/request-origin-layout'
 import {
   getRequestOrigins,
   isRequestOriginPoint,
@@ -54,8 +55,16 @@ export function useRequestOrigins(options: {
   const [activity, setActivity] = useState<{
     scope: string
     pulses: RequestOriginPulse[]
+    pendingInternational: RequestOriginPoint[]
     status: StreamStatus
   }>()
+  const checkpoint = useRef<{
+    scope: string
+    cursor: string
+    seen: Set<string>
+    pendingInternational: RequestOriginPoint[]
+    refreshingInternational: boolean
+  }>(undefined)
   const requestedStart = options.params?.start_timestamp
   const requestedEnd = options.params?.end_timestamp
   const requestedUsername = isAdmin ? options.params?.username : undefined
@@ -98,26 +107,66 @@ export function useRequestOrigins(options: {
   })
   const latestSnapshot = useEffectEvent(() => query.data)
   const reload = useEffectEvent(() => query.refetch())
+  const reloadInternational = useEffectEvent(() => {
+    if (!query.isFetching) return query.refetch()
+  })
   const ready = query.data?.geoip_available === true
+  const hasInternationalActivity = useMemo(() => {
+    if (activity?.scope !== scope) return false
+    const confirmed = new Map(
+      query.data?.points.map((point) => [point.location_id, point.last_seen])
+    )
+    return activity.pendingInternational.some(
+      (point) =>
+        point.last_seen >= (query.data?.sample_start ?? 0) &&
+        point.last_seen > (confirmed.get(point.location_id) ?? 0)
+    )
+  }, [activity, scope, query.data])
 
   useEffect(() => {
-    if (!ready || options.paused || !live) return
+    if (options.paused || !live) {
+      setActivity((previous) => ({
+        scope,
+        status: options.paused ? 'paused' : 'history',
+        pulses: [],
+        pendingInternational:
+          previous?.scope === scope ? previous.pendingInternational : [],
+      }))
+      return
+    }
+    if (!ready) return
     let stopped = false
     let active: AbortController | undefined
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let pulseTimer: ReturnType<typeof setTimeout> | undefined
     let retryDelay = 1000
-    let cursor = latestSnapshot()?.cursor ?? ''
-    const seen = new Set<string>()
-    const initial = latestSnapshot()?.points ?? []
-    for (const point of initial) {
-      seen.add(`${point.location_id}:${point.last_seen}`)
+    if (checkpoint.current?.scope !== scope) {
+      checkpoint.current = {
+        scope,
+        cursor: latestSnapshot()?.cursor ?? '',
+        seen: new Set(
+          latestSnapshot()?.points.map(
+            (point) => `${point.location_id}:${point.last_seen}`
+          )
+        ),
+        pendingInternational: [],
+        refreshingInternational: false,
+      }
     }
+    const current = checkpoint.current
+    let cursor = current.cursor
+    const seen = current.seen
     const publishStatus = (status: StreamStatus) =>
       setActivity((previous) => ({
         scope,
         status,
-        pulses: previous?.scope === scope ? previous.pulses : [],
+        pulses:
+          status !== 'connecting' &&
+          status !== 'paused' &&
+          previous?.scope === scope
+            ? previous.pulses
+            : [],
+        pendingInternational: current.pendingInternational,
       }))
     const connect = async () => {
       if (stopped || active || document.hidden) return
@@ -162,6 +211,7 @@ export function useRequestOrigins(options: {
               return
             }
             cursor = batch.cursor
+            current.cursor = cursor
             const pulses: RequestOriginPulse[] = []
             for (const point of batch.points) {
               const key = `${point.location_id}:${point.last_seen}`
@@ -175,14 +225,56 @@ export function useRequestOrigins(options: {
               seen.delete(oldest.value)
             }
             if (!pulses.length) return
+            const snapshot = latestSnapshot()
+            const confirmed = new Map(
+              snapshot?.points.map((point) => [
+                point.location_id,
+                point.last_seen,
+              ])
+            )
+            const pending = new Map(
+              current.pendingInternational
+                .filter(
+                  (point) =>
+                    point.last_seen >= (snapshot?.sample_start ?? 0) &&
+                    point.last_seen > (confirmed.get(point.location_id) ?? 0)
+                )
+                .map((point) => [point.location_id, point])
+            )
+            const hadPending = pending.size > 0
+            for (const point of pulses) {
+              if (
+                !isDomesticRequestOrigin(point) &&
+                point.last_seen >= (snapshot?.sample_start ?? 0) &&
+                point.last_seen > (confirmed.get(point.location_id) ?? 0)
+              ) {
+                pending.set(point.location_id, point)
+              }
+            }
+            current.pendingInternational = [...pending.values()].slice(-100)
             setActivity((previous) => ({
               scope,
               status: 'live',
+              pendingInternational: current.pendingInternational,
               pulses: [
                 ...(previous?.scope === scope ? previous.pulses : []),
                 ...pulses,
               ].slice(-60),
             }))
+            if (
+              !hadPending &&
+              pending.size > 0 &&
+              snapshot?.points.every(isDomesticRequestOrigin) &&
+              !current.refreshingInternational
+            ) {
+              const refresh = reloadInternational()
+              if (refresh) {
+                current.refreshingInternational = true
+                void refresh.finally(() => {
+                  current.refreshingInternational = false
+                })
+              }
+            }
             clearTimeout(pulseTimer)
             pulseTimer = setTimeout(() => {
               if (!stopped) {
@@ -213,6 +305,7 @@ export function useRequestOrigins(options: {
         const result = await reload()
         if (stopped) return
         cursor = result.data?.cursor ?? cursor
+        current.cursor = cursor
       }
       retryTimer = setTimeout(() => void connect(), retryDelay)
       retryDelay = Math.min(retryDelay * 2, 10_000)
@@ -221,7 +314,12 @@ export function useRequestOrigins(options: {
       clearTimeout(retryTimer)
       if (document.hidden) {
         active?.abort()
-        setActivity({ scope, status: 'paused', pulses: [] })
+        setActivity({
+          scope,
+          status: 'paused',
+          pulses: [],
+          pendingInternational: current.pendingInternational,
+        })
       } else {
         void reload()
         void connect()
@@ -249,5 +347,6 @@ export function useRequestOrigins(options: {
     params,
     isAdmin,
     live,
+    hasInternationalActivity,
   }
 }

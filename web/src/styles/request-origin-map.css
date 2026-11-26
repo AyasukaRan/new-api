@@ -20,11 +20,15 @@ For commercial licensing, please contact support@quantumnous.com
   --origin-water: color-mix(in srgb, var(--muted) 14%, transparent);
   --origin-land: color-mix(in srgb, var(--muted-foreground) 17%, var(--card));
   --origin-edge: color-mix(in srgb, var(--muted-foreground) 24%, transparent);
+  --origin-flow: #00846d;
   background: radial-gradient(
     ellipse at 50% 48%,
     var(--origin-water),
     transparent 72%
   );
+}
+.dark .origin-world-map {
+  --origin-flow: #45d6b3;
 }
 .origin-map-grid {
   stroke: var(--border);
@@ -35,17 +39,35 @@ For commercial licensing, please contact support@quantumnous.com
   fill: var(--origin-land);
   stroke: var(--origin-edge);
   stroke-width: 0.55;
+  vector-effect: non-scaling-stroke;
+}
+.origin-map-routes,
+.origin-map-gateway,
+.origin-map-activity {
+  pointer-events: none;
+}
+.origin-map-route {
+  fill: none;
+  stroke: var(--origin-flow);
+  opacity: 0.25;
+}
+.origin-map-route-selected {
+  opacity: 0.8;
+}
+.origin-map-route-dimmed {
+  opacity: 0.1;
 }
 .origin-map-marker {
   cursor: pointer;
 }
 .origin-map-dot {
-  fill: var(--primary);
+  fill: var(--origin-flow);
   stroke: var(--card);
   stroke-width: 1;
+  vector-effect: non-scaling-stroke;
 }
 .origin-map-halo {
-  fill: var(--primary);
+  fill: var(--origin-flow);
   opacity: 0.12;
 }
 .origin-map-halo-selected {
@@ -53,26 +75,69 @@ For commercial licensing, please contact support@quantumnous.com
 }
 .origin-map-focus {
   fill: none;
-  stroke: var(--primary);
+  stroke: var(--origin-flow);
   stroke-width: 1;
   opacity: 0;
+  vector-effect: non-scaling-stroke;
 }
 .origin-map-marker:focus-visible .origin-map-focus,
 .origin-map-marker:hover .origin-map-focus {
   opacity: 0.8;
 }
-.origin-map-pulse {
+.origin-map-location-label,
+.origin-map-gateway-label {
+  fill: var(--muted-foreground);
+  stroke: var(--card);
+  stroke-width: 3;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+.origin-map-count,
+.origin-map-gateway-label {
+  fill: var(--foreground);
+  font-weight: 600;
+}
+.origin-map-gateway-ring {
   fill: none;
-  stroke: var(--primary);
+  stroke: var(--origin-flow);
+  stroke-width: 1;
+  opacity: 0.4;
+  vector-effect: non-scaling-stroke;
+}
+.origin-map-pulse,
+.origin-map-arrival {
+  fill: none;
+  stroke: var(--origin-flow);
   stroke-width: 1.4;
-  animation: origin-request-pulse 2.4s ease-out both;
+  vector-effect: non-scaling-stroke;
+  animation: origin-request-pulse 0.8s ease-out both;
 }
-.origin-map-pulse-delayed {
-  animation-delay: 0.35s;
+.origin-map-arrival {
+  opacity: 0;
+  animation-delay: 2.1s;
+  animation-fill-mode: forwards;
 }
-.origin-map-flash {
-  fill: var(--primary);
-  animation: origin-request-flash 2.4s ease-out both;
+.origin-map-flight-head {
+  fill: var(--card);
+  stroke: var(--origin-flow);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  offset-rotate: 0deg;
+  animation: origin-request-flight 2.4s linear both;
+}
+.origin-map-flight-glow {
+  fill: var(--origin-flow);
+  fill-opacity: 0.3;
+  stroke: none;
+}
+.origin-map-flight-trail {
+  fill: none;
+  stroke: var(--origin-flow);
+  stroke-linecap: round;
+  stroke-dasharray: 0.07 1;
+  animation: origin-request-trail 2.4s linear both;
 }
 @keyframes origin-request-pulse {
   from {
@@ -84,18 +149,36 @@ For commercial licensing, please contact support@quantumnous.com
     opacity: 0;
   }
 }
-@keyframes origin-request-flash {
-  from {
+@keyframes origin-request-flight {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  8%,
+  90% {
     opacity: 1;
   }
-  to {
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+@keyframes origin-request-trail {
+  0% {
+    stroke-dashoffset: 0.07;
+    opacity: 0;
+  }
+  8%,
+  90% {
+    opacity: 0.8;
+  }
+  100% {
+    stroke-dashoffset: -0.93;
     opacity: 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .origin-map-pulse,
-  .origin-map-flash {
-    animation: none;
+  .origin-map-activity {
     display: none;
   }
 }

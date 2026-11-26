@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Globe2, MapPin, Pause, Play, Radio, RefreshCw } from 'lucide-react'
-import { memo, useId, useMemo, useState } from 'react'
+import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { EmptyState } from '@/components/empty-state'
@@ -38,6 +38,11 @@ import {
   useRequestOrigins,
   type RequestOriginPulse,
 } from '../../hooks/use-request-origins'
+import {
+  calculateRequestOriginLayout,
+  createRequestOriginRoute,
+  projectRequestOrigin,
+} from '../../lib/request-origin-layout'
 import type {
   RequestOriginPoint,
   RequestOriginsParams,
@@ -66,13 +71,6 @@ function locationName(
   ].join(', ')
 }
 
-function mapPosition(point: RequestOriginPoint) {
-  return {
-    x: ((point.longitude + 180) * 1000) / 360,
-    y: ((90 - point.latitude) * 500) / 180,
-  }
-}
-
 const WorldLand = memo(function WorldLand() {
   return <path d={WORLD_LAND_PATH} className='origin-map-land' />
 })
@@ -83,6 +81,7 @@ function OriginMapCanvas(props: {
   selected?: string
   onSelect: (id: string) => void
   reducedMotion: boolean
+  hasInternationalActivity: boolean
 }) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
@@ -91,13 +90,51 @@ function OriginMapCanvas(props: {
     [locale]
   )
   const gridId = useId()
-  const maxCount = Math.max(1, ...props.points.map((point) => point.count))
+  const canvas = useRef<SVGSVGElement>(null)
+  const [canvasSize, setCanvasSize] = useState({ width: 1000, height: 500 })
+  useLayoutEffect(() => {
+    const element = canvas.current
+    if (!element) return
+    const measure = () => {
+      const { width, height } = element.getBoundingClientRect()
+      if (!width || !height) return
+      setCanvasSize((previous) =>
+        previous.width === width && previous.height === height
+          ? previous
+          : { width, height }
+      )
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  const layout = useMemo(
+    () =>
+      calculateRequestOriginLayout(
+        props.hasInternationalActivity ? [] : props.points
+      ),
+    [props.points, props.hasInternationalActivity]
+  )
+  const points = props.points.slice(0, 500)
+  const scale = Math.max(
+    layout.width / canvasSize.width,
+    layout.height / canvasSize.height
+  )
+  const maxCount = Math.max(1, ...points.map((point) => point.count))
   return (
     <svg
-      viewBox='0 0 1000 500'
+      ref={canvas}
+      viewBox={layout.viewBox}
+      data-origin-map-mode={layout.mode}
       className='origin-world-map h-full w-full'
       role='group'
-      aria-label={t('Request origin world map')}
+      aria-label={
+        layout.mode === 'china'
+          ? t('Request origin China map')
+          : t('Request origin world map')
+      }
     >
       <defs>
         <pattern
@@ -122,14 +159,41 @@ function OriginMapCanvas(props: {
       <g aria-hidden='true'>
         <WorldLand />
       </g>
-      {props.points.map((point) => {
-        const { x, y } = mapPosition(point)
-        const radius = 2.7 + Math.sqrt(point.count / maxCount) * 5
+      <g aria-hidden='true' className='origin-map-routes'>
+        {points.map((point) => {
+          const route = createRequestOriginRoute(point)
+          if (!route) return null
+          return (
+            <path
+              key={point.location_id}
+              d={route}
+              data-origin-route={point.location_id}
+              strokeWidth={
+                (0.8 + Math.sqrt(point.count / maxCount) * 2.4) * scale
+              }
+              className={cn(
+                'origin-map-route',
+                point.location_id === props.selected &&
+                  'origin-map-route-selected',
+                props.selected &&
+                  point.location_id !== props.selected &&
+                  'origin-map-route-dimmed'
+              )}
+            />
+          )
+        })}
+      </g>
+      {points.map((point, index) => {
+        const { x, y } = projectRequestOrigin(point)
+        const radius = (2.7 + Math.sqrt(point.count / maxCount) * 5) * scale
         const selected = point.location_id === props.selected
         const label = `${locationName(point, countryNames)} · ${t('{{count}} request records', { count: point.count })}`
+        const nearGateway =
+          Math.hypot(x - layout.gateway.x, y - layout.gateway.y) < 40 * scale
         return (
           <g
             key={point.location_id}
+            data-origin-location={point.location_id}
             transform={`translate(${x} ${y})`}
             role='button'
             tabIndex={0}
@@ -148,35 +212,96 @@ function OriginMapCanvas(props: {
               {locationName(point, countryNames)} ·{' '}
               {formatNumber(point.count, locale)}
             </title>
-            <circle r={Math.max(12, radius + 5)} fill='transparent' />
             <circle
-              r={radius + 5}
+              r={Math.max(12 * scale, radius + 5 * scale)}
+              fill='transparent'
+            />
+            <circle
+              r={radius + 5 * scale}
               className={cn(
                 'origin-map-halo',
                 selected && 'origin-map-halo-selected'
               )}
             />
             <circle r={radius} className='origin-map-dot' />
-            <circle r={radius + 9} className='origin-map-focus' />
+            <circle r={radius + 9 * scale} className='origin-map-focus' />
+            {(selected ||
+              (!props.selected && canvasSize.width >= 600 && index === 0)) && (
+              <text
+                y={(nearGateway ? -22 : 25) * scale}
+                textAnchor='middle'
+                fontSize={12 * scale}
+                className='origin-map-location-label'
+                aria-hidden='true'
+              >
+                {point.city || point.region || countryName(point, countryNames)}
+                <tspan className='origin-map-count'>
+                  {' · '}
+                  {formatCompactNumber(point.count, locale)}
+                </tspan>
+              </text>
+            )}
           </g>
         )
       })}
+      {points.length > 0 && (
+        <g
+          transform={`translate(${layout.gateway.x} ${layout.gateway.y})`}
+          className='origin-map-gateway'
+          aria-label={t('Shiyan, Hubei · Gateway')}
+        >
+          <circle r={15 * scale} className='origin-map-gateway-ring' />
+          <circle r={9 * scale} className='origin-map-gateway-ring' />
+          <circle r={5 * scale} className='origin-map-dot' />
+          <text
+            y={46 * scale}
+            textAnchor='middle'
+            fontSize={13 * scale}
+            className='origin-map-gateway-label'
+          >
+            {t('Shiyan, Hubei · Gateway')}
+          </text>
+        </g>
+      )}
       {!props.reducedMotion &&
         props.pulses.map((point) => {
-          const { x, y } = mapPosition(point)
+          const { x, y } = projectRequestOrigin(point)
+          const route = createRequestOriginRoute(point)
           return (
             <g
               key={point.pulse_id}
-              transform={`translate(${x} ${y})`}
               aria-hidden='true'
               data-origin-pulse={point.pulse_id}
+              className='origin-map-activity'
             >
-              <circle r='4' className='origin-map-pulse' />
-              <circle
-                r='3'
-                className='origin-map-pulse origin-map-pulse-delayed'
-              />
-              <circle r='3.5' className='origin-map-flash' />
+              <g transform={`translate(${x} ${y}) scale(${scale})`}>
+                <circle r='4' className='origin-map-pulse' />
+              </g>
+              {route && (
+                <>
+                  <path
+                    d={route}
+                    pathLength='1'
+                    strokeWidth={2.2 * scale}
+                    className='origin-map-flight-trail'
+                  />
+                  <circle
+                    r={5 * scale}
+                    style={{ offsetPath: `path("${route}")` }}
+                    className='origin-map-flight-head origin-map-flight-glow'
+                  />
+                  <circle
+                    r={2.6 * scale}
+                    style={{ offsetPath: `path("${route}")` }}
+                    className='origin-map-flight-head'
+                  />
+                  <g
+                    transform={`translate(${layout.gateway.x} ${layout.gateway.y}) scale(${scale})`}
+                  >
+                    <circle r='5' className='origin-map-arrival' />
+                  </g>
+                </>
+              )}
             </g>
           )
         })}
@@ -197,11 +322,12 @@ export function RequestOriginMap(props: {
   const [paused, setPaused] = useState(false)
   const [selectedId, setSelectedId] = useState<string>()
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
-  const { query, status, pulses, live, isAdmin } = useRequestOrigins({
-    params: props.params,
-    hours: props.hours ?? 24,
-    paused,
-  })
+  const { query, status, pulses, live, isAdmin, hasInternationalActivity } =
+    useRequestOrigins({
+      params: props.params,
+      hours: props.hours ?? 24,
+      paused,
+    })
   const data = query.data
   const points = useMemo(
     () => [...(data?.points ?? [])].sort((a, b) => b.count - a.count),
@@ -341,11 +467,12 @@ export function RequestOriginMap(props: {
               </div>
               <div className='relative mx-auto aspect-[2/1] max-h-[680px] w-full'>
                 <OriginMapCanvas
-                  points={points.slice(0, 500)}
+                  points={points}
                   pulses={pulses}
                   selected={selected?.location_id}
                   onSelect={setSelectedId}
                   reducedMotion={reducedMotion}
+                  hasInternationalActivity={hasInternationalActivity}
                 />
                 {points.length === 0 && (
                   <div className='absolute inset-0 flex items-center justify-center'>
@@ -388,9 +515,12 @@ export function RequestOriginMap(props: {
               ) : (
                 <div className='text-muted-foreground flex min-h-8 items-center gap-1.5 px-1 text-xs'>
                   <Radio className='size-3.5 shrink-0' aria-hidden='true' />
-                  {t('New request records light up their source location.')}
+                  {t('New requests travel from their source to Shiyan, Hubei.')}
                 </div>
               )}
+              <p className='text-muted-foreground px-1 pt-1 text-[11px]'>
+                {t('Marker size and route width show request counts.')}
+              </p>
             </div>
             <div className='border-t px-4 py-4 sm:px-5 xl:border-t-0 xl:border-l'>
               <h4 className='mb-3 text-xs font-semibold'>
@@ -485,7 +615,10 @@ export function RequestOriginMap(props: {
                     'Locations are approximate and may reflect a proxy or gateway.'
                   )}{' '}
               {points.length > 500 &&
-                t('Map shows the top {{count}} locations.', { count: 500 })}
+                t('Map shows the top {{count}} locations.', {
+                  count: 500,
+                })}{' '}
+              {t('Routes show request direction only.')}
             </span>
             <a
               href='https://db-ip.com'

@@ -65,6 +65,25 @@ const snapshot: RequestOriginsSnapshot = {
   geoip_available: true,
   geoip_updated_at: 100,
 }
+const beijing: RequestOriginPoint = {
+  ...point,
+  location_id: 'beijing',
+  country_code: 'CN',
+  country: 'China',
+  region: 'Beijing',
+  city: 'Beijing',
+  latitude: 39.9,
+  longitude: 116.4,
+}
+const shanghai: RequestOriginPoint = {
+  ...beijing,
+  location_id: 'shanghai',
+  city: 'Shanghai',
+  region: 'Shanghai',
+  longitude: 121.47,
+  latitude: 31.23,
+  count: 28,
+}
 
 beforeEach(async () => {
   await i18next.changeLanguage('en')
@@ -187,6 +206,9 @@ it('animates only newly streamed locations without counting a snapshot or replay
   const view = renderMap()
   await screen.findByText('Live')
   expect(view.container.querySelector('[data-origin-pulse]')).toBeNull()
+  expect(
+    view.container.querySelector('[data-origin-route="tokyo"]')
+  ).toBeInTheDocument()
   const next = { ...point, last_seen: 101, count: 1 }
   await act(async () => {
     streams[0].enqueue(
@@ -196,6 +218,10 @@ it('animates only newly streamed locations without counting a snapshot or replay
     )
   })
   expect(view.container.querySelectorAll('[data-origin-pulse]')).toHaveLength(1)
+  expect(
+    view.container.querySelector<SVGCircleElement>('.origin-map-flight-head')
+      ?.style.offsetPath
+  ).toMatch(/^path\("M /)
   await act(async () => {
     streams[0].enqueue(
       encoder.encode(
@@ -213,6 +239,188 @@ it('animates only newly streamed locations without counting a snapshot or replay
   await userEvent.click(screen.getByRole('button', { name: 'Pause live map' }))
   expect(view.container.querySelector('[data-origin-pulse]')).toBeNull()
   expect(screen.getByText('Paused')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Resume live map' }))
+  await screen.findByText('Live')
+  expect(streams).toHaveLength(2)
+  expect(view.container.querySelector('[data-origin-pulse]')).toBeNull()
+  await act(async () => {
+    streams[1].enqueue(
+      encoder.encode(
+        `event: origins\ndata: ${JSON.stringify({ cursor: 'next', points: [next] })}\n\n`
+      )
+    )
+  })
+  expect(view.container.querySelector('[data-origin-pulse]')).toBeNull()
+  await act(async () => {
+    streams[1].enqueue(
+      encoder.encode(
+        `event: origins\ndata: ${JSON.stringify({ cursor: 'after-resume', points: [{ ...point, last_seen: 102 }] })}\n\n`
+      )
+    )
+  })
+  expect(view.container.querySelectorAll('[data-origin-pulse]')).toHaveLength(1)
+  expect(
+    view.container.querySelector('[data-origin-pulse="tokyo:102"]')
+  ).toBeInTheDocument()
+})
+
+it.each([{ points: [beijing] }, { points: [beijing, shanghai] }])(
+  'zooms domestic sources and retains request counts and keyboard selection',
+  async ({ points }) => {
+    mockOrigins({ ...snapshot, points })
+    const view = renderMap({
+      params: { start_timestamp: 50, end_timestamp: 200 },
+    })
+    const map = await screen.findByRole('group', {
+      name: 'Request origin China map',
+    })
+    expect(map).toHaveAttribute('data-origin-map-mode', 'china')
+    expect(map).not.toHaveAttribute('viewBox', '0 0 1000 500')
+    expect(within(map).getByText('Shiyan, Hubei · Gateway')).toBeInTheDocument()
+    expect(view.container.querySelector('[data-origin-pulse]')).toBeNull()
+    const marker = within(map).getByRole('button', {
+      name: 'Beijing, China · 7 request records',
+    })
+    marker.focus()
+    await userEvent.keyboard(' ')
+    expect(marker).toHaveAttribute('aria-pressed', 'true')
+    expect(
+      screen.getByText('7 request records', { selector: 'strong' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Marker size and route width show request counts.')
+    ).toBeInTheDocument()
+  }
+)
+
+it('uses larger markers and heavier routes for greater snapshot request counts', async () => {
+  mockOrigins({
+    ...snapshot,
+    points: [beijing, shanghai],
+  })
+  const view = renderMap({
+    params: { start_timestamp: 50, end_timestamp: 200 },
+  })
+  await screen.findByRole('group', { name: 'Request origin China map' })
+  const smallerMarker = view.container.querySelector(
+    '[data-origin-location="beijing"] .origin-map-dot'
+  )
+  const largerMarker = view.container.querySelector(
+    '[data-origin-location="shanghai"] .origin-map-dot'
+  )
+  expect(Number(largerMarker?.getAttribute('r'))).toBeGreaterThan(
+    Number(smallerMarker?.getAttribute('r'))
+  )
+  const smallerRoute = view.container.querySelector(
+    '[data-origin-route="beijing"]'
+  )
+  const largerRoute = view.container.querySelector(
+    '[data-origin-route="shanghai"]'
+  )
+  expect(Number(largerRoute?.getAttribute('stroke-width'))).toBeGreaterThan(
+    Number(smallerRoute?.getAttribute('stroke-width'))
+  )
+})
+
+it('keeps the world view when an overseas location falls outside the displayed top 500', async () => {
+  const domestic = Array.from({ length: 500 }, (_, index) => ({
+    ...beijing,
+    location_id: `domestic-${index}`,
+    count: 8,
+  }))
+  mockOrigins({ ...snapshot, points: [...domestic, point] })
+  const view = renderMap({
+    params: { start_timestamp: 50, end_timestamp: 200 },
+  })
+  const map = await screen.findByRole('group', {
+    name: 'Request origin world map',
+  })
+  expect(map).toHaveAttribute('viewBox', '0 0 1000 500')
+  expect(within(map).getAllByRole('button')).toHaveLength(500)
+  expect(
+    view.container.querySelector('[data-origin-location="tokyo"]')
+  ).toBeNull()
+})
+
+it('keeps the world view for a mapped source with an unknown country', async () => {
+  mockOrigins({
+    ...snapshot,
+    points: [beijing, { ...point, country_code: '', country: '' }],
+  })
+  renderMap({ params: { start_timestamp: 50, end_timestamp: 200 } })
+  expect(
+    await screen.findByRole('group', { name: 'Request origin world map' })
+  ).toHaveAttribute('data-origin-map-mode', 'world')
+})
+
+it('shows a new overseas request immediately and keeps the world view until the snapshot catches up', async () => {
+  mockOrigins({ ...snapshot, points: [beijing] })
+  const view = renderMap()
+  await screen.findByText('Live')
+  expect(
+    screen.getByRole('group', { name: 'Request origin China map' })
+  ).toBeInTheDocument()
+  vi.useFakeTimers()
+  await act(async () => {
+    streams[0].enqueue(
+      encoder.encode(
+        `event: origins\ndata: ${JSON.stringify({ cursor: 'overseas', points: [{ ...point, last_seen: 101 }] })}\n\n`
+      )
+    )
+  })
+  expect(
+    screen.getByRole('group', { name: 'Request origin world map' })
+  ).toBeInTheDocument()
+  expect(
+    view.container.querySelector('[data-origin-pulse="tokyo:101"]')
+  ).toBeInTheDocument()
+  expect(screen.getByText('Request records').parentElement).toHaveTextContent(
+    '10'
+  )
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3000)
+  })
+  expect(view.container.querySelector('[data-origin-pulse]')).toBeNull()
+  expect(
+    screen.getByRole('group', { name: 'Request origin world map' })
+  ).toBeInTheDocument()
+  expect(screen.getByText('Located').parentElement).toHaveTextContent('7')
+})
+
+it('keeps the gateway readable and shows only the selected source label on a narrow map', async () => {
+  vi.spyOn(SVGElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    width: 360,
+    height: 180,
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 360,
+    bottom: 180,
+    toJSON: () => ({}),
+  })
+  mockOrigins({ ...snapshot, points: [beijing, shanghai] })
+  const view = renderMap({
+    params: { start_timestamp: 50, end_timestamp: 200 },
+  })
+  const map = await screen.findByRole('group', {
+    name: 'Request origin China map',
+  })
+  expect(within(map).getByText('Shiyan, Hubei · Gateway')).toBeInTheDocument()
+  expect(
+    view.container.querySelectorAll('.origin-map-location-label')
+  ).toHaveLength(0)
+  await userEvent.click(
+    within(map).getByRole('button', {
+      name: 'Beijing, China · 7 request records',
+    })
+  )
+  expect(
+    view.container.querySelectorAll('.origin-map-location-label')
+  ).toHaveLength(1)
+  expect(
+    view.container.querySelector('.origin-map-location-label')
+  ).toHaveTextContent('Beijing · 7')
 })
 
 it('keeps real location counts but suppresses pulse motion when reduced motion is requested', async () => {
