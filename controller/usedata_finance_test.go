@@ -3,10 +3,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -14,6 +17,369 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Reconciliation changes administrator cost projections, never the original
+// request charges. The immutable log store may be a different database engine.
+func TestSub2APIBillFinanceDatabaseMatrix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousUnit := common.QuotaPerUnit
+	common.QuotaPerUnit = 500000
+	t.Cleanup(func() { common.QuotaPerUnit = previousUnit })
+	for _, dialect := range []struct {
+		name, env string
+		kind      common.DatabaseType
+	}{
+		{"sqlite", "", common.DatabaseTypeSQLite},
+		{"mysql", "AUDIT_MYSQL_DSN", common.DatabaseTypeMySQL},
+		{"postgres", "AUDIT_POSTGRES_DSN", common.DatabaseTypePostgreSQL},
+		{"clickhouse", "AUDIT_CLICKHOUSE_DSN", common.DatabaseTypeClickHouse},
+	} {
+		t.Run(dialect.name, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip(dialect.env + " is not configured")
+			}
+			mainName, mainDSN, mainKind := dialect.name, os.Getenv(dialect.env), dialect.kind
+			if dialect.kind == common.DatabaseTypeClickHouse {
+				mainName, mainDSN, mainKind = "sqlite", "", common.DatabaseTypeSQLite
+			}
+			mainDB, _ := newAuditTestDatabase(t, mainName, mainDSN)
+			logDB, logDSN := newAuditTestDatabase(t, dialect.name, os.Getenv(dialect.env))
+			useLogExportDatabases(t, mainDB, logDB, mainKind, dialect.kind)
+			require.NoError(t, mainDB.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.QuotaData{}))
+			require.NoError(t, model.MigrateSub2APIStorage(mainDB))
+			previousMaster, previousSQLite := common.IsMasterNode, common.SQLitePath
+			t.Cleanup(func() { common.IsMasterNode, common.SQLitePath = previousMaster, previousSQLite })
+			common.IsMasterNode = dialect.kind == common.DatabaseTypeClickHouse
+			if dialect.name == "sqlite" {
+				common.SQLitePath, logDSN = logDSN, "local"
+			}
+			t.Setenv("LOG_SQL_DSN", logDSN)
+			t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", "0")
+			require.NoError(t, model.InitLogDB())
+			logDB = model.LOG_DB
+			connection, err := logDB.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = connection.Close() })
+			if dialect.kind != common.DatabaseTypeClickHouse {
+				require.NoError(t, logDB.AutoMigrate(&model.Log{}))
+				require.NoError(t, model.MigrateDashboardFinance())
+			}
+			user := model.User{Id: 1, Username: "bill-owner", Quota: 10000, UsedQuota: 300}
+			token := model.Token{Id: 11, UserId: 1, Key: "fixture-only", Name: "bill-token", RemainQuota: 9700, UsedQuota: 300}
+			require.NoError(t, mainDB.Create(&user).Error)
+			require.NoError(t, mainDB.Create(&token).Error)
+			require.NoError(t, mainDB.Create(&model.Channel{Id: 1, Name: "supplier"}).Error)
+			require.NoError(t, mainDB.Create(&model.Sub2APIAccount{ID: 7, ChannelID: 1, Origin: "https://fixture.example", UpstreamUserID: 7, Identity: strings.Repeat("a", 64), ProxyIdentity: strings.Repeat("p", 64), Credential: "sealed-fixture", NeedsLogin: true}).Error)
+			const hour int64 = 3600
+			require.NoError(t, mainDB.Create(&model.QuotaData{UserID: 1, Username: user.Username, ModelName: "bill-model", CreatedAt: hour, TokenID: 11, ChannelID: 1, UseGroup: "bill-group", Count: 3, Quota: 300}).Error)
+			var logs []model.Log
+			for i, name := range []string{"wallet-zero", "subscription-fraction", "pending"} {
+				metadata, err := common.Marshal(map[string]any{"admin_info": map[string]any{
+					"sub2api_billing": model.Sub2APIBillingRef{AccountID: 7, APIKeyID: 17, KeyIdentity: strings.Repeat("a", 64), RequestID: "client:" + name},
+					"cost":            map[string]any{"cost_ratio": 0.1, "base_quota": 100, "cost_quota": 10, "revenue_quota": 100, "profit_quota": 90, "estimated": true},
+				}})
+				require.NoError(t, err)
+				row := model.Log{UserId: 1, Username: user.Username, CreatedAt: hour + 10 + int64(i), Type: model.LogTypeConsume, ModelName: "bill-model", ChannelId: 1, TokenId: 11, TokenName: token.Name, Group: "bill-group", Quota: 100, RequestId: name, Other: string(metadata)}
+				if dialect.kind == common.DatabaseTypeClickHouse {
+					// Production createLog assigns IDs for the non-auto-increment log store.
+					row.Id = 100 + i
+				}
+				require.NoError(t, logDB.Create(&row).Error)
+				logs = append(logs, row)
+				require.NoError(t, model.QueueSub2APIBill(t.Context(), &row))
+				require.NoError(t, model.QueueSub2APIBill(t.Context(), &row))
+			}
+			require.NoError(t, model.MigrateSub2APIStorage(mainDB), "repeated startup preserves queued bills and uniqueness")
+			var bills []model.Sub2APIBill
+			require.NoError(t, mainDB.Order("created_at").Find(&bills).Error)
+			require.Len(t, bills, 3)
+			for _, bill := range bills {
+				assert.Nil(t, bill.CostQuota)
+			}
+			filter := model.LogFilter{StartTimestamp: hour, EndTimestamp: hour + 3599}
+			require.NoError(t, model.AttachQuotaFinance(t.Context(), nil, hour, hour+3599, "", false))
+			warm, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, &model.DashboardFinance{CostQuota: 30, ProfitQuota: 270, CoveredRevenueQuota: 300, RecordedCount: 3, EstimatedCount: 3}, warm.Finance)
+			for _, amount := range []string{"-1", "NaN", "+Inf", "1e30", "not-money"} {
+				assert.Error(t, model.SettleSub2APIBill(t.Context(), bills[0], 101, 17, bills[0].RequestID, amount, 0, nil), amount)
+			}
+			assert.Error(t, model.SettleSub2APIBill(t.Context(), bills[0], 101, 18, bills[0].RequestID, "1", 0, nil))
+			assert.Error(t, model.SettleSub2APIBill(t.Context(), bills[0], 101, 17, "client:other", "1", 0, nil))
+			assert.Error(t, model.SettleSub2APIBill(t.Context(), bills[0], 101, 17, bills[0].RequestID, "1", 9, nil))
+			for _, rate := range []float64{-1, math.NaN(), math.Inf(1), 10001} {
+				assert.Error(t, model.SettleSub2APIBill(t.Context(), bills[0], 101, 17, bills[0].RequestID, "1", 0, &rate))
+			}
+			rate := 23.0
+			require.NoError(t, model.SettleSub2APIBill(t.Context(), bills[0], 101, 17, bills[0].RequestID, "0", 0, &rate))
+			require.NoError(t, model.SettleSub2APIBill(t.Context(), bills[1], 102, 17, bills[1].RequestID, "0.0000005", 1, &rate))
+			require.NoError(t, model.SettleSub2APIBill(t.Context(), bills[1], 102, 17, bills[1].RequestID, "9", 1, &rate), "replay cannot overwrite an already reconciled charge")
+			var settled []model.Sub2APIBill
+			require.NoError(t, mainDB.Order("created_at").Find(&settled).Error)
+			require.Len(t, settled, 3)
+			require.NotNil(t, settled[0].CostQuota)
+			assert.Zero(t, *settled[0].CostQuota)
+			require.NotNil(t, settled[1].CostQuota)
+			assert.Equal(t, 0.25, *settled[1].CostQuota, "actual cost already contains the upstream rate")
+			assert.Nil(t, settled[2].CostQuota, "a missing bill is not zero cost")
+			status, err := model.GetSub2APIBillStatus(t.Context(), 1)
+			require.NoError(t, err)
+			require.Len(t, status, 1)
+			assert.Equal(t, int64(2), status[strings.Repeat("a", 64)].Synced)
+			assert.Equal(t, int64(1), status[strings.Repeat("a", 64)].Pending)
+			assert.Positive(t, status[strings.Repeat("a", 64)].LastSyncedAt)
+			otherStatus, err := model.GetSub2APIBillStatus(t.Context(), 2)
+			require.NoError(t, err)
+			assert.Empty(t, otherStatus)
+			pending, err := model.PendingSub2APIBills(t.Context(), 1, 10)
+			require.NoError(t, err)
+			require.Len(t, pending, 1, "manual sync includes the selected channel despite backoff")
+			assert.Equal(t, bills[2].ID, pending[0].ID)
+			require.NoError(t, mainDB.Delete(&settled[2]).Error)
+			require.NoError(t, model.RepairSub2APIBillQueue(t.Context(), hour, []int{1}))
+			var restored []model.Sub2APIBill
+			require.NoError(t, mainDB.Order("created_at").Find(&restored).Error)
+			require.Len(t, restored, 3, "repair restores an interrupted enqueue without duplicating settled bills")
+			assert.Nil(t, restored[2].CostQuota)
+			want := model.DashboardFinance{CostQuota: 10.25, ProfitQuota: 289.75, CoveredRevenueQuota: 300, RecordedCount: 3, ActualCount: 2, EstimatedCount: 1}
+			for range 2 {
+				stat, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+				require.NoError(t, err)
+				assert.Equal(t, 300, stat.Quota)
+				assert.Equal(t, &want, stat.Finance)
+				rows, err := model.GetAllQuotaDates(hour, hour+3599, user.Username)
+				require.NoError(t, err)
+				require.NoError(t, model.AttachQuotaFinance(t.Context(), rows, hour, hour+3599, user.Username, false))
+				require.Len(t, rows, 1)
+				assert.Equal(t, &want, rows[0].Finance)
+			}
+			adminLogs, total, err := model.GetAllLogs(filter, 0, 10)
+			require.NoError(t, err)
+			assert.Equal(t, int64(3), total)
+			for _, row := range adminLogs {
+				if row.RequestId == "pending" {
+					assert.NotContains(t, row.Other, "upstream_bill")
+					continue
+				}
+				var metadata struct {
+					Admin struct {
+						Estimate map[string]any `json:"cost_estimate"`
+						Cost     struct {
+							Source      string  `json:"source"`
+							BillingType int     `json:"billing_type"`
+							CostQuota   float64 `json:"cost_quota"`
+						} `json:"cost"`
+					} `json:"admin_info"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(row.Other, &metadata))
+				assert.Equal(t, "upstream_bill", metadata.Admin.Cost.Source)
+				assert.Equal(t, float64(10), metadata.Admin.Estimate["cost_quota"])
+				if row.RequestId == "wallet-zero" {
+					assert.Zero(t, metadata.Admin.Cost.BillingType)
+					assert.Zero(t, metadata.Admin.Cost.CostQuota)
+				} else {
+					assert.Equal(t, 1, metadata.Admin.Cost.BillingType)
+					assert.Equal(t, 0.25, metadata.Admin.Cost.CostQuota)
+				}
+			}
+			selfLogs, _, err := model.GetUserLogs(1, filter, 0, 10)
+			require.NoError(t, err)
+			require.Len(t, selfLogs, 3)
+			for _, row := range selfLogs {
+				assert.NotContains(t, row.Other, "admin_info")
+				assert.NotContains(t, row.Other, "cost_quota")
+			}
+			for _, original := range logs {
+				var raw model.Log
+				require.NoError(t, logDB.Where("request_id = ?", original.RequestId).First(&raw).Error)
+				assert.Equal(t, original.Other, raw.Other, "the source log is immutable, including ClickHouse")
+				assert.Equal(t, original.Quota, raw.Quota)
+			}
+
+			t.Run("exact source ownership", func(t *testing.T) {
+				copy := logs[1]
+				copy.Id += 100000
+				require.NoError(t, model.AttachSub2APIBills(t.Context(), []*model.Log{&copy}))
+				assert.Equal(t, logs[1].Other, copy.Other, "same request metadata on another log cannot acquire its invoice")
+				missing := bills[2]
+				missing.LogID += 100000
+				assert.Error(t, model.SettleSub2APIBill(t.Context(), missing, 103, 17, missing.RequestID, "0.1", 0, nil))
+				var unchanged model.Sub2APIBill
+				require.NoError(t, mainDB.Where("match_id = ?", missing.MatchID).Take(&unchanged).Error)
+				assert.Nil(t, unchanged.CostQuota)
+			})
+
+			t.Run("response identity matches one invoice once", func(t *testing.T) {
+				var pending []model.Sub2APIBill
+				require.NoError(t, mainDB.Create(&model.Sub2APIAccount{ID: 8, ChannelID: 2, Origin: "https://fixture.example", UpstreamUserID: 7, Identity: strings.Repeat("b", 64), ProxyIdentity: strings.Repeat("p", 64), Credential: "sealed-fixture", NeedsLogin: true}).Error)
+				for i, primary := range []string{"client:ws-envelope", "resp-exact", "client:other-channel"} {
+					accountID, channelID := int64(7), 1
+					if i == 2 {
+						accountID, channelID = 8, 2
+					}
+					ref := model.Sub2APIBillingRef{AccountID: accountID, APIKeyID: 17, KeyIdentity: strings.Repeat("a", 64), RequestID: primary, ResponseID: "resp-exact"}
+					metadata, err := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": ref, "cost": map[string]any{"cost_ratio": 0.1, "base_quota": 100, "cost_quota": 10, "revenue_quota": 100, "profit_quota": 90, "estimated": true}}})
+					require.NoError(t, err)
+					row := model.Log{UserId: 1, Username: user.Username, CreatedAt: hour + 4000 + int64(i), Type: model.LogTypeConsume, ModelName: "response-identity", ChannelId: channelID, TokenId: 11, Quota: 100, RequestId: fmt.Sprintf("response-local-%d", i), Other: string(metadata)}
+					if dialect.kind == common.DatabaseTypeClickHouse {
+						row.Id = 300 + i
+					}
+					require.NoError(t, logDB.Create(&row).Error)
+					require.NoError(t, model.QueueSub2APIBill(t.Context(), &row))
+					var bill model.Sub2APIBill
+					require.NoError(t, mainDB.Where("log_request_id = ?", row.RequestId).Take(&bill).Error)
+					assert.Nil(t, bill.InvoiceIdentity, "distinct pending records may share no assigned invoice")
+					pending = append(pending, bill)
+				}
+				assert.Error(t, model.SettleSub2APIBill(t.Context(), pending[0], 110, 17, "resp-wrong", "0.000002", 0, nil))
+				require.NoError(t, model.SettleSub2APIBill(t.Context(), pending[0], 110, 17, "resp-exact", "0.000002", 0, nil))
+				for _, bill := range pending[1:] {
+					assert.Error(t, model.SettleSub2APIBill(t.Context(), bill, 110, 17, "resp-exact", "0.000002", 0, nil), "the same upstream invoice cannot be assigned to two local logs, including another channel")
+				}
+				var duplicate model.Sub2APIBill
+				require.NoError(t, mainDB.First(&duplicate, pending[1].ID).Error)
+				assert.Nil(t, duplicate.CostQuota)
+				assert.Nil(t, duplicate.InvoiceIdentity)
+				items, _, err := model.GetAllLogs(model.LogFilter{ModelName: "response-identity"}, 0, 10)
+				require.NoError(t, err)
+				require.Len(t, items, 3)
+				for _, row := range items {
+					if row.RequestId == "response-local-0" {
+						assert.Contains(t, row.Other, "upstream_bill")
+					} else {
+						assert.NotContains(t, row.Other, "upstream_bill")
+						assert.Contains(t, row.Other, "estimated")
+					}
+				}
+			})
+
+			t.Run("paid failure costs never become user charges or hidden retries", func(t *testing.T) {
+				metadata, err := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": model.Sub2APIBillingRef{AccountID: 7, APIKeyID: 17, KeyIdentity: strings.Repeat("a", 64), RequestID: "client:paid-failure"}}})
+				require.NoError(t, err)
+				failure := model.Log{UserId: 1, Username: user.Username, CreatedAt: hour + 20, Type: model.LogTypeError, ModelName: "bill-error-only", ChannelId: 1, TokenId: 11, Group: "bill-group", RequestId: "paid-failed-retry", Other: string(metadata)}
+				if dialect.kind == common.DatabaseTypeClickHouse {
+					failure.Id = 200
+				}
+				require.NoError(t, logDB.Create(&failure).Error)
+				require.NoError(t, model.QueueSub2APIBill(t.Context(), &failure))
+				var bill model.Sub2APIBill
+				require.NoError(t, mainDB.Where("log_id = ?", failure.Id).Take(&bill).Error)
+				for range 2 {
+					require.NoError(t, model.SettleSub2APIBill(t.Context(), bill, 104, 17, bill.RequestID, "0.000004", 0, nil))
+				}
+				stat, err := model.SumUsedQuota(t.Context(), filter, nil, true)
+				require.NoError(t, err)
+				assert.Equal(t, 300, stat.Quota)
+				wantPaid := want
+				wantPaid.CostQuota += 2
+				wantPaid.ProfitQuota -= 2
+				assert.Equal(t, &wantPaid, stat.Finance)
+				successFilter := filter
+				successFilter.Type = model.LogTypeConsume
+				successStat, err := model.SumUsedQuota(t.Context(), successFilter, nil, true)
+				require.NoError(t, err)
+				assert.Equal(t, &want, successStat.Finance)
+				rows, err := model.GetAllQuotaDates(hour, hour+3599, user.Username)
+				require.NoError(t, err)
+				require.NoError(t, model.AttachQuotaFinance(t.Context(), rows, hour, hour+3599, user.Username, false))
+				require.Len(t, rows, 2)
+				for _, row := range rows {
+					if row.ModelName != failure.ModelName {
+						continue
+					}
+					assert.Zero(t, row.Count)
+					assert.Zero(t, row.Quota)
+					require.NotNil(t, row.Finance)
+					assert.Equal(t, 2.0, row.Finance.CostQuota)
+					assert.Equal(t, -2.0, row.Finance.ProfitQuota)
+				}
+				var reportRows int64
+				require.NoError(t, mainDB.Model(&model.QuotaData{}).Where("model_name = ?", failure.ModelName).Count(&reportRows).Error)
+				assert.Equal(t, int64(1), reportRows, "settlement replay cannot create another cost-only report row")
+				success := failure
+				success.Id, success.Type, success.CreatedAt, success.Other = 0, model.LogTypeConsume, hour+21, "{}"
+				if dialect.kind == common.DatabaseTypeClickHouse {
+					success.Id = 201
+				}
+				require.NoError(t, logDB.Create(&success).Error)
+				listed, total, err := model.GetAllLogs(model.LogFilter{Category: "model", RequestId: failure.RequestId}, 0, 10)
+				require.NoError(t, err)
+				assert.Equal(t, int64(2), total)
+				require.Len(t, listed, 2, "paid upstream attempts must remain visible alongside the later success")
+				for _, row := range listed {
+					if row.Type == model.LogTypeError {
+						assert.Contains(t, row.Other, "upstream_bill")
+					}
+				}
+			})
+			var afterUser model.User
+			var afterToken model.Token
+			require.NoError(t, mainDB.First(&afterUser, user.Id).Error)
+			require.NoError(t, mainDB.First(&afterToken, token.Id).Error)
+			assert.Equal(t, user.Quota, afterUser.Quota)
+			assert.Equal(t, user.UsedQuota, afterUser.UsedQuota)
+			assert.Equal(t, token.RemainQuota, afterToken.RemainQuota)
+			assert.Equal(t, token.UsedQuota, afterToken.UsedQuota)
+
+			t.Run("bounded export preserves same-second records and invoice overlays", func(t *testing.T) {
+				// SQLite shares one connection in normal installations. Export must
+				// release its source cursor before loading main-database invoices.
+				exportDB := logDB
+				if dialect.kind == common.DatabaseTypeSQLite {
+					exportDB = mainDB
+					model.LOG_DB = mainDB
+					t.Cleanup(func() { model.LOG_DB = logDB })
+					require.NoError(t, mainDB.AutoMigrate(&model.Log{}))
+					conn, err := mainDB.DB()
+					require.NoError(t, err)
+					conn.SetMaxOpenConns(1)
+				}
+				rows := make([]model.Log, 301)
+				wantRequests := make([]string, len(rows))
+				for i := range rows {
+					wantRequests[i] = fmt.Sprintf("export-boundary-%03d", i)
+					rows[i] = model.Log{UserId: 1, Username: user.Username, CreatedAt: hour + 100, Type: model.LogTypeConsume, ModelName: "export-boundary", ChannelId: 1, RequestId: wantRequests[i], Other: "{}"}
+				}
+				// Old ClickHouse rows can share ID=0 and the same second. Their
+				// request IDs, not the later synthetic display IDs, preserve order.
+				if dialect.kind == common.DatabaseTypeClickHouse {
+					rows[0].Id = 1000
+				}
+				metadata, err := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": model.Sub2APIBillingRef{AccountID: 7, APIKeyID: 17, KeyIdentity: strings.Repeat("a", 64), RequestID: "client:export-boundary"}}})
+				require.NoError(t, err)
+				rows[0].Other = string(metadata)
+				if dialect.kind == common.DatabaseTypeClickHouse {
+					require.NoError(t, exportDB.Create(&rows[0]).Error)
+					legacy := rows[1:]
+					require.NoError(t, exportDB.Create(&legacy).Error)
+				} else {
+					require.NoError(t, exportDB.Create(&rows).Error)
+				}
+				require.NoError(t, model.QueueSub2APIBill(t.Context(), &rows[0]))
+				var bill model.Sub2APIBill
+				require.NoError(t, mainDB.Where("log_request_id = ?", rows[0].RequestId).Take(&bill).Error)
+				require.NoError(t, model.SettleSub2APIBill(t.Context(), bill, 105, 17, bill.RequestID, "0.000002", 0, nil))
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				var exported []string
+				actualCount := 0
+				require.NoError(t, model.StreamAllLogs(ctx, model.LogFilter{ModelName: "export-boundary"}, common.RoleRootUser, func(row *model.Log) error {
+					exported = append(exported, row.RequestId)
+					if strings.Contains(row.Other, "upstream_bill") {
+						actualCount++
+					}
+					return nil
+				}))
+				assert.ElementsMatch(t, wantRequests, exported)
+				assert.Equal(t, 1, actualCount)
+				if dialect.kind == common.DatabaseTypeClickHouse {
+					assert.Equal(t, "export-boundary-300", exported[0])
+					assert.Equal(t, "export-boundary-000", exported[len(exported)-1])
+				}
+			})
+		})
+	}
+}
 
 // Exercise the public report handlers against separate real main/log databases.
 func TestDashboardFinanceDatabaseMatrix(t *testing.T) {

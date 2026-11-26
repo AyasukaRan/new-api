@@ -22,7 +22,10 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Skeleton } from '@/components/ui/skeleton'
-import { getDashboardMetricValue } from '@/features/dashboard/lib/finance'
+import {
+  getDashboardMetricValue,
+  hasDashboardFinanceValues,
+} from '@/features/dashboard/lib/finance'
 import { formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
@@ -151,7 +154,7 @@ export function CommonLogsStats({
     profitValue = t('Loading failed')
   } else if (
     finance &&
-    (finance.recorded_count > 0 ||
+    (hasDashboardFinanceValues(finance) ||
       (finance.recorded_count === 0 && finance.unrecorded_count === 0))
   ) {
     if (Number.isFinite(finance.cost_quota)) {

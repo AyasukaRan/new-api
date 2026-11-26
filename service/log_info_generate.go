@@ -102,6 +102,11 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 		return
 	}
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
+	if ref, ok := ctx.Get(sub2APIBillingContextKey); ok {
+		if billing, valid := ref.(*model.Sub2APIBillingRef); valid && billing != nil && (billing.RequestID != "" || billing.ResponseID != "") {
+			other.SetAdmin("sub2api_billing", billing)
+		}
+	}
 	// The trace itself lives in its own table; the log row carries only the key
 	// that finds it, so the log list stays small.
 	if traceId := RequestTraceId(ctx); traceId != "" {

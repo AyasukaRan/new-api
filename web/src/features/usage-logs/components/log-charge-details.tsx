@@ -21,7 +21,11 @@ import { useTranslation } from 'react-i18next'
 import { normalizeTierLabel } from '@/features/pricing/lib/billing-expr'
 import { toIntlLocale } from '@/i18n/languages'
 import { getCurrencyDisplay } from '@/lib/currency'
-import { formatLogQuota, formatNumber } from '@/lib/format'
+import {
+  formatLogQuota,
+  formatNumber,
+  formatTimestampToDate,
+} from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 import type { UsageLog } from '../data/schema'
@@ -76,6 +80,15 @@ export function LogChargeDetails({
     payable = other.subscription_consumed ?? quota
   }
   const cost = isAdmin ? getLogCostEstimate(other) : null
+  let actualCostUSD = Number.NaN
+  if (typeof cost?.actual_cost_usd === 'number') {
+    actualCostUSD = cost.actual_cost_usd
+  } else if (
+    typeof cost?.actual_cost_usd === 'string' &&
+    /^\d+(?:\.\d+)?$/.test(cost.actual_cost_usd)
+  ) {
+    actualCostUSD = Number(cost.actual_cost_usd)
+  }
   const { config } = getCurrencyDisplay()
   const lines = getChargeBreakdown(
     other,
@@ -94,6 +107,10 @@ export function LogChargeDetails({
   const rawTotal = lines.reduce((sum, line) => sum + line.value, 0)
   const rounding = quota - rawTotal
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  // Keep the receipt in USD; do not apply the site's currency conversion.
+  const originalAmount = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 20,
+  })
   const percentage = new Intl.NumberFormat(locale, {
     style: 'percent',
     maximumFractionDigits: 1,
@@ -104,7 +121,9 @@ export function LogChargeDetails({
   if (tier === 'off_peak') tariff = 'Off-peak hours'
   if (tier === 'base' || tier === 'standard') tariff = 'Standard'
   const rateSummary =
-    compact || lines.length ? null : getTieredBillingSummary(other, log?.model_name)
+    compact || lines.length
+      ? null
+      : getTieredBillingSummary(other, log?.model_name)
 
   return (
     <div className={compact ? 'space-y-2 text-xs' : 'space-y-4 text-sm'}>
@@ -304,6 +323,55 @@ export function LogChargeDetails({
             </>
           )}
         </dl>
+      )}
+      {cost?.source === 'upstream_bill' && !cost.estimated && (
+        <div className='space-y-2 border-t pt-3'>
+          <dl className='grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-xs [&_dd]:text-end [&_dd]:tabular-nums'>
+            <dt className='text-muted-foreground'>{t('Cost source')}</dt>
+            <dd>{t('Upstream bill')}</dd>
+            {(cost.billing_type === 0 || cost.billing_type === 1) && (
+              <>
+                <dt className='text-muted-foreground'>{t('Deduction type')}</dt>
+                <dd>
+                  {cost.billing_type === 1
+                    ? t('Subscription allowance used')
+                    : t('Wallet deduction')}
+                </dd>
+              </>
+            )}
+            {Number.isFinite(actualCostUSD) && actualCostUSD >= 0 && (
+              <>
+                <dt className='text-muted-foreground'>
+                  {t('Original deduction (USD)')}
+                </dt>
+                <dd>{originalAmount.format(actualCostUSD)}</dd>
+              </>
+            )}
+            {typeof cost.rate_multiplier === 'number' &&
+              Number.isFinite(cost.rate_multiplier) &&
+              cost.rate_multiplier >= 0 && (
+                <>
+                  <dt className='text-muted-foreground'>
+                    {t('Upstream key multiplier')}
+                  </dt>
+                  <dd>{originalAmount.format(cost.rate_multiplier)}×</dd>
+                </>
+              )}
+            {typeof cost.synced_at === 'number' && cost.synced_at > 0 && (
+              <>
+                <dt className='text-muted-foreground'>{t('Synced at')}</dt>
+                <dd>{formatTimestampToDate(cost.synced_at)}</dd>
+              </>
+            )}
+          </dl>
+          {cost.billing_type === 1 && (
+            <p className='text-muted-foreground text-xs'>
+              {t(
+                'Gross profit uses upstream allowance consumption, not a wallet payment.'
+              )}
+            </p>
+          )}
+        </div>
       )}
     </div>
   )

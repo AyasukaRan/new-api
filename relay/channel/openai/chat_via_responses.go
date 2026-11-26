@@ -36,6 +36,7 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	if err := common.Unmarshal(body, &responsesResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
+	service.CaptureSub2APIResponseID(c, responsesResp.ID, false)
 
 	if oaiError := responsesResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
@@ -90,6 +91,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 			break
 		}
 		if streamResp.Response != nil {
+			service.CaptureSub2APIResponseID(c, streamResp.Response.ID, false)
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
 		service.ObserveResponsesOutcome(info, &streamResp)
@@ -277,6 +279,7 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 
 		if streamResp.Response != nil {
+			service.CaptureSub2APIResponseID(c, streamResp.Response.ID, false)
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
 		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {

@@ -61,6 +61,18 @@ func (f LogFilter) withRetries(ctx context.Context, ownUserID int) (LogFilter, e
 	if len(failures) == 0 {
 		return f, nil
 	}
+	failureIDs := make([]int, 0, len(failures))
+	for _, failure := range failures {
+		failureIDs = append(failureIDs, failure.Id)
+	}
+	paid, err := sub2APIPaidFailureIDs(ctx, failureIDs)
+	if err != nil {
+		return f, err
+	}
+	failures = slices.DeleteFunc(failures, func(log *Log) bool { return paid[log.Id] })
+	if len(failures) == 0 {
+		return f, nil
+	}
 	requests := make(map[logRetryRequest][]*Log)
 	requestIDs := make([]string, 0, len(failures))
 	for _, row := range failures {
@@ -243,7 +255,7 @@ func (f LogFilter) withRetries(ctx context.Context, ownUserID int) (LogFilter, e
 		winners[key] = winner
 		group := []*Log{winner}
 		for _, row := range rows[:len(rows)-1] {
-			if row.Type == LogTypeError && row.Quota == 0 && row.PromptTokens == 0 && row.CompletionTokens == 0 && row.Id != 0 {
+			if row.Type == LogTypeError && row.Quota == 0 && row.PromptTokens == 0 && row.CompletionTokens == 0 && row.Id != 0 && !paid[row.Id] {
 				group = append(group, row)
 			}
 		}

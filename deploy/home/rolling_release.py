@@ -294,6 +294,8 @@ class Rollout:
         private_write(self.args.state, json_bytes(self.state))
 
     def guard(self):
+        check(self.state.get('trusted_https_proxy') == self.args.trusted_https_proxy,
+              'trusted_https_proxy_changed')
         check(digest(self.args.release) == self.state['release_sha256']
               and digest(self.args.backup) == self.state['backup_sha256'], 'receipt_changed')
         check(digest(self.args.release.parent / 'gates.json') == self.state['gates_sha256']
@@ -325,6 +327,8 @@ class Rollout:
         values = environment(expected['Config']['Env'])
         if not old:
             values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
+            if self.state.get('trusted_https_proxy'):
+                values['SUB2API_TRUSTED_HTTPS_PROXIES'] = self.state['trusted_https_proxy']
             mount = document_pages_mount(self.release)
             if mount is not None:
                 values['DEEPSEEK_DOCUMENT_PAGES_SOCKET'] = '/run/document-pages/pages.sock'
@@ -528,6 +532,7 @@ class Rollout:
 
 def initialize(args):
     release, original, app, state = preflight(args.release, args.backup)
+    state['trusted_https_proxy'] = args.trusted_https_proxy
     private = args.state.with_suffix('.private')
     private.mkdir(mode=0o700)
     for name, content in {'compose.before': original, 'env.before': ENV.read_bytes(), 'app.before.json': json_bytes(app),
@@ -540,6 +545,8 @@ def initialize(args):
     service = final['services']['new-api']
     values = environment(service['environment'])
     values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
+    if args.trusted_https_proxy:
+        values['SUB2API_TRUSTED_HTTPS_PROXIES'] = args.trusted_https_proxy
     if document_pages_mount(release) is not None:
         check('DEEPSEEK_DOCUMENT_PAGES_SOCKET' not in values and not any(
               '/run/document-pages' in str(v) for v in service.get('volumes', [])), 'document_pages_already_configured')
@@ -572,11 +579,15 @@ def main(argv=None):
     parser.add_argument('--backup', type=Path, required=True)
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--drain-timeout', type=float, default=20)
+    parser.add_argument('--trusted-https-proxy', help='Explicitly trust only the current home edge peer for HTTPS metadata')
     args = parser.parse_args(argv)
     args.release, args.backup, args.state = args.release.resolve(), args.backup.resolve(), args.state.resolve()
     os.umask(0o077)
     try:
         check(0 < args.drain_timeout <= 30, 'invalid_drain_timeout')
+        if args.trusted_https_proxy is not None:
+            edge_ip = inspect(EDGE)['NetworkSettings']['Networks'][NETWORK]['IPAddress']
+            check(args.trusted_https_proxy == edge_ip + '/32', 'untrusted_https_proxy')
         if not args.apply:
             if args.state.exists():
                 state = read_json(args.state)

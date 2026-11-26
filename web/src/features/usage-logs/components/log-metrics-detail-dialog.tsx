@@ -32,7 +32,7 @@ import { formatTimestampToDate } from '@/lib/format'
 import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
 import { hasLogBillingEvidence } from '../lib/charge-breakdown'
-import { hasToolSurcharge, isViolationFeeLog } from '../lib/format'
+import { canShowLogCost, hasToolSurcharge } from '../lib/format'
 import { isTimingLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { RequestTraceSection } from './dialogs/request-trace-section'
@@ -54,16 +54,9 @@ export function LogRequestDetailTabs(
   }
 ) {
   const { t } = useTranslation()
+  const showCost = props.isAdmin && canShowLogCost(props.log.type, props.other)
   const charge = (
-    <LogChargeDetails
-      log={props.log}
-      other={props.other}
-      isAdmin={
-        props.isAdmin &&
-        props.log.type === LOG_TYPE_ENUM.CONSUME &&
-        !isViolationFeeLog(props.other)
-      }
-    />
+    <LogChargeDetails log={props.log} other={props.other} isAdmin={showCost} />
   )
   if (!isTimingLogType(props.log.type)) return charge
   const traceId = props.isAdmin && props.other?.admin_info?.trace_id
@@ -73,6 +66,7 @@ export function LogRequestDetailTabs(
     props.log.type
   )
   const hasCharge =
+    showCost ||
     hasEvidence ||
     hasToolSurcharge(props.other) ||
     props.log.type !== LOG_TYPE_ENUM.ERROR ||

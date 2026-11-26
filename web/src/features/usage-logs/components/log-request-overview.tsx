@@ -21,7 +21,7 @@ import { useTranslation } from 'react-i18next'
 import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
 import { getLogTokenTotals } from '../lib/cache-usage'
-import { isViolationFeeLog, renderLogContent } from '../lib/format'
+import { canShowLogCost, renderLogContent } from '../lib/format'
 import { isConsumeLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { LogOverviewCard } from './dialogs/log-detail-layout'
@@ -43,7 +43,8 @@ export function LogRequestOverview(props: {
   const { t } = useTranslation()
   const { log, other } = props
   const { hasUsage: hasTokens } = getLogTokenTotals(log, other)
-  const hasCharge = isConsumeLogType(log.type) || log.quota > 0
+  const showCost = props.isAdmin && canShowLogCost(log.type, other)
+  const hasCharge = isConsumeLogType(log.type) || log.quota > 0 || showCost
   const admin = props.isAdmin ? other?.admin_info : undefined
 
   return (
@@ -91,11 +92,7 @@ export function LogRequestOverview(props: {
               compact
               log={log}
               other={other}
-              isAdmin={
-                props.isAdmin &&
-                log.type === LOG_TYPE_ENUM.CONSUME &&
-                !isViolationFeeLog(other)
-              }
+              isAdmin={showCost}
             />
           </LogOverviewCard>
         )}

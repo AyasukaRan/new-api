@@ -132,13 +132,17 @@ export interface ToolSurchargeItem {
 
 export interface LogCostEstimate {
   free_quota?: number
-  cost_ratio: number
-  base_quota: number
+  cost_ratio?: number
+  base_quota?: number
   cost_quota: number
   revenue_quota: number
   profit_quota: number
   estimated: boolean
   source?: 'upstream_bill'
+  actual_cost_usd?: number | string
+  billing_type?: 0 | 1
+  synced_at?: number
+  rate_multiplier?: number
 }
 
 /** One change a request processing plugin made, as the log owner sees it. */

@@ -18,6 +18,18 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { DashboardFinance, DashboardMetric, QuotaDataItem } from '../types'
 
+/** Paid failures carry real costs without increasing successful-call counts. */
+export function hasDashboardFinanceValues(
+  finance: DashboardFinance | undefined
+): boolean {
+  return Boolean(
+    finance &&
+    (finance.recorded_count > 0 ||
+      (Number.isFinite(finance.cost_quota) && finance.cost_quota > 0) ||
+      (Number.isFinite(finance.profit_quota) && finance.profit_quota !== 0))
+  )
+}
+
 export function getDashboardMetricValue(
   item: Pick<QuotaDataItem, 'quota' | 'count' | 'finance'>,
   metric: DashboardMetric
@@ -28,7 +40,7 @@ export function getDashboardMetricValue(
     const free = Number(item.finance?.free_quota) || 0
     return Math.max(0, quota - Math.max(0, free))
   }
-  if (!item.finance || item.finance.recorded_count <= 0) return null
+  if (!item.finance || !hasDashboardFinanceValues(item.finance)) return null
   const value =
     metric === 'cost' ? item.finance.cost_quota : item.finance.profit_quota
   return Number.isFinite(value) ? value : null

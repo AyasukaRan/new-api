@@ -62,6 +62,7 @@ import { LOG_TYPE_ALL_VALUE, LOG_TYPE_ENUM } from '../../constants'
 import type { UsageLog } from '../../data/schema'
 import type { LogFilterColumn } from '../../lib/filter'
 import {
+  canShowLogCost,
   formatModelName,
   decodeBillingExprB64,
   getTieredBillingSummary,
@@ -887,10 +888,7 @@ export function useCommonLogsColumns(
               other={other}
               showBillingSource={showBillingSource}
               isAdmin={
-                isAdmin &&
-                source !== 'test' &&
-                log.type === LOG_TYPE_ENUM.CONSUME &&
-                !isViolationFeeLog(other)
+                isAdmin && source !== 'test' && canShowLogCost(log.type, other)
               }
             />
           )

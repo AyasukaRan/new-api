@@ -146,6 +146,7 @@ import {
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
   CHANNEL_TYPE_NEW_API,
+  CHANNEL_TYPE_SUB2API,
   CHANNEL_TYPE_OLLAMA,
   CHANNEL_TYPE_OPTIONS,
   CHANNEL_TYPE_TASK_PLUGIN,
@@ -243,6 +244,7 @@ import {
 } from '../model-mapping-editor'
 import { ModelRedirectPanel } from '../model-redirect-panel'
 import { ResponsesWebSocketSetting } from '../responses-websocket-setting'
+import { Sub2APISettings } from '../sub2api-settings'
 import { UpstreamModelSelection } from '../upstream-model-selection'
 import {
   ChannelConfiguration,
@@ -5051,58 +5053,61 @@ export function ChannelMutateDrawer({
                 </div>
               )}
 
-              {!useUnifiedKeyEditor && isEditing && isMultiKeyChannel && !pluginLogin && (
-                <FormField
-                  control={form.control}
-                  name='key_mode'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t('Key Update Mode')}</FormLabel>
-                      <Select
-                        disabled={sensitiveLocked}
-                        items={[
-                          {
-                            value: 'append',
-                            label: t('Append to existing keys'),
-                          },
-                          {
-                            value: 'replace',
-                            label: t('Replace all existing keys'),
-                          },
-                        ]}
-                        onValueChange={field.onChange}
-                        value={field.value}
-                      >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent alignItemWithTrigger={false}>
-                          <SelectGroup>
-                            <SelectItem value='append'>
-                              {t('Append to existing keys')}
-                            </SelectItem>
-                            <SelectItem value='replace'>
-                              {t('Replace all existing keys')}
-                            </SelectItem>
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                      <FormDescription>
-                        {field.value === 'replace'
-                          ? t(
-                              'Replace mode: Will completely replace all existing keys'
-                            )
-                          : t(
-                              'Append mode: New keys will be added to the end of the existing key list'
-                            )}
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              )}
+              {!useUnifiedKeyEditor &&
+                isEditing &&
+                isMultiKeyChannel &&
+                !pluginLogin && (
+                  <FormField
+                    control={form.control}
+                    name='key_mode'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Key Update Mode')}</FormLabel>
+                        <Select
+                          disabled={sensitiveLocked}
+                          items={[
+                            {
+                              value: 'append',
+                              label: t('Append to existing keys'),
+                            },
+                            {
+                              value: 'replace',
+                              label: t('Replace all existing keys'),
+                            },
+                          ]}
+                          onValueChange={field.onChange}
+                          value={field.value}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent alignItemWithTrigger={false}>
+                            <SelectGroup>
+                              <SelectItem value='append'>
+                                {t('Append to existing keys')}
+                              </SelectItem>
+                              <SelectItem value='replace'>
+                                {t('Replace all existing keys')}
+                              </SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <FormDescription>
+                          {field.value === 'replace'
+                            ? t(
+                                'Replace mode: Will completely replace all existing keys'
+                              )
+                            : t(
+                                'Append mode: New keys will be added to the end of the existing key list'
+                              )}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
               {!useUnifiedKeyEditor &&
                 (isMultiKeyChannel ||
@@ -5315,6 +5320,14 @@ export function ChannelMutateDrawer({
                 {proxyFields}
                 {httpProtocolFields}
                 {httpShardsFields}
+                {currentType === CHANNEL_TYPE_SUB2API && (
+                  <Sub2APISettings
+                    key={channelId ?? 'new'}
+                    channelId={channelId ?? null}
+                    disabled={!canEditSensitive}
+                    hasUnsavedChanges={form.formState.isDirty}
+                  />
+                )}
                 <FormField
                   control={form.control}
                   name='upstream_cost_ratio'

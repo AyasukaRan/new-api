@@ -36,6 +36,7 @@ import { policyLabel } from '@/features/system-settings/request-policies/policy-
 import { formatNumber, formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 
+import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
 import type { LogCostEstimate, LogOtherData } from '../types'
 import { buildQuotaAuditOperation } from './quota-audit-operation'
@@ -64,16 +65,34 @@ export function getLogCostEstimate(
   if (cost.estimated !== true && !fromUpstreamBill) return null
   if (!Number.isFinite(cost.profit_quota)) return null
   if (
-    [
-      cost.cost_ratio,
-      cost.base_quota,
-      cost.cost_quota,
-      cost.revenue_quota,
-    ].some((value) => !Number.isFinite(value) || value < 0)
+    [cost.cost_quota, cost.revenue_quota].some(
+      (value) => !Number.isFinite(value) || value < 0
+    )
+  ) {
+    return null
+  }
+  if (
+    !fromUpstreamBill &&
+    [cost.cost_ratio, cost.base_quota].some(
+      (value) =>
+        typeof value !== 'number' || !Number.isFinite(value) || value < 0
+    )
   ) {
     return null
   }
   return cost
+}
+
+/** Failed requests expose only confirmed upstream receipts, never estimates. */
+export function canShowLogCost(
+  type: number,
+  other: LogOtherData | null
+): boolean {
+  if (isViolationFeeLog(other)) return false
+  if (type === LOG_TYPE_ENUM.CONSUME) return true
+  if (type !== LOG_TYPE_ENUM.ERROR) return false
+  const cost = getLogCostEstimate(other)
+  return cost?.estimated === false && cost.source === 'upstream_bill'
 }
 
 const PARAM_OVERRIDE_ACTION_MAP: Record<string, string> = {

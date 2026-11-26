@@ -100,6 +100,16 @@ func PasswordEncryptionPublicKey() (keyID string, publicKeyPEM string) {
 // allowing long Unicode passwords to work with existing 2048-bit server keys.
 // Both formats share one public error for all malformed inputs.
 func DecryptPassword(ciphertextBase64 string, keyID string) (string, error) {
+	return decryptBrowserSecret(ciphertextBase64, keyID, MaxAccountPasswordLength*utf8.UTFMax, 4096)
+}
+
+// DecryptChannelCredential reuses the authenticated browser envelope for token
+// pairs, which can be longer than passwords. Password limits remain unchanged.
+func DecryptChannelCredential(ciphertextBase64 string, keyID string) (string, error) {
+	return decryptBrowserSecret(ciphertextBase64, keyID, 32768, 49152)
+}
+
+func decryptBrowserSecret(ciphertextBase64 string, keyID string, maxBytes, maxEnvelope int) (string, error) {
 	passwordEncryptionState.RLock()
 	privateKey := passwordEncryptionState.privateKey
 	activeKeyID := passwordEncryptionState.keyID
@@ -108,7 +118,7 @@ func DecryptPassword(ciphertextBase64 string, keyID string) (string, error) {
 		return "", ErrPasswordEncryptionInvalid
 	}
 	if strings.HasPrefix(ciphertextBase64, "v2.") {
-		if len(ciphertextBase64) > 4096 {
+		if len(ciphertextBase64) > maxEnvelope {
 			return "", ErrPasswordEncryptionInvalid
 		}
 		parts := strings.Split(ciphertextBase64, ".")
@@ -124,7 +134,7 @@ func DecryptPassword(ciphertextBase64 string, keyID string) (string, error) {
 			return "", ErrPasswordEncryptionInvalid
 		}
 		ciphertext, err := base64.StdEncoding.Strict().DecodeString(parts[3])
-		if err != nil || len(ciphertext) <= 16 || len(ciphertext) > MaxAccountPasswordLength*utf8.UTFMax+16 {
+		if err != nil || len(ciphertext) <= 16 || len(ciphertext) > maxBytes+16 {
 			return "", ErrPasswordEncryptionInvalid
 		}
 		key, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, privateKey, wrappedKey, []byte("password-v2"))

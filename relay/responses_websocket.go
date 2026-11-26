@@ -371,6 +371,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		}
 		info.ChannelAttemptStartTime = time.Now()
 		finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), info, s.lockedChannelID)
+		service.BeginSub2APIBillingAttempt(c, info)
 		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
 			state.closeCode = websocket.CloseInternalServerErr
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -418,6 +419,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			info.ChannelAttemptStartTime = time.Now()
 			finishActivity = perfmetrics.BeginChannelRequest(c.Request.Context(), info, channel.Id)
 			service.MarkGroupKeyAttempt(c, channel, common.GetContextKeyString(c, appconstant.ContextKeyChannelKey))
+			service.BeginSub2APIBillingAttempt(c, info)
 			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
@@ -630,6 +632,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					accepted = true
 					if event.Response != nil && event.Response.ID != "" {
 						responseID = event.Response.ID
+						service.CaptureSub2APIResponseID(c, responseID, true)
 					}
 				}
 				accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)

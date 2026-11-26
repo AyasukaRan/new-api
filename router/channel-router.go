@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 	"path"
+	"strings"
 
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
@@ -50,11 +51,23 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	)
 
 	for _, route := range channelPermissionRoutes {
+		if route.method != http.MethodGet && strings.Contains(route.path, "/sub2api/") {
+			handlePermissionRoute(channelRoute, route.method, route.path, route.permission, middleware.CriticalRateLimit(), route.handler)
+			continue
+		}
 		handlePermissionRoute(channelRoute, route.method, route.path, route.permission, route.handler)
 	}
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/:id/sub2api", permission: authz.ChannelRead, handler: controller.GetSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/login", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/login/2fa", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/import", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/refresh", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/disconnect", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/sync", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPut, path: "/:id/sub2api/keys", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
 	{method: http.MethodGet, path: "/group_key_routing", permission: authz.ChannelRead, handler: controller.GetGroupKeyRouting},
 	{method: http.MethodPut, path: "/group_key_routing", permission: authz.ChannelSensitiveWrite, handler: controller.SetGroupKeyRouting},
 	{method: http.MethodGet, path: "/priority/order", permission: authz.ChannelRead, handler: controller.GetChannelPriorityOrder},

@@ -2,8 +2,10 @@ package model
 
 import (
 	"crypto/hmac"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"gorm.io/gorm"
 )
@@ -11,6 +13,16 @@ import (
 // UpstreamCostRatioForKey freezes the actual credential's override, including
 // zero. An absent override inherits the channel's optional estimate.
 func (channel *Channel) UpstreamCostRatioForKey(key string) *float64 {
+	if channel.Type == constant.ChannelTypeSub2API && Sub2APIStorageReady() {
+		if binding, err := GetSub2APIKeyBinding(channel.Id, channel.KeyIdentity(key)); err == nil && binding.SyncRates && binding.RateJSON != "" {
+			var rate Sub2APIRate
+			if common.UnmarshalJsonStr(binding.RateJSON, &rate) == nil && rate.SourceIdentity == channel.Sub2APIConnectionIdentity() {
+				if effective, valid := rate.EffectiveAt(time.Now()); valid {
+					return &effective
+				}
+			}
+		}
+	}
 	ratio, exists := channel.ChannelInfo.KeyCostRatios[channel.KeyIdentity(key)]
 	if !exists {
 		configured := channel.GetSetting().UpstreamCostRatio

@@ -135,6 +135,61 @@ it('marks wholly missing cost as unrecorded rather than zero', () => {
   ).toBeVisible()
 })
 
+it.each([0, 1])(
+  'keeps paid-failure costs visible with %s unrecorded successful calls',
+  (unrecorded) => {
+    const rows: QuotaDataItem[] = [
+      {
+        created_at: 0,
+        count: unrecorded,
+        quota: 0,
+        finance: {
+          cost_quota: 650000,
+          profit_quota: -650000,
+          covered_revenue_quota: 0,
+          recorded_count: 0,
+          actual_count: 0,
+          estimated_count: 0,
+          unrecorded_count: unrecorded,
+        },
+      },
+    ]
+    expect(getDashboardMetricValue(rows[0], 'cost')).toBe(650000)
+    expect(getDashboardMetricValue(rows[0], 'profit')).toBe(-650000)
+    expect(getDashboardMetricValue(rows[0], 'requests')).toBe(unrecorded)
+    const summary = summarizeDashboardFinance(rows)
+    expect(summary.recorded_count).toBe(0)
+    expect(summary.actual_count).toBe(0)
+    const trend = hourlyDashboardFinance(rows, 0, 0)
+    render(<FinancialSummary data={rows} trend={trend} />)
+    expect(
+      within(screen.getByRole('group', { name: 'Upstream cost' })).getByText(
+        '$1.3'
+      )
+    ).toBeVisible()
+    expect(
+      within(screen.getByRole('group', { name: 'Gross profit' })).getByText(
+        '-$1.3'
+      )
+    ).toBeVisible()
+    expect(
+      screen.getByRole('figure', { name: 'Financial summary · Trend' })
+    ).toBeVisible()
+    if (unrecorded === 0) {
+      expect(trend).toEqual([
+        { time: 0, revenue: 0, cost: 650000, profit: -650000 },
+      ])
+      expect(
+        screen.queryByRole('progressbar', { name: 'Cost coverage' })
+      ).not.toBeInTheDocument()
+    } else {
+      expect(
+        screen.getByRole('progressbar', { name: 'Cost coverage' })
+      ).toHaveAttribute('aria-valuenow', '0')
+    }
+  }
+)
+
 it('excludes free allowances from revenue even when cost is not recorded', () => {
   const rows: QuotaDataItem[] = [
     {
@@ -236,14 +291,12 @@ it('reads sitewide finance in aligned 24 or 168 hourly buckets and only for admi
   const now = new Date('2026-11-20T11:27:03Z')
   vi.spyOn(Date, 'now').mockReturnValue(now.getTime())
   const end = now.getTime() / 1000
-  const get = vi
-    .spyOn(api, 'get')
-    .mockResolvedValue({
-      data: {
-        success: true,
-        data: [{ ...data[0], created_at: end - (end % 3600) }],
-      },
-    })
+  const get = vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: [{ ...data[0], created_at: end - (end % 3600) }],
+    },
+  })
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })

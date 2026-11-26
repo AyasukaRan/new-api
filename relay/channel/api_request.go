@@ -377,6 +377,7 @@ func signUpstreamRequest(adaptor any, c *gin.Context, info *common.RelayInfo, me
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	service.BeginSub2APIBillingAttempt(c, info)
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
@@ -678,6 +679,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
 		c.Set(common2.UpstreamRequestIdKey, upID)
 	}
+	service.CaptureSub2APIBillingResponse(c, resp.Header)
 
 	// resp.Body is still untouched here. A tee is the only way to see the real
 	// stream: the SSE scanner discards comments, event lines and blank lines

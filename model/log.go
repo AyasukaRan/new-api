@@ -194,6 +194,9 @@ func createLog(log *Log) error {
 	if err := LOG_DB.Create(log).Error; err != nil {
 		return err
 	}
+	if err := QueueSub2APIBill(context.Background(), log); err != nil {
+		common.SysError("Sub2API bill queue failed; source log retained for reconciliation")
+	}
 	usageLiveFeed.committed(log)
 	return nil
 }
@@ -883,17 +886,19 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	if filter.Live {
 		keyLiveLogs(logs)
 	}
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		assignDisplayLogIds(logs, startIdx)
-	}
-
 	if err := resolveLogChannels(logs); err != nil {
 		return nil, 0, err
+	}
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		assignDisplayLogIds(logs, startIdx)
 	}
 	return logs, total, resolveLogUsers(logs, true)
 }
 
 func resolveLogChannels(logs []*Log) error {
+	if err := AttachSub2APIBills(context.Background(), logs); err != nil {
+		return err
+	}
 	channelIds := types.NewSet[int]()
 	for _, log := range logs {
 		if log.ChannelId != 0 {
@@ -1027,12 +1032,60 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 			channelNames[channel.Id] = channel.Name
 		}
 	}
-	return streamLogs(tx, "logs.created_at desc, logs.id desc", func(log *Log) error {
-		log.useCurrentUser(users)
-		log.ChannelName = channelNames[log.ChannelId]
-		log.Other = formatLogOtherJSON(log.Other, visibility)
-		return fn(log)
-	})
+	emitBatch := func(rows []*Log) error {
+		if err := AttachSub2APIBills(ctx, rows); err != nil {
+			return err
+		}
+		for _, log := range rows {
+			log.useCurrentUser(users)
+			log.ChannelName = channelNames[log.ChannelId]
+			log.Other = formatLogOtherJSON(log.Other, visibility)
+			if err := fn(log); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		// Historical ClickHouse rows may have identical/zero IDs. Preserve the
+		// original cursor and tie ordering; invoices use the separate main DB.
+		batch := make([]*Log, 0, 300)
+		err := streamLogs(tx, clickHouseLogOrder("logs."), func(log *Log) error {
+			batch = append(batch, log)
+			if len(batch) < 300 {
+				return nil
+			}
+			if err := emitBatch(batch); err != nil {
+				return err
+			}
+			batch = batch[:0]
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return emitBatch(batch)
+	}
+	// Release each bounded source batch before querying main-DB invoices. This
+	// also works when the stores share SQLite's single connection.
+	var before *Log
+	for {
+		batchQuery := tx.Session(&gorm.Session{})
+		if before != nil {
+			batchQuery = batchQuery.Where("logs.created_at < ? OR (logs.created_at = ? AND logs.id < ?)", before.CreatedAt, before.CreatedAt, before.Id)
+		}
+		var rows []*Log
+		if err := batchQuery.Order("logs.created_at desc, logs.id desc").Limit(300).Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		before = rows[len(rows)-1]
+		if err := emitBatch(rows); err != nil {
+			return err
+		}
+	}
 }
 
 // StreamUserLogs is StreamAllLogs for one user's own logs, shaped like the
@@ -1121,6 +1174,19 @@ func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFin
 	}
 	if includeFinance && filter.Source != LogSourceTest {
 		stat, err = logFinanceStat(tx)
+		if err == nil {
+			err = applySub2APIBillStat(ctx, tx, &stat, filter.StartTimestamp, filter.EndTimestamp)
+		}
+		if err == nil && Sub2APIStorageReady() {
+			failed := LOG_DB.WithContext(ctx).Model(&Log{}).Where("logs.type = ?", LogTypeError)
+			if userID != nil {
+				failed = failed.Where("logs.user_id = ?", *userID)
+			}
+			failed, err = filter.apply(failed)
+			if err == nil {
+				err = applySub2APIBillStat(ctx, failed, &stat, filter.StartTimestamp, filter.EndTimestamp)
+			}
+		}
 	} else {
 		err = tx.Select("COALESCE(sum(quota), 0) quota").Scan(&stat).Error
 	}

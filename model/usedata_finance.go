@@ -72,12 +72,16 @@ func recordedLogFinance(quota int, cost *dashboardCostSnapshot, freeQuota int64)
 	if cost == nil || cost.Estimated == nil || (!*cost.Estimated && cost.Source != "upstream_bill") {
 		return finance, false
 	}
-	for _, amount := range []*float64{cost.CostRatio, cost.BaseQuota, cost.CostQuota, cost.RevenueQuota} {
+	amounts := []*float64{cost.CostQuota, cost.RevenueQuota}
+	if *cost.Estimated {
+		amounts = append(amounts, cost.CostRatio, cost.BaseQuota)
+	}
+	for _, amount := range amounts {
 		if amount == nil || math.IsNaN(*amount) || math.IsInf(*amount, 0) || *amount < 0 || *amount > common.MaxQuota {
 			return finance, false
 		}
 	}
-	if *cost.CostRatio > 10000 || cost.FreeQuota != freeQuota || *cost.RevenueQuota != float64(int64(quota)-freeQuota) {
+	if (*cost.Estimated && *cost.CostRatio > 10000) || cost.FreeQuota != freeQuota || *cost.RevenueQuota != float64(int64(quota)-freeQuota) {
 		return finance, false
 	}
 	profit := *cost.RevenueQuota - *cost.CostQuota
@@ -118,6 +122,25 @@ var dashboardFinanceCache = hot.NewHotCache[string, map[dashboardFinanceKey]Dash
 var dashboardFinanceLoads singleflight.Group
 
 func getDashboardFinance(ctx context.Context, startTime, endTime int64, username string) (map[dashboardFinanceKey]DashboardFinance, error) {
+	costs, err := getRecordedDashboardFinance(ctx, startTime, endTime, username)
+	if err != nil || !Sub2APIStorageReady() {
+		return costs, err
+	}
+	// Cached source projections remain estimates. Apply current settled invoices
+	// to a copy, so neither cache hits nor repeated reports compound the cost.
+	result := make(map[dashboardFinanceKey]DashboardFinance, len(costs))
+	for key, value := range costs {
+		result[key] = value
+	}
+	start := ((startTime + 3599) / 3600) * 3600
+	end := endTime - endTime%3600 + 3599
+	if start > end {
+		return result, nil
+	}
+	return result, applySub2APIDashboardBills(ctx, result, start, end, username)
+}
+
+func getRecordedDashboardFinance(ctx context.Context, startTime, endTime int64, username string) (map[dashboardFinanceKey]DashboardFinance, error) {
 	if startTime < 0 || endTime < startTime || endTime > math.MaxInt64-3599 {
 		return nil, fmt.Errorf("invalid time range")
 	}

@@ -103,7 +103,13 @@ function DetailPreview(props: {
   isAdmin: boolean
   type?: number
   source?: LogSource
-  columnId?: 'content' | 'prompt_tokens' | 'created_at' | 'request_details'
+  columnId?:
+    | 'content'
+    | 'prompt_tokens'
+    | 'created_at'
+    | 'request_details'
+    | 'quota'
+  quota?: number
   createdAt?: number
   inlineEvents?: boolean
 }) {
@@ -111,7 +117,11 @@ function DetailPreview(props: {
     useState<UsageLogDetailSelection | null>(null)
   const table = useReactTable({
     data: [
-      { ...makeLog(props.other, props.type), created_at: props.createdAt ?? 1 },
+      {
+        ...makeLog(props.other, props.type),
+        created_at: props.createdAt ?? 1,
+        ...(props.quota === undefined ? {} : { quota: props.quota }),
+      },
     ],
     columns: useCommonLogsColumns(
       props.isAdmin,
@@ -975,6 +985,160 @@ test.each([true, false])(
       expect(dialog.queryByText('Upstream cost')).not.toBeInTheDocument()
       expect(dialog.queryByText('$0.013')).not.toBeInTheDocument()
       expect(dialog.queryByText('Gross profit')).not.toBeInTheDocument()
+    }
+  }
+)
+
+test.each([
+  { billingType: 0, amount: '0.013', expected: '0.013' },
+  { billingType: 1, amount: '0.013', expected: '0.013' },
+  { billingType: 0, amount: '0', expected: '0' },
+  { billingType: 0, amount: 0.013, expected: '0.013' },
+  { billingType: 0, amount: '0x10', expected: null },
+  { billingType: 0, amount: '-1', expected: null },
+  { billingType: 0, amount: 'Infinity', expected: null },
+  { billingType: 0, amount: '', expected: null },
+])(
+  'actual upstream billing type $billingType with amount $amount shows valid receipt evidence',
+  async ({ billingType, amount, expected }) => {
+    const other = {
+      model_price: 0.25,
+      admin_info: {
+        cost: {
+          cost_quota: 6500,
+          revenue_quota: 5000,
+          profit_quota: -1500,
+          estimated: false,
+          source: 'upstream_bill',
+          actual_cost_usd: amount,
+          billing_type: billingType,
+          synced_at: 1795672800,
+          rate_multiplier: 0.5,
+        },
+      },
+    } as unknown as LogOtherData
+    fireEvent.click(renderPreview(other, true))
+    const dialog = within(await screen.findByRole('dialog'))
+    await userEvent.click(dialog.getByRole('tab', { name: 'Cost breakdown' }))
+    expect(dialog.getByText('Upstream bill')).toBeVisible()
+    expect(
+      dialog.getByText(
+        billingType === 1 ? 'Subscription allowance used' : 'Wallet deduction'
+      )
+    ).toBeVisible()
+    if (expected === null) {
+      expect(
+        dialog.queryByText('Original deduction (USD)')
+      ).not.toBeInTheDocument()
+    } else {
+      expect(dialog.getByText('Original deduction (USD)')).toBeVisible()
+      expect(
+        dialog.getByText('Original deduction (USD)').nextElementSibling
+      ).toHaveTextContent(expected)
+    }
+    expect(dialog.getByText('Synced at')).toBeVisible()
+    expect(dialog.getByText('0.5×')).toBeVisible()
+    expect(
+      dialog.queryByText('Estimated upstream cost')
+    ).not.toBeInTheDocument()
+    if (billingType === 1) {
+      expect(
+        dialog.getByText(
+          'Gross profit uses upstream allowance consumption, not a wallet payment.'
+        )
+      ).toBeVisible()
+    }
+  }
+)
+
+test.each([
+  { isAdmin: true, estimated: false, source: 'usage' as const, visible: true },
+  {
+    isAdmin: false,
+    estimated: false,
+    source: 'usage' as const,
+    visible: false,
+  },
+  { isAdmin: true, estimated: true, source: 'usage' as const, visible: false },
+  { isAdmin: true, estimated: false, source: 'test' as const, visible: false },
+])(
+  'failed request actual costs respect administrator and source boundaries: $isAdmin / $estimated / $source',
+  async ({ isAdmin, estimated, source, visible }) => {
+    const other: LogOtherData = {
+      admin_info: {
+        cost: {
+          cost_quota: 6500,
+          revenue_quota: 0,
+          profit_quota: -6500,
+          estimated,
+          source: estimated ? undefined : 'upstream_bill',
+          ...(estimated ? { cost_ratio: 1.3, base_quota: 5000 } : {}),
+          actual_cost_usd: '0.013',
+          billing_type: 0,
+        },
+      },
+    }
+    const row = render(
+      <DetailPreview
+        other={other}
+        isAdmin={isAdmin}
+        source={source}
+        type={5}
+        quota={0}
+        columnId='quota'
+      />,
+      { wrapper: DetailProviders }
+    )
+    expect(
+      screen.getByRole('button', { name: 'Billing Details · $0' })
+    ).toBeVisible()
+    if (visible) {
+      expect(screen.getByText('$0.013')).toBeVisible()
+      expect(screen.getByText('-$0.013')).toBeVisible()
+    } else {
+      expect(screen.queryByText('$0.013')).not.toBeInTheDocument()
+      expect(screen.queryByText('-$0.013')).not.toBeInTheDocument()
+    }
+    row.unmount()
+    render(
+      <DetailsDialog
+        open
+        log={{ ...makeLog(other, 5), quota: 0 }}
+        source={source}
+        isAdmin={isAdmin}
+        isRoot={false}
+        onOpenChange={() => undefined}
+      />,
+      { wrapper: DetailProviders }
+    )
+    const dialog = within(await screen.findByRole('dialog'))
+    const costTab = dialog.queryByRole('tab', { name: 'Cost breakdown' })
+    expect(Boolean(costTab)).toBe(visible)
+    if (source === 'test') {
+      expect(dialog.queryByText('Upstream bill')).not.toBeInTheDocument()
+      return
+    }
+    await userEvent.click(dialog.getByRole('tab', { name: 'Overview' }))
+    const overview = within(dialog.getByRole('tabpanel', { name: 'Overview' }))
+    if (visible) {
+      const receipt = within(
+        overview.getByRole('region', { name: 'Billing Details' })
+      )
+      expect(receipt.getByText('Upstream bill')).toBeVisible()
+      expect(
+        receipt.getByText('Amount charged').nextElementSibling
+      ).toHaveTextContent('$0')
+      await userEvent.click(dialog.getByRole('tab', { name: 'Cost breakdown' }))
+      expect(dialog.getByText('Upstream bill')).toBeVisible()
+      expect(dialog.getByText('Wallet deduction')).toBeVisible()
+      expect(
+        dialog.getByText('Gross profit').nextElementSibling
+      ).toHaveTextContent(/-\$0\.013$/)
+    } else {
+      expect(
+        overview.queryByRole('region', { name: 'Billing Details' })
+      ).not.toBeInTheDocument()
+      expect(dialog.queryByText('Upstream bill')).not.toBeInTheDocument()
     }
   }
 )

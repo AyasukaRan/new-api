@@ -25,7 +25,10 @@ import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-p
 import { usePricingData } from '@/features/pricing/hooks/use-pricing-data'
 import { BILLING_PRICING_VARS } from '@/features/pricing/lib/billing-expr'
 import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
-import { getCachePriceLabels, getCachePricingMode } from '@/features/pricing/lib/cache-pricing'
+import {
+  getCachePriceLabels,
+  getCachePricingMode,
+} from '@/features/pricing/lib/cache-pricing'
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
@@ -220,9 +223,7 @@ function BillingBreakdown(props: {
       other.cache_creation_ratio !== 1
     ) {
       rows.push({
-        label: hasCacheWrite12h
-          ? t('Cache Write (30m)')
-          : t('Cache Write'),
+        label: hasCacheWrite12h ? t('Cache Write (30m)') : t('Cache Write'),
         value: `${fmtPrice(baseInputUSD * other.cache_creation_ratio)}/M`,
       })
     }
@@ -376,20 +377,22 @@ function BillingBreakdown(props: {
       )}
       {isAdmin && props.showCostEstimate && (
         <>
-          {cost && (
-            <>
-              <DetailRow
-                label={t('Base model amount')}
-                value={formatLogQuota(cost.base_quota)}
-                mono
-              />
-              <DetailRow
-                label={t('Upstream cost multiplier')}
-                value={`${formatRatio(cost.cost_ratio)}x`}
-                mono
-              />
-            </>
-          )}
+          {cost?.estimated &&
+            cost.base_quota !== undefined &&
+            cost.cost_ratio !== undefined && (
+              <>
+                <DetailRow
+                  label={t('Base model amount')}
+                  value={formatLogQuota(cost.base_quota)}
+                  mono
+                />
+                <DetailRow
+                  label={t('Upstream cost multiplier')}
+                  value={`${formatRatio(cost.cost_ratio)}x`}
+                  mono
+                />
+              </>
+            )}
           {props.legacy && (
             <>
               <DetailRow
@@ -430,7 +433,9 @@ function TokenBreakdown(props: {
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const { log, other } = props
 
-  const compiled = compileBillingExpression(decodeBillingExprB64(other.expr_b64))
+  const compiled = compileBillingExpression(
+    decodeBillingExprB64(other.expr_b64)
+  )
   const cacheMode = getCachePricingMode(
     compiled.status === 'ready' ? compiled.variables : [],
     log.model_name

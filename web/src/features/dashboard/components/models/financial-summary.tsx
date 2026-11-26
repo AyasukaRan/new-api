@@ -26,6 +26,7 @@ import { ErrorState } from '@/components/error-state'
 import { Progress } from '@/components/ui/progress'
 import { getUserQuotaDates } from '@/features/dashboard/api'
 import {
+  hasDashboardFinanceValues,
   hourlyDashboardFinance,
   summarizeDashboardFinance,
 } from '@/features/dashboard/lib/finance'
@@ -57,7 +58,7 @@ export function FinancialSummary(props: FinancialSummaryProps) {
   )
   if (!role || role < ROLE.ADMIN) return null
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
-  const recorded = summary.recorded_count > 0
+  const recorded = hasDashboardFinanceValues(summary)
   const coverageCount = Math.max(
     summary.count,
     summary.recorded_count + summary.unrecorded_count
@@ -151,7 +152,7 @@ export function FinancialSummary(props: FinancialSummaryProps) {
       {!props.loading &&
         !props.error &&
         props.trend &&
-        (coverageCount > 0 ? (
+        (coverageCount > 0 || recorded ? (
           <FinancialTrend points={props.trend} />
         ) : (
           <EmptyState title={t('No data available')} className='min-h-28' />

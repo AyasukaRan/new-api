@@ -22,6 +22,7 @@ const (
 	VerificationMethodOAuth              = "oauth"
 	VerificationMethodSession            = "session"
 	VerificationScopeChannelKeyRead      = "channel.key.read"
+	VerificationScopeSub2APIManage       = "channel.sub2api.manage"
 	VerificationScopePasskeyRegister     = "passkey.register"
 	VerificationScopePasskeyDelete       = "passkey.delete"
 	VerificationScopeTwoFASetup          = "2fa.setup"
@@ -70,6 +71,13 @@ type VerificationOperation struct {
 
 type ChannelKeyReadContext struct {
 	ChannelID int `json:"channel_id"`
+}
+
+type Sub2APIManageContext struct {
+	ChannelID   int    `json:"channel_id"`
+	Action      string `json:"action"`
+	AccountID   int64  `json:"account_id"`
+	KeyIdentity string `json:"key_identity"`
 }
 
 type AccountBindingContext struct {
@@ -163,6 +171,15 @@ func BindVerificationOperation(operation VerificationOperation) (VerificationBin
 	}
 	var normalized any
 	switch operation.Scope {
+	case VerificationScopeSub2APIManage:
+		var context Sub2APIManageContext
+		if len(fields) != 4 || common.Unmarshal(operation.Context, &context) != nil || context.ChannelID <= 0 || context.AccountID < 0 || !slices.Contains([]string{"login", "import", "refresh", "disconnect", "sync", "keys"}, context.Action) {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		if context.Action == "keys" && len(context.KeyIdentity) != 64 || context.Action != "keys" && context.KeyIdentity != "" {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		normalized = context
 	case VerificationScopeChannelKeyRead:
 		var context ChannelKeyReadContext
 		if len(fields) != 1 || common.Unmarshal(fields["channel_id"], &context.ChannelID) != nil || context.ChannelID <= 0 {
@@ -319,7 +336,7 @@ func securityVerificationPolicy(scope string, state model.UserVerificationState)
 		methods = append(methods, VerificationMethodPasskey)
 	}
 	switch scope {
-	case VerificationScopeChannelKeyRead:
+	case VerificationScopeChannelKeyRead, VerificationScopeSub2APIManage:
 		// Only accounts without an enrolled factor may use their password.
 		if len(methods) == 0 && state.HasPassword {
 			methods = []string{VerificationMethodPassword}
@@ -383,6 +400,9 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	if scope == VerificationScopeChannelKeyRead && state.Role != common.RoleRootUser {
 		return nil, ErrVerificationForbidden
 	}
+	if scope == VerificationScopeSub2APIManage && state.Role < common.RoleAdminUser {
+		return nil, ErrVerificationForbidden
+	}
 	if strings.HasPrefix(scope, verificationScopeAdminUserPrefix) && state.Role < common.RoleAdminUser {
 		return nil, ErrVerificationForbidden
 	}
@@ -397,7 +417,7 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	for i := range methods {
 		if methods[i].Method == VerificationMethodPassword && !common.PasswordLoginEnabled {
 			switch scope {
-			case VerificationScopeChannelKeyRead,
+			case VerificationScopeChannelKeyRead, VerificationScopeSub2APIManage,
 				VerificationScopeAccountBind, VerificationScopeAccountUnbind, VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete,
 				VerificationScopeAdminUserCreate, VerificationScopeAdminUserUpdate, VerificationScopeAdminUserDelete,
 				VerificationScopeAdminUserManage, VerificationScopeAdminUserPasskeyReset,

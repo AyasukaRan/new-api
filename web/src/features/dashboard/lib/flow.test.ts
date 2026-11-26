@@ -855,37 +855,58 @@ describe('administrator flow costs', () => {
     ).toBe(130)
   })
 
-  test('cost tooltips show signed profit and covered request count', () => {
-    const data = buildDashboardFlowData(costRows, 'cost', {
-      role: 'admin',
-      selectedUsers: ['user:1'],
-    })
-    const spec = buildFlowSankeySpec(data.flow, 'Flow', String, {
-      quota: 'Revenue',
-      tokens: 'Tokens',
-      requests: 'Requests',
-      share: 'Share',
-      cost: 'Cost',
-      profit: 'Profit',
-      coverage: 'Coverage',
-      unrecorded: 'Unknown',
-    })
-    const datum = { datum: spec.data[0].values[0].links[0] }
-    const content = spec.tooltip.mark.content as {
-      key: string
-      value: (datum: unknown) => string
-      visible?: (datum: unknown) => boolean
-    }[]
-    expect(content.find((line) => line.key === 'Cost')?.value(datum)).toBe(
-      '130'
-    )
-    expect(content.find((line) => line.key === 'Profit')?.value(datum)).toBe(
-      '-30'
-    )
-    expect(content.find((line) => line.key === 'Coverage')?.value(datum)).toBe(
-      '1 / 2'
-    )
-  })
+  test.each([false, true])(
+    'cost tooltips show signed profit and covered request count, paid failure: %s',
+    (paidFailure) => {
+      const rows = paidFailure
+        ? [
+            {
+              ...costRows[0],
+              count: 0,
+              quota: 0,
+              finance: {
+                cost_quota: 130,
+                profit_quota: -130,
+                covered_revenue_quota: 0,
+                recorded_count: 0,
+                actual_count: 0,
+                estimated_count: 0,
+                unrecorded_count: 0,
+              },
+            },
+          ]
+        : costRows
+      const data = buildDashboardFlowData(rows, 'cost', {
+        role: 'admin',
+        selectedUsers: ['user:1'],
+      })
+      const spec = buildFlowSankeySpec(data.flow, 'Flow', String, {
+        quota: 'Revenue',
+        tokens: 'Tokens',
+        requests: 'Requests',
+        share: 'Share',
+        cost: 'Cost',
+        profit: 'Profit',
+        coverage: 'Coverage',
+        unrecorded: 'Unknown',
+      })
+      const datum = { datum: spec.data[0].values[0].links[0] }
+      const content = spec.tooltip.mark.content as {
+        key: string
+        value: (datum: unknown) => string
+        visible?: (datum: unknown) => boolean
+      }[]
+      expect(content.find((line) => line.key === 'Cost')?.value(datum)).toBe(
+        '130'
+      )
+      expect(content.find((line) => line.key === 'Profit')?.value(datum)).toBe(
+        paidFailure ? '-130' : '-30'
+      )
+      expect(
+        content.find((line) => line.key === 'Coverage')?.value(datum)
+      ).toBe(paidFailure ? '0 / 0' : '1 / 2')
+    }
+  )
 
   test('ordinary-user flows discard financial fields and cannot use cost width', () => {
     const data = buildDashboardFlowData(costRows, 'cost', { role: 'user' })

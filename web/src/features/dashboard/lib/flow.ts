@@ -35,6 +35,7 @@ import type {
 } from '@/features/dashboard/types'
 
 import { getDashboardChartColors } from './charts'
+import { hasDashboardFinanceValues } from './finance'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type VChartSpec = Record<string, any>
@@ -1170,7 +1171,7 @@ function tooltipMetricLines(
             key: labels.cost,
             value: (datum: Record<string, unknown>) => {
               const data = finance(datum)
-              return data?.recorded_count
+              return data && hasDashboardFinanceValues(data)
                 ? valueFormatter(data.cost_quota)
                 : (labels.unrecorded ?? '--')
             },
@@ -1185,7 +1186,7 @@ function tooltipMetricLines(
             key: labels.profit,
             value: (datum: Record<string, unknown>) => {
               const data = finance(datum)
-              return data?.recorded_count
+              return data && hasDashboardFinanceValues(data)
                 ? valueFormatter(data.profit_quota)
                 : (labels.unrecorded ?? '--')
             },

@@ -302,6 +302,38 @@ it('shows zero financial totals for an explicitly empty filtered result', async 
   expect(screen.queryByText('Not recorded')).not.toBeInTheDocument()
 })
 
+it('keeps paid-failure costs in totals even when all successful costs are unrecorded', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue(
+    response({
+      quota: 0,
+      rpm: 0,
+      tpm: 0,
+      finance: {
+        cost_quota: 650000,
+        profit_quota: -650000,
+        covered_revenue_quota: 0,
+        recorded_count: 0,
+        actual_count: 0,
+        estimated_count: 0,
+        unrecorded_count: 1,
+      },
+    })
+  )
+  await renderStats()
+  const cost = await screen.findByRole('group', { name: 'Upstream cost' })
+  expect(within(cost).getByText('$1.3')).toBeVisible()
+  expect(
+    within(screen.getByRole('group', { name: 'Gross profit' })).getByText(
+      '-$1.3'
+    )
+  ).toBeVisible()
+  expect(
+    screen.getByText(
+      'Cost and profit include only requests with recorded costs.'
+    )
+  ).toBeVisible()
+})
+
 it('keeps full usage while showing the free deduction and net revenue to administrators', async () => {
   const data = {
     ...stats,
