@@ -60,7 +60,10 @@ import type {
   UsageLogDetailSelection,
 } from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
+import { CommonLogMobileCard } from '../common-log-mobile-card'
 import { DetailsDialog } from '../dialogs/details-dialog'
+import { LogChargeDetails } from '../log-charge-details'
+import { UsageLogsProvider } from '../usage-logs-provider'
 
 vi.mock('@lobehub/icons', () => ({}))
 vi.hoisted(() => {
@@ -109,6 +112,9 @@ function DetailPreview(props: {
     | 'created_at'
     | 'request_details'
     | 'quota'
+    | 'model_name'
+  mobile?: boolean
+  inProgress?: boolean
   quota?: number
   createdAt?: number
   inlineEvents?: boolean
@@ -120,6 +126,7 @@ function DetailPreview(props: {
       {
         ...makeLog(props.other, props.type),
         created_at: props.createdAt ?? 1,
+        in_progress: props.inProgress,
         ...(props.quota === undefined ? {} : { quota: props.quota }),
       },
     ],
@@ -133,6 +140,19 @@ function DetailPreview(props: {
     ),
     getCoreRowModel: getCoreRowModel(),
   })
+  if (props.mobile) {
+    const row = table.getRowModel().rows[0]
+    return (
+      <UsageLogsProvider>
+        <CommonLogMobileCard
+          log={row.original}
+          cells={
+            new Map(row.getAllCells().map((cell) => [cell.column.id, cell]))
+          }
+        />
+      </UsageLogsProvider>
+    )
+  }
   const cell = table
     .getRowModel()
     .rows[0].getAllCells()
@@ -197,6 +217,94 @@ function renderPreview(other: LogOtherData, isAdmin = true, type?: number) {
   )
   return screen.getByRole('button', { name: /./ })
 }
+
+const longContextOther: LogOtherData = {
+  billing_mode: 'tiered_expr',
+  billing_unit: 'token',
+  matched_tier: 'extended',
+  expr_b64: btoa(
+    'len <= 100000 ? tier("standard", p * 1 + c * 5 + cr * 0.1) : tier("extended", p * 2 + c * 7.5 + cr * 0.2)'
+  ),
+  billing_tokens: { len: 150000, p: 1000, cr: 149000, c: 20 },
+}
+
+test.each(['desktop', 'mobile', 'receipt'] as const)(
+  'long context tag shows settled input including cache and tier on %s',
+  async (surface) => {
+    const user = userEvent.setup()
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueryClientProvider client={client}>
+          {surface === 'receipt' ? (
+            <LogChargeDetails
+              log={makeLog(longContextOther)}
+              other={longContextOther}
+            />
+          ) : (
+            <DetailPreview
+              isAdmin={false}
+              other={longContextOther}
+              columnId='model_name'
+              mobile={surface === 'mobile'}
+            />
+          )}
+        </QueryClientProvider>
+      </I18nextProvider>
+    )
+    const tag = screen.getByRole('note', { name: 'Long context' })
+    expect(tag).toBeVisible()
+    if (surface === 'receipt') await user.hover(tag)
+    else act(() => tag.focus())
+    const tooltip = await screen.findByRole('tooltip')
+    expect(tooltip).toHaveTextContent('Context threshold')
+    expect(tooltip).toHaveTextContent('> 100,000')
+    expect(tooltip).toHaveTextContent('Billed input (including cache)')
+    expect(tooltip).toHaveTextContent('150,000')
+    expect(tooltip).toHaveTextContent('Pricing tier')
+    expect(tooltip).toHaveTextContent('extended')
+    expect(screen.queryByText('Pricing tier extended')).not.toBeInTheDocument()
+  }
+)
+
+test.each([
+  { name: 'pending', other: longContextOther, inProgress: true },
+  {
+    name: 'request-priced',
+    other: {
+      ...longContextOther,
+      billing_unit: 'request' as const,
+      fixed_price: 0.01,
+    },
+  },
+  {
+    name: 'historical without settlement input',
+    other: { ...longContextOther, billing_tokens: undefined },
+  },
+  {
+    name: 'single standard tier with large input',
+    other: {
+      ...longContextOther,
+      matched_tier: 'standard',
+      expr_b64: btoa('tier("standard", p * 1 + c * 5 + cr * 0.1)'),
+    },
+  },
+])('long context tag is absent for $name', ({ other, inProgress }) => {
+  render(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>
+        <DetailPreview
+          isAdmin
+          other={other}
+          columnId='model_name'
+          inProgress={inProgress}
+        />
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+  expect(
+    screen.queryByRole('note', { name: 'Long context' })
+  ).not.toBeInTheDocument()
+})
 
 test.each([true, false])(
   'only shows the upstream ID in administrator details (isAdmin %s)',

@@ -39,10 +39,12 @@ import {
   getLogCostEstimate,
   getLogFreeQuota,
 } from '../lib/format'
+import { getLongContextBilling } from '../lib/long-context-billing'
 import type { LogOtherData } from '../types'
 import { BillingTierIcon } from './billing-tier-icon'
 import { LogBreakdownBar } from './log-breakdown-bar'
 import { LogGroupLabel } from './log-identity-cells'
+import { LongContextBillingTag } from './long-context-billing-tag'
 
 const chargeColors: Record<string, string> = {
   Input: 'bg-sky-500',
@@ -116,6 +118,7 @@ export function LogChargeDetails({
     maximumFractionDigits: 1,
   })
   const tier = normalizeTierLabel(other?.matched_tier)
+  const longContext = log?.in_progress ? null : getLongContextBilling(other)
   let tariff: string | undefined
   if (tier === 'peak') tariff = 'Peak hours'
   if (tier === 'off_peak') tariff = 'Off-peak hours'
@@ -141,7 +144,8 @@ export function LogChargeDetails({
       {(log?.group || other?.group_ratio != null || tier) && (
         <div className='flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs'>
           <LogGroupLabel group={log?.group ?? ''} other={other} visible />
-          {other?.matched_tier && (
+          <LongContextBillingTag billing={longContext} />
+          {other?.matched_tier && !longContext && (
             <span className='text-muted-foreground inline-flex items-center gap-1'>
               {tariff && (
                 <BillingTierIcon
