@@ -150,6 +150,29 @@ export const getUserLogs = (
   signal?: AbortSignal
 ) => fetchLogs('/api/log', params, false, signal)
 
+export async function getLogRetryAttempts(
+  log: UsageLog,
+  isAdmin: boolean,
+  signal?: AbortSignal
+): Promise<UsageLog[]> {
+  const response = await api.get<{ success: boolean; data: UsageLog[] }>(
+    isAdmin ? '/api/log/retries' : '/api/log/self/retries',
+    {
+      params: {
+        request_id: log.request_id,
+        start_timestamp: log.retry_started_at,
+        end_timestamp: log.created_at,
+      },
+      signal,
+      disableDuplicate: true,
+    }
+  )
+  if (!response.data.success || !Array.isArray(response.data.data)) {
+    throw createServerError(response.data)
+  }
+  return response.data.data
+}
+
 /** Read a resumable stream using the same authenticated client as the initial list. */
 export async function streamUsageLogs(
   params: GetLogsParams,

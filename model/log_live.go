@@ -231,8 +231,12 @@ func GetChangedLogs(ctx context.Context, filter LogFilter, ownUserID, role int, 
 	if len(refs) == 0 {
 		return rows, 0, nil
 	}
-	tx := LOG_DB.WithContext(ctx).Model(&Log{})
 	var err error
+	filter, err = filter.withRetries(ctx, ownUserID)
+	if err != nil {
+		return nil, 0, err
+	}
+	tx := LOG_DB.WithContext(ctx).Model(&Log{})
 	if ownUserID != 0 {
 		tx, err = filter.forUser(tx, ownUserID)
 	} else {
@@ -300,6 +304,7 @@ func GetChangedLogs(ctx context.Context, filter LogFilter, ownUserID, role int, 
 		return cmp.Compare(b.Id, a.Id)
 	})
 	rows = rows[:min(len(rows), pageSize)]
+	filter.retries.annotate(rows)
 	keyLiveLogs(rows)
 	if ownUserID != 0 {
 		formatUserLogs(rows, 0)
@@ -313,4 +318,89 @@ func GetChangedLogs(ctx context.Context, filter LogFilter, ownUserID, role int, 
 		FormatLogList(rows, role, compact)
 	}
 	return rows, total - len(rows), resolveLogUsers(rows, ownUserID == 0 && role >= common.RoleAdminUser)
+}
+
+// Late trace persistence can establish a client-retry relationship after its log was published.
+func NotifyRetryTraceLogs(traces []*RequestTrace) {
+	for _, trace := range traces {
+		if trace.Direction != TraceDirectionClientRequest || trace.RequestId == "" || trace.ConversationUserId <= 0 {
+			continue
+		}
+		var rows []*Log
+		if err := LOG_DB.Model(&Log{}).Select("id, user_id, request_id, created_at").Where("request_id = ? AND user_id = ? AND type IN ?", trace.RequestId, trace.ConversationUserId, []int{LogTypeConsume, LogTypeError}).Find(&rows).Error; err != nil {
+			common.SysError("failed to publish retry log relationship: " + err.Error())
+			continue
+		}
+		for _, row := range rows {
+			usageLiveFeed.committed(row)
+		}
+	}
+}
+
+type LogChangePage struct {
+	Items   []*Log `json:"items"`
+	Omitted int    `json:"omitted"`
+	Replace bool   `json:"replace,omitempty"`
+	Total   int64  `json:"total,omitempty"`
+}
+
+func GetLogChangePage(ctx context.Context, filter LogFilter, ownUserID, role int, compact bool, pageSize int, refs []LiveLogRef) (LogChangePage, error) {
+	var err error
+	replace := false
+	if filter.Category == "model" || filter.Result != "" {
+		var ids []int
+		for _, ref := range refs {
+			if ref.ID != 0 {
+				ids = append(ids, ref.ID)
+			}
+		}
+		var changed []*Log
+		q := LOG_DB.WithContext(ctx).Model(&Log{}).Select(logRetryColumns).Where("id IN ?", ids)
+		if ownUserID != 0 {
+			q = q.Where("user_id = ?", ownUserID)
+		}
+		if err = q.Find(&changed).Error; err != nil {
+			return LogChangePage{}, err
+		}
+		possible := false
+		for _, row := range changed {
+			var count int64
+			start := row.CreatedAt - int64(row.UseTime) - logRetryWindow - 2
+			if err = LOG_DB.WithContext(ctx).Model(&Log{}).Where("user_id = ? AND type = ? AND quota = 0 AND prompt_tokens = 0 AND completion_tokens = 0 AND created_at >= ? AND created_at <= ?", row.UserId, LogTypeError, start, row.CreatedAt).Limit(1).Count(&count).Error; err != nil {
+				return LogChangePage{}, err
+			}
+			if count > 0 {
+				possible, replace = true, true
+				break
+			}
+		}
+		if !possible {
+			filter.retries = &logRetryProjection{}
+		}
+	}
+	filter, err = filter.withRetries(ctx, ownUserID)
+	if err != nil {
+		return LogChangePage{}, err
+	}
+	if replace {
+		// A late trace may either establish or invalidate a retry relationship.
+		// Refresh this rare failure window so both hidden and restored rows are reconciled.
+		filter.Live = true
+		var rows []*Log
+		var total int64
+		if ownUserID != 0 {
+			rows, total, err = GetUserLogs(ownUserID, filter, 0, pageSize)
+		} else {
+			rows, total, err = GetAllLogs(filter, 0, pageSize)
+			if err == nil {
+				FormatLogList(rows, role, compact)
+			}
+		}
+		if rows == nil {
+			rows = []*Log{}
+		}
+		return LogChangePage{Items: rows, Replace: true, Total: total}, err
+	}
+	rows, omitted, err := GetChangedLogs(ctx, filter, ownUserID, role, compact, pageSize, refs)
+	return LogChangePage{Items: rows, Omitted: omitted}, err
 }

@@ -62,29 +62,32 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
-	LiveKey           string `json:"live_key,omitempty" gorm:"-"`
-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
-	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
-	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
-	Content           string `json:"content"`
-	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
-	UserAdminNickname string `json:"user_admin_nickname,omitempty" gorm:"-"`
-	TokenName         string `json:"token_name" gorm:"index;default:''"`
-	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
-	Quota             int    `json:"quota" gorm:"default:0"`
-	PromptTokens      int    `json:"prompt_tokens" gorm:"default:0"`
-	CompletionTokens  int    `json:"completion_tokens" gorm:"default:0"`
-	UseTime           int    `json:"use_time" gorm:"default:0"`
-	IsStream          bool   `json:"is_stream"`
-	ChannelId         int    `json:"channel" gorm:"index"`
-	ChannelName       string `json:"channel_name" gorm:"->"`
-	TokenId           int    `json:"token_id" gorm:"default:0;index"`
-	Group             string `json:"group" gorm:"index"`
-	Ip                string `json:"ip" gorm:"index;default:''"`
-	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
-	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
-	Other             string `json:"other"`
+	RetryCount          int    `json:"retry_count,omitempty" gorm:"-"`
+	RetryGroupRequestID string `json:"retry_group_request_id,omitempty" gorm:"-"`
+	RetryStartedAt      int64  `json:"retry_started_at,omitempty" gorm:"-"`
+	LiveKey             string `json:"live_key,omitempty" gorm:"-"`
+	Id                  int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
+	UserId              int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
+	CreatedAt           int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
+	Type                int    `json:"type" gorm:"index:idx_created_at_type"`
+	Content             string `json:"content"`
+	Username            string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
+	UserAdminNickname   string `json:"user_admin_nickname,omitempty" gorm:"-"`
+	TokenName           string `json:"token_name" gorm:"index;default:''"`
+	ModelName           string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
+	Quota               int    `json:"quota" gorm:"default:0"`
+	PromptTokens        int    `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens    int    `json:"completion_tokens" gorm:"default:0"`
+	UseTime             int    `json:"use_time" gorm:"default:0"`
+	IsStream            bool   `json:"is_stream"`
+	ChannelId           int    `json:"channel" gorm:"index"`
+	ChannelName         string `json:"channel_name" gorm:"->"`
+	TokenId             int    `json:"token_id" gorm:"default:0;index"`
+	Group               string `json:"group" gorm:"index"`
+	Ip                  string `json:"ip" gorm:"index;default:''"`
+	RequestId           string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
+	UpstreamRequestId   string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
+	Other               string `json:"other"`
 }
 
 // don't use iota, avoid change log type value
@@ -651,6 +654,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 // LogFilter is the usage-log search shared by the log list and the log export.
 // Username, Channel, UpstreamRequestId, and ClientTool are administrator filters.
 type LogFilter struct {
+	retries       *logRetryProjection
 	Live          bool // Opt into stable list keys or the corresponding exact statistics count.
 	AdminSelfView bool // set by the dashboard from the authenticated account; never bound from the query
 
@@ -729,7 +733,7 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	if err = f.Validate(); err != nil {
 		return nil, err
 	}
-	tx = applyLogSourceFilter(tx, f.Source)
+	tx = f.retries.apply(applyLogSourceFilter(tx, f.Source))
 	if f.Category == "model" || f.Result != "" {
 		tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeError})
 	}
@@ -855,6 +859,10 @@ func resolveLogUsers(logs []*Log, includeAdminNickname bool) error {
 }
 
 func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
+	filter, err = filter.withRetries(context.Background(), 0)
+	if err != nil {
+		return nil, 0, err
+	}
 	tx, err := filter.apply(LOG_DB)
 	if err != nil {
 		return nil, 0, err
@@ -871,6 +879,7 @@ func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int
 	if err != nil {
 		return nil, 0, err
 	}
+	filter.retries.annotate(logs)
 	if filter.Live {
 		keyLiveLogs(logs)
 	}
@@ -939,6 +948,10 @@ func (f LogFilter) forUser(tx *gorm.DB, userID int) (*gorm.DB, error) {
 }
 
 func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
+	filter, err = filter.withRetries(context.Background(), userId)
+	if err != nil {
+		return nil, 0, err
+	}
 	tx, err := filter.forUser(LOG_DB, userId)
 	if err != nil {
 		return nil, 0, err
@@ -958,6 +971,7 @@ func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*L
 		return nil, 0, common.NewMessage("Failed to query logs")
 	}
 
+	filter.retries.annotate(logs)
 	if filter.Live {
 		keyLiveLogs(logs)
 	}
@@ -969,6 +983,11 @@ func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*L
 // administrator with role sees it. Rows are read one at a time, so an export
 // never holds the whole result in memory.
 func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log) error) error {
+	var err error
+	filter, err = filter.withRetries(ctx, 0)
+	if err != nil {
+		return err
+	}
 	tx, err := filter.apply(LOG_DB.WithContext(ctx))
 	if err != nil {
 		return err
@@ -1019,6 +1038,11 @@ func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log
 // StreamUserLogs is StreamAllLogs for one user's own logs, shaped like the
 // user log list.
 func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*Log) error) error {
+	var err error
+	filter, err = filter.withRetries(ctx, userId)
+	if err != nil {
+		return err
+	}
 	tx, err := filter.forUser(LOG_DB.WithContext(ctx), userId)
 	if err != nil {
 		return err
@@ -1074,6 +1098,15 @@ func SumUsedQuota(ctx context.Context, filter LogFilter, userID *int, includeFin
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	stat := Stat{}
+	owner := 0
+	if userID != nil {
+		owner = *userID
+	}
+	var err error
+	filter, err = filter.withRetries(ctx, owner)
+	if err != nil {
+		return stat, err
+	}
 	consumeTypes := []int{LogTypeConsume}
 	if filter.Source == LogSourceTest {
 		consumeTypes = append(consumeTypes, LogTypeTestConsume)

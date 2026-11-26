@@ -62,6 +62,7 @@ export function useLiveUsageLogs({
     let firstBatch = true
     let pendingUncertain = false
     let needsExactTotal = false
+    let totalGeneration = 0
     let cursor = snapshot.cursor
     let stopped = false
     let retryDelay = 1000
@@ -71,16 +72,26 @@ export function useLiveUsageLogs({
     // Keep an immutable view behind the reader. Only the newest page needs buffering.
     let visibleItems = items
     let visibleTotal = total
-    const updateTotal = (count: number) => {
+    const updateTotal = (count: number, generation: number) => {
       // A stats fetch for an earlier filter or account can finish after navigation.
-      if (stopped || reset || !Number.isSafeInteger(count) || count < 0) return
+      if (
+        stopped ||
+        reset ||
+        generation !== totalGeneration ||
+        !needsExactTotal ||
+        !Number.isSafeInteger(count) ||
+        count < 0
+      ) {
+        return
+      }
       total = count
       if (!pending && !reading()) {
         visibleTotal = total
         publish()
       }
     }
-    const publish = () =>
+    const publish = () => {
+      const generation = totalGeneration
       setView({
         snapshot,
         items: visibleItems,
@@ -88,8 +99,11 @@ export function useLiveUsageLogs({
         pending,
         reset,
         pendingUncertain,
-        exactTotal: needsExactTotal ? updateTotal : undefined,
+        exactTotal: needsExactTotal
+          ? (count) => updateTotal(count, generation)
+          : undefined,
       })
+    }
     const show = () => {
       pending = 0
       pendingUncertain = false
@@ -142,6 +156,8 @@ export function useLiveUsageLogs({
               cursor: string
               items: UsageLog[]
               omitted?: number
+              replace?: boolean
+              total?: number
             }
             if (
               !batch.cursor ||
@@ -152,6 +168,36 @@ export function useLiveUsageLogs({
               return
             }
             if (batch.cursor === cursor) return
+            if (batch.replace === true) {
+              const replacementTotal = batch.total
+              if (
+                typeof replacementTotal !== 'number' ||
+                !Number.isSafeInteger(replacementTotal) ||
+                replacementTotal < 0
+              ) {
+                requireSnapshot()
+                return
+              }
+              cursor = batch.cursor
+              retryDelay = 1000
+              firstBatch = false
+              needsExactTotal = false
+              totalGeneration++
+              items = batch.items.slice(0, pageSize)
+              total = replacementTotal
+              seen.clear()
+              for (const log of items) seen.add(log.live_key)
+              if (pending || reading()) {
+                // A recovered request can disappear from a failure filter;
+                // retain the reader's view until they accept the replacement.
+                pending = Math.max(1, pending)
+                pendingUncertain = true
+                publish()
+              } else {
+                show()
+              }
+              return
+            }
             const incoming = batch.items.filter((log) => {
               if (seen.has(log.live_key)) return false
               seen.add(log.live_key)

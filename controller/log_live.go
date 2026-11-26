@@ -95,12 +95,12 @@ func streamLogChanges(c *gin.Context, all bool) {
 			return
 		}
 		if len(refs) > 0 {
-			items, omitted, err := model.GetChangedLogs(ctx, filter, ownUserID, role, compact, pageSize, refs)
+			page, err := model.GetLogChangePage(ctx, filter, ownUserID, role, compact, pageSize, refs)
 			if err != nil {
 				write("reset", struct{}{})
 				return
 			}
-			if len(items) > 0 && !write("logs", gin.H{"items": items, "omitted": omitted, "cursor": next}) {
+			if (len(page.Items) > 0 || page.Replace) && !write("logs", gin.H{"items": page.Items, "omitted": page.Omitted, "replace": page.Replace, "total": page.Total, "cursor": next}) {
 				return
 			}
 		}

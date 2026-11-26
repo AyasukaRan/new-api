@@ -648,6 +648,8 @@ func (job *traceWriteJob) persist() {
 	}
 	if err := model.SaveRequestTraces(records); err != nil {
 		common.SysError("failed to store request trace: " + err.Error())
+	} else {
+		model.NotifyRetryTraceLogs(records)
 	}
 }
 

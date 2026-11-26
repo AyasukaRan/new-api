@@ -72,7 +72,8 @@ function renderLogs(
   content?: string | ((id: number) => string),
   initialIds = [11, 10],
   olderIds?: number[],
-  recordOverrides?: Partial<UsageLog>
+  recordOverrides?: Partial<UsageLog>,
+  retryRecords?: UsageLog[]
 ) {
   useAuthStore
     .getState()
@@ -92,6 +93,8 @@ function renderLogs(
     ? new Set([...initialIds, ...olderIds]).size
     : defaultTotal
   const requestedTraces: string[] = []
+  const requestedRetries: unknown[] = []
+  let rejectRetryLoad = false
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined
   vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
     let data: unknown = {}
@@ -117,6 +120,13 @@ function renderLogs(
       url.includes('live_total=1')
     ) {
       data = { live_total: liveTotal, quota: 0, rpm: 0, tpm: 0 }
+    } else if (url === '/api/log/retries' || url === '/api/log/self/retries') {
+      requestedRetries.push(config?.params)
+      if (rejectRetryLoad) {
+        rejectRetryLoad = false
+        throw new Error('Retry attempt load failed')
+      }
+      data = retryRecords ?? []
     } else if (url === '/api/log/trace') {
       const params = config?.params as { trace_id?: string } | undefined
       const trace = params?.trace_id
@@ -184,7 +194,23 @@ function renderLogs(
   }
   return {
     router,
+    client,
     requestedTraces,
+    requestedRetries,
+    failNextRetryLoad: () => {
+      rejectRetryLoad = true
+    },
+    replace: async (ids: number[], total: number, cursor = 'grouped') => {
+      await waitFor(() => expect(stream).toBeDefined())
+      records = ids.map(entry)
+      await act(async () => {
+        stream?.enqueue(
+          new TextEncoder().encode(
+            `event: logs\ndata: ${JSON.stringify({ replace: true, items: records, total, cursor })}\n\n`
+          )
+        )
+      })
+    },
     reset: async (ids: number[]) => {
       records = ids.map(entry)
       await act(async () => {
@@ -745,6 +771,166 @@ test('follows new logs once, and keeps the table and selected details still unti
   expect(screen.queryByText('model-13')).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Show new logs (1)' }))
   expect(await screen.findByText('model-13')).toBeVisible()
+})
+
+test('replaces grouped retries and removes recovered requests from a failure filter without double counting replay', async () => {
+  const { replace } = renderLogs(true, '/usage-logs/common?result=failure')
+  await screen.findByText('model-11')
+  await replace([12], 1)
+  expect(await screen.findByText('model-12')).toBeVisible()
+  expect(screen.queryByText('model-11')).not.toBeInTheDocument()
+  expect(screen.queryByText('model-10')).not.toBeInTheDocument()
+  expect(
+    screen.getByText('Rows per page').parentElement?.parentElement
+      ?.firstElementChild
+  ).toHaveTextContent(/^1$/)
+  await replace([12], 1)
+  expect(screen.getAllByText('model-12')).toHaveLength(1)
+  await replace([], 0, 'recovered')
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+  expect(await screen.findByText('No Logs Found')).toBeVisible()
+})
+
+test('buffers grouped retry replacements while details are open and applies them only when the reader returns to latest', async () => {
+  const user = userEvent.setup()
+  const { replace } = renderLogs(true)
+  await user.click(
+    await screen.findByRole('button', { name: 'Summary for request 11' })
+  )
+  const details = screen.getByRole('dialog', { name: /Log Details/ })
+  await user.click(within(details).getByRole('tab', { name: 'Overview' }))
+  await replace([12], 1)
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+  expect(within(details).getByText('request-11')).toBeVisible()
+  await user.keyboard('{Escape}')
+  expect(screen.queryByText('model-12')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Show latest logs' }))
+  expect(await screen.findByText('model-12')).toBeVisible()
+  expect(screen.queryByText('model-11')).not.toBeInTheDocument()
+  expect(
+    screen.getByText('Rows per page').parentElement?.parentElement
+      ?.firstElementChild
+  ).toHaveTextContent(/^1$/)
+})
+
+test('ignores stats started before a grouped replacement even after a later overlapping update', async () => {
+  const { append, replace, client } = renderLogs(true)
+  await screen.findByText('model-11')
+  await append(11)
+  const originalGet = vi.mocked(api.get).getMockImplementation()
+  if (!originalGet) throw new Error('Missing log API fixture')
+  let releaseStats!: () => void
+  const statsGate = new Promise<void>((resolve) => {
+    releaseStats = resolve
+  })
+  let startedStats = false
+  vi.mocked(api.get).mockImplementation(async (url, config) => {
+    if (url.startsWith('/api/log/stat?') && url.includes('live_total=1')) {
+      startedStats = true
+      await statsGate
+      return {
+        data: {
+          success: true,
+          data: { live_total: 2, quota: 0, rpm: 0, tpm: 0 },
+        },
+      }
+    }
+    return originalGet(url, config)
+  })
+  let pendingStats!: Promise<void>
+  await act(async () => {
+    pendingStats = client.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+  })
+  await waitFor(() => expect(startedStats).toBe(true))
+  await replace([12], 1)
+  await append(12)
+  await act(async () => {
+    releaseStats()
+    await pendingStats
+  })
+  expect(
+    screen.getByText('Rows per page').parentElement?.parentElement
+      ?.firstElementChild
+  ).toHaveTextContent(/^1$/)
+})
+
+test('loads retry attempts only when details open and lets the reader inspect each original request and trace', async () => {
+  const user = userEvent.setup()
+  const first = {
+    ...entry(11),
+    type: 5,
+    content: 'status_code=429, rate limited',
+  }
+  const final = entry(12)
+  const grouped = {
+    ...final,
+    retry_count: 1,
+    retry_group_request_id: first.request_id,
+    retry_started_at: first.created_at,
+  }
+  const { requestedTraces, requestedRetries } = renderLogs(
+    false,
+    '/usage-logs/common',
+    undefined,
+    [12],
+    undefined,
+    grouped,
+    [first, final]
+  )
+  await screen.findByText('model-12')
+  expect(screen.queryByText('model-11')).not.toBeInTheDocument()
+  expect(requestedRetries).toHaveLength(0)
+  await user.click(screen.getByRole('button', { name: 'Attempts: 2' }))
+  const details = screen.getByRole('dialog', { name: /Log Details/ })
+  const attempts = await within(details).findByRole('combobox', {
+    name: 'Request attempts',
+  })
+  expect(attempts).toHaveTextContent('Attempt 2')
+  expect(within(details).getByText('request-12')).toBeVisible()
+  expect(requestedRetries).toEqual([
+    {
+      request_id: final.request_id,
+      start_timestamp: first.created_at,
+      end_timestamp: final.created_at,
+    },
+  ])
+  await user.click(attempts)
+  await user.click(await screen.findByRole('option', { name: /Attempt 1/ }))
+  expect(attempts).toHaveTextContent('Attempt 1')
+  expect(within(details).getByText('request-11')).toBeVisible()
+  await user.click(
+    within(details).getByRole('button', { name: 'View request trace' })
+  )
+  expect(await screen.findByText('Reply for trace-11')).toBeVisible()
+  expect(requestedTraces).toEqual(['trace-11'])
+})
+
+test('keeps the final record readable when retry attempts fail to load and supports retrying the lookup', async () => {
+  const user = userEvent.setup()
+  const final = entry(12)
+  const { failNextRetryLoad, requestedRetries } = renderLogs(
+    false,
+    '/usage-logs/common',
+    undefined,
+    [12],
+    undefined,
+    { ...final, retry_count: 1, retry_started_at: final.created_at },
+    [entry(11), final]
+  )
+  await screen.findByText('model-12')
+  failNextRetryLoad()
+  await user.click(screen.getByRole('button', { name: 'Attempts: 2' }))
+  const details = screen.getByRole('dialog', { name: /Log Details/ })
+  expect(await within(details).findByText('Failed to load logs')).toBeVisible()
+  expect(within(details).getByText('request-12')).toBeVisible()
+  await user.click(within(details).getByRole('button', { name: 'Retry' }))
+  expect(
+    await within(details).findByRole('combobox', { name: 'Request attempts' })
+  ).toBeVisible()
+  expect(requestedRetries).toHaveLength(2)
+  expect(
+    within(details).queryByText('Failed to load logs')
+  ).not.toBeInTheDocument()
 })
 
 test('reveals buffered live logs only when the reader keeps scrolling up at the top', async () => {

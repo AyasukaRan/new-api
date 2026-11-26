@@ -50,7 +50,11 @@ import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
-import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
+import {
+  formatLogQuota,
+  formatNumber,
+  formatTimestampToDate,
+} from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -412,6 +416,7 @@ export function useCommonLogsColumns(
           const config = getLogTypeConfig(log.type, source)
           const dateTime = formatTimestampToDate(timestamp)
           const [date, time] = dateTime.split(' ')
+          const retryCount = log.retry_count ?? 0
 
           return (
             <div
@@ -438,6 +443,32 @@ export function useCommonLogsColumns(
                   copyable={false}
                   className='text-muted-foreground gap-1 text-[11px] font-normal'
                 />
+                {retryCount > 0 && (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          variant='ghost'
+                          size='sm'
+                          className='text-muted-foreground h-4 gap-1 rounded-sm px-0.5 text-[11px] tabular-nums'
+                          aria-label={t('Attempts: {{count}}', {
+                            count: retryCount + 1,
+                          })}
+                          onClick={() =>
+                            onShowDetails({ log, initialView: 'overview' })
+                          }
+                        />
+                      }
+                    >
+                      <GitBranch className='size-3' aria-hidden='true' />
+                      {formatNumber(retryCount)}
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {t('Retry Chain')} ·{' '}
+                      {t('Attempts: {{count}}', { count: retryCount + 1 })}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
               </div>
             </div>
           )

@@ -345,6 +345,8 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute := apiRouter.Group("/log")
 		logRoute.GET("/", middleware.AdminAuth(), controller.GetAllLogs)
 		logRoute.GET("/stream", middleware.AdminAuth(), controller.StreamAllLogChanges)
+		logRoute.GET("/retries", middleware.DisableCache(), middleware.AdminAuth(), controller.GetAllLogRetryAttempts)
+		logRoute.GET("/self/retries", middleware.DisableCache(), middleware.UserAuth(), controller.GetSelfLogRetryAttempts)
 		logRoute.GET("/self/stream", middleware.UserAuth(), controller.StreamUserLogChanges)
 		logRoute.GET("/stat", middleware.AdminAuth(), controller.GetLogsStat)
 		logRoute.GET("/self/stat", middleware.UserAuth(), controller.GetLogsSelfStat)

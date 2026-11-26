@@ -118,6 +118,7 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			} else {
 				require.NoError(t, db.AutoMigrate(&model.Log{}))
 			}
+			require.NoError(t, model.MigrateRequestTraces())
 			versionSQL := "SELECT version()"
 			if tc.kind == "sqlite" {
 				versionSQL = "SELECT sqlite_version()"
@@ -764,6 +765,198 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				assert.EqualValues(t, 2, stat["live_total"])
 				empty := callLogHandler(t, GetLogsSelfStat, 81, common.RoleCommonUser, query+"&live_total=1&model_name=absent-live-model")[0]["data"].(map[string]any)
 				assert.EqualValues(t, 0, empty["live_total"])
+			})
+
+			t.Run("retry groups preserve final results across pages", func(t *testing.T) {
+				const owner = 775
+				const name = "retry-group-contract"
+				rows := []model.Log{
+					{Id: 977501, UserId: owner, TokenId: 75, CreatedAt: now - 180, Type: model.LogTypeError, ModelName: name, RequestId: "retry-client-first", Content: "status_code=429, rate limit", Other: `{}`},
+					{Id: 977502, UserId: owner, TokenId: 75, CreatedAt: now - 120, Type: model.LogTypeConsume, ModelName: name, RequestId: "retry-client-final", UseTime: 10, Quota: 7, Other: `{}`},
+					{Id: 977503, UserId: owner, TokenId: 75, CreatedAt: now - 90, Type: model.LogTypeError, ModelName: name, RequestId: "retry-internal", Other: `{}`},
+					{Id: 977504, UserId: owner, TokenId: 75, CreatedAt: now - 80, Type: model.LogTypeConsume, ModelName: name, RequestId: "retry-internal", Quota: 9, Other: `{}`},
+					{Id: 977505, UserId: owner, TokenId: 75, CreatedAt: now - 60, Type: model.LogTypeConsume, ModelName: name, RequestId: "retry-new-success", Quota: 11, Other: `{}`},
+				}
+				for i := range rows {
+					require.NoError(t, model.LOG_DB.Create(&rows[i]).Error)
+				}
+				for _, index := range []int{0, 1, 4} {
+					row := rows[index]
+					require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{{TraceId: row.RequestId + "-trace", RequestId: row.RequestId, CreatedAt: row.CreatedAt, Direction: model.TraceDirectionClientRequest, ConversationUserId: owner, ConversationKey: "c_explicit-retry-session", Format: "claude", Method: "POST", Url: "/v1/messages", Body: `{"model":"retry-group-contract","messages":[{"role":"user","content":"same full request"}]}`, BodySize: int64(len(`{"model":"retry-group-contract","messages":[{"role":"user","content":"same full request"}]}`))}}))
+				}
+				params := fmt.Sprintf("category=model&model_name=%s&start_timestamp=%d&end_timestamp=%d&page_size=1", name, now-300, now)
+				for _, handler := range []gin.HandlerFunc{GetAllLogs, GetUserLogs} {
+					for page, request := range []string{"retry-new-success", "retry-internal", "retry-client-final"} {
+						response := callLogHandler(t, handler, owner, common.RoleAdminUser, params+fmt.Sprintf("&p=%d", page+1))[0]
+						require.Equal(t, true, response["success"], response)
+						data := response["data"].(map[string]any)
+						assert.EqualValues(t, 3, data["total"])
+						items := data["items"].([]any)
+						require.Len(t, items, 1)
+						item := items[0].(map[string]any)
+						assert.Equal(t, request, item["request_id"])
+						if page > 0 {
+							assert.EqualValues(t, 1, item["retry_count"])
+						}
+					}
+					failed := callLogHandler(t, handler, owner, common.RoleAdminUser, params+"&result=failure")[0]["data"].(map[string]any)
+					assert.EqualValues(t, 0, failed["total"])
+				}
+				var rawCount int64
+				require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("model_name = ?", name).Count(&rawCount).Error)
+				assert.EqualValues(t, 5, rawCount, "raw attempts remain intact")
+				var rawQuota int64
+				require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("model_name = ?", name).Select("sum(quota)").Scan(&rawQuota).Error)
+				assert.EqualValues(t, 27, rawQuota, "billing is never consolidated or rewritten")
+				filter := model.LogFilter{Category: "model", ModelName: name, StartTimestamp: now - 300, EndTimestamp: now, Live: true}
+				ownerID := owner
+				stat, err := model.SumUsedQuota(t.Context(), filter, &ownerID, false)
+				require.NoError(t, err)
+				assert.Equal(t, 27, stat.Quota)
+				require.NotNil(t, stat.LiveTotal)
+				assert.EqualValues(t, 3, *stat.LiveTotal)
+				searchedFilter := filter
+				searchedFilter.RequestId = "retry-client-first"
+				searchedStat, err := model.SumUsedQuota(t.Context(), searchedFilter, &ownerID, false)
+				require.NoError(t, err)
+				assert.Equal(t, 7, searchedStat.Quota, "original request lookup uses the final result for list and spending")
+				export := callLogHandler(t, ExportAllLogs, owner, common.RoleAdminUser, params)
+				assert.ElementsMatch(t, []any{"retry-new-success", "retry-internal", "retry-client-final"}, exportedRequestIds(export))
+				searched := callLogHandler(t, GetAllLogs, owner, common.RoleAdminUser, params+"&request_id=retry-client-first")[0]["data"].(map[string]any)
+				assert.EqualValues(t, 1, searched["total"])
+				assert.Equal(t, "retry-client-final", searched["items"].([]any)[0].(map[string]any)["request_id"])
+
+				detailQuery := fmt.Sprintf("request_id=retry-client-final&start_timestamp=%d&end_timestamp=%d", now-180, now-120)
+				for _, handler := range []gin.HandlerFunc{GetAllLogRetryAttempts, GetSelfLogRetryAttempts} {
+					response := callLogHandler(t, handler, owner, common.RoleCommonUser, detailQuery)[0]
+					require.Equal(t, true, response["success"], response)
+					attempts := response["data"].([]any)
+					require.Len(t, attempts, 2)
+					assert.Equal(t, "retry-client-first", attempts[0].(map[string]any)["request_id"])
+					assert.Equal(t, "retry-client-final", attempts[1].(map[string]any)["request_id"])
+					assert.NotEmpty(t, attempts[0].(map[string]any)["live_key"])
+					assert.NotEqual(t, attempts[0].(map[string]any)["live_key"], attempts[1].(map[string]any)["live_key"])
+				}
+				denied := callLogHandler(t, GetSelfLogRetryAttempts, owner+1, common.RoleCommonUser, detailQuery)[0]
+				assert.Equal(t, false, denied["success"], "attempt lookup cannot cross owners")
+				refs := []model.LiveLogRef{{ID: rows[1].Id, UserID: owner, CreatedAt: rows[1].CreatedAt, RequestID: rows[1].RequestId}}
+				page, err := model.GetLogChangePage(t.Context(), filter, owner, common.RoleCommonUser, true, 20, refs)
+				require.NoError(t, err)
+				assert.True(t, page.Replace)
+				assert.EqualValues(t, 3, page.Total)
+				require.Len(t, page.Items, 3)
+				assert.NotEmpty(t, page.Items[0].LiveKey)
+				filter.Result = "failure"
+				page, err = model.GetLogChangePage(t.Context(), filter, owner, common.RoleCommonUser, true, 20, refs)
+				require.NoError(t, err)
+				assert.True(t, page.Replace, "success removes a previous error from the failure view")
+				assert.Zero(t, page.Total)
+				assert.NotNil(t, page.Items)
+				assert.Empty(t, page.Items)
+				// A long overlapping sibling can finish later. Its delayed trace must restore
+				// a previously folded failure rather than merely append another success.
+				parallel := model.Log{Id: 977506, UserId: owner, TokenId: 75, CreatedAt: now - 110, Type: model.LogTypeConsume, ModelName: name, RequestId: "retry-parallel", UseTime: 100, Quota: 1, Other: `{}`}
+				require.NoError(t, model.LOG_DB.Create(&parallel).Error)
+				body := `{"model":"retry-group-contract","messages":[{"role":"user","content":"same full request"}]}`
+				require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{{TraceId: parallel.RequestId, RequestId: parallel.RequestId, CreatedAt: parallel.CreatedAt, Direction: model.TraceDirectionClientRequest, ConversationUserId: owner, ConversationKey: "c_explicit-retry-session", Method: "POST", Url: "/v1/messages", Body: body, BodySize: int64(len(body))}}))
+				filter.Result = ""
+				page, err = model.GetLogChangePage(t.Context(), filter, owner, common.RoleCommonUser, true, 20, []model.LiveLogRef{{ID: parallel.Id, UserID: owner, CreatedAt: parallel.CreatedAt, RequestID: parallel.RequestId}})
+				require.NoError(t, err)
+				assert.True(t, page.Replace)
+				assert.EqualValues(t, 5, page.Total)
+				assert.True(t, slices.ContainsFunc(page.Items, func(row *model.Log) bool { return row.RequestId == "retry-client-first" }))
+			})
+
+			t.Run("retry grouping rejects uncertain client matches", func(t *testing.T) {
+				for index, reason := range []string{"different body", "different token", "different model", "different path", "different method", "missing session", "truncated", "incomplete body", "too late", "overlap", "unknown duration", "billed error", "partial consume", "independent success", "intervening request"} {
+					t.Run(reason, func(t *testing.T) {
+						owner := 1780 + index
+						name := fmt.Sprintf("retry-guard-%d", index)
+						first := model.Log{Id: 978000 + index*10, UserId: owner, TokenId: 95, CreatedAt: now - 400, Type: model.LogTypeError, ModelName: name, RequestId: name + "-first", Other: `{}`}
+						next := first
+						next.Id++
+						next.CreatedAt, next.Type, next.RequestId, next.UseTime, next.Quota = now-200, model.LogTypeConsume, name+"-next", 10, 5
+						body := `{"messages":[{"role":"user","content":"hello"}]}`
+						original := model.RequestTrace{TraceId: first.RequestId, RequestId: first.RequestId, CreatedAt: first.CreatedAt, ConversationKey: "c_" + name, ConversationUserId: owner, Direction: model.TraceDirectionClientRequest, Method: "POST", Url: "/v1/messages", Body: body, BodySize: int64(len(body))}
+						candidate := original
+						candidate.TraceId, candidate.RequestId, candidate.CreatedAt = next.RequestId, next.RequestId, next.CreatedAt
+						switch reason {
+						case "different body":
+							candidate.Body = strings.ReplaceAll(body, "hello", "world")
+						case "different token":
+							next.TokenId++
+						case "different model":
+							next.ModelName += "-changed"
+						case "different path":
+							candidate.Url = "/v1/responses"
+						case "different method":
+							candidate.Method = "PUT"
+						case "missing session":
+							original.ConversationKey, candidate.ConversationKey = first.RequestId, next.RequestId
+						case "truncated":
+							candidate.Truncated = true
+						case "incomplete body":
+							candidate.BodySize++
+						case "too late":
+							first.CreatedAt, original.CreatedAt = now-800, now-800
+						case "overlap":
+							next.UseTime = 250
+						case "unknown duration":
+							next.UseTime = 0
+						case "billed error":
+							first.Quota = 1
+						case "partial consume":
+							first.Type, first.PromptTokens = model.LogTypeConsume, 20
+							first.Other = `{"stream_status":{"response_status":"incomplete"}}`
+						case "independent success":
+							first.Type, first.Quota = model.LogTypeConsume, 1
+						}
+						require.NoError(t, model.LOG_DB.Create(&first).Error)
+						require.NoError(t, model.LOG_DB.Create(&next).Error)
+						require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{&original, &candidate}))
+						want := int64(2)
+						if reason == "intervening request" {
+							barrier := next
+							barrier.Id, barrier.CreatedAt, barrier.RequestId = next.Id+1, now-300, name+"-barrier"
+							trace := candidate
+							trace.Id = 0
+							trace.TraceId, trace.RequestId, trace.CreatedAt, trace.Body = barrier.RequestId, barrier.RequestId, barrier.CreatedAt, strings.ReplaceAll(body, "hello", "world")
+							require.NoError(t, model.LOG_DB.Create(&barrier).Error)
+							require.NoError(t, model.SaveRequestTraces([]*model.RequestTrace{&trace}))
+							want++
+						}
+						rows, total, err := model.GetUserLogs(owner, model.LogFilter{Category: "model", StartTimestamp: now - 1000, EndTimestamp: now}, 0, 20)
+						require.NoError(t, err)
+						assert.Equal(t, want, total)
+						for _, row := range rows {
+							assert.Zero(t, row.RetryCount)
+						}
+					})
+				}
+			})
+
+			t.Run("retry attempt order uses recorded clock", func(t *testing.T) {
+				firstID, finalID := 979001, 979002
+				if tc.kind == "clickhouse" {
+					firstID, finalID = finalID, firstID // ClickHouse IDs do not encode chronology.
+				}
+				for _, row := range []model.Log{
+					{Id: firstID, UserId: 1799, CreatedAt: now - 30, Type: model.LogTypeError, RequestId: "retry-same-second", Other: `{"duration_ms":100,"admin_info":{"request_policy":[{"attempt":1,"elapsed_ms":100}]}}`},
+					{Id: finalID, UserId: 1799, CreatedAt: now - 30, Type: model.LogTypeError, RequestId: "retry-same-second", Content: "final failure", Other: `{"duration_ms":200,"admin_info":{"request_policy":[{"attempt":2,"elapsed_ms":200}]}}`},
+				} {
+					require.NoError(t, model.LOG_DB.Create(&row).Error)
+				}
+				rows, total, err := model.GetUserLogs(1799, model.LogFilter{Category: "model", StartTimestamp: now - 60, EndTimestamp: now, Result: "failure"}, 0, 20)
+				require.NoError(t, err)
+				assert.EqualValues(t, 1, total)
+				require.Len(t, rows, 1)
+				assert.Equal(t, "final failure", rows[0].Content)
+				assert.Equal(t, 1, rows[0].RetryCount)
+				attempts, err := model.GetLogRetryAttempts(t.Context(), "retry-same-second", now-30, now-30, 1799, common.RoleCommonUser)
+				require.NoError(t, err)
+				require.Len(t, attempts, 2)
+				assert.Empty(t, attempts[0].Content)
+				assert.Equal(t, "final failure", attempts[1].Content)
 			})
 
 		})

@@ -35,16 +35,29 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
 import { Globe, ShieldCheck, UserCog, Info, LogIn } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
 import { Dialog } from '@/components/dialog'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { formatTimestampToDate, formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
+import { getLogRetryAttempts } from '../../api'
 import { AuditDetailFields } from '../../audit/components/audit-detail-fields'
 import type { UsageLog } from '../../data/schema'
 import {
@@ -513,10 +526,38 @@ function LegacyLogDetails(
 
 export function DetailsDialog(props: DetailsDialogProps) {
   const { t } = useTranslation()
-  const typeConfig = getLogTypeConfig(props.log.type, props.source)
-  const requestOverview =
-    props.source !== 'test' && isTimingLogType(props.log.type)
-  const other = parseLogOther(props.log.other)
+  const user = useAuthStore((state) => state.auth.user)
+  const [selectedAttempt, setSelectedAttempt] = useState<string | null>(null)
+  const hasRetries = props.source !== 'test' && (props.log.retry_count ?? 0) > 0
+  const attempts = useQuery({
+    queryKey: [
+      'log-retry-attempts',
+      user?.id,
+      user?.role,
+      props.isAdmin,
+      props.log.request_id,
+      props.log.retry_started_at,
+      props.log.created_at,
+    ],
+    queryFn: ({ signal }) =>
+      getLogRetryAttempts(props.log, props.isAdmin, signal),
+    enabled: props.open && hasRetries,
+    staleTime: Infinity,
+    gcTime: 0,
+    retry: false,
+    meta: { errorToast: false },
+  })
+  const log =
+    selectedAttempt === null
+      ? props.log
+      : (attempts.data?.[Number(selectedAttempt)] ?? props.log)
+  const attemptOptions = (attempts.data ?? []).map((attempt, index) => ({
+    value: String(index),
+    label: `${t('Attempt {{index}}', { index: index + 1 })} · ${formatTimestampToDate(attempt.created_at)} · ${t(getLogTypeConfig(attempt.type, props.source).label)}`,
+  }))
+  const typeConfig = getLogTypeConfig(log.type, props.source)
+  const requestOverview = props.source !== 'test' && isTimingLogType(log.type)
+  const other = parseLogOther(log.other)
   const isTieredBilling = other?.billing_mode === 'tiered_expr'
   return (
     <Dialog
@@ -549,19 +590,54 @@ export function DetailsDialog(props: DetailsDialogProps) {
       contentHeight={requestOverview ? 'auto' : 'min(72dvh, 720px)'}
       bodyClassName='px-1'
     >
+      {props.open && hasRetries && (
+        <div className='mb-3 min-w-0'>
+          {attempts.isPending && (
+            <LoadingState inline size='sm' message={t('Loading...')} />
+          )}
+          {attempts.isError && (
+            <ErrorState
+              title={t('Failed to load logs')}
+              onRetry={() => void attempts.refetch()}
+              className='min-h-0 py-3'
+            />
+          )}
+          {!!attempts.data?.length && (
+            <Select
+              items={attemptOptions}
+              value={selectedAttempt ?? String(attempts.data.length - 1)}
+              onValueChange={setSelectedAttempt}
+            >
+              <SelectTrigger
+                aria-label={t('Request attempts')}
+                className='w-full'
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {attemptOptions.map((attempt) => (
+                  <SelectItem key={attempt.value} value={attempt.value}>
+                    {attempt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+      )}
       {props.open &&
         (requestOverview ? (
           <LogRequestDetailTabs
-            key={props.log.request_id || props.log.id}
-            log={props.log}
+            key={log.live_key ?? `${log.request_id}:${log.id}`}
+            log={log}
             other={other}
             isAdmin={props.isAdmin}
             initialTab={props.initialView ?? 'overview'}
           >
-            <LogRequestDiagnostics {...props} other={other} />
+            <LogRequestDiagnostics {...props} log={log} other={other} />
           </LogRequestDetailTabs>
         ) : (
-          <LegacyLogDetails {...props} other={other} />
+          <LegacyLogDetails {...props} log={log} other={other} />
         ))}
     </Dialog>
   )

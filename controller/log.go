@@ -94,6 +94,41 @@ func GetAllLogs(c *gin.Context) {
 	common.ApiSuccess(c, liveLogPage{pageInfo, liveCursor})
 }
 
+func GetAllLogRetryAttempts(c *gin.Context)  { getLogRetryAttempts(c, false) }
+func GetSelfLogRetryAttempts(c *gin.Context) { getLogRetryAttempts(c, true) }
+
+func getLogRetryAttempts(c *gin.Context, own bool) {
+	start, startErr := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	end, endErr := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	requestID := c.Query("request_id")
+	if startErr != nil || endErr != nil || len(requestID) > 64 {
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
+		return
+	}
+	owner := 0
+	if own {
+		owner = c.GetInt("id")
+		if owner <= 0 {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		if c.GetInt("role") < common.RoleAdminUser {
+			limited, err := limitLogTimeRange(start, end)
+			if err != nil {
+				common.ApiError(c, err)
+				return
+			}
+			start = limited
+		}
+	}
+	rows, err := model.GetLogRetryAttempts(c.Request.Context(), requestID, start, end, owner, c.GetInt("role"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, rows)
+}
+
 func GetLogRequestBody(c *gin.Context) {
 	createdAt, err := strconv.ParseInt(c.Query("created_at"), 10, 64)
 	ref := c.Query("ref")
