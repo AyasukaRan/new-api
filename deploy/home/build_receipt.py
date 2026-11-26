@@ -93,6 +93,7 @@ def finish(root, dist, runtime_base, runtime_base_id, built_image):
         'image': image, 'image_id': image_id, 'runtime_base': runtime_base, 'runtime_base_id': runtime_base_id,
         'manifest_sha256': manifest_hash, 'binary_sha256': digest(binary), 'assets': assets,
         'entry_assets': {path: assets[path] for path in entries.paths}, 'index_sha256': assets['/index.html'],
+        'shared_sub2api_schema': True,
     }
     # Deployment validates its own gate evidence separately from this build receipt.
     path = output / 'release.json'

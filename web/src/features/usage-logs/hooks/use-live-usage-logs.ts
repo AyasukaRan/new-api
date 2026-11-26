@@ -35,6 +35,10 @@ interface LiveLogView {
   exactTotal?: (total: number) => void
 }
 
+function requestIdentity(log: UsageLog) {
+  return `${log.user_id}:${log.request_id}`
+}
+
 export function useLiveUsageLogs({
   snapshot,
   preset,
@@ -58,6 +62,10 @@ export function useLiveUsageLogs({
     if (!snapshot || !preset) return
     let items = snapshot.items
     let activeItems: UsageLog[] = []
+    // The active registry and committed journal arrive independently. Keep a
+    // retiring projection briefly so an out-of-order completion cannot blink.
+    const completing = new Map<string, UsageLog>()
+    let completionTimer: ReturnType<typeof setTimeout> | undefined
     let activeSignature: string | undefined
     let total = snapshot.total
     let pending = 0
@@ -96,9 +104,7 @@ export function useLiveUsageLogs({
     }
     const publish = () => {
       const generation = totalGeneration
-      const activeRequests = new Set(
-        visibleActiveItems.map((log) => `${log.user_id}:${log.request_id}`)
-      )
+      const activeRequests = new Set(visibleActiveItems.map(requestIdentity))
       setView({
         snapshot,
         // Active rows replace intermediate retry failures. Retain the full
@@ -106,7 +112,7 @@ export function useLiveUsageLogs({
         items: [
           ...visibleActiveItems,
           ...visibleItems.filter(
-            (log) => !activeRequests.has(`${log.user_id}:${log.request_id}`)
+            (log) => !activeRequests.has(requestIdentity(log))
           ),
         ],
         committedItems: visibleItems,
@@ -128,7 +134,7 @@ export function useLiveUsageLogs({
         return
       }
       visibleItems = items
-      visibleActiveItems = activeItems
+      visibleActiveItems = [...activeItems, ...completing.values()]
       visibleTotal = total
       publish()
     }
@@ -139,6 +145,16 @@ export function useLiveUsageLogs({
       active?.abort()
       publish()
       if (!pending && !reading() && !document.hidden) void reload()
+    }
+    const checkCompletions = () => {
+      if (!completing.size) {
+        clearTimeout(completionTimer)
+        completionTimer = undefined
+      } else if (completionTimer === undefined) {
+        // Missing events, disabled logging, or an expired worker lease need an
+        // authoritative refresh, not an indefinitely retained processing row.
+        completionTimer = setTimeout(requireSnapshot, 3000)
+      }
     }
     const connect = async () => {
       if (stopped || document.hidden || reset || active) return
@@ -183,7 +199,17 @@ export function useLiveUsageLogs({
               const changed =
                 activeSignature !== undefined || batch.items.length > 0
               activeSignature = signature
+              const current = new Set(batch.items.map(requestIdentity))
+              const committed = new Set(items.map(requestIdentity))
+              for (const log of activeItems) {
+                const key = requestIdentity(log)
+                if (!current.has(key) && !committed.has(key)) {
+                  completing.set(key, log)
+                }
+              }
+              for (const key of current) completing.delete(key)
               activeItems = batch.items
+              checkCompletions()
               if (pending || reading()) {
                 if (changed) {
                   pending = Math.max(1, pending)
@@ -212,6 +238,11 @@ export function useLiveUsageLogs({
               return
             }
             if (batch.cursor === cursor) return
+            let completed = false
+            for (const log of batch.items) {
+              completed = completing.delete(requestIdentity(log)) || completed
+            }
+            checkCompletions()
             if (batch.replace === true) {
               const replacementTotal = batch.total
               if (
@@ -280,7 +311,8 @@ export function useLiveUsageLogs({
             }
             const added = incoming.length + omitted
             if (!added) {
-              if (needsExactTotal) publish()
+              if (completed && !pending && !reading()) show()
+              else if (needsExactTotal) publish()
               return
             }
             // Each batch already has the database's tie order. ClickHouse and
@@ -350,6 +382,7 @@ export function useLiveUsageLogs({
       active?.abort()
       clearTimeout(retryTimer)
       clearTimeout(calendarTimer)
+      clearTimeout(completionTimer)
       document.removeEventListener('visibilitychange', checkVisibility)
       apply.current = undefined
     }

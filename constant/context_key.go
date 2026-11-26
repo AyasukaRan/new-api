@@ -81,6 +81,9 @@ const (
 	// ContextKeyConsumeLog holds the *model.RecordConsumeLogParams of the
 	// request's last consume log, which request plugin report hooks read.
 	ContextKeyConsumeLog ContextKey = "consume_log"
+	// ContextKeyConsumeLogRequestID is set only after a consume log is persisted.
+	// A reused WebSocket context must not confuse a previous turn with this one.
+	ContextKeyConsumeLogRequestID ContextKey = "consume_log_request_id"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

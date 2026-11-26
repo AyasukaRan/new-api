@@ -29,6 +29,10 @@ export interface Sub2APIAccount {
   needs_login: boolean
   last_sync_at: number
   last_error: string
+  has_proxy: boolean
+  channel_ids: number[]
+  channels: { id: number; name: string }[]
+  legacy: boolean
 }
 
 export interface Sub2APIKey {
@@ -61,6 +65,7 @@ export interface Sub2APIStatus {
   encryption_ready: boolean
   management_allowed: boolean
   accounts: Sub2APIAccount[]
+  available_accounts: Sub2APIAccount[]
   keys: Sub2APIKey[]
 }
 
@@ -68,13 +73,40 @@ export type Sub2APILoginResult =
   | { requires_2fa: false; account_id: number }
   | { requires_2fa: true; flow: string; email_masked: string }
 
-export type Sub2APIAction =
-  | 'login'
-  | 'import'
-  | 'refresh'
-  | 'disconnect'
-  | 'sync'
-  | 'keys'
+export type Sub2APIAction = 'attach' | 'detach' | 'sync' | 'keys'
+
+export type Sub2APIAccountAction = 'login' | 'import' | 'refresh' | 'disconnect'
+
+export type Sub2APIAccountsStatus = Pick<
+  Sub2APIStatus,
+  'accounts' | 'encryption_ready' | 'management_allowed'
+>
+
+export function getSub2APIAccounts(signal?: AbortSignal) {
+  return authResult<Sub2APIAccountsStatus>(
+    api.get('/api/sub2api/accounts', {
+      ...authRequestOptions,
+      signal,
+      disableDuplicate: true,
+    })
+  )
+}
+
+export function submitSub2APIAccountAction<T>(
+  action: Sub2APIAccountAction | 'login/2fa',
+  data: Record<string, unknown>,
+  proof: string | undefined,
+  signal: AbortSignal
+) {
+  return authResult<T>(
+    api.post(`/api/sub2api/accounts/${action}`, data, {
+      ...authRequestOptions,
+      signal,
+      singleUseAuthorization: true,
+      headers: proof ? { 'X-Security-Proof': proof } : undefined,
+    })
+  )
+}
 
 export function getSub2APIStatus(channelId: number, signal?: AbortSignal) {
   return authResult<Sub2APIStatus>(
@@ -89,7 +121,7 @@ export function getSub2APIStatus(channelId: number, signal?: AbortSignal) {
 /** Only encrypted credentials cross this boundary. Proofs are never replayed. */
 export function submitSub2APIAction<T>(
   channelId: number,
-  action: Sub2APIAction | 'login/2fa',
+  action: Sub2APIAction,
   data: Record<string, unknown>,
   proof: string | undefined,
   signal: AbortSignal

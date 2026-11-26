@@ -144,3 +144,27 @@ func GetPerfMetrics(c *gin.Context) {
 		"data":    result,
 	})
 }
+
+// GetLiveDashboardMetrics exposes only administrator-visible single-instance
+// measurements. The route also enforces AdminAuth and the log:read PAT scope.
+func GetLiveDashboardMetrics(c *gin.Context) {
+	if c.GetInt("role") < common.RoleAdminUser {
+		common.ApiErrorStatus(c, http.StatusForbidden, common.NewMessage("Unauthorized, insufficient privileges"))
+		return
+	}
+	seconds, secondsErr := strconv.ParseInt(c.DefaultQuery("seconds", "900"), 10, 64)
+	step, stepErr := strconv.ParseInt(c.DefaultQuery("step", "60"), 10, 64)
+	modelName := strings.TrimSpace(c.Query("model"))
+	if secondsErr != nil || stepErr != nil || !slices.Contains([]int64{900, 3600, 21600, 86400}, seconds) ||
+		!slices.Contains([]int64{60, 300, 3600}, step) || utf8.RuneCountInString(modelName) > 128 {
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
+		return
+	}
+	result, accepted := perfmetrics.TryQueryLive(seconds, step, modelName)
+	if !accepted {
+		c.Header("Retry-After", "1")
+		common.ApiErrorStatus(c, http.StatusTooManyRequests, common.NewMessage("Rate limited"))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": result})
+}

@@ -27,6 +27,7 @@ export type VerificationMethod =
 export type SecurityProofScope =
   | 'channel.key.read'
   | 'channel.sub2api.manage'
+  | 'sub2api.account.manage'
   | 'passkey.register'
   | 'passkey.delete'
   | '2fa.setup'
@@ -57,9 +58,27 @@ export type VerificationOperation =
       scope: 'channel.sub2api.manage'
       context: {
         channel_id: number
-        action: 'login' | 'import' | 'refresh' | 'disconnect' | 'sync' | 'keys'
+        action:
+          | 'login'
+          | 'import'
+          | 'refresh'
+          | 'disconnect'
+          | 'sync'
+          | 'keys'
+          | 'attach'
+          | 'detach'
         account_id: number
         key_identity: string
+      }
+    }
+  | {
+      scope: 'sub2api.account.manage'
+      context: {
+        action: 'login' | 'import' | 'refresh' | 'disconnect'
+        account_id: number
+        origin: string
+        proxy_encrypted: string
+        email: string
       }
     }
   | {
@@ -103,6 +122,7 @@ export type VerificationOperation =
         SecurityProofScope,
         | 'channel.key.read'
         | 'channel.sub2api.manage'
+        | 'sub2api.account.manage'
         | 'account.binding.bind'
         | 'account.binding.unbind'
         | 'access_token.generate'

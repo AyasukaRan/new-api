@@ -147,7 +147,7 @@ func SettleSub2APIBill(ctx context.Context, pending Sub2APIBill, usageID, apiKey
 	if err != nil {
 		return err
 	}
-	if account.ChannelID != pending.ChannelID || account.Origin == "" || account.UpstreamUserID <= 0 {
+	if account.SharedIdentity == nil && account.ChannelID != pending.ChannelID || account.Origin == "" || account.UpstreamUserID <= 0 {
 		return errors.New("invalid upstream bill account")
 	}
 	changed := false

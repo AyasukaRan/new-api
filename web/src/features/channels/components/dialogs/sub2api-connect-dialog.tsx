@@ -39,11 +39,15 @@ import {
   sub2APILoginSchema,
   sub2APITotpSchema,
 } from '../../lib/sub2api-login'
-import { submitSub2APIAction, type Sub2APILoginResult } from '../../sub2api-api'
+import {
+  submitSub2APIAccountAction,
+  type Sub2APIAccount,
+  type Sub2APILoginResult,
+} from '../../sub2api-api'
 import { FieldsStep } from './plugin-login-steps'
 
 export function Sub2APIConnectDialog(props: {
-  channelId: number
+  account?: Sub2APIAccount
   mode: 'login' | 'import'
   managementAllowed: boolean
   onClose: () => void
@@ -67,8 +71,7 @@ export function Sub2APIConnectDialog(props: {
       proof?: string
       signal: AbortSignal
     }) =>
-      submitSub2APIAction<Sub2APILoginResult>(
-        props.channelId,
+      submitSub2APIAccountAction<Sub2APILoginResult>(
         request.action,
         request.data,
         request.proof,
@@ -107,8 +110,39 @@ export function Sub2APIConnectDialog(props: {
           ...sub2APITotpSchema.parse(input.fields),
         }
       } else {
+        let origin = ''
+        let proxyEncrypted = ''
+        let proxyKeyId = ''
+        if (!props.account) {
+          origin = input.fields.origin?.trim() ?? ''
+          let site: URL
+          try {
+            site = new URL(origin)
+          } catch {
+            throw new Error(t('Enter a valid HTTPS site URL.'))
+          }
+          if (
+            site.protocol !== 'https:' ||
+            site.username ||
+            site.password ||
+            site.search ||
+            site.hash
+          ) {
+            throw new Error(t('Enter a valid HTTPS site URL.'))
+          }
+          if (input.fields.proxy?.trim()) {
+            const encryptedProxy = await encryptPassword(
+              input.fields.proxy.trim()
+            )
+            proxyEncrypted = encryptedProxy.password_encrypted
+            proxyKeyId = encryptedProxy.encryption_key_id
+          }
+        }
         if (props.mode === 'login') {
-          const credentials = sub2APILoginSchema.parse(input.fields)
+          const credentials = sub2APILoginSchema.parse({
+            ...input.fields,
+            email: props.account?.email ?? input.fields.email,
+          })
           const encrypted = await encryptPassword(credentials.password)
           credentials.password = ''
           data = { email: credentials.email, ...encrypted }
@@ -129,15 +163,25 @@ export function Sub2APIConnectDialog(props: {
             encryption_key_id: encrypted.encryption_key_id,
           }
         }
+        if (proxyKeyId && proxyKeyId !== data.encryption_key_id) {
+          throw new Error(t('Operation failed'))
+        }
+        data = {
+          ...data,
+          origin,
+          proxy_encrypted: proxyEncrypted,
+          account_id: props.account?.id ?? 0,
+        }
         for (const key of Object.keys(input.fields)) input.fields[key] = ''
         if (operation.current !== current) return
         const result = await verification.requestVerification({
-          scope: 'channel.sub2api.manage',
+          scope: 'sub2api.account.manage',
           context: {
-            channel_id: props.channelId,
             action: props.mode,
-            account_id: 0,
-            key_identity: '',
+            account_id: props.account?.id ?? 0,
+            origin,
+            proxy_encrypted: proxyEncrypted,
+            email: props.mode === 'login' ? String(data.email) : '',
           },
           title: t('Verify to manage upstream account'),
         })
@@ -200,13 +244,41 @@ export function Sub2APIConnectDialog(props: {
     ]
   } else {
     fields = [
-      { name: 'email', label: t('Email'), type: 'text', required: true },
+      ...(!props.account
+        ? [
+            {
+              name: 'email',
+              label: t('Email'),
+              type: 'text' as const,
+              required: true,
+            },
+          ]
+        : []),
       {
         name: 'password',
         label: t('Password'),
         type: 'password',
         required: true,
       },
+    ]
+  }
+
+  if (!challenge && !props.account) {
+    fields = [
+      {
+        name: 'origin',
+        label: t('Site URL'),
+        type: 'text',
+        required: true,
+        placeholder: 'https://example.com',
+      },
+      {
+        name: 'proxy',
+        label: t('Proxy Address'),
+        type: 'password',
+        description: t('Leave empty for a direct connection.'),
+      },
+      ...fields,
     ]
   }
 
@@ -247,7 +319,15 @@ export function Sub2APIConnectDialog(props: {
           </>
         }
       >
-        <div className='space-y-4'>
+        <div
+          className='space-y-4'
+          onSubmit={(event) => event.stopPropagation()}
+        >
+          {props.account && (
+            <p className='text-muted-foreground text-sm break-all'>
+              {props.account.email} · {props.account.origin}
+            </p>
+          )}
           {error && (
             <Alert variant='destructive'>
               <AlertDescription>{error}</AlertDescription>

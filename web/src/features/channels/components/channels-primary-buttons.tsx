@@ -20,6 +20,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import {
   Plus,
+  UsersRound,
   MoreHorizontal,
   Settings2,
   Trash2,
@@ -158,6 +159,18 @@ export function ChannelsPrimaryButtons() {
             })
           }}
         />
+
+        <Button
+          variant='outline'
+          disabled={!canEditSensitive}
+          onClick={() => {
+            setCurrentRow(null)
+            setOpen('upstream-accounts')
+          }}
+        >
+          <UsersRound aria-hidden />
+          <span>{t('Upstream accounts')}</span>
+        </Button>
 
         {/* Create Channel */}
         <Tooltip>

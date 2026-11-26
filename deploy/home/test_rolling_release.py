@@ -96,6 +96,7 @@ class FakeRollout(release.Rollout):
         self.containers[name]['State']['Running'] = False
         self.events.append('stop:' + name)
         self.assert_service()
+        return True
 
     def finish(self, phase):
         self.guard()
@@ -113,14 +114,30 @@ class FakeRollout(release.Rollout):
 class RollingReleaseTests(unittest.TestCase):
 
     def test_additive_schema_failure_does_not_start_bridge(self):
+        for flag, prepare in (('relay_file_schema', 'prepare_relay_file_schema'),
+                              ('shared_sub2api_schema', 'prepare_sub2api_shared_schema')):
+            with self.subTest(flag=flag):
+                flow = FakeRollout()
+                flow.release[flag] = True
+                with patch.object(release, prepare, side_effect=RuntimeError('locked')):
+                    with self.assertRaisesRegex(RuntimeError, 'locked'):
+                        self.run_fake(flow)
+                self.assertEqual(flow.state['phase'], 'prepared')
+                self.assertNotIn('start:' + release.BRIDGE + ':new', flow.events)
+                self.assertTrue(flow.containers[release.APP]['State']['Running'])
+                self.assertFalse(flow.state.get(flag + '_prepared'))
+
+    def test_shared_account_schema_precedes_bridge_and_resumes_once(self):
         flow = FakeRollout()
-        flow.release['relay_file_schema'] = True
-        with patch.object(release, 'prepare_relay_file_schema', side_effect=RuntimeError('locked')):
-            with self.assertRaisesRegex(RuntimeError, 'locked'):
-                self.run_fake(flow)
-        self.assertNotIn('start:' + release.BRIDGE + ':new', flow.events)
-        self.assertTrue(flow.containers[release.APP]['State']['Running'])
-        self.assertFalse(flow.state.get('relay_file_schema_prepared'))
+        flow.release['shared_sub2api_schema'] = True
+        flow.pending.add('to-bridge')
+        with patch.object(release, 'prepare_sub2api_shared_schema', side_effect=lambda: flow.events.append('prepare-schema')) as prepare:
+            self.assertEqual(self.run_fake(flow), 'pending')
+            self.assertTrue(flow.state['shared_sub2api_schema_prepared'])
+            self.assertLess(flow.events.index('prepare-schema'), flow.events.index('start:' + release.BRIDGE + ':new'))
+            flow.pending.clear()
+            self.assertEqual(self.run_fake(flow), 'complete')
+            prepare.assert_called_once_with()
 
 
 
@@ -407,6 +424,7 @@ class RollingReleaseTests(unittest.TestCase):
                                                                  ('compose.bridge', 'new-api-bridge', release.BRIDGE)):
                     saved = release.read_json(flow.private / filename)['services'][service_name]['environment']
                     self.assertEqual(saved.get(key), 'true' if enabled else existing)
+                    self.assertEqual(saved.get('DASHBOARD_CONFIG_READ_ONLY'), 'true' if container_name == release.BRIDGE else None)
                     candidate = copy.deepcopy(old)
                     candidate['Image'] = 'new'
                     candidate['Config']['Env'] = saved
@@ -434,6 +452,89 @@ class RollingReleaseTests(unittest.TestCase):
                                                        '--state', str(root / name)]), 1)
                         self.assertEqual(json.loads(output.getvalue())['error_type'], 'BlockingIOError')
                     self.assertFalse((root / name).exists())
+
+    def test_application_connections_block_stop_even_after_edge_drain(self):
+        header = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode'
+        for state in ('01', '08'):
+            for protocol in ('tcp', 'tcp6'):
+                with self.subTest(state=state, protocol=protocol):
+                    flow = object.__new__(release.Rollout)
+                    flow.state = {}
+                    flow.save = lambda **values: flow.state.update(values)
+                    live = app('old', 'old')
+                    live['State']['Pid'] = 123
+                    row = f'0: 00000000:0BB8 00000000:1234 {state} 0 0 0 0 0 1'
+                    def contents(path):
+                        return header + ('\n' + row if path.name == protocol else '')
+                    with patch.object(release, 'inspect', return_value=live), \
+                            patch.object(release.Path, 'read_text', contents), \
+                            patch.object(release, 'command') as command:
+                        self.assertFalse(flow.stop(release.APP))
+                    command.assert_not_called()
+                    self.assertEqual(flow.state['application_connections_pending'], 1)
+        flow = object.__new__(release.Rollout)
+        live['State']['Pid'] = 123
+        for failure in (PermissionError(), 'malformed'):
+            with patch.object(release, 'inspect', return_value=live), \
+                    patch.object(release.Path, 'read_text', side_effect=failure if isinstance(failure, Exception) else None,
+                                 return_value=failure if isinstance(failure, str) else ''), \
+                    patch.object(release, 'command') as command:
+                with self.assertRaises((PermissionError, RuntimeError)):
+                    flow.stop(release.APP)
+                command.assert_not_called()
+
+    def test_application_stop_requires_stable_empty_application_sockets(self):
+        flow = object.__new__(release.Rollout)
+        flow.state = {'started_at': '2026-11-26T00:00:00Z', 'logs_before': {}}
+        flow.save = lambda **values: flow.state.update(values)
+        live = app('old', 'old')
+        live['State']['Pid'] = 123
+        stopped = app('old', 'old', running=False)
+        sockets = ('sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n'
+                   '0: 00000000:0BB8 00000000:0000 0A 0 0 0 0 0 1\n'
+                   '1: 00000000:1234 00000000:0BB8 01 0 0 0 0 0 2')
+        with patch.object(release.Path, 'read_text', return_value=sockets), \
+                patch.object(release, 'inspect', side_effect=[live, live, stopped]), \
+                patch.object(release, 'command', return_value='') as command, \
+                patch.object(release, 'log_bounds', return_value={}), \
+                patch.object(release, 'preserve_logs'):
+            self.assertTrue(flow.stop(release.APP))
+        self.assertEqual(command.call_args_list[0].args, ('docker', 'stop', '-t', '150', release.APP))
+        replaced = copy.deepcopy(live)
+        replaced['State']['Pid'] = 456
+        with patch.object(release.Path, 'read_text', return_value=sockets), \
+                patch.object(release, 'inspect', side_effect=[live, replaced]), \
+                patch.object(release, 'command') as command:
+            with self.assertRaisesRegex(RuntimeError, 'application_process_changed'):
+                flow.stop(release.APP)
+            command.assert_not_called()
+
+    def test_pending_application_stop_keeps_release_journal_in_stop_phase(self):
+        for phase, route in (('stop_old', release.BRIDGE), ('stop_bridge', release.APP),
+                             ('stop_rollback_bridge', release.APP)):
+            flow = FakeRollout()
+            flow.state['phase'], flow.route = phase, route
+            flow.containers[release.BRIDGE] = app('new', 'bridge')
+            with patch.object(flow, 'stop', return_value=False):
+                self.assertEqual(self.run_fake(flow), 'pending')
+            self.assertEqual(flow.state['phase'], phase)
+            self.assertTrue(all(v['State']['Running'] for v in flow.containers.values()))
+
+    def test_bridge_compose_project_isolated_from_archived_same_service(self):
+        flow = object.__new__(release.Rollout)
+        flow.private = Path('/private/rollout')
+        flow.original = b'{"name":"home"}'
+        flow.state = {'commit': 'a' * 40}
+        with patch.object(release, 'command') as command:
+            flow.compose_up(bridge=True)
+            bridge_args = command.call_args.args
+            flow.compose_up()
+            main_args = command.call_args.args
+        self.assertEqual(bridge_args[bridge_args.index('-p') + 1], 'home-bridge-aaaaaaaaa')
+        self.assertEqual(main_args[main_args.index('-p') + 1], 'home')
+        self.assertEqual(bridge_args[-1], 'new-api-bridge')
+        self.assertIn('--no-deps', bridge_args)
+        self.assertEqual(bridge_args[bridge_args.index('-f') + 1], '/private/rollout/compose.bridge')
 
     def test_shutdown_detects_stderr_flush_failure_and_killed_process(self):
         flow = object.__new__(release.Rollout)

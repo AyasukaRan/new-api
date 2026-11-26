@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { LogIn, RefreshCw, Unplug } from 'lucide-react'
+import { Link2, RefreshCw, Unplug } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -28,6 +28,7 @@ import { LoadingState } from '@/components/loading-state'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Combobox } from '@/components/ui/combobox'
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import {
   Item,
@@ -66,7 +67,6 @@ import {
   type Sub2APIAction,
   type Sub2APIAccount,
 } from '../sub2api-api'
-import { Sub2APIConnectDialog } from './dialogs/sub2api-connect-dialog'
 
 export function Sub2APISettings(props: {
   channelId: number | null
@@ -82,9 +82,7 @@ export function Sub2APISettings(props: {
   const verification = useSecureVerification()
   const cancelVerification = verification.cancel
   const operation = useRef<AbortController | null>(null)
-  const [connectMode, setConnectMode] = useState<'login' | 'import' | null>(
-    null
-  )
+  const [selectedAccount, setSelectedAccount] = useState<string | null>(null)
   const [disconnect, setDisconnect] = useState<Sub2APIAccount | null>(null)
   const [selectedKey, setSelectedKey] = useState('')
   const [busy, setBusy] = useState(false)
@@ -174,6 +172,7 @@ export function Sub2APISettings(props: {
         signal: current.signal,
       })
       if (operation.current !== current) return
+      if (action === 'attach') setSelectedAccount(null)
       invalidate()
       toast.success(t('Saved successfully'))
     } catch (error) {
@@ -250,25 +249,6 @@ export function Sub2APISettings(props: {
             type='button'
             variant='outline'
             size='sm'
-            disabled={locked || !status.encryption_ready}
-            onClick={() => setConnectMode('import')}
-          >
-            {t('Import tokens')}
-          </Button>
-          <Button
-            type='button'
-            variant='outline'
-            size='sm'
-            disabled={locked || !status.encryption_ready}
-            onClick={() => setConnectMode('login')}
-          >
-            <LogIn data-icon='inline-start' />
-            {t('Add account')}
-          </Button>
-          <Button
-            type='button'
-            variant='outline'
-            size='sm'
             disabled={locked}
             onClick={() => void runAction('sync')}
           >
@@ -305,6 +285,50 @@ export function Sub2APISettings(props: {
           </AlertDescription>
         </Alert>
       )}
+      <Field>
+        <FieldLabel htmlFor={`${id}-account`}>
+          {t('Upstream account')}
+        </FieldLabel>
+        <div className='flex min-w-0 items-center gap-2'>
+          <Combobox
+            id={`${id}-account`}
+            className='min-w-0 flex-1'
+            disabled={locked}
+            options={status.available_accounts
+              .filter(
+                (item) => !status.accounts.some((bound) => bound.id === item.id)
+              )
+              .map((item) => ({
+                value: String(item.id),
+                label: `${item.email} · #${item.id}`,
+              }))}
+            value={selectedAccount}
+            onValueChange={setSelectedAccount}
+            placeholder={t('Select an account')}
+            emptyText={t('No available accounts for this site')}
+          />
+          <Button
+            type='button'
+            variant='outline'
+            disabled={locked || !selectedAccount}
+            onClick={() => {
+              if (selectedAccount) {
+                void runAction('attach', {
+                  account_id: Number(selectedAccount),
+                })
+              }
+            }}
+          >
+            <Link2 />
+            {t('Link account')}
+          </Button>
+        </div>
+        <FieldDescription>
+          {t(
+            'Only accounts on the same site can be linked. Key ownership is verified automatically.'
+          )}
+        </FieldDescription>
+      </Field>
       {status.accounts.length > 0 ? (
         <ItemGroup className='gap-2'>
           {status.accounts.map((item) => (
@@ -339,25 +363,7 @@ export function Sub2APISettings(props: {
                   type='button'
                   variant='ghost'
                   size='icon'
-                  aria-label={t('Refresh account {{account}}', {
-                    account: item.email,
-                  })}
-                  disabled={
-                    locked ||
-                    !item.has_refresh_token ||
-                    !status.encryption_ready
-                  }
-                  onClick={() =>
-                    void runAction('refresh', { account_id: item.id })
-                  }
-                >
-                  <RefreshCw />
-                </Button>
-                <Button
-                  type='button'
-                  variant='ghost'
-                  size='icon'
-                  aria-label={t('Disconnect account {{account}}', {
+                  aria-label={t('Detach account {{account}}', {
                     account: item.email,
                   })}
                   disabled={locked}
@@ -371,9 +377,7 @@ export function Sub2APISettings(props: {
         </ItemGroup>
       ) : (
         <p className='text-muted-foreground text-xs'>
-          {t(
-            'Connect an upstream account to match its API keys and sync actual charges.'
-          )}
+          {t('Choose an account saved in Upstream accounts.')}
         </p>
       )}
       {key && (
@@ -498,33 +502,21 @@ export function Sub2APISettings(props: {
           </p>
         </div>
       )}
-      {connectMode && (
-        <Sub2APIConnectDialog
-          key={`${channelId}:${connectMode}`}
-          channelId={channelId}
-          mode={connectMode}
-          managementAllowed={
-            managementAllowed && !props.disabled && !props.hasUnsavedChanges
-          }
-          onClose={() => setConnectMode(null)}
-          onDone={invalidate}
-        />
-      )}
       <ConfirmDialog
         open={disconnect !== null}
         onOpenChange={(open) => {
           if (!open) setDisconnect(null)
         }}
-        title={t('Disconnect upstream account')}
+        title={t('Detach upstream account')}
         desc={t(
-          'Disconnecting stops actual charge sync for this account. Existing API keys stay unchanged.'
+          'This stops account billing sync only for this channel. Other channels stay connected.'
         )}
-        confirmText={t('Disconnect')}
+        confirmText={t('Detach')}
         destructive
         handleConfirm={() => {
           const target = disconnect
           setDisconnect(null)
-          if (target) void runAction('disconnect', { account_id: target.id })
+          if (target) void runAction('detach', { account_id: target.id })
         }}
       />
       <SecureVerificationDialog {...verification.dialogProps} />

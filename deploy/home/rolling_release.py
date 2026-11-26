@@ -124,6 +124,43 @@ COMMIT;
     command(*args, input=sql, timeout=40)
 
 
+def prepare_sub2api_shared_schema(database_container=None, database_name=None):
+    # The new slave starts before the new master runs AutoMigrate.
+    sql = """BEGIN;
+SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='20s';
+ALTER TABLE sub2_api_accounts
+ ADD COLUMN IF NOT EXISTS shared_identity char(64),
+ ADD COLUMN IF NOT EXISTS proxy_credential text;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sub2_api_accounts_shared_identity
+ ON sub2_api_accounts (shared_identity);
+DO $migration$
+BEGIN
+ IF (SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='sub2_api_accounts'
+     AND is_nullable='YES' AND column_default IS NULL AND
+     ((column_name='shared_identity' AND data_type='character' AND character_maximum_length=64) OR
+      (column_name='proxy_credential' AND data_type='text'))) <> 2
+ THEN RAISE EXCEPTION 'unexpected shared Sub2API account columns'; END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid
+     JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+     JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=i.indkey[0]
+     JOIN pg_am m ON m.oid=x.relam
+     WHERE n.nspname=current_schema() AND t.relname='sub2_api_accounts'
+       AND x.relname='idx_sub2_api_accounts_shared_identity' AND a.attname='shared_identity'
+       AND i.indisunique AND i.indisvalid AND i.indisready AND i.indnatts=1
+       AND i.indpred IS NULL AND i.indexprs IS NULL AND m.amname='btree')
+ THEN RAISE EXCEPTION 'unexpected shared Sub2API account index'; END IF;
+END $migration$;
+COMMIT;
+"""
+    args = ['docker', 'exec', '-i']
+    if database_name is not None:
+        check(re.fullmatch(r'[a-zA-Z0-9_-]+', database_name), 'invalid_migration_database')
+        args += ['-e', 'PGDATABASE=' + database_name]
+    args += [database_container or DB, 'sh', '-ec',
+             'exec psql -XqAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "${PGDATABASE:-$POSTGRES_DB}"']
+    command(*args, input=sql, timeout=40)
+
+
 def document_pages_mount(receipt):
     config = receipt.get('document_pages')
     if config is None:
@@ -317,7 +354,10 @@ class Rollout:
     def compose_up(self, bridge=False):
         path = self.private / 'compose.bridge' if bridge else COMPOSE
         service = 'new-api-bridge' if bridge else 'new-api'
-        command('docker', 'compose', '--project-directory', str(PROJECT), '-p', json.loads(self.original)['name'],
+        project = json.loads(self.original)['name']
+        if bridge:
+            project += '-bridge-' + self.state['commit'][:9]
+        command('docker', 'compose', '--project-directory', str(PROJECT), '-p', project,
                 '-f', str(path), 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', service)
 
     def replace_compose(self, content):
@@ -341,6 +381,8 @@ class Rollout:
                 expected['Mounts'].append(mount)
         if name == BRIDGE:
             values.update(NODE_TYPE='slave', NODE_NAME=values['NODE_NAME'] + '-bridge')
+            if not old:
+                values['DASHBOARD_CONFIG_READ_ONLY'] = 'true'
             expected['HostConfig']['PortBindings'] = {}
         expected['Config']['Env'] = values
         identity = self.release['runtime_base_id'] if old else self.release['image_id']
@@ -412,6 +454,26 @@ class Rollout:
         item = inspect(name)
         running = item['State']['Running']
         if running:
+            # Edge worker drain does not prove that the application finished its
+            # handlers: disconnected streams can remain in CLOSE_WAIT.
+            pid = item['State'].get('Pid')
+            check(isinstance(pid, int) and pid > 0, 'application_process_unavailable')
+            pending = 0
+            for protocol in ('tcp', 'tcp6'):
+                lines = Path(f'/proc/{pid}/net/{protocol}').read_text().splitlines()
+                check(lines and 'local_address' in lines[0], 'application_connections_unreadable')
+                for line in lines[1:]:
+                    fields = line.split()
+                    check(len(fields) >= 10 and re.fullmatch(r'[0-9A-Fa-f]+:[0-9A-Fa-f]{4}', fields[1])
+                          and re.fullmatch(r'[0-9A-Fa-f]{2}', fields[3]), 'application_connections_unreadable')
+                    if int(fields[1].rsplit(':', 1)[1], 16) == 3000 and fields[3] in ('01', '08'):
+                        pending += 1
+            current = inspect(name)
+            check(current['Id'] == item['Id'] and current['State'].get('Pid') == pid
+                  and current['State']['Running'], 'application_process_changed')
+            self.save(application_connections_pending=pending)
+            if pending:
+                return False
             command('docker', 'stop', '-t', '150', name, timeout=165)
         item = inspect(name)
         # An unserved candidate may have exited during startup. Never accept a killed or OOM process.
@@ -424,6 +486,7 @@ class Rollout:
         after = log_bounds()
         preserve_logs(self.state.get('logs_drained', self.state['logs_before']), after)
         self.save(logs_drained=after)
+        return True
 
     def finish(self, phase):
         self.guard()
@@ -463,6 +526,9 @@ class Rollout:
                 if self.release.get('relay_file_schema') and not self.state.get('relay_file_schema_prepared'):
                     prepare_relay_file_schema()
                     self.save(relay_file_schema_prepared=True)
+                if self.release.get('shared_sub2api_schema') and not self.state.get('shared_sub2api_schema_prepared'):
+                    prepare_sub2api_shared_schema()
+                    self.save(shared_sub2api_schema_prepared=True)
                 item = inspect(BRIDGE, optional=True)
                 if item:
                     check(item['Config'].get('Labels', {}).get('io.new-api.rollout') == str(self.args.state), 'unowned_bridge')
@@ -480,7 +546,8 @@ class Rollout:
                 self.guard()
                 self.require_route('to-bridge', BRIDGE)
                 check(inspect(APP)['Id'] == self.state['old_id'], 'old_application_replaced')
-                self.stop(APP)
+                if not self.stop(APP):
+                    return 'pending'
                 self.save('start_main')
             elif phase == 'start_main':
                 self.guard()
@@ -507,14 +574,16 @@ class Rollout:
                 self.save('stop_bridge')
             elif phase == 'stop_bridge':
                 self.require_route('to-main', APP, victim=BRIDGE)
-                self.stop(BRIDGE)
+                if not self.stop(BRIDGE):
+                    return 'pending'
                 self.finish('complete')
             elif phase == 'restore_old':
                 self.require_route('to-bridge', BRIDGE)
                 item = inspect(APP, optional=True)
                 if item and item['Image'] != self.release['runtime_base_id']:
                     check(item['Image'] == self.release['image_id'], 'unknown_master_image')
-                    self.stop(APP, unserved=True)
+                    if not self.stop(APP, unserved=True):
+                        return 'pending'
                 self.replace_compose(self.original)
                 self.compose_up()
                 self.ready(APP, old=True)
@@ -528,7 +597,8 @@ class Rollout:
                 self.save('stop_rollback_bridge')
             elif phase == 'stop_rollback_bridge':
                 self.require_route('restore-route', APP, old=True, victim=BRIDGE)
-                self.stop(BRIDGE)
+                if not self.stop(BRIDGE):
+                    return 'pending'
                 self.finish('rolled_back')
             else:
                 raise RuntimeError('unknown_journal_phase')
@@ -565,7 +635,8 @@ def initialize(args):
     bridge = copy.deepcopy(final)
     service = bridge['services']['new-api']
     service.update(container_name=BRIDGE, ports=[], depends_on={})
-    service['environment'].update(NODE_TYPE='slave', NODE_NAME=environment(app['Config']['Env'])['NODE_NAME'] + '-bridge')
+    service['environment'].update(NODE_TYPE='slave', NODE_NAME=environment(app['Config']['Env'])['NODE_NAME'] + '-bridge',
+                                  DASHBOARD_CONFIG_READ_ONLY='true')
     labels = service.setdefault('labels', {})
     check(isinstance(labels, dict), 'unexpected_compose_labels')
     labels['io.new-api.rollout'] = str(args.state)

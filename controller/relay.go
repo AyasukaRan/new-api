@@ -116,6 +116,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 
 	var relayInfo *relaycommon.RelayInfo
+	var finishMetadata func()
 	var ingressRecord []relaycommon.RequestPluginRecord
 	// Registered first so that it runs last: the request plugins' report
 	// hooks receive the request once the client has the whole response and
@@ -125,8 +126,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}()
 
 	defer func() {
+		if finishMetadata != nil {
+			defer finishMetadata()
+		}
 		if newAPIError != nil {
 			service.RecordRequestPolicyTermination(c, newAPIError)
+			service.RecordFinalRelayErrorLog(c, newAPIError, relayInfo)
 			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
 			if c.GetBool("deepseek_tts_upgrade_failed") {
@@ -198,8 +203,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 	relayInfo.SetRequestPluginIngress(ingressSteps, ingressRecord)
-	finishMetadata := service.BeginRequestMetadata(c, relayInfo)
-	defer finishMetadata()
+	finishMetadata = service.BeginRequestMetadata(c, relayInfo)
 	if relayFormat != types.RelayFormatOpenAIRealtime && !relayInfo.IsChannelTest {
 		defer perfmetrics.BeginGatewayRequest(relayInfo.StartTime)()
 	}

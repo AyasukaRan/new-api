@@ -25,6 +25,8 @@ type sub2APIManagementRequest struct {
 	Flow                  string `json:"flow"`
 	TOTPCode              string `json:"totp_code"`
 	AccountID             int64  `json:"account_id"`
+	Origin                string `json:"origin"`
+	ProxyEncrypted        string `json:"proxy_encrypted"`
 	KeyIdentity           string `json:"key_identity"`
 	SyncRates             bool   `json:"sync_rates"`
 	SyncBills             bool   `json:"sync_bills"`
@@ -58,6 +60,8 @@ func sub2APIErrorMessage(code string) string {
 		"SUB2API_ACCOUNT_NOT_FOUND":      "The Sub2API account was not found.",
 		"SUB2API_RESPONSE_INVALID":       "The Sub2API response is incomplete or invalid.",
 		"SUB2API_KEY_NOT_BOUND":          "Connect the account that owns this key before syncing bills.",
+		"SUB2API_ACCOUNT_CONFLICT":       "This Sub2API account already has an independent connection.",
+		"SUB2API_ACCOUNT_LINKED":         "Detach this account from its channels before disconnecting.",
 		"SUB2API_SECURE_ENTRY_REQUIRED":  "Use the HTTPS management address to connect a Sub2API account.",
 	}
 	message := messages[code]
@@ -78,7 +82,7 @@ func GetSub2APIChannel(c *gin.Context) {
 		return
 	}
 	if !model.Sub2APIStorageReady() {
-		common.ApiSuccess(c, gin.H{"encryption_ready": false, "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": []any{}, "keys": []any{}})
+		common.ApiSuccess(c, gin.H{"encryption_ready": false, "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": []any{}, "available_accounts": []any{}, "keys": []any{}})
 		return
 	}
 	accounts, err := model.ListSub2APIAccounts(channelID)
@@ -121,7 +125,25 @@ func GetSub2APIChannel(c *gin.Context) {
 	if accounts == nil {
 		accounts = []model.Sub2APIAccount{}
 	}
-	common.ApiSuccess(c, gin.H{"encryption_ready": service.Sub2APIEncryptionReady(), "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": accounts, "keys": rows})
+	available := make([]model.Sub2APIAccount, 0)
+	origin, originErr := service.NormalizeSub2APIOrigin(channel.GetBaseURL())
+	all, listErr := model.ListSub2APIAccounts(0)
+	if listErr != nil {
+		sub2APIManagementError(c, listErr)
+		return
+	}
+	linked := make(map[int64]bool)
+	for _, account := range accounts {
+		linked[account.ID] = true
+	}
+	for _, account := range all {
+		accountOrigin, accountOriginErr := service.NormalizeSub2APIOrigin(account.Origin)
+		if originErr == nil && accountOriginErr == nil && account.SharedIdentity != nil && accountOrigin == origin && !linked[account.ID] {
+			account.LastError = sub2APIErrorMessage(account.LastError)
+			available = append(available, account)
+		}
+	}
+	common.ApiSuccess(c, gin.H{"encryption_ready": service.Sub2APIEncryptionReady(), "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": accounts, "available_accounts": available, "keys": rows})
 }
 
 // ManageSub2APIChannel handles the narrow authenticated account operations.
@@ -162,11 +184,26 @@ func ManageSub2APIChannel(c *gin.Context) {
 			return
 		}
 	}
-	if input.AccountID > 0 {
+	if input.AccountID > 0 && action != "attach" && action != "detach" {
 		account, err := model.GetSub2APIAccount(input.AccountID)
-		if err != nil || account.ChannelID != channelID {
+		if err != nil || account.ChannelID != channelID && account.SharedIdentity == nil {
 			common.ApiErrorT(c, "Invalid parameters")
 			return
+		}
+		if account.SharedIdentity != nil {
+			if action != "sync" {
+				common.ApiErrorT(c, "Invalid parameters")
+				return
+			}
+			accounts, listErr := model.ListSub2APIAccounts(channelID)
+			linked := false
+			for _, candidate := range accounts {
+				linked = linked || candidate.ID == account.ID
+			}
+			if listErr != nil || !linked {
+				common.ApiErrorT(c, "Invalid parameters")
+				return
+			}
 		}
 	}
 	var result any = gin.H{}
@@ -200,6 +237,10 @@ func ManageSub2APIChannel(c *gin.Context) {
 		if err == nil {
 			err = billErr
 		}
+	case "attach":
+		err = service.AttachIndependentSub2API(c.Request.Context(), channelID, input.AccountID, authorization)
+	case "detach":
+		err = model.DetachSub2APIAccount(channelID, input.AccountID, authorization)
 	case "keys":
 		if input.SyncBills {
 			binding, lookupErr := model.GetSub2APIKeyBinding(channelID, input.KeyIdentity)
@@ -255,4 +296,145 @@ func sub2APISecureEntry(request *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// Account management is global, but exposes only connection metadata. Neither
+// proxy credentials nor access/refresh tokens are serializable in these DTOs.
+func GetSub2APIAccounts(c *gin.Context) {
+	if !model.Sub2APIStorageReady() {
+		common.ApiSuccess(c, gin.H{"encryption_ready": false, "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": []any{}})
+		return
+	}
+	accounts, err := model.ListSub2APIAccounts(0)
+	if err != nil {
+		sub2APIManagementError(c, err)
+		return
+	}
+	bindings, err := model.ListSub2APIKeyBindings(0)
+	if err != nil {
+		sub2APIManagementError(c, err)
+		return
+	}
+	ids := make([]int, 0)
+	for _, binding := range bindings {
+		if binding.AccountID > 0 {
+			ids = append(ids, binding.ChannelID)
+		}
+	}
+	var channels []model.Channel
+	if len(ids) > 0 {
+		if err := model.DB.Select("id", "name").Where("id IN ? AND type = ?", ids, constant.ChannelTypeSub2API).Find(&channels).Error; err != nil {
+			sub2APIManagementError(c, err)
+			return
+		}
+	}
+	names := make(map[int]string)
+	for _, channel := range channels {
+		names[channel.Id] = channel.Name
+	}
+	type channelLabel struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	type accountDTO struct {
+		model.Sub2APIAccount
+		HasProxy   bool           `json:"has_proxy"`
+		Legacy     bool           `json:"legacy"`
+		ChannelIDs []int          `json:"channel_ids"`
+		Channels   []channelLabel `json:"channels"`
+	}
+	result := make([]accountDTO, 0, len(accounts))
+	for _, account := range accounts {
+		account.LastError = sub2APIErrorMessage(account.LastError)
+		row := accountDTO{Sub2APIAccount: account, HasProxy: service.Sub2APIAccountHasProxy(&account), Legacy: account.SharedIdentity == nil, ChannelIDs: []int{}, Channels: []channelLabel{}}
+		seen := make(map[int]bool)
+		for _, binding := range bindings {
+			if _, exists := names[binding.ChannelID]; !exists {
+				continue
+			}
+			if binding.AccountID == account.ID && !seen[binding.ChannelID] {
+				seen[binding.ChannelID] = true
+				row.ChannelIDs = append(row.ChannelIDs, binding.ChannelID)
+				row.Channels = append(row.Channels, channelLabel{binding.ChannelID, names[binding.ChannelID]})
+			}
+		}
+		result = append(result, row)
+	}
+	common.ApiSuccess(c, gin.H{"encryption_ready": service.Sub2APIEncryptionReady(), "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": result})
+}
+
+func ManageSub2APIAccounts(c *gin.Context) {
+	if !sub2APIManagementAllowed(c.Request) {
+		sub2APIManagementError(c, &service.Sub2APIError{Code: "SUB2API_SECURE_ENTRY_REQUIRED"})
+		return
+	}
+	identity, ok := middleware.GetStepUpIdentity(c)
+	if !ok {
+		writeSecurityOperationError(c, service.ErrAuthTokenInvalid)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 96<<10)
+	var input sub2APIManagementRequest
+	if err := common.DecodeJson(c.Request.Body, &input); err != nil {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	action := c.FullPath()[strings.LastIndex(c.FullPath(), "/")+1:]
+	if strings.HasSuffix(c.FullPath(), "/login/2fa") {
+		action = "login/2fa"
+	}
+	operation := service.Sub2APIAccountManageContext{Action: action, AccountID: input.AccountID, Origin: input.Origin, ProxyEncrypted: input.ProxyEncrypted, Email: input.Email}
+	var authorization *model.AuthFlowAuthorization
+	if action != "login/2fa" {
+		context, _ := common.Marshal(operation)
+		authorization = middleware.RequireSecurityProof(c, service.VerificationOperation{Scope: service.VerificationScopeSub2APIAccountManage, Context: context})
+		if authorization == nil {
+			return
+		}
+	}
+	var result any = gin.H{}
+	var err error
+	proxy := ""
+	if input.ProxyEncrypted != "" {
+		proxy, err = common.DecryptChannelCredential(input.ProxyEncrypted, input.EncryptionKeyID)
+	}
+	if err == nil {
+		switch action {
+		case "login":
+			var password string
+			password, err = common.DecryptChannelCredential(input.PasswordEncrypted, input.EncryptionKeyID)
+			if err == nil {
+				result, err = service.LoginIndependentSub2API(c.Request.Context(), operation, proxy, service.Sub2APILoginInput{Email: input.Email, Password: password, TurnstileToken: input.TurnstileToken, TencentCaptchaTicket: input.TencentCaptchaTicket, TencentCaptchaRandstr: input.TencentCaptchaRandstr}, authorization)
+			}
+		case "login/2fa":
+			result, err = service.CompleteIndependentSub2APILogin(c.Request.Context(), input.Flow, input.TOTPCode, identity)
+		case "import":
+			var plain string
+			plain, err = common.DecryptChannelCredential(input.CredentialEncrypted, input.EncryptionKeyID)
+			if err == nil {
+				var credential service.Sub2APICredential
+				err = common.UnmarshalJsonStr(plain, &credential)
+				if err == nil {
+					result, err = service.ImportIndependentSub2API(c.Request.Context(), operation, proxy, credential, authorization)
+				}
+			}
+		case "refresh":
+			err = service.RefreshSub2APIAccount(c.Request.Context(), input.AccountID, 0)
+		case "disconnect":
+			err = service.DisconnectIndependentSub2API(c.Request.Context(), input.AccountID, authorization)
+		default:
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+	}
+	fields := map[string]any{"source": "sub2api_account", "action": action, "account_id": input.AccountID}
+	if err != nil {
+		fields["outcome"], fields["error_code"] = "failure", service.Sub2APIErrorCode(err)
+		recordManageAudit(c, "channel.update", fields)
+		sub2APIManagementError(c, err)
+		return
+	}
+	fields["changed_fields"] = []string{"sub2api_account"}
+	recordManageAudit(c, "channel.update", fields)
+	common.ApiSuccess(c, result)
 }

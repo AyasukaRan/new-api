@@ -40,6 +40,7 @@ import { AuthOperationError } from '@/lib/secure-verification'
 import { useAuthStore } from '@/stores/auth-store'
 
 import type { Sub2APIStatus } from '../../sub2api-api'
+import { Sub2APIAccountsDialog } from '../dialogs/sub2api-accounts-dialog'
 import { Sub2APISettings } from '../sub2api-settings'
 
 const { publicKey, privateKey } = generateKeyPairSync('rsa', {
@@ -48,6 +49,7 @@ const { publicKey, privateKey } = generateKeyPairSync('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 })
 const url = '/api/channel/7/sub2api'
+const accountUrl = '/api/sub2api/accounts'
 let status: Sub2APIStatus
 
 beforeEach(() => {
@@ -57,6 +59,7 @@ beforeEach(() => {
   status = {
     encryption_ready: true,
     management_allowed: true,
+    available_accounts: [],
     accounts: [
       {
         id: 1,
@@ -68,6 +71,10 @@ beforeEach(() => {
         needs_login: false,
         last_sync_at: 0,
         last_error: '',
+        has_proxy: false,
+        channel_ids: [],
+        channels: [],
+        legacy: false,
       },
     ],
     keys: [
@@ -93,8 +100,8 @@ beforeEach(() => {
       },
     ],
   }
-  vi.spyOn(api, 'get').mockImplementation(async (path) => {
-    if (path === url) {
+  vi.spyOn(api, 'get').mockImplementation(async (path, config) => {
+    if (path === url || path === accountUrl) {
       return { data: { success: true, data: structuredClone(status) } }
     }
     if (path === '/api/verify/methods') {
@@ -102,7 +109,7 @@ beforeEach(() => {
         data: {
           success: true,
           data: {
-            scope: 'channel.sub2api.manage',
+            scope: (config?.params as { scope?: string } | undefined)?.scope,
             methods: [{ method: 'session', available: true }],
             oauth_providers: [],
             password_encryption_enabled: false,
@@ -142,7 +149,7 @@ function serveActions(
             proof_token: 'scoped-proof',
             expires_at: Math.floor(Date.now() / 1000) + 60,
             method: 'session',
-            scope: 'channel.sub2api.manage',
+            scope: (data as { scope: string }).scope,
           },
         },
       }
@@ -157,7 +164,8 @@ function serveActions(
 }
 
 function renderSettings(
-  props: Partial<React.ComponentProps<typeof Sub2APISettings>> = {}
+  props: Partial<React.ComponentProps<typeof Sub2APISettings>> = {},
+  accounts = false
 ) {
   const onChannelSubmit = vi.fn((event: React.FormEvent) =>
     event.preventDefault()
@@ -171,16 +179,24 @@ function renderSettings(
   const view = render(
     <QueryClientProvider client={client}>
       <form onSubmit={onChannelSubmit}>
-        <Sub2APISettings
-          channelId={7}
-          disabled={false}
-          hasUnsavedChanges={false}
-          {...props}
-        />
+        {accounts ? (
+          <Sub2APIAccountsDialog open onOpenChange={() => undefined} />
+        ) : (
+          <Sub2APISettings
+            channelId={7}
+            disabled={false}
+            hasUnsavedChanges={false}
+            {...props}
+          />
+        )}
       </form>
     </QueryClientProvider>
   )
   return { ...view, client, onChannelSubmit }
+}
+
+function renderAccounts() {
+  return renderSettings({}, true)
 }
 
 test('new channels require saving before connecting accounts, and locked channels cannot mutate credentials', async () => {
@@ -198,9 +214,8 @@ test('new channels require saving before connecting accounts, and locked channel
   dirty.unmount()
   renderSettings({ disabled: true })
   expect(
-    await screen.findByRole('button', { name: 'Add account' })
+    await screen.findByRole('button', { name: 'Link account' })
   ).toBeDisabled()
-  expect(screen.getByRole('button', { name: 'Import tokens' })).toBeDisabled()
   expect(
     screen.getByRole('switch', { name: 'Sync actual upstream charges' })
   ).toHaveAttribute('aria-disabled', 'true')
@@ -209,14 +224,14 @@ test('new channels require saving before connecting accounts, and locked channel
 test('login encrypts credentials, completes upstream 2FA, and refreshes the bound account list', async () => {
   const user = userEvent.setup()
   const post = serveActions((path, data) => {
-    if (path === `${url}/login`) {
+    if (path === `${accountUrl}/login`) {
       return {
         requires_2fa: true,
         flow: 'login-flow',
         email_masked: 's***@example.com',
       }
     }
-    if (path === `${url}/login/2fa`) {
+    if (path === `${accountUrl}/login/2fa`) {
       expect(data).toEqual({ flow: 'login-flow', totp_code: '123456' })
       status.accounts.push({
         ...status.accounts[0],
@@ -227,20 +242,29 @@ test('login encrypts credentials, completes upstream 2FA, and refreshes the boun
     }
     throw new Error(`Unexpected POST ${path}`)
   })
-  const { onChannelSubmit } = renderSettings()
+  const { onChannelSubmit } = renderAccounts()
   await user.click(await screen.findByRole('button', { name: 'Add account' }))
   expect(
     screen.queryByText('HTTP management is enabled. Use a trusted network.')
   ).not.toBeInTheDocument()
+  await user.type(
+    screen.getByLabelText('Site URL', { exact: false }),
+    'https://upstream.example'
+  )
   await user.type(screen.getByLabelText(/Email/), 'second@example.com')
   await user.type(screen.getByLabelText(/Password/), 'upstream-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
   await user.type(await screen.findByLabelText(/Authenticator code/), '123456')
   expect(onChannelSubmit).not.toHaveBeenCalled()
   expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
-  const loginCall = post.mock.calls.find(([path]) => path === `${url}/login`)
+  const loginCall = post.mock.calls.find(
+    ([path]) => path === `${accountUrl}/login`
+  )
   expect(loginCall?.[1]).toEqual({
     email: 'second@example.com',
+    origin: 'https://upstream.example',
+    proxy_encrypted: '',
+    account_id: 0,
     encryption_key_id: 'key-1',
     password_encrypted: expect.any(String),
   })
@@ -252,36 +276,46 @@ test('login encrypts credentials, completes upstream 2FA, and refreshes the boun
   expect(post).toHaveBeenCalledWith(
     '/api/verify',
     expect.objectContaining({
-      scope: 'channel.sub2api.manage',
+      scope: 'sub2api.account.manage',
       context: {
-        channel_id: 7,
         action: 'login',
         account_id: 0,
-        key_identity: '',
+        origin: 'https://upstream.example',
+        proxy_encrypted: '',
+        email: 'second@example.com',
       },
     }),
     expect.anything()
   )
   await user.click(screen.getByRole('button', { name: 'Continue' }))
   expect(await screen.findByText('second@example.com')).toBeVisible()
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('dialog', {
+      name: /Log in to Sub2API|Import Sub2API tokens/,
+    })
+  ).not.toBeInTheDocument()
   expect(onChannelSubmit).not.toHaveBeenCalled()
 })
 
 test('token import sends one encrypted payload and reopening starts with empty fields', async () => {
   const user = userEvent.setup()
   const post = serveActions(() => ({ requires_2fa: false, account_id: 1 }))
-  const { onChannelSubmit } = renderSettings()
+  const { onChannelSubmit } = renderAccounts()
   await user.click(await screen.findByRole('button', { name: 'Import tokens' }))
+  await user.type(
+    screen.getByLabelText('Site URL', { exact: false }),
+    'https://upstream.example'
+  )
   await user.type(screen.getByLabelText(/Access token/), 'upstream-access')
   await user.type(screen.getByLabelText(/Refresh token/), 'upstream-refresh')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
-  await waitFor(() =>
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  )
-  const call = post.mock.calls.find(([path]) => path === `${url}/import`)
+  await screen.findByRole('dialog', { name: 'Upstream accounts' })
+  const call = post.mock.calls.find(([path]) => path === `${accountUrl}/import`)
   expect(call?.[1]).toEqual({
     credential_encrypted: expect.any(String),
+    origin: 'https://upstream.example',
+    proxy_encrypted: '',
+    account_id: 0,
     encryption_key_id: 'key-1',
   })
   expect(JSON.stringify(call?.[1])).not.toContain('upstream-access')
@@ -296,20 +330,24 @@ test('a canceled login ignores its late response and does not reopen a 2FA form'
   const user = userEvent.setup()
   let finish: (value: unknown) => void = () => undefined
   serveActions((path) =>
-    path === `${url}/login`
+    path === `${accountUrl}/login`
       ? new Promise((resolve) => {
           finish = resolve
         })
       : {}
   )
-  renderSettings()
+  renderAccounts()
   await user.click(await screen.findByRole('button', { name: 'Add account' }))
+  await user.type(
+    screen.getByLabelText('Site URL', { exact: false }),
+    'https://upstream.example'
+  )
   await user.type(screen.getByLabelText(/Email/), 'second@example.com')
   await user.type(screen.getByLabelText(/Password/), 'upstream-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
   await waitFor(() =>
     expect(api.post).toHaveBeenCalledWith(
-      `${url}/login`,
+      `${accountUrl}/login`,
       expect.anything(),
       expect.anything()
     )
@@ -322,7 +360,11 @@ test('a canceled login ignores its late response and does not reopen a 2FA form'
       email_masked: 's***@example.com',
     })
   )
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('dialog', {
+      name: /Log in to Sub2API|Import Sub2API tokens/,
+    })
+  ).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Add account' }))
   expect(screen.getByLabelText(/Password/)).toHaveValue('')
   expect(screen.queryByLabelText(/Authenticator code/)).not.toBeInTheDocument()
@@ -374,12 +416,12 @@ test('per-key syncing uses stable key identity and does not offer bill sync for 
 test('refresh and disconnect authorize the selected account and refresh the status', async () => {
   const user = userEvent.setup()
   const post = serveActions((path) => {
-    if (path === `${url}/disconnect`) {
+    if (path === `${accountUrl}/disconnect`) {
       status.accounts = []
     }
     return {}
   })
-  renderSettings()
+  renderAccounts()
   await user.click(
     await screen.findByRole('button', {
       name: 'Refresh account first@example.com',
@@ -387,7 +429,7 @@ test('refresh and disconnect authorize the selected account and refresh the stat
   )
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
-      `${url}/refresh`,
+      `${accountUrl}/refresh`,
       { account_id: 1 },
       expect.anything()
     )
@@ -409,7 +451,7 @@ test('refresh and disconnect authorize the selected account and refresh the stat
   )
   await waitFor(() =>
     expect(post).toHaveBeenCalledWith(
-      `${url}/disconnect`,
+      `${accountUrl}/disconnect`,
       { account_id: 1 },
       expect.objectContaining({ singleUseAuthorization: true })
     )
@@ -418,17 +460,16 @@ test('refresh and disconnect authorize the selected account and refresh the stat
     '/api/verify',
     expect.objectContaining({
       context: {
-        channel_id: 7,
         action: 'disconnect',
         account_id: 1,
-        key_identity: '',
+        origin: '',
+        proxy_encrypted: '',
+        email: '',
       },
     }),
     expect.anything()
   )
-  await screen.findByText(
-    'Connect an upstream account to match its API keys and sync actual charges.'
-  )
+  await screen.findByText('No upstream accounts')
 })
 
 test('failed login clears passwords and surfaces the safe error without creating an account', async () => {
@@ -443,7 +484,7 @@ test('failed login clears passwords and surfaces the safe error without creating
               proof_token: 'scoped-proof',
               expires_at: Math.floor(Date.now() / 1000) + 60,
               method: 'session',
-              scope: 'channel.sub2api.manage',
+              scope: 'sub2api.account.manage',
             },
           },
         }
@@ -455,8 +496,12 @@ test('failed login clears passwords and surfaces the safe error without creating
           },
         }
   )
-  renderSettings()
+  renderAccounts()
   await user.click(await screen.findByRole('button', { name: 'Add account' }))
+  await user.type(
+    screen.getByLabelText('Site URL', { exact: false }),
+    'https://upstream.example'
+  )
   await user.type(screen.getByLabelText(/Email/), 'second@example.com')
   await user.type(screen.getByLabelText(/Password/), 'wrong-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
@@ -471,7 +516,7 @@ test.each([false, undefined])(
     vi.stubGlobal('location', new URL('http://gateway.example'))
     Object.assign(status, { management_allowed: allowed })
     const post = serveActions()
-    renderSettings()
+    renderAccounts()
     expect(
       await screen.findByText(
         'Use the HTTPS management address to connect a Sub2API account.'
@@ -479,7 +524,6 @@ test.each([false, undefined])(
     ).toBeVisible()
     expect(screen.getByRole('button', { name: 'Add account' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Import tokens' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Sync now' })).toBeDisabled()
     expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
     expect(post).not.toHaveBeenCalled()
   }
@@ -496,7 +540,7 @@ test.each(['login', 'import'] as const)(
     })
     const user = userEvent.setup()
     const post = serveActions(() => ({ requires_2fa: false, account_id: 1 }))
-    const { onChannelSubmit } = renderSettings()
+    const { onChannelSubmit } = renderAccounts()
     expect(
       await screen.findByText(
         'HTTP management is enabled. Use a trusted network.'
@@ -509,9 +553,17 @@ test.each(['login', 'import'] as const)(
     await user.click(open)
     const accessToken = `upstream-access-${'A'.repeat(300)}`
     if (mode === 'login') {
+      await user.type(
+        screen.getByLabelText('Site URL', { exact: false }),
+        'https://upstream.example'
+      )
       await user.type(screen.getByLabelText(/Email/), 'first@example.com')
       await user.type(screen.getByLabelText(/Password/), 'upstream-password')
     } else {
+      await user.type(
+        screen.getByLabelText('Site URL', { exact: false }),
+        'https://upstream.example'
+      )
       await user.type(screen.getByLabelText(/Access token/), accessToken)
       await user.type(
         screen.getByLabelText(/Refresh token/),
@@ -519,10 +571,10 @@ test.each(['login', 'import'] as const)(
       )
     }
     await user.click(screen.getByRole('button', { name: 'Continue' }))
-    await waitFor(() =>
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await screen.findByRole('dialog', { name: 'Upstream accounts' })
+    const call = post.mock.calls.find(
+      ([path]) => path === `${accountUrl}/${mode}`
     )
-    const call = post.mock.calls.find(([path]) => path === `${url}/${mode}`)
     expect(call).toBeDefined()
     expect(call?.[2]).toMatchObject({
       headers: { 'X-Security-Proof': 'scoped-proof' },
@@ -569,7 +621,11 @@ test.each(['login', 'import'] as const)(
       })
     }
     expect(onChannelSubmit).not.toHaveBeenCalled()
-    await user.click(open)
+    await user.click(
+      screen.getByRole('button', {
+        name: mode === 'login' ? 'Add account' : 'Import tokens',
+      })
+    )
     expect(
       screen.getByLabelText(mode === 'login' ? /Password/ : /Access token/)
     ).toHaveValue('')
@@ -579,7 +635,7 @@ test.each(['login', 'import'] as const)(
 test('an expired upstream 2FA flow returns to an empty login form', async () => {
   const user = userEvent.setup()
   serveActions((path) => {
-    if (path === `${url}/login`) {
+    if (path === `${accountUrl}/login`) {
       return {
         requires_2fa: true,
         flow: 'expired-flow',
@@ -591,8 +647,12 @@ test('an expired upstream 2FA flow returns to an empty login form', async () => 
       'SUB2API_FLOW_EXPIRED'
     )
   })
-  renderSettings()
+  renderAccounts()
   await user.click(await screen.findByRole('button', { name: 'Add account' }))
+  await user.type(
+    screen.getByLabelText('Site URL', { exact: false }),
+    'https://upstream.example'
+  )
   await user.type(screen.getByLabelText(/Email/), 'second@example.com')
   await user.type(screen.getByLabelText(/Password/), 'upstream-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
@@ -620,4 +680,194 @@ test('bill matching counts and last bill sync remain distinct from rate sync', a
   expect(await screen.findByText('12 matched · 3 pending')).toBeVisible()
   expect(screen.getByText(/^Last bill sync:/)).toBeVisible()
   expect(screen.getByText(/^Last rate sync:/)).toBeVisible()
+})
+
+test('channel settings reuse existing accounts without exposing another login form', async () => {
+  renderSettings()
+  await screen.findByRole('switch', { name: 'Sync upstream key multiplier' })
+  expect(
+    screen.queryByRole('button', { name: 'Add account' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Import tokens' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.getByRole('combobox', { name: 'Upstream account' })
+  ).toBeVisible()
+})
+
+test('a new independent login binds its encrypted proxy to proof before any channel exists', async () => {
+  status.accounts = []
+  const user = userEvent.setup()
+  const post = serveActions(() => ({ requires_2fa: false, account_id: 8 }))
+  renderAccounts()
+  await user.click(await screen.findByRole('button', { name: 'Add account' }))
+  await user.type(
+    screen.getByLabelText(/Site URL/),
+    'https://second.example/prefix'
+  )
+  await user.type(
+    screen.getByLabelText(/Proxy Address/),
+    'socks5://proxy-user:proxy-secret@proxy.example:1080'
+  )
+  await user.type(screen.getByLabelText(/Email/), 'owner@example.com')
+  await user.type(screen.getByLabelText(/Password/), 'upstream-password')
+  await user.click(screen.getByRole('button', { name: 'Continue' }))
+  await waitFor(() =>
+    expect(
+      post.mock.calls.some(([path]) => path === `${accountUrl}/login`)
+    ).toBe(true)
+  )
+  const payload = post.mock.calls.find(
+    ([path]) => path === `${accountUrl}/login`
+  )?.[1] as Record<string, string | number>
+  expect(payload).toMatchObject({
+    account_id: 0,
+    origin: 'https://second.example/prefix',
+    proxy_encrypted: expect.any(String),
+  })
+  expect(JSON.stringify(payload)).not.toContain('proxy-secret')
+  expect(
+    privateDecrypt(
+      { key: privateKey, oaepHash: 'sha256' },
+      Buffer.from(String(payload.proxy_encrypted), 'base64')
+    ).toString()
+  ).toBe('socks5://proxy-user:proxy-secret@proxy.example:1080')
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'sub2api.account.manage',
+      context: {
+        action: 'login',
+        account_id: 0,
+        origin: payload.origin,
+        proxy_encrypted: payload.proxy_encrypted,
+        email: 'owner@example.com',
+      },
+    }),
+    expect.anything()
+  )
+  expect(
+    post.mock.calls.some(([path]) => String(path).startsWith('/api/channel/'))
+  ).toBe(false)
+})
+
+test('relogin targets the shared account without replacing its site or proxy and blocks disconnect while linked', async () => {
+  Object.assign(status.accounts[0], {
+    channel_ids: [7, 9],
+    channels: [
+      { id: 7, name: 'Primary' },
+      { id: 9, name: 'Fallback' },
+    ],
+    needs_login: true,
+    has_proxy: true,
+  })
+  const user = userEvent.setup()
+  const post = serveActions(() => ({ requires_2fa: false, account_id: 1 }))
+  renderAccounts()
+  expect(
+    await screen.findByText('#7 Primary, #9 Fallback', { exact: false })
+  ).toBeVisible()
+  expect(
+    screen.getByRole('button', { name: 'Disconnect account first@example.com' })
+  ).toBeDisabled()
+  await user.click(screen.getByRole('button', { name: 'Log in again' }))
+  expect(
+    screen.queryByLabelText(/Site URL|Proxy Address|Email/)
+  ).not.toBeInTheDocument()
+  await user.type(screen.getByLabelText(/Password/), 'replacement-password')
+  await user.click(screen.getByRole('button', { name: 'Continue' }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      `${accountUrl}/login`,
+      expect.objectContaining({
+        account_id: 1,
+        origin: '',
+        proxy_encrypted: '',
+        email: 'first@example.com',
+      }),
+      expect.anything()
+    )
+  )
+})
+
+test('linking and detaching an existing account only changes the current channel', async () => {
+  status.accounts = []
+  status.available_accounts = [
+    {
+      id: 2,
+      origin: 'https://upstream.example',
+      email: 'shared@example.com',
+      upstream_user_id: 20,
+      has_proxy: false,
+      channel_ids: [9],
+      channels: [{ id: 9, name: 'Other channel' }],
+      legacy: false,
+      expires_at: 1900000000,
+      has_refresh_token: true,
+      needs_login: false,
+      last_sync_at: 0,
+      last_error: '',
+    },
+  ]
+  const user = userEvent.setup()
+  const post = serveActions((path) => {
+    if (path === `${url}/attach`) {
+      status.accounts = [...status.available_accounts]
+    }
+    if (path === `${url}/detach`) status.accounts = []
+    return {}
+  })
+  renderSettings()
+  await user.click(
+    await screen.findByRole('combobox', { name: 'Upstream account' })
+  )
+  await user.click(
+    await screen.findByRole('option', { name: 'shared@example.com · #2' })
+  )
+  await user.click(screen.getByRole('button', { name: 'Link account' }))
+  const detach = await screen.findByRole('button', {
+    name: 'Detach account shared@example.com',
+  })
+  await user.click(detach)
+  await user.click(
+    within(screen.getByRole('alertdialog')).getByRole('button', {
+      name: 'Detach',
+    })
+  )
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith(
+      `${url}/detach`,
+      { account_id: 2 },
+      expect.anything()
+    )
+  )
+  expect(post).toHaveBeenCalledWith(
+    '/api/verify',
+    expect.objectContaining({
+      scope: 'channel.sub2api.manage',
+      context: {
+        channel_id: 7,
+        action: 'attach',
+        account_id: 2,
+        key_identity: '',
+      },
+    }),
+    expect.anything()
+  )
+  expect(
+    post.mock.calls.some(([path]) => String(path).startsWith(accountUrl))
+  ).toBe(false)
+})
+
+test('accounts manager requires channel credential permission before accepting secrets', async () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 78, username: 'read-only-admin', role: 10 })
+  renderAccounts()
+  expect(
+    await screen.findByRole('button', { name: 'Add account' })
+  ).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Import tokens' })).toBeDisabled()
+  expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
 })

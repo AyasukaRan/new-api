@@ -36,6 +36,10 @@ func BeginSub2APIBillingAttempt(c *gin.Context, info *relaycommon.RelayInfo) {
 	if err != nil || binding == nil || !binding.SyncBills || binding.AccountID <= 0 || binding.UpstreamAPIKeyID <= 0 {
 		return
 	}
+	origin, originErr := NormalizeSub2APIOrigin(info.ChannelBaseUrl)
+	if originErr != nil || !sameSub2APIOrigin(origin, binding.AccountOrigin) {
+		return
+	}
 	c.Set(sub2APIBillingContextKey, &model.Sub2APIBillingRef{AccountID: binding.AccountID, APIKeyID: binding.UpstreamAPIKeyID, KeyIdentity: identity})
 }
 
@@ -94,30 +98,11 @@ func SyncSub2APIBills(ctx context.Context, channelID int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	bindings, err := model.ListSub2APIKeyBindings(channelID)
-	if err != nil {
-		return 0, err
-	}
-	type key struct {
-		channel  int
-		identity string
-	}
-	allowed := make(map[key]model.Sub2APIKeyBinding, len(bindings))
-	for _, binding := range bindings {
-		if binding.SyncBills {
-			allowed[key{binding.ChannelID, binding.KeyIdentity}] = binding
-		}
-	}
+	// Pending rows were authorized and frozen at request capture. Detaching a
+	// channel only stops future captures; it must not orphan an existing bill.
 	windows := make(map[sub2APIBillWindow][]model.Sub2APIBill)
 	for _, bill := range pending {
 		if channelID > 0 && bill.ChannelID != channelID {
-			continue
-		}
-		binding, ok := allowed[key{bill.ChannelID, bill.KeyIdentity}]
-		if !ok || binding.AccountID != bill.AccountID || binding.UpstreamAPIKeyID != bill.APIKeyID {
-			if err := model.DeferSub2APIBills(ctx, []int64{bill.ID}); err != nil {
-				return 0, err
-			}
 			continue
 		}
 		window := sub2APIBillWindow{bill.AccountID, bill.APIKeyID, time.Unix(bill.CreatedAt, 0).UTC().Format("2006-01-02")}
@@ -221,7 +206,7 @@ func StartSub2APIBillingSync() {
 					if time.Now().Unix()-lastMetadata >= 300 {
 						channels := make([]int, 0, len(bindings))
 						for _, binding := range bindings {
-							if binding.SyncRates || binding.SyncBills {
+							if binding.SyncRates || binding.SyncBills || binding.AccountID > 0 {
 								channels = append(channels, binding.ChannelID)
 							}
 						}
@@ -231,7 +216,6 @@ func StartSub2APIBillingSync() {
 								if account.NeedsLogin {
 									continue
 								}
-								channels = append(channels, account.ChannelID)
 								if account.HasRefreshToken && account.ExpiresAt > 0 && account.ExpiresAt <= time.Now().Unix()+300 {
 									_ = RefreshSub2APIAccount(ctx, account.ID, account.Revision)
 								}

@@ -190,8 +190,34 @@ func UpdateUserSetting(userId int, setting dto.UserSetting) error {
 	if err != nil {
 		return err
 	}
-	settingValue := string(settingBytes)
-	if err = DB.Model(&User{}).Where("id = ?", userId).Update("setting", settingValue).Error; err != nil {
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		user, err := lockUserSettings(tx, userId)
+		if err != nil {
+			return err
+		}
+		// Existing preference forms do not own the separately versioned dashboards.
+		var current, next map[string]common.RawMessage
+		if user.Setting != "" {
+			if err := common.UnmarshalJsonStr(user.Setting, &current); err != nil {
+				return err
+			}
+		}
+		if err := common.Unmarshal(settingBytes, &next); err != nil {
+			return err
+		}
+		if raw := current[personalDashboardSetting]; len(raw) > 0 {
+			next[personalDashboardSetting] = raw
+		}
+		encoded, err := common.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if len(encoded) > 65535 {
+			return common.NewMessage("Invalid parameters")
+		}
+		return tx.Model(&User{}).Where("id = ?", userId).Update("setting", string(encoded)).Error
+	})
+	if err != nil {
 		return err
 	}
 	return PublishUserAuthCache(userId)
@@ -723,8 +749,7 @@ func (user *User) finishInsert(inviterId int) {
 		if defaultSidebarConfig != "" {
 			currentSetting := createdUser.GetSetting()
 			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
+			_ = UpdateUserSetting(createdUser.Id, currentSetting)
 			common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
 		}
 	}
@@ -783,8 +808,7 @@ func (user *User) FinalizeOAuthUserCreation(inviterId int) {
 		if defaultSidebarConfig != "" {
 			currentSetting := createdUser.GetSetting()
 			currentSetting.SidebarModules = defaultSidebarConfig
-			createdUser.SetSetting(currentSetting)
-			createdUser.Update(false)
+			_ = UpdateUserSetting(createdUser.Id, currentSetting)
 			common.SysLog(common.LogText("initialized the sidebar config for new user %s (role: %d)", createdUser.Username, createdUser.Role))
 		}
 	}
@@ -851,6 +875,7 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 		}
 	}
 	if err = tx.Model(&current).Omit(
+		"setting", // Preference writers merge their independently versioned fields.
 		"access_token",
 		"quota",
 		"used_quota",

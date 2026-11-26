@@ -46,6 +46,9 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/status/test":                accessTokenScopeRule("log:read"),
 	"GET /api/pricing":                    accessTokenAnyRule,
 	"GET /api/perf-metrics/summary":       accessTokenAnyRule,
+	"GET /api/dashboard/live":             accessTokenScopeRule("log:read"),
+	"GET /api/user/self/dashboards":       accessTokenScopeRule("profile:read"),
+	"PUT /api/user/self/dashboards":       accessTokenScopeRule("profile:write"),
 	"GET /api/perf-metrics/admin":         accessTokenScopeRule("log:read"),
 	"GET /api/perf-metrics":               accessTokenAnyRule,
 	"GET /api/rankings":                   accessTokenAnyRule,
@@ -146,6 +149,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 
 	// router/api-router.go: /api/option
 	"GET /api/option/": accessTokenScopeRule("option:read"),
+	"GET /api/option/error_recognition_rules/inventory":          accessTokenScopeRule("option:read"),
+	"POST /api/option/error_recognition_rules/preview":           accessTokenScopeRule("option:read"),
 	"GET /api/option/request_source_rules/builtins":              accessTokenScopeRule("option:read"),
 	"GET /api/option/request_source_rules/lookup":                accessTokenScopeRule("option:read"),
 	"GET /api/option/request_source_rules/unidentified":          accessTokenScopeRule("option:read"),
@@ -250,6 +255,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	// AdminAuth also requires an administrator; this scope keeps administrators’ existing access to their own records.
 	"GET /api/audit/self":                       accessTokenScopeRule("usage:read"),
 	"GET /api/log/":                             accessTokenScopeRule("log:read"),
+	"GET /api/log/retries":                      accessTokenScopeRule("log:read"),
+	"GET /api/log/self/retries":                 accessTokenScopeRule("usage:read"),
 	"GET /api/log/stream":                       accessTokenScopeRule("log:read"),
 	"GET /api/log/self/stream":                  accessTokenScopeRule("usage:read"),
 	"GET /api/log/stat":                         accessTokenScopeRule("log:read"),

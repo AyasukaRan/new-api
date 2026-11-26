@@ -36,6 +36,7 @@ const recentSuccessHistoryHours = 7 * 24
 
 func Init() {
 	gatewayLoad.start()
+	liveMetrics.start()
 	go flushLoop()
 }
 
@@ -46,7 +47,16 @@ func RecordRelayResult(ctx context.Context, info *relaycommon.RelayInfo, apiErr 
 	if outcome == OutcomeIgnored {
 		return
 	}
-	Record(RelaySample(info, outcome == OutcomeSuccess, info.PerformanceOutputTokens))
+	sample := RelaySample(info, outcome == OutcomeSuccess, info.PerformanceOutputTokens)
+	Record(sample)
+	if !info.IsChannelTest {
+		// A first response at completion has no measured generation duration.
+		// Preserve the existing hourly sample, but do not invent live throughput.
+		if sample.HasTtft {
+			sample.GenerationMs = max(int64(0), sample.LatencyMs-sample.TtftMs)
+		}
+		liveMetrics.record(sample)
+	}
 	RecordChannelRelayResult(info, outcome == OutcomeSuccess)
 }
 

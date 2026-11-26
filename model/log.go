@@ -459,7 +459,7 @@ func RecordTopupLog(userId int, content *common.Message, callerIp string, paymen
 }
 
 func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string, tokenName string, content string, tokenId int, useTimeSeconds int,
-	isStream bool, group string, other *LogOther) {
+	isStream bool, group string, other *LogOther) bool {
 	logger.LogInfo(c, common.LogText("record error log: userId=%d, channelId=%d, modelName=%s, tokenName=%s, content=%s", userId, channelId, modelName, tokenName, common.LocalLogPreview(content)))
 	username := c.GetString("username")
 	requestId := c.GetString(common.RequestIdKey)
@@ -494,6 +494,7 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	if err != nil {
 		logger.LogError(c, common.LogText("failed to record log: %s", err.Error()))
 	}
+	return err == nil
 }
 
 type RecordConsumeLogParams struct {
@@ -562,6 +563,8 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	err := createLog(log)
 	if err != nil {
 		logger.LogError(c, common.LogText("failed to record log: %s", err.Error()))
+	} else {
+		common.SetContextKey(c, constant.ContextKeyConsumeLogRequestID, requestId)
 	}
 	if common.DataExportEnabled && !params.IsChannelTest {
 		var cacheReadTokens, cacheCreationTokens int

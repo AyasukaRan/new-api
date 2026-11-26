@@ -253,6 +253,75 @@ func TestSub2APIBillFinanceDatabaseMatrix(t *testing.T) {
 				}
 			})
 
+			t.Run("shared account preserves channel invoices independently of links", func(t *testing.T) {
+				account := model.Sub2APIAccount{ID: 9, Origin: "https://shared.fixture.example", UpstreamUserID: 19,
+					Identity: strings.Repeat("c", 64), SharedIdentity: common.GetPointer(strings.Repeat("d", 64)),
+					ProxyIdentity: strings.Repeat("p", 64), Credential: "sealed-shared-fixture", NeedsLogin: true}
+				require.NoError(t, mainDB.Create(&account).Error)
+				var sources []model.Log
+				var pending []model.Sub2APIBill
+				for i, item := range []struct {
+					channel int
+					key     int64
+				}{{3, 27}, {4, 28}, {4, 27}} {
+					keyIdentity := fmt.Sprintf("%064d", item.key)
+					require.NoError(t, mainDB.Create(&model.Sub2APIKeyBinding{ChannelID: item.channel, KeyIdentity: keyIdentity, AccountID: account.ID, UpstreamAPIKeyID: item.key, SyncBills: true}).Error)
+					ref := model.Sub2APIBillingRef{AccountID: account.ID, APIKeyID: item.key, KeyIdentity: keyIdentity, RequestID: fmt.Sprintf("client:shared-%d", i)}
+					metadata, err := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": ref}})
+					require.NoError(t, err)
+					row := model.Log{UserId: 1, Username: user.Username, CreatedAt: hour + 8000 + int64(i), Type: model.LogTypeConsume,
+						ModelName: "shared-account", ChannelId: item.channel, TokenId: token.Id, Quota: 100,
+						RequestId: fmt.Sprintf("shared-local-%d", i), Other: string(metadata)}
+					if dialect.kind == common.DatabaseTypeClickHouse {
+						row.Id = 400 + i
+					}
+					require.NoError(t, logDB.Create(&row).Error)
+					require.NoError(t, model.QueueSub2APIBill(t.Context(), &row))
+					var bill model.Sub2APIBill
+					require.NoError(t, mainDB.Where("log_request_id = ?", row.RequestId).Take(&bill).Error)
+					sources, pending = append(sources, row), append(pending, bill)
+				}
+				for i, item := range []struct {
+					amount string
+					rate   float64
+					quota  float64
+				}{{"0.000002", 2, 1}, {"0.000003", 5, 1.5}} {
+					bill := pending[i]
+					require.NoError(t, model.SettleSub2APIBill(t.Context(), bill, int64(201+i), bill.APIKeyID, bill.RequestID, item.amount, 0, &item.rate))
+					var settled model.Sub2APIBill
+					require.NoError(t, mainDB.First(&settled, bill.ID).Error)
+					require.NotNil(t, settled.CostQuota)
+					assert.Equal(t, item.quota, *settled.CostQuota, "each actual invoice already includes its own Key rate")
+					assert.Equal(t, account.ID, settled.AccountID)
+					assert.Equal(t, bill.ChannelID, settled.ChannelID)
+				}
+				duplicate := pending[2]
+				assert.Error(t, model.SettleSub2APIBill(t.Context(), duplicate, 201, duplicate.APIKeyID, duplicate.RequestID, "0.000002", 0, nil), "one shared-account invoice cannot be charged to another channel again")
+				var unassigned model.Sub2APIBill
+				require.NoError(t, mainDB.First(&unassigned, duplicate.ID).Error)
+				assert.Nil(t, unassigned.CostQuota)
+				assert.Nil(t, unassigned.InvoiceIdentity)
+				// Historical projections survive removal of a current channel link.
+				require.NoError(t, mainDB.Where("channel_id = ? AND account_id = ?", 3, account.ID).Delete(&model.Sub2APIKeyBinding{}).Error)
+				require.NoError(t, model.MigrateSub2APIStorage(mainDB))
+				require.NoError(t, model.MigrateSub2APIStorage(mainDB))
+				remaining, err := model.ListSub2APIKeyBindings(4)
+				require.NoError(t, err)
+				require.Len(t, remaining, 2)
+				for i, original := range sources {
+					var raw model.Log
+					require.NoError(t, logDB.Where("id = ? AND request_id = ?", original.Id, original.RequestId).Take(&raw).Error)
+					assert.Equal(t, original.Other, raw.Other)
+					assert.Equal(t, original.Quota, raw.Quota)
+					require.NoError(t, model.AttachSub2APIBills(t.Context(), []*model.Log{&raw}))
+					if i < 2 {
+						assert.Contains(t, raw.Other, "upstream_bill")
+					} else {
+						assert.Equal(t, original.Other, raw.Other)
+					}
+				}
+			})
+
 			t.Run("paid failure costs never become user charges or hidden retries", func(t *testing.T) {
 				metadata, err := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": model.Sub2APIBillingRef{AccountID: 7, APIKeyID: 17, KeyIdentity: strings.Repeat("a", 64), RequestID: "client:paid-failure"}}})
 				require.NoError(t, err)

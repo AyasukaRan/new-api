@@ -37,6 +37,7 @@ import type { Channel } from '../types'
 // ============================================================================
 
 type DialogType =
+  | 'upstream-accounts'
   | 'create-channel'
   | 'update-channel'
   | 'test-channel'

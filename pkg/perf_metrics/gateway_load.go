@@ -122,7 +122,12 @@ func (g *gatewayLoadCollector) observeLocked(now time.Time) *gatewayLoadBucket {
 // BeginGatewayRequest measures a logical synchronous relay, outside its retry
 // loop. For WebSocket Responses it is one response.create, not the socket.
 func BeginGatewayRequest(startedAt time.Time) func() {
-	return gatewayLoad.begin(startedAt)
+	finishLoad := gatewayLoad.begin(startedAt)
+	finishLive := liveMetrics.begin()
+	return func() {
+		finishLoad()
+		finishLive()
+	}
 }
 
 func (g *gatewayLoadCollector) pauseLocked() {

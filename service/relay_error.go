@@ -16,6 +16,41 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const recordedRelayErrorContextKey = "recorded_relay_error"
+
+type recordedRelayError struct {
+	requestID string
+	attempt   int
+	status    int
+	code      types.ErrorCode
+	message   string
+}
+
+// RecordFinalRelayErrorLog covers failures before an upstream attempt can
+// record its own error. It never adds an error beside a settled consume log or
+// repeats the same failed attempt; a later local failure keeps its own cause.
+func RecordFinalRelayErrorLog(c *gin.Context, err *types.NewAPIError, info *relaycommon.RelayInfo) {
+	if c == nil || err == nil || c.GetInt("id") <= 0 || info != nil && info.IsChannelTest {
+		return
+	}
+	requestID := c.GetString(common.RequestIdKey)
+	if value, exists := c.Get(string(constant.ContextKeyConsumeLogRequestID)); exists && value == requestID {
+		return
+	}
+	attempt := 0
+	channelID := 0
+	if info != nil {
+		attempt = info.RetryIndex
+		channelID = info.GetChannelID()
+	}
+	if value, exists := c.Get(recordedRelayErrorContextKey); exists {
+		if recorded, ok := value.(recordedRelayError); ok && recorded.requestID == requestID && recorded.attempt == attempt && recorded.status == err.StatusCode && recorded.code == err.GetErrorCode() && recorded.message == err.Error() {
+			return
+		}
+	}
+	RecordRelayErrorLog(c, channelID, err, info)
+}
+
 // Relay diagnostics are visible to the request owner. Keep useful upstream
 // messages, but never repeat the selected secret or the provider's request ID.
 func relayLogErrorText(c *gin.Context, info *relaycommon.RelayInfo, text string) string {
@@ -135,5 +170,11 @@ func RecordRelayErrorLog(c *gin.Context, channelId int, err *types.NewAPIError, 
 		startTime = time.Now()
 	}
 	useTimeSeconds := int(time.Since(startTime).Seconds())
-	model.RecordErrorLog(c, userId, channelId, modelName, tokenName, relayLogErrorText(c, relayInfo, err.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(c)...)), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
+	if model.RecordErrorLog(c, userId, channelId, modelName, tokenName, relayLogErrorText(c, relayInfo, err.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(c)...)), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other) {
+		attempt := 0
+		if relayInfo != nil {
+			attempt = relayInfo.RetryIndex
+		}
+		c.Set(recordedRelayErrorContextKey, recordedRelayError{requestID: c.GetString(common.RequestIdKey), attempt: attempt, status: err.StatusCode, code: err.GetErrorCode(), message: err.Error()})
+	}
 }

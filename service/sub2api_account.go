@@ -14,9 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"gorm.io/gorm"
 )
 
 const sub2APIUserAgent = "new-api/Sub2API-account"
@@ -170,13 +173,40 @@ func sub2APIChannel(channelID int) (*model.Channel, string, error) {
 	if err != nil || channel.Type != constant.ChannelTypeSub2API {
 		return nil, "", sub2APIError("SUB2API_CHANNEL_INVALID")
 	}
-	parsed, err := url.Parse(channel.GetBaseURL())
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, "", sub2APIError("SUB2API_HTTPS_REQUIRED")
+	origin, err := NormalizeSub2APIOrigin(channel.GetBaseURL())
+	return channel, origin, err
+}
+
+// NormalizeSub2APIOrigin includes the deployment path; distinct prefixes and
+// ports are separate suppliers even when their DNS host is the same.
+func NormalizeSub2APIOrigin(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || len(raw) > 512 || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
+		return "", sub2APIError("SUB2API_HTTPS_REQUIRED")
 	}
-	parsed.Path = strings.TrimSuffix(strings.TrimSuffix(parsed.Path, "/"), "/v1")
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if port == "443" {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	parsed.Host = host
+	parsed.Path = strings.TrimSuffix(path.Clean("/"+strings.TrimPrefix(parsed.Path, "/")), "/")
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
 	parsed.RawPath = ""
-	return channel, strings.TrimSuffix(parsed.String(), "/"), nil
+	return strings.TrimSuffix(parsed.String(), "/"), nil
+}
+
+// Legacy credentials retain their original Origin in the authenticated data;
+// canonical comparison must not rewrite that persisted cryptographic scope.
+func sameSub2APIOrigin(left, right string) bool {
+	leftOrigin, leftErr := NormalizeSub2APIOrigin(left)
+	rightOrigin, rightErr := NormalizeSub2APIOrigin(right)
+	return leftErr == nil && rightErr == nil && leftOrigin == rightOrigin
 }
 
 func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path string, query url.Values, payload, result any, rawResponse bool) error {
@@ -282,17 +312,19 @@ func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path stri
 	return nil
 }
 
-func verifySub2APICredential(ctx context.Context, channel *model.Channel, origin string, credential Sub2APICredential) (sub2APIUser, []model.Sub2APIKeyBinding, error) {
+func verifySub2APICredential(ctx context.Context, channel *model.Channel, origin, proxy string, credential Sub2APICredential) (sub2APIUser, []model.Sub2APIKeyBinding, error) {
 	var user sub2APIUser
 	if credential.AccessToken == "" || len(credential.AccessToken) > 16384 || len(credential.RefreshToken) > 16384 || credential.ExpiresIn < 0 || credential.ExpiresIn > 365*86400 {
 		return user, nil, sub2APIError("SUB2API_CREDENTIAL_INVALID")
 	}
-	proxy := channel.GetSetting().Proxy
 	if err := sub2APIRequest(ctx, origin, proxy, credential.AccessToken, http.MethodGet, "/api/v1/auth/me", nil, nil, &user, false); err != nil {
 		return user, nil, err
 	}
 	if user.ID <= 0 || len(user.Email) > 320 {
 		return user, nil, sub2APIError("SUB2API_RESPONSE_INVALID")
+	}
+	if channel == nil {
+		return user, nil, nil
 	}
 	keys := make(map[string]bool)
 	for _, key := range channel.GetKeys() {
@@ -332,7 +364,7 @@ func verifySub2APICredential(ctx context.Context, channel *model.Channel, origin
 func connectSub2APICredential(ctx context.Context, channel *model.Channel, origin string, credential Sub2APICredential, authorization *model.AuthFlowAuthorization) (Sub2APILoginResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	user, bindings, err := verifySub2APICredential(ctx, channel, origin, credential)
+	user, bindings, err := verifySub2APICredential(ctx, channel, origin, channel.GetSetting().Proxy, credential)
 	if err != nil {
 		return Sub2APILoginResult{}, err
 	}
@@ -428,24 +460,42 @@ func ImportSub2API(ctx context.Context, channelID int, credential Sub2APICredent
 	return connectSub2APICredential(ctx, channel, origin, credential, authorization)
 }
 
-func sub2APILoadAccount(accountID int64) (*model.Sub2APIAccount, *model.Channel, Sub2APICredential, error) {
-	var credential Sub2APICredential
-	account, err := model.GetSub2APIAccount(accountID)
-	if err != nil {
-		return nil, nil, credential, sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
+func sub2APIAccountConnection(account *model.Sub2APIAccount) (string, error) {
+	if account.SharedIdentity != nil {
+		var proxy string
+		if account.ProxyCredential == "" {
+			return "", sub2APIError("SUB2API_LOGIN_REQUIRED")
+		}
+		if err := sub2APIOpen(account.ProxyCredential, sub2APIAccountScope(account)+":proxy", &proxy); err != nil {
+			return "", err
+		}
+		return proxy, nil
 	}
 	channel, origin, err := sub2APIChannel(account.ChannelID)
 	if err != nil {
-		return nil, nil, credential, err
+		return "", err
 	}
-	if account.NeedsLogin {
-		return nil, nil, credential, sub2APIError("SUB2API_LOGIN_REQUIRED")
+	if !sameSub2APIOrigin(account.Origin, origin) || account.ProxyIdentity != sub2APIProxyIdentity(channel.GetSetting().Proxy) {
+		return "", sub2APIError("SUB2API_CHANNEL_CHANGED")
 	}
-	if account.Origin != origin || account.ProxyIdentity != sub2APIProxyIdentity(channel.GetSetting().Proxy) {
-		return nil, nil, credential, sub2APIError("SUB2API_CHANNEL_CHANGED")
+	return channel.GetSetting().Proxy, nil
+}
+
+func sub2APILoadAccount(accountID int64) (*model.Sub2APIAccount, string, Sub2APICredential, error) {
+	var credential Sub2APICredential
+	account, err := model.GetSub2APIAccount(accountID)
+	if err != nil {
+		return nil, "", credential, sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
+	}
+	if account.NeedsLogin || account.Credential == "" {
+		return nil, "", credential, sub2APIError("SUB2API_LOGIN_REQUIRED")
+	}
+	proxy, err := sub2APIAccountConnection(account)
+	if err != nil {
+		return nil, "", credential, err
 	}
 	err = sub2APIOpen(account.Credential, sub2APIAccountScope(account), &credential)
-	return account, channel, credential, err
+	return account, proxy, credential, err
 }
 
 func RefreshSub2APIAccount(ctx context.Context, accountID int64, expectedRevision int64) error {
@@ -455,8 +505,11 @@ func RefreshSub2APIAccount(ctx context.Context, accountID int64, expectedRevisio
 	if err != nil {
 		return sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
 	}
-	return model.WithPluginCredentialRefreshLock(ctx, account.ChannelID, func() error {
-		account, channel, credential, err := sub2APILoadAccount(accountID)
+	if expectedRevision == 0 {
+		expectedRevision = account.Revision
+	}
+	return model.WithSub2APIAccountLock(ctx, accountID, func() error {
+		account, proxy, credential, err := sub2APILoadAccount(accountID)
 		if err != nil {
 			return err
 		}
@@ -478,7 +531,7 @@ func RefreshSub2APIAccount(ctx context.Context, accountID int64, expectedRevisio
 		}
 		account.Revision++
 		var next Sub2APICredential
-		err = sub2APIRequest(ctx, account.Origin, channel.GetSetting().Proxy, "", http.MethodPost, "/api/v1/auth/refresh", nil, map[string]string{"refresh_token": credential.RefreshToken}, &next, false)
+		err = sub2APIRequest(ctx, account.Origin, proxy, "", http.MethodPost, "/api/v1/auth/refresh", nil, map[string]string{"refresh_token": credential.RefreshToken}, &next, false)
 		if err != nil || next.AccessToken == "" || next.RefreshToken == "" || next.ExpiresIn <= 0 || next.ExpiresIn > 365*86400 {
 			// The upstream may already have consumed this token. Do not replay it.
 			account.NeedsLogin, account.LastError = true, "SUB2API_LOGIN_REQUIRED"
@@ -490,7 +543,7 @@ func RefreshSub2APIAccount(ctx context.Context, accountID int64, expectedRevisio
 			return err
 		}
 		var refreshedUser sub2APIUser
-		if err := sub2APIRequest(ctx, account.Origin, channel.GetSetting().Proxy, next.AccessToken, http.MethodGet, "/api/v1/auth/me", nil, nil, &refreshedUser, false); err != nil || refreshedUser.ID != account.UpstreamUserID {
+		if err := sub2APIRequest(ctx, account.Origin, proxy, next.AccessToken, http.MethodGet, "/api/v1/auth/me", nil, nil, &refreshedUser, false); err != nil || refreshedUser.ID != account.UpstreamUserID {
 			account.NeedsLogin, account.LastError = true, "SUB2API_LOGIN_REQUIRED"
 			_, _ = model.UpdateSub2APICredential(account, account.Revision)
 			return sub2APIError("SUB2API_LOGIN_REQUIRED")
@@ -510,7 +563,7 @@ func Sub2APIAccountRequest(ctx context.Context, accountID int64, method, path st
 	if method != http.MethodGet || path != "/api/v1/usage" && path != "/api/v1/keys" && path != "/api/v1/auth/me" && !strings.HasPrefix(path, "/api/v1/usage/") {
 		return sub2APIError("SUB2API_PATH_INVALID")
 	}
-	account, channel, credential, err := sub2APILoadAccount(accountID)
+	account, proxy, credential, err := sub2APILoadAccount(accountID)
 	if err != nil {
 		return err
 	}
@@ -518,12 +571,12 @@ func Sub2APIAccountRequest(ctx context.Context, accountID int64, method, path st
 		if err := RefreshSub2APIAccount(ctx, accountID, account.Revision); err != nil {
 			return err
 		}
-		account, channel, credential, err = sub2APILoadAccount(accountID)
+		account, proxy, credential, err = sub2APILoadAccount(accountID)
 		if err != nil {
 			return err
 		}
 	}
-	err = sub2APIRequest(ctx, account.Origin, channel.GetSetting().Proxy, credential.AccessToken, method, path, query, payload, result, false)
+	err = sub2APIRequest(ctx, account.Origin, proxy, credential.AccessToken, method, path, query, payload, result, false)
 	var upstream *Sub2APIError
 	if !errors.As(err, &upstream) || upstream.Status != http.StatusUnauthorized {
 		return err
@@ -531,23 +584,23 @@ func Sub2APIAccountRequest(ctx context.Context, accountID int64, method, path st
 	if err := RefreshSub2APIAccount(ctx, accountID, account.Revision); err != nil {
 		return err
 	}
-	account, channel, credential, err = sub2APILoadAccount(accountID)
+	account, proxy, credential, err = sub2APILoadAccount(accountID)
 	if err != nil {
 		return err
 	}
-	return sub2APIRequest(ctx, account.Origin, channel.GetSetting().Proxy, credential.AccessToken, method, path, query, payload, result, false)
+	return sub2APIRequest(ctx, account.Origin, proxy, credential.AccessToken, method, path, query, payload, result, false)
 }
 
 func DisconnectSub2API(ctx context.Context, channelID int, accountID int64, authorization *model.AuthFlowAuthorization) error {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	return model.WithPluginCredentialRefreshLock(ctx, channelID, func() error {
-		account, channel, credential, err := sub2APILoadAccount(accountID)
-		if err == nil && account.ChannelID != channelID {
+	return model.WithSub2APIAccountLock(ctx, accountID, func() error {
+		account, proxy, credential, err := sub2APILoadAccount(accountID)
+		if err == nil && (account.ChannelID != channelID || account.SharedIdentity != nil) {
 			return sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
 		}
 		if err == nil && credential.RefreshToken != "" {
-			_ = sub2APIRequest(ctx, account.Origin, channel.GetSetting().Proxy, "", http.MethodPost, "/api/v1/auth/logout", nil, map[string]string{"refresh_token": credential.RefreshToken}, nil, false)
+			_ = sub2APIRequest(ctx, account.Origin, proxy, "", http.MethodPost, "/api/v1/auth/logout", nil, map[string]string{"refresh_token": credential.RefreshToken}, nil, false)
 		}
 		return model.DeleteSub2APIAccount(channelID, accountID, authorization)
 	})
@@ -576,12 +629,15 @@ func SyncSub2APIChannel(ctx context.Context, channelID int, accountID int64) err
 			}
 			continue
 		}
-		stored, _, credential, err := sub2APILoadAccount(account.ID)
+		stored, proxy, credential, err := sub2APILoadAccount(account.ID)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		verified, bindings, err := verifySub2APICredential(ctx, channel, origin, credential)
+		if !sameSub2APIOrigin(stored.Origin, origin) {
+			return sub2APIError("SUB2API_CHANNEL_CHANGED")
+		}
+		verified, bindings, err := verifySub2APICredential(ctx, channel, origin, proxy, credential)
 		if err != nil || verified.ID != stored.UpstreamUserID {
 			if err == nil {
 				err = sub2APIError("SUB2API_CREDENTIAL_INVALID")
@@ -592,7 +648,7 @@ func SyncSub2APIChannel(ctx context.Context, channelID int, accountID int64) err
 			}
 			continue
 		}
-		if err := model.ReplaceSub2APIAccountBindings(stored, bindings); err != nil {
+		if err := model.ReplaceSub2APIAccountBindings(stored, channel, bindings); err != nil {
 			return err
 		}
 		if err := model.UpdateSub2APIAccountSync(account.ID, ""); err != nil {
@@ -639,4 +695,227 @@ func SyncSub2APIChannel(ctx context.Context, channelID int, accountID int64) err
 		}
 	}
 	return lastErr
+}
+
+// Independent connections are fixed independently of channel routing settings.
+func sub2APIIndependentConnection(accountID int64, origin, proxy string) (string, string, error) {
+	if !model.Sub2APIStorageReady() {
+		return "", "", sub2APIError("SUB2API_STORAGE_UNAVAILABLE")
+	}
+	if accountID > 0 {
+		account, err := model.GetSub2APIAccount(accountID)
+		if err != nil {
+			return "", "", sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
+		}
+		storedProxy, err := sub2APIAccountConnection(account)
+		return account.Origin, storedProxy, err
+	}
+	canonical, err := NormalizeSub2APIOrigin(origin)
+	if err != nil {
+		return "", "", err
+	}
+	if proxy != "" {
+		parsed, parseErr := url.Parse(proxy)
+		if parseErr != nil || len(proxy) > 2048 || parsed.Hostname() == "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" && parsed.Path != "/" || parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "socks5" && parsed.Scheme != "socks5h" {
+			return "", "", sub2APIError("SUB2API_CREDENTIAL_INVALID")
+		}
+	}
+	return canonical, proxy, nil
+}
+
+func connectIndependentSub2API(ctx context.Context, accountID int64, origin, proxy string, credential Sub2APICredential, authorization *model.AuthFlowAuthorization) (Sub2APILoginResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	if authorization == nil || !Sub2APIEncryptionReady() {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_ENCRYPTION_UNAVAILABLE")
+	}
+	user, _, err := verifySub2APICredential(ctx, nil, origin, proxy, credential)
+	if err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	canonicalOrigin, err := NormalizeSub2APIOrigin(origin)
+	if err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("sub2api:shared:%s:%d", canonicalOrigin, user.ID)))
+	shared := hex.EncodeToString(digest[:])
+	var result Sub2APILoginResult
+	err = model.WithSub2APIIdentityLock(ctx, shared, func() error {
+		existing, lookupErr := model.FindIndependentSub2APIAccount(shared)
+		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			return lookupErr
+		}
+		if lookupErr == nil {
+			if accountID > 0 && existing.ID != accountID {
+				return sub2APIError("SUB2API_ACCOUNT_CONFLICT")
+			}
+			accountID = existing.ID
+		}
+		return model.WithSub2APIAccountLock(ctx, accountID, func() error {
+			account := &model.Sub2APIAccount{Origin: origin, UpstreamUserID: user.ID}
+			previousRevision := int64(0)
+			if accountID > 0 {
+				var loadErr error
+				account, loadErr = model.GetSub2APIAccount(accountID)
+				if loadErr != nil {
+					return sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
+				}
+				if !sameSub2APIOrigin(account.Origin, origin) || account.UpstreamUserID != user.ID || account.ProxyIdentity != sub2APIProxyIdentity(proxy) {
+					return sub2APIError("SUB2API_CREDENTIAL_INVALID")
+				}
+				previousRevision = account.Revision
+			}
+			account.SharedIdentity, account.Email = &shared, user.Email
+			account.ProxyIdentity = sub2APIProxyIdentity(proxy)
+			account.Revision, account.NeedsLogin, account.LastError = previousRevision+1, false, ""
+			account.HasRefreshToken, account.ExpiresAt = credential.RefreshToken != "", 0
+			if credential.ExpiresIn > 0 {
+				account.ExpiresAt = time.Now().Unix() + credential.ExpiresIn
+			}
+			if account.Identity == "" {
+				hash := sha256.Sum256([]byte(sub2APIAccountScope(account)))
+				account.Identity = hex.EncodeToString(hash[:])
+			}
+			account.Credential, err = sub2APISeal(credential, sub2APIAccountScope(account))
+			if err != nil {
+				return err
+			}
+			account.ProxyCredential, err = sub2APISeal(proxy, sub2APIAccountScope(account)+":proxy")
+			if err != nil {
+				return err
+			}
+			if err := model.StoreIndependentSub2APIAccount(ctx, account, previousRevision, authorization); err != nil {
+				return err
+			}
+			result.AccountID = account.ID
+			return nil
+		})
+	})
+	return result, err
+}
+
+type sub2APIIndependentChallenge struct {
+	Operation     Sub2APIAccountManageContext `json:"operation"`
+	Origin        string                      `json:"origin"`
+	Proxy         string                      `json:"proxy"`
+	TempToken     string                      `json:"temp_token"`
+	Authorization model.AuthFlowAuthorization `json:"authorization"`
+}
+
+func LoginIndependentSub2API(ctx context.Context, operation Sub2APIAccountManageContext, proxy string, input Sub2APILoginInput, authorization *model.AuthFlowAuthorization) (Sub2APILoginResult, error) {
+	if !Sub2APIEncryptionReady() || authorization == nil {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_ENCRYPTION_UNAVAILABLE")
+	}
+	origin, proxy, err := sub2APIIndependentConnection(operation.AccountID, operation.Origin, proxy)
+	if err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	if input.Email == "" || len(input.Email) > 320 || input.Password == "" || len(input.Password) > 4096 {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_CREDENTIAL_INVALID")
+	}
+	var response sub2APILoginResponse
+	if err := sub2APIRequest(ctx, origin, proxy, "", http.MethodPost, "/api/v1/auth/login", nil, input, &response, false); err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	if !response.Requires2FA {
+		return connectIndependentSub2API(ctx, operation.AccountID, origin, proxy, response.Sub2APICredential, authorization)
+	}
+	if response.TempToken == "" || len(response.TempToken) > 4096 {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_RESPONSE_INVALID")
+	}
+	challenge := sub2APIIndependentChallenge{operation, origin, proxy, response.TempToken, *authorization}
+	sealed, err := sub2APISeal(challenge, "sub2api:independent-challenge")
+	if err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	flow, _, err := model.CreateAuthFlow(model.AuthFlowCreate{Purpose: "sub2api_account_login", Provider: "sub2api", Intent: "bind", UserId: authorization.UserID, SessionId: authorization.SessionID, Payload: sealed, ExpiresAt: time.Now().Add(5 * time.Minute)})
+	return Sub2APILoginResult{Requires2FA: true, Flow: flow, EmailMasked: response.UserEmailMasked}, err
+}
+
+func CompleteIndependentSub2APILogin(ctx context.Context, flow, code string, identity AuthIdentity) (Sub2APILoginResult, error) {
+	if len(code) != 6 || strings.Trim(code, "0123456789") != "" {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_2FA_INVALID")
+	}
+	stored, err := model.ConsumeAuthFlow(flow, model.AuthFlowMatch{Purpose: "sub2api_account_login", Provider: "sub2api", Intent: "bind", UserId: identity.UserID, SessionId: identity.SessionID})
+	if err != nil {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_FLOW_EXPIRED")
+	}
+	var challenge sub2APIIndependentChallenge
+	if err := sub2APIOpen(stored.Payload, "sub2api:independent-challenge", &challenge); err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	operation, _ := common.Marshal(challenge.Operation)
+	if err := ValidateFlowAuthorization(identity, VerificationOperation{Scope: VerificationScopeSub2APIAccountManage, Context: operation}, &challenge.Authorization); err != nil {
+		return Sub2APILoginResult{}, sub2APIError("SUB2API_FLOW_EXPIRED")
+	}
+	if challenge.Operation.AccountID > 0 {
+		origin, proxy, err := sub2APIIndependentConnection(challenge.Operation.AccountID, "", "")
+		if err != nil || origin != challenge.Origin || proxy != challenge.Proxy {
+			return Sub2APILoginResult{}, sub2APIError("SUB2API_CHANNEL_CHANGED")
+		}
+	}
+	var response sub2APILoginResponse
+	if err := sub2APIRequest(ctx, challenge.Origin, challenge.Proxy, "", http.MethodPost, "/api/v1/auth/login/2fa", nil, map[string]string{"temp_token": challenge.TempToken, "totp_code": code}, &response, false); err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	return connectIndependentSub2API(ctx, challenge.Operation.AccountID, challenge.Origin, challenge.Proxy, response.Sub2APICredential, &challenge.Authorization)
+}
+
+func ImportIndependentSub2API(ctx context.Context, operation Sub2APIAccountManageContext, proxy string, credential Sub2APICredential, authorization *model.AuthFlowAuthorization) (Sub2APILoginResult, error) {
+	origin, proxy, err := sub2APIIndependentConnection(operation.AccountID, operation.Origin, proxy)
+	if err != nil {
+		return Sub2APILoginResult{}, err
+	}
+	return connectIndependentSub2API(ctx, operation.AccountID, origin, proxy, credential, authorization)
+}
+
+func AttachIndependentSub2API(ctx context.Context, channelID int, accountID int64, authorization *model.AuthFlowAuthorization) error {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	return model.WithSub2APIAccountLock(ctx, accountID, func() error {
+		channel, origin, err := sub2APIChannel(channelID)
+		if err != nil {
+			return err
+		}
+		account, proxy, credential, err := sub2APILoadAccount(accountID)
+		if err != nil {
+			return err
+		}
+		if account.SharedIdentity == nil || !sameSub2APIOrigin(origin, account.Origin) {
+			return sub2APIError("SUB2API_CHANNEL_CHANGED")
+		}
+		user, bindings, err := verifySub2APICredential(ctx, channel, origin, proxy, credential)
+		if err != nil {
+			return err
+		}
+		if user.ID != account.UpstreamUserID {
+			return sub2APIError("SUB2API_CREDENTIAL_INVALID")
+		}
+		if len(bindings) == 0 {
+			return sub2APIError("SUB2API_NO_MATCHING_KEYS")
+		}
+		return model.AttachSub2APIAccount(channel, account, bindings, authorization)
+	})
+}
+
+func DisconnectIndependentSub2API(ctx context.Context, accountID int64, authorization *model.AuthFlowAuthorization) error {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	return model.WithSub2APIAccountLock(ctx, accountID, func() error {
+		account, proxy, credential, loadErr := sub2APILoadAccount(accountID)
+		if err := model.DisconnectIndependentSub2APIAccount(accountID, authorization); err != nil {
+			if errors.Is(err, model.ErrSub2APIAccountLinked) {
+				return sub2APIError("SUB2API_ACCOUNT_LINKED")
+			}
+			return err
+		}
+		if loadErr == nil && credential.RefreshToken != "" {
+			_ = sub2APIRequest(ctx, account.Origin, proxy, "", http.MethodPost, "/api/v1/auth/logout", nil, map[string]string{"refresh_token": credential.RefreshToken}, nil, false)
+		}
+		return nil
+	})
+}
+
+func Sub2APIAccountHasProxy(account *model.Sub2APIAccount) bool {
+	return account.ProxyIdentity != sub2APIProxyIdentity("")
 }

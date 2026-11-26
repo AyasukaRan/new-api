@@ -34,10 +34,30 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 const sub2APITestKey = "sk-sub2api-fixture-one"
 const sub2APITestOtherKey = "sk-sub2api-fixture-two"
+
+func TestSub2APICanonicalOrigins(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://SUPPLIER.example:443/v1/", "https://supplier.example"},
+		{"https://supplier.example/tenant/v1", "https://supplier.example/tenant"},
+		{"https://supplier.example:8443/v1", "https://supplier.example:8443"},
+		{"https://supplier.example/another/v1", "https://supplier.example/another"},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, err := service.NormalizeSub2APIOrigin(tc.raw)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+	for _, invalid := range []string{"http://supplier.example", "https://user:password@supplier.example", "https://supplier.example?token=secret", "https://supplier.example#fragment"} {
+		_, err := service.NormalizeSub2APIOrigin(invalid)
+		require.Error(t, err)
+	}
+}
 
 func TestSub2APIManagementHTTPCompatibility(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -108,7 +128,12 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			require.NoError(t, err)
 
 			var refreshes, completions, redirectHits atomic.Int32
-			var redirectMode, incompleteRate, ledgerFailure, refreshFailure atomic.Bool
+			var redirectMode, incompleteRate, ledgerFailure, refreshFailure, blockKeys, blockRefresh atomic.Bool
+			keysEntered, keysRelease := make(chan struct{}, 1), make(chan struct{})
+			refreshEntered, refreshRelease := make(chan struct{}, 1), make(chan struct{})
+			var refreshReleaseOnce sync.Once
+			var keysReleaseOnce sync.Once
+			t.Cleanup(func() { keysReleaseOnce.Do(func() { close(keysRelease) }) })
 			var server *httptest.Server
 			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -140,12 +165,20 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 						http.Redirect(w, r, server.URL+"/redirect-target", http.StatusFound)
 						return
 					}
+					if r.Header.Get("Authorization") == "Bearer parallel-access" {
+						respond(map[string]any{"id": 88, "email": "parallel@example.com"})
+						return
+					}
 					if r.Header.Get("Authorization") == "Bearer foreign-access" {
 						respond(map[string]any{"id": 99, "email": "foreign@example.com"})
 						return
 					}
 					respond(map[string]any{"id": 7, "email": "owner@example.com"})
 				case "/api/v1/keys":
+					if blockKeys.CompareAndSwap(true, false) {
+						keysEntered <- struct{}{}
+						<-keysRelease
+					}
 					if r.Header.Get("Authorization") == "Bearer foreign-access" {
 						respond(map[string]any{"pages": 1, "items": []any{map[string]any{"id": 99, "user_id": 99, "key": "sk-unrelated"}}})
 						return
@@ -158,6 +191,10 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 					}
 				case "/api/v1/auth/refresh":
 					refreshes.Add(1)
+					if blockRefresh.CompareAndSwap(true, false) {
+						refreshEntered <- struct{}{}
+						<-refreshRelease
+					}
 					if refreshFailure.Load() {
 						w.WriteHeader(http.StatusBadGateway)
 						return
@@ -184,6 +221,8 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 							map[string]any{"id": 112, "api_key_id": 71, "request_id": "client:exact", "actual_cost": 0, "billing_type": 1, "rate_multiplier": 0.5},
 							map[string]any{"id": 113, "api_key_id": 71, "request_id": "resp_http", "actual_cost": 0.000001, "billing_type": 0},
 							map[string]any{"id": 114, "api_key_id": 71, "request_id": "resp_ws_second", "actual_cost": 0.000002, "billing_type": 0},
+							map[string]any{"id": 115, "api_key_id": 71, "request_id": "client:detached", "actual_cost": 0.000003, "billing_type": 0},
+							map[string]any{"id": 116, "api_key_id": 71, "request_id": "client:disconnected", "actual_cost": 0.000004, "billing_type": 0},
 						}})
 					}
 				case "/v1/sub2api/billing":
@@ -336,7 +375,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			billingContext, _ := gin.CreateTestContext(recorder)
 			billingContext.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-			relayInfo := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeSub2API, ChannelId: channel.Id, ApiKey: sub2APITestKey}}
+			relayInfo := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeSub2API, ChannelId: channel.Id, ChannelBaseUrl: server.URL, ApiKey: sub2APITestKey}}
 			service.BeginSub2APIBillingAttempt(billingContext, relayInfo)
 			service.CaptureSub2APIBillingResponse(billingContext, http.Header{"X-Client-Request-Id": {"http-header"}})
 			responseBody := `{"id":"resp_http","model":"fixture","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`
@@ -524,6 +563,302 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			storedChannel, err = model.GetChannelById(channel.Id, true)
 			require.NoError(t, err)
 			assert.Equal(t, channel.Key, storedChannel.Key)
+
+			t.Run("independent accounts reuse verified ownership across channels", func(t *testing.T) {
+				defer keysReleaseOnce.Do(func() { close(keysRelease) })
+				defer refreshReleaseOnce.Do(func() { close(refreshRelease) })
+				refreshFailure.Store(false)
+				credential := service.Sub2APICredential{AccessToken: "fixture-access", RefreshToken: "fixture-refresh", ExpiresIn: 3600}
+				sharedOperation := func(action string, id int64, origin string) service.Sub2APIAccountManageContext {
+					return service.Sub2APIAccountManageContext{Action: action, AccountID: id, Origin: origin}
+				}
+				authorizeShared := func(operation service.Sub2APIAccountManageContext) *model.AuthFlowAuthorization {
+					payload, marshalErr := common.Marshal(operation)
+					require.NoError(t, marshalErr)
+					target := service.VerificationOperation{Scope: service.VerificationScopeSub2APIAccountManage, Context: payload}
+					proof := issueSecurityEnrollmentProof(t, identity, target, service.VerificationMethodPassword)
+					authorization, consumeErr := service.ConsumeOperationProof(proof, identity, target)
+					require.NoError(t, consumeErr)
+					return authorization
+				}
+				authorizeChannel := func(id int, action string, accountID int64) *model.AuthFlowAuthorization {
+					operation := sub2APITestOperation(t, id, action, accountID, "")
+					proof := issueSecurityEnrollmentProof(t, identity, operation, service.VerificationMethodPassword)
+					authorization, consumeErr := service.ConsumeOperationProof(proof, identity, operation)
+					require.NoError(t, consumeErr)
+					return authorization
+				}
+				// A legacy row upgrades in place; another NULL identity remains independent.
+				legacy, createErr := service.ImportSub2API(ctx, channel.Id, credential, authorize("import", 0, ""))
+				require.NoError(t, createErr)
+				legacyBefore, loadErr := model.GetSub2APIAccount(legacy.AccountID)
+				require.NoError(t, loadErr)
+				operation := sharedOperation("import", legacy.AccountID, "")
+				upgraded, upgradeErr := service.ImportIndependentSub2API(ctx, operation, "", credential, authorizeShared(operation))
+				require.NoError(t, upgradeErr)
+				assert.Equal(t, legacy.AccountID, upgraded.AccountID)
+				upgradedAccount, loadErr := model.GetSub2APIAccount(upgraded.AccountID)
+				require.NoError(t, loadErr)
+				assert.Equal(t, legacyBefore.Identity, upgradedAccount.Identity)
+				assert.Equal(t, legacyBefore.ChannelID, upgradedAccount.ChannelID)
+				require.NotNil(t, upgradedAccount.SharedIdentity)
+				assert.NotEmpty(t, upgradedAccount.ProxyCredential)
+				require.NoError(t, model.MigrateSub2APIStorage(db))
+				require.NoError(t, model.MigrateSub2APIStorage(db))
+				// Old channel endpoints may not overwrite an upgraded independent login.
+				_, legacyErr := service.ImportSub2API(ctx, channel.Id, credential, authorize("import", 0, ""))
+				require.Error(t, legacyErr)
+				unchanged, loadErr := model.GetSub2APIAccount(upgraded.AccountID)
+				require.NoError(t, loadErr)
+				assert.Equal(t, upgradedAccount.Credential, unchanged.Credential)
+				assert.Equal(t, upgradedAccount.ProxyCredential, unchanged.ProxyCredential)
+				// New login of the canonical same site/user reuses its stable ID, no keys required.
+				operation = sharedOperation("import", 0, server.URL+"/v1/")
+				reused, reuseErr := service.ImportIndependentSub2API(ctx, operation, "", credential, authorizeShared(operation))
+				require.NoError(t, reuseErr)
+				assert.Equal(t, upgraded.AccountID, reused.AccountID)
+				// The global API binds site/account/proxy/email to one-use local step-up.
+				globalContext, marshalErr := common.Marshal(operation)
+				require.NoError(t, marshalErr)
+				globalTarget := service.VerificationOperation{Scope: service.VerificationScopeSub2APIAccountManage, Context: globalContext}
+				globalProof := issueSecurityEnrollmentProof(t, identity, globalTarget, service.VerificationMethodPassword)
+				wrongOrigin := sub2APITestRequest(t, identity, 0, "import", map[string]any{"origin": server.URL + "/wrong-site", "credential_encrypted": credentialEnvelope, "encryption_key_id": credentialKey}, globalProof)
+				assert.NotContains(t, wrongOrigin.Body.String(), `"success":true`)
+				globalProof = issueSecurityEnrollmentProof(t, identity, globalTarget, service.VerificationMethodPassword)
+				input := map[string]any{"origin": server.URL + "/v1/", "credential_encrypted": credentialEnvelope, "encryption_key_id": credentialKey}
+				imported := sub2APITestRequest(t, identity, 0, "import", input, globalProof)
+				assert.Contains(t, imported.Body.String(), `"success":true`, imported.Body.String())
+				replayed := sub2APITestRequest(t, identity, 0, "import", input, globalProof)
+				assert.NotContains(t, replayed.Body.String(), `"success":true`)
+				noProof := sub2APITestRequest(t, identity, 0, "import", input, "")
+				assert.NotContains(t, noProof.Body.String(), `"success":true`)
+				// Global MFA remains session-bound, expires, and never returns the temporary token.
+				loginOperation := sharedOperation("login", upgraded.AccountID, "")
+				loginOperation.Email = loginInput.Email
+				sharedFlow, flowErr := service.LoginIndependentSub2API(ctx, loginOperation, "", loginInput, authorizeShared(loginOperation))
+				require.NoError(t, flowErr)
+				_, flowErr = service.CompleteIndependentSub2APILogin(ctx, sharedFlow.Flow, "123456", wrongSession)
+				require.Error(t, flowErr)
+				sharedLogin, flowErr := service.CompleteIndependentSub2APILogin(ctx, sharedFlow.Flow, "123456", identity)
+				require.NoError(t, flowErr)
+				assert.Equal(t, upgraded.AccountID, sharedLogin.AccountID)
+				_, flowErr = service.CompleteIndependentSub2APILogin(ctx, sharedFlow.Flow, "123456", identity)
+				require.Error(t, flowErr)
+				expiredFlow, flowErr := service.LoginIndependentSub2API(ctx, loginOperation, "", loginInput, authorizeShared(loginOperation))
+				require.NoError(t, flowErr)
+				require.NoError(t, db.Model(&model.AuthFlow{}).Where("purpose = ? AND consumed_at IS NULL", "sub2api_account_login").Update("expires_at", time.Now().Add(-time.Minute)).Error)
+				_, flowErr = service.CompleteIndependentSub2APILogin(ctx, expiredFlow.Flow, "123456", identity)
+				assert.Equal(t, "SUB2API_FLOW_EXPIRED", service.Sub2APIErrorCode(flowErr))
+				// Manual refresh callers (revision=0) also share one rotation. Observe the
+				// second caller's DB snapshot before releasing the upstream response.
+				beforeRefresh := refreshes.Load()
+				blockRefresh.Store(true)
+				refreshResults := make(chan error, 2)
+				go func() { refreshResults <- service.RefreshSub2APIAccount(ctx, upgraded.AccountID, 0) }()
+				select {
+				case <-refreshEntered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("refresh did not reach upstream barrier")
+				}
+				secondSnapshot := make(chan struct{}, 1)
+				var observed atomic.Bool
+				require.NoError(t, db.Callback().Query().After("gorm:query").Register("sub2api_shared_refresh_snapshot", func(tx *gorm.DB) {
+					if tx.Statement.Table == "sub2_api_accounts" && observed.CompareAndSwap(false, true) {
+						secondSnapshot <- struct{}{}
+					}
+				}))
+				defer db.Callback().Query().Remove("sub2api_shared_refresh_snapshot")
+				go func() { refreshResults <- service.RefreshSub2APIAccount(ctx, upgraded.AccountID, 0) }()
+				select {
+				case <-secondSnapshot:
+				case <-time.After(10 * time.Second):
+					t.Fatal("second refresh did not capture its revision")
+				}
+				refreshReleaseOnce.Do(func() { close(refreshRelease) })
+				require.NoError(t, <-refreshResults)
+				require.NoError(t, <-refreshResults)
+				assert.Equal(t, beforeRefresh+1, refreshes.Load())
+				// Concurrent first logins converge on one verified identity.
+				concurrentOp := sharedOperation("import", 0, server.URL)
+				concurrentAuth := []*model.AuthFlowAuthorization{authorizeShared(concurrentOp), authorizeShared(concurrentOp)}
+				type connectedResult struct {
+					result service.Sub2APILoginResult
+					err    error
+				}
+				connectedResults := make(chan connectedResult, 2)
+				var concurrent sync.WaitGroup
+				for _, auth := range concurrentAuth {
+					concurrent.Go(func() {
+						value, err := service.ImportIndependentSub2API(ctx, concurrentOp, "", service.Sub2APICredential{AccessToken: "parallel-access"}, auth)
+						connectedResults <- connectedResult{value, err}
+					})
+				}
+				concurrent.Wait()
+				close(connectedResults)
+				var parallelID int64
+				for value := range connectedResults {
+					require.NoError(t, value.err)
+					if parallelID == 0 {
+						parallelID = value.result.AccountID
+					}
+					assert.Equal(t, parallelID, value.result.AccountID)
+				}
+				foreignOp := sharedOperation("import", 0, server.URL)
+				foreign, foreignErr := service.ImportIndependentSub2API(ctx, foreignOp, "", service.Sub2APICredential{AccessToken: "foreign-access"}, authorizeShared(foreignOp))
+				require.NoError(t, foreignErr)
+				foreignAccount, loadErr := model.GetSub2APIAccount(foreign.AccountID)
+				require.NoError(t, loadErr)
+				assert.Zero(t, foreignAccount.ChannelID)
+				require.Error(t, service.AttachIndependentSub2API(ctx, channel.Id, foreign.AccountID, authorizeChannel(channel.Id, "attach", foreign.AccountID)))
+				second := model.Channel{Type: constant.ChannelTypeSub2API, Name: "Second channel", BaseURL: common.GetPointer(server.URL), Key: sub2APITestKey, Group: "default", Models: "fixture-model"}
+				require.NoError(t, db.Create(&second).Error)
+				require.NoError(t, service.AttachIndependentSub2API(ctx, second.Id, upgraded.AccountID, authorizeChannel(second.Id, "attach", upgraded.AccountID)))
+				firstBinding, bindErr := model.GetSub2APIKeyBinding(channel.Id, keyIdentity)
+				require.NoError(t, bindErr)
+				secondBinding, bindErr := model.GetSub2APIKeyBinding(second.Id, second.KeyIdentity(sub2APITestKey))
+				require.NoError(t, bindErr)
+				assert.Equal(t, upgraded.AccountID, firstBinding.AccountID)
+				assert.Equal(t, upgraded.AccountID, secondBinding.AccountID)
+				assert.False(t, secondBinding.SyncBills)
+				assert.False(t, secondBinding.SyncRates)
+				manager := sub2APITestRequest(t, identity, 0, "", nil, "")
+				assert.Contains(t, manager.Body.String(), "Second channel")
+				assert.Contains(t, manager.Body.String(), `"legacy":false`)
+				assert.Contains(t, manager.Body.String(), `"has_proxy":false`)
+				assert.NotContains(t, manager.Body.String(), "fixture-access")
+				assert.NotContains(t, manager.Body.String(), "proxy_credential")
+				assert.NotContains(t, manager.Body.String(), upgradedAccount.ProxyCredential)
+				require.NoError(t, model.SetSub2APIKeySync(channel.Id, keyIdentity, true, true, authorize("keys", 0, keyIdentity)))
+				secondBinding, bindErr = model.GetSub2APIKeyBinding(second.Id, second.KeyIdentity(sub2APITestKey))
+				require.NoError(t, bindErr)
+				assert.False(t, secondBinding.SyncBills)
+				require.NoError(t, service.SyncSub2APIChannel(ctx, second.Id, upgraded.AccountID))
+				firstBinding, bindErr = model.GetSub2APIKeyBinding(channel.Id, keyIdentity)
+				require.NoError(t, bindErr)
+				assert.Equal(t, upgraded.AccountID, firstBinding.AccountID, "syncing one channel cannot clear another channel")
+				disconnect := sharedOperation("disconnect", upgraded.AccountID, "")
+				assert.Equal(t, "SUB2API_ACCOUNT_LINKED", service.Sub2APIErrorCode(service.DisconnectIndependentSub2API(ctx, upgraded.AccountID, authorizeShared(disconnect))))
+				pendingJSON, marshalErr := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": model.Sub2APIBillingRef{AccountID: upgraded.AccountID, APIKeyID: 71, KeyIdentity: keyIdentity, RequestID: "client:detached"}}})
+				require.NoError(t, marshalErr)
+				detachedLog := model.Log{UserId: user.Id, ChannelId: channel.Id, RequestId: "gateway-detached", CreatedAt: time.Now().Unix(), Type: model.LogTypeConsume, Quota: 17, Other: string(pendingJSON)}
+				require.NoError(t, db.Create(&detachedLog).Error)
+				require.NoError(t, model.QueueSub2APIBill(ctx, &detachedLog))
+				// An in-flight metadata sync cannot undo an explicit detach.
+				blockKeys.Store(true)
+				syncResult := make(chan error, 1)
+				go func() { syncResult <- service.SyncSub2APIChannel(ctx, channel.Id, upgraded.AccountID) }()
+				select {
+				case <-keysEntered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("sync did not reach key ownership barrier")
+				}
+				require.NoError(t, model.DetachSub2APIAccount(channel.Id, upgraded.AccountID, authorizeChannel(channel.Id, "detach", upgraded.AccountID)))
+				keysReleaseOnce.Do(func() { close(keysRelease) })
+				require.Error(t, <-syncResult)
+				firstBinding, bindErr = model.GetSub2APIKeyBinding(channel.Id, keyIdentity)
+				require.NoError(t, bindErr)
+				assert.Zero(t, firstBinding.AccountID)
+				secondBinding, bindErr = model.GetSub2APIKeyBinding(second.Id, second.KeyIdentity(sub2APITestKey))
+				require.NoError(t, bindErr)
+				assert.Equal(t, upgraded.AccountID, secondBinding.AccountID)
+				require.NoError(t, db.Model(&model.Sub2APIBill{}).Where("account_id = ?", upgraded.AccountID).Update("next_sync_at", 0).Error)
+				reconciled, reconcileErr := service.SyncSub2APIBills(ctx, 0)
+				require.NoError(t, reconcileErr)
+				assert.Equal(t, 1, reconciled)
+				var detachedBill model.Sub2APIBill
+				require.NoError(t, db.Where("log_id = ? AND log_request_id = ?", detachedLog.Id, detachedLog.RequestId).First(&detachedBill).Error)
+				require.NotNil(t, detachedBill.CostQuota)
+				assert.Equal(t, "0.000003", detachedBill.ActualCostUSD)
+				assert.Equal(t, upgraded.AccountID, detachedBill.AccountID)
+				// Routing changes never move a management login, nor tag new requests with its old supplier.
+				require.NoError(t, db.Model(&second).Update("base_url", server.URL+"/other-site").Error)
+				require.Error(t, service.AttachIndependentSub2API(ctx, second.Id, upgraded.AccountID, authorizeChannel(second.Id, "attach", upgraded.AccountID)))
+				var verified map[string]any
+				require.NoError(t, service.Sub2APIAccountRequest(ctx, upgraded.AccountID, http.MethodGet, "/api/v1/auth/me", nil, nil, &verified))
+				require.NoError(t, model.SetSub2APIKeySync(second.Id, second.KeyIdentity(sub2APITestKey), false, true, func() *model.AuthFlowAuthorization {
+					target := sub2APITestOperation(t, second.Id, "keys", 0, second.KeyIdentity(sub2APITestKey))
+					proof := issueSecurityEnrollmentProof(t, identity, target, service.VerificationMethodPassword)
+					auth, err := service.ConsumeOperationProof(proof, identity, target)
+					require.NoError(t, err)
+					return auth
+				}()))
+				traceContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+				changedInfo := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeSub2API, ChannelId: second.Id, ChannelBaseUrl: server.URL + "/other-site", ApiKey: sub2APITestKey}}
+				service.BeginSub2APIBillingAttempt(traceContext, changedInfo)
+				service.CaptureSub2APIResponseID(traceContext, "wrong_supplier", true)
+				assert.Zero(t, sub2APIBillingRefFromLog(t, traceContext, changedInfo).AccountID)
+				require.NoError(t, model.DetachSub2APIAccount(second.Id, upgraded.AccountID, authorizeChannel(second.Id, "detach", upgraded.AccountID)))
+				// Historical links to deleted/retyped channels cannot trap a
+				// shared account in management. A disabled live channel still can.
+				orphanChannels := []model.Channel{
+					{Type: constant.ChannelTypeSub2API, Name: "Deleted orphan channel", Key: sub2APITestKey},
+					{Type: constant.ChannelTypeSub2API, Name: "Retyped orphan channel", Key: sub2APITestKey},
+					{Type: constant.ChannelTypeSub2API, Name: "Disabled linked channel", Key: sub2APITestKey},
+				}
+				for i := range orphanChannels {
+					require.NoError(t, db.Create(&orphanChannels[i]).Error)
+					require.NoError(t, db.Create(&model.Sub2APIKeyBinding{ChannelID: orphanChannels[i].Id, AccountID: upgraded.AccountID, KeyIdentity: orphanChannels[i].KeyIdentity(sub2APITestKey), UpstreamAPIKeyID: 71, SyncBills: true}).Error)
+				}
+				require.NoError(t, db.Delete(&orphanChannels[0]).Error)
+				require.NoError(t, db.Model(&orphanChannels[1]).Update("type", constant.ChannelTypeOpenAI).Error)
+				require.NoError(t, db.Model(&orphanChannels[2]).Update("status", common.ChannelStatusManuallyDisabled).Error)
+				manager = sub2APITestRequest(t, identity, 0, "", nil, "")
+				assert.NotContains(t, manager.Body.String(), "Deleted orphan channel")
+				assert.NotContains(t, manager.Body.String(), "Retyped orphan channel")
+				assert.Contains(t, manager.Body.String(), "Disabled linked channel")
+				assert.Equal(t, "SUB2API_ACCOUNT_LINKED", service.Sub2APIErrorCode(service.DisconnectIndependentSub2API(ctx, upgraded.AccountID, authorizeShared(disconnect))))
+				var linkedCount int64
+				require.NoError(t, db.Model(&model.Sub2APIKeyBinding{}).Where("account_id = ?", upgraded.AccountID).Count(&linkedCount).Error)
+				assert.EqualValues(t, 3, linkedCount, "a refused global disconnect must not remove any links")
+				require.NoError(t, model.DetachSub2APIAccount(orphanChannels[2].Id, upgraded.AccountID, authorizeChannel(orphanChannels[2].Id, "detach", upgraded.AccountID)))
+				manager = sub2APITestRequest(t, identity, 0, "", nil, "")
+				var management struct {
+					Success bool `json:"success"`
+					Data    struct {
+						Accounts []struct {
+							ID         int64 `json:"id"`
+							ChannelIDs []int `json:"channel_ids"`
+						} `json:"accounts"`
+					} `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(manager.Body.Bytes(), &management))
+				require.True(t, management.Success)
+				foundAccount := false
+				for _, item := range management.Data.Accounts {
+					if item.ID == upgraded.AccountID {
+						foundAccount = true
+						assert.Empty(t, item.ChannelIDs)
+					}
+				}
+				require.True(t, foundAccount)
+				stoppedJSON, marshalErr := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": model.Sub2APIBillingRef{AccountID: upgraded.AccountID, APIKeyID: 71, KeyIdentity: keyIdentity, RequestID: "client:disconnected"}}})
+				require.NoError(t, marshalErr)
+				stoppedLog := model.Log{UserId: user.Id, ChannelId: channel.Id, RequestId: "gateway-disconnected", CreatedAt: time.Now().Unix(), Type: model.LogTypeConsume, Quota: 17, Other: string(stoppedJSON)}
+				require.NoError(t, db.Create(&stoppedLog).Error)
+				require.NoError(t, model.QueueSub2APIBill(ctx, &stoppedLog))
+				require.NoError(t, service.DisconnectIndependentSub2API(ctx, upgraded.AccountID, authorizeShared(disconnect)))
+				require.NoError(t, db.Model(&model.Sub2APIKeyBinding{}).Where("account_id = ?", upgraded.AccountID).Count(&linkedCount).Error)
+				assert.Zero(t, linkedCount)
+				require.NoError(t, db.Where("id = ?", detachedBill.ID).First(&detachedBill).Error)
+				assert.Equal(t, "0.000003", detachedBill.ActualCostUSD, "orphan cleanup preserves historical invoices")
+				require.NoError(t, db.Model(&model.Sub2APIBill{}).Where("log_id = ? AND log_request_id = ?", stoppedLog.Id, stoppedLog.RequestId).Update("next_sync_at", 0).Error)
+				reconciled, reconcileErr = service.SyncSub2APIBills(ctx, 0)
+				assert.Equal(t, "SUB2API_LOGIN_REQUIRED", service.Sub2APIErrorCode(reconcileErr))
+				assert.Zero(t, reconciled)
+				var stoppedBill model.Sub2APIBill
+				require.NoError(t, db.Where("log_id = ? AND log_request_id = ?", stoppedLog.Id, stoppedLog.RequestId).First(&stoppedBill).Error)
+				assert.Nil(t, stoppedBill.CostQuota)
+				tombstone, loadErr := model.GetSub2APIAccount(upgraded.AccountID)
+				require.NoError(t, loadErr)
+				assert.Empty(t, tombstone.Credential)
+				assert.Empty(t, tombstone.ProxyCredential)
+				assert.Equal(t, server.URL, tombstone.Origin)
+				remaining, listErr := model.ListSub2APIAccounts(0)
+				require.NoError(t, listErr)
+				for _, current := range remaining {
+					assert.NotEqual(t, upgraded.AccountID, current.ID)
+				}
+			})
 		})
 	}
 }
@@ -562,7 +897,16 @@ func sub2APITestRequest(t *testing.T, identity service.AuthIdentity, channelID i
 	if action == "keys" {
 		method = http.MethodPut
 	}
-	if action == "" {
+	if channelID == 0 {
+		route = "/sub2api/accounts"
+		if action == "" {
+			method = http.MethodGet
+			router.GET(route, GetSub2APIAccounts)
+		} else {
+			route += "/" + action
+			router.Handle(method, route, ManageSub2APIAccounts)
+		}
+	} else if action == "" {
 		method, route = http.MethodGet, "/channel/:id/sub2api"
 		router.GET(route, GetSub2APIChannel)
 	} else {

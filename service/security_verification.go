@@ -16,27 +16,28 @@ import (
 )
 
 const (
-	VerificationMethodTwoFA              = "2fa"
-	VerificationMethodPasskey            = "passkey"
-	VerificationMethodPassword           = "password"
-	VerificationMethodOAuth              = "oauth"
-	VerificationMethodSession            = "session"
-	VerificationScopeChannelKeyRead      = "channel.key.read"
-	VerificationScopeSub2APIManage       = "channel.sub2api.manage"
-	VerificationScopePasskeyRegister     = "passkey.register"
-	VerificationScopePasskeyDelete       = "passkey.delete"
-	VerificationScopeTwoFASetup          = "2fa.setup"
-	VerificationScopeTwoFADisable        = "2fa.disable"
-	VerificationScopeTwoFABackupCodes    = "2fa.backup_codes.regenerate"
-	VerificationScopeLogin               = "auth.login"
-	VerificationScopeAccessTokenGenerate = "access_token.generate"
-	VerificationScopeAccessTokenRevoke   = "access_token.revoke"
-	VerificationScopeAccessTokenUpdate   = "access_token.update"
-	VerificationScopeAccountBind         = "account.binding.bind"
-	VerificationScopeAccountUnbind       = "account.binding.unbind"
-	VerificationScopePasswordSet         = "account.password.set"
-	VerificationScopePasswordChange      = "account.password.change"
-	VerificationScopeAccountDelete       = "account.delete"
+	VerificationMethodTwoFA               = "2fa"
+	VerificationMethodPasskey             = "passkey"
+	VerificationMethodPassword            = "password"
+	VerificationMethodOAuth               = "oauth"
+	VerificationMethodSession             = "session"
+	VerificationScopeChannelKeyRead       = "channel.key.read"
+	VerificationScopeSub2APIManage        = "channel.sub2api.manage"
+	VerificationScopeSub2APIAccountManage = "sub2api.account.manage"
+	VerificationScopePasskeyRegister      = "passkey.register"
+	VerificationScopePasskeyDelete        = "passkey.delete"
+	VerificationScopeTwoFASetup           = "2fa.setup"
+	VerificationScopeTwoFADisable         = "2fa.disable"
+	VerificationScopeTwoFABackupCodes     = "2fa.backup_codes.regenerate"
+	VerificationScopeLogin                = "auth.login"
+	VerificationScopeAccessTokenGenerate  = "access_token.generate"
+	VerificationScopeAccessTokenRevoke    = "access_token.revoke"
+	VerificationScopeAccessTokenUpdate    = "access_token.update"
+	VerificationScopeAccountBind          = "account.binding.bind"
+	VerificationScopeAccountUnbind        = "account.binding.unbind"
+	VerificationScopePasswordSet          = "account.password.set"
+	VerificationScopePasswordChange       = "account.password.change"
+	VerificationScopeAccountDelete        = "account.delete"
 	// Administrative step-up scopes bind the managed user into the proof so a
 	// proof issued for one account cannot be replayed against another.
 	VerificationScopeAdminUserCreate       = "admin.user.create"
@@ -78,6 +79,14 @@ type Sub2APIManageContext struct {
 	Action      string `json:"action"`
 	AccountID   int64  `json:"account_id"`
 	KeyIdentity string `json:"key_identity"`
+}
+
+type Sub2APIAccountManageContext struct {
+	Action         string `json:"action"`
+	AccountID      int64  `json:"account_id"`
+	Origin         string `json:"origin"`
+	ProxyEncrypted string `json:"proxy_encrypted"`
+	Email          string `json:"email"`
 }
 
 type AccountBindingContext struct {
@@ -173,10 +182,32 @@ func BindVerificationOperation(operation VerificationOperation) (VerificationBin
 	switch operation.Scope {
 	case VerificationScopeSub2APIManage:
 		var context Sub2APIManageContext
-		if len(fields) != 4 || common.Unmarshal(operation.Context, &context) != nil || context.ChannelID <= 0 || context.AccountID < 0 || !slices.Contains([]string{"login", "import", "refresh", "disconnect", "sync", "keys"}, context.Action) {
+		if len(fields) != 4 || common.Unmarshal(operation.Context, &context) != nil || context.ChannelID <= 0 || context.AccountID < 0 || !slices.Contains([]string{"login", "import", "refresh", "disconnect", "sync", "keys", "attach", "detach"}, context.Action) {
 			return VerificationBinding{}, ErrVerificationContextInvalid
 		}
 		if context.Action == "keys" && len(context.KeyIdentity) != 64 || context.Action != "keys" && context.KeyIdentity != "" {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		normalized = context
+	case VerificationScopeSub2APIAccountManage:
+		var context Sub2APIAccountManageContext
+		if len(fields) != 5 || common.Unmarshal(operation.Context, &context) != nil || context.AccountID < 0 || len(context.Email) > 320 || len(context.ProxyEncrypted) > 16384 || !slices.Contains([]string{"login", "import", "refresh", "disconnect"}, context.Action) {
+			return VerificationBinding{}, ErrVerificationContextInvalid
+		}
+		if context.Action == "login" || context.Action == "import" {
+			if context.Action == "login" && context.Email == "" || context.Action == "import" && context.Email != "" {
+				return VerificationBinding{}, ErrVerificationContextInvalid
+			}
+			if context.AccountID == 0 {
+				origin, err := NormalizeSub2APIOrigin(context.Origin)
+				if err != nil {
+					return VerificationBinding{}, ErrVerificationContextInvalid
+				}
+				context.Origin = origin
+			} else if context.Origin != "" || context.ProxyEncrypted != "" {
+				return VerificationBinding{}, ErrVerificationContextInvalid
+			}
+		} else if context.AccountID == 0 || context.Origin != "" || context.ProxyEncrypted != "" || context.Email != "" {
 			return VerificationBinding{}, ErrVerificationContextInvalid
 		}
 		normalized = context
@@ -336,7 +367,7 @@ func securityVerificationPolicy(scope string, state model.UserVerificationState)
 		methods = append(methods, VerificationMethodPasskey)
 	}
 	switch scope {
-	case VerificationScopeChannelKeyRead, VerificationScopeSub2APIManage:
+	case VerificationScopeChannelKeyRead, VerificationScopeSub2APIManage, VerificationScopeSub2APIAccountManage:
 		// Only accounts without an enrolled factor may use their password.
 		if len(methods) == 0 && state.HasPassword {
 			methods = []string{VerificationMethodPassword}
@@ -400,7 +431,7 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	if scope == VerificationScopeChannelKeyRead && state.Role != common.RoleRootUser {
 		return nil, ErrVerificationForbidden
 	}
-	if scope == VerificationScopeSub2APIManage && state.Role < common.RoleAdminUser {
+	if (scope == VerificationScopeSub2APIManage || scope == VerificationScopeSub2APIAccountManage) && state.Role < common.RoleAdminUser {
 		return nil, ErrVerificationForbidden
 	}
 	if strings.HasPrefix(scope, verificationScopeAdminUserPrefix) && state.Role < common.RoleAdminUser {
@@ -417,7 +448,7 @@ func GetVerificationRequirements(identity AuthIdentity, scope string) (*Verifica
 	for i := range methods {
 		if methods[i].Method == VerificationMethodPassword && !common.PasswordLoginEnabled {
 			switch scope {
-			case VerificationScopeChannelKeyRead, VerificationScopeSub2APIManage,
+			case VerificationScopeChannelKeyRead, VerificationScopeSub2APIManage, VerificationScopeSub2APIAccountManage,
 				VerificationScopeAccountBind, VerificationScopeAccountUnbind, VerificationScopePasswordSet, VerificationScopePasswordChange, VerificationScopeAccountDelete,
 				VerificationScopeAdminUserCreate, VerificationScopeAdminUserUpdate, VerificationScopeAdminUserDelete,
 				VerificationScopeAdminUserManage, VerificationScopeAdminUserPasskeyReset,

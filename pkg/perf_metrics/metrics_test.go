@@ -3,8 +3,11 @@ package perfmetrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -618,4 +621,207 @@ func TestPerformanceAggregationAndFlush(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestLiveDashboardWindowAggregation(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 10, 0, time.UTC)
+	collector := liveCollector{now: func() time.Time { return now }, instance: "fixture-instance"}
+	collector.start()
+	finish := collector.begin()
+	collector.record(Sample{Model: "a", Success: true, LatencyMs: 100, HasTtft: true, TtftMs: 0, OutputTokens: 10, GenerationMs: 100})
+	collector.record(Sample{Model: "a", Success: true, LatencyMs: 300, HasTtft: true, TtftMs: 200, OutputTokens: 20, GenerationMs: 900})
+	now = now.Add(time.Minute)
+	otherFinish := collector.begin()
+	collector.record(Sample{Model: "b", Success: false, LatencyMs: 900})
+	otherFinish()
+	now = now.Add(2 * time.Minute)
+	collector.record(Sample{Model: "a", Success: true, LatencyMs: 500, OutputTokens: 100, GenerationMs: 1000})
+	result := collector.query(900, 60, "")
+	assert.Equal(t, "fixture-instance", result.Instance)
+	assert.Equal(t, time.Date(2026, 11, 26, 12, 0, 10, 0, time.UTC).Unix(), result.ObservedFrom)
+	assert.Equal(t, int64(1), result.Active)
+	require.Len(t, result.Totals, 4)
+	for i, expected := range []int64{1, 2, 1, 1} {
+		require.NotNil(t, result.Totals[i].Concurrency)
+		assert.Equal(t, expected, *result.Totals[i].Concurrency)
+	}
+	assert.Nil(t, result.Totals[2].LatencyMs)
+	assert.Nil(t, result.Totals[2].TtftMs)
+	assert.Nil(t, result.Totals[2].Tps)
+	assert.Nil(t, result.Totals[2].P95Ms)
+	assert.Equal(t, int64(4), result.Total.Requests)
+	assert.Equal(t, int64(3), result.Total.SuccessCount)
+	require.NotNil(t, result.Total.LatencyMs)
+	assert.Equal(t, 450.0, *result.Total.LatencyMs)
+	require.NotNil(t, result.Total.TtftMs)
+	assert.Equal(t, 100.0, *result.Total.TtftMs)
+	require.NotNil(t, result.Total.Tps)
+	assert.Equal(t, 65.0, *result.Total.Tps)
+	require.NotNil(t, result.Total.P95Ms)
+	assert.Equal(t, int64(900), *result.Total.P95Ms)
+	require.Len(t, result.Summary, 2)
+	assert.Equal(t, "a", result.Summary[0].Model)
+	assert.Equal(t, int64(3), result.Summary[0].Requests)
+	for _, point := range result.Series {
+		assert.Nil(t, point.Concurrency)
+	}
+
+	filtered := collector.query(900, 300, "a")
+	assert.Equal(t, int64(1), filtered.Active)
+	assert.Equal(t, int64(3), filtered.Total.Requests)
+	assert.Equal(t, 300.0, *filtered.Total.LatencyMs)
+	assert.Equal(t, 100.0, *filtered.Total.TtftMs)
+	assert.Equal(t, 65.0, *filtered.Total.Tps)
+	assert.Equal(t, int64(500), *filtered.Total.P95Ms)
+	assert.Nil(t, filtered.Total.Concurrency)
+	for _, point := range filtered.Totals {
+		assert.Nil(t, point.Concurrency)
+	}
+	finish()
+	finish() // An accidental repeated completion cannot make active negative.
+	assert.Zero(t, collector.query(900, 60, "").Active)
+}
+
+func TestLiveDashboardQuantilesUseRequestCounts(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	collector := liveCollector{now: func() time.Time { return now }, instance: "quantiles"}
+	collector.start()
+	for range 19 {
+		collector.record(Sample{Model: "small", Success: true, LatencyMs: 10})
+	}
+	now = now.Add(time.Minute)
+	collector.record(Sample{Model: "large", LatencyMs: 1000})
+	result := collector.query(3600, 300, "")
+	require.NotNil(t, result.Total.P95Ms)
+	assert.Equal(t, int64(10), *result.Total.P95Ms)
+	assert.Equal(t, 59.5, *result.Total.LatencyMs)
+	assert.Equal(t, int64(20), result.Total.Requests)
+	assert.Equal(t, int64(19), result.Total.SuccessCount)
+	assert.False(t, result.P95Limited)
+	// A zero-millisecond observed request differs from a missing measurement.
+	collector.record(Sample{Model: "zero", Success: true, LatencyMs: 0, HasTtft: true})
+	zero := collector.query(900, 60, "zero").Total
+	require.NotNil(t, zero.LatencyMs)
+	assert.Zero(t, *zero.LatencyMs)
+	require.NotNil(t, zero.TtftMs)
+	assert.Zero(t, *zero.TtftMs)
+	assert.Nil(t, zero.Tps)
+}
+
+func TestLiveDashboardBoundsAndQuietCleanup(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	collector := liveCollector{now: func() time.Time { return now }, instance: "bounded"}
+	collector.start()
+	finish := collector.begin()
+	// Each name contributes a distinct real measurement. The overflow model
+	// stays in global totals without being mislabeled as another model.
+	for i := range 33 {
+		collector.record(Sample{Model: fmt.Sprintf("model-%02d", i), Success: true, LatencyMs: int64(i)})
+	}
+	result := collector.query(900, 60, "")
+	assert.True(t, result.ModelsTruncated)
+	assert.Equal(t, int64(33), result.Total.Requests)
+	assert.Len(t, result.Summary, 32)
+	// Histograms discard only quantiles on overflow; counts and weighted
+	// averages remain available instead of silently sampling durations.
+	for i := range 1025 {
+		collector.record(Sample{Model: "model-00", LatencyMs: int64(i)})
+	}
+	result = collector.query(900, 60, "")
+	assert.True(t, result.P95Limited)
+	assert.Nil(t, result.Total.P95Ms)
+	assert.NotNil(t, result.Total.LatencyMs)
+	assert.Equal(t, int64(1058), result.Total.Requests)
+	assert.Nil(t, collector.query(900, 60, "model-00").Total.P95Ms)
+
+	// A single open stream crossing multiple days must neither leak buckets
+	// nor forget its current concurrency. Reads clean up an otherwise quiet node.
+	now = now.Add(72 * time.Hour)
+	result = collector.query(86400, 3600, "")
+	assert.False(t, result.ModelsTruncated)
+	assert.False(t, result.P95Limited)
+	assert.Zero(t, result.Total.Requests)
+	assert.Equal(t, int64(1), result.Active)
+	require.NotNil(t, result.Total.Concurrency)
+	assert.Equal(t, int64(1), *result.Total.Concurrency)
+	assert.Len(t, collector.buckets, 1440)
+	assert.Empty(t, collector.models)
+	collector.record(Sample{Model: "new-model", Success: true, LatencyMs: 1})
+	assert.Equal(t, int64(1), collector.query(900, 60, "new-model").Total.Requests)
+	finish()
+	assert.Zero(t, collector.query(900, 60, "").Active)
+}
+
+func TestLiveDashboardFinalRelayBoundary(t *testing.T) {
+	previous := liveMetrics
+	liveMetrics = &liveCollector{now: time.Now, instance: "relay-boundary"}
+	liveMetrics.start()
+	t.Cleanup(func() { liveMetrics = previous; hotBuckets.Clear() })
+	info := &relaycommon.RelayInfo{OriginModelName: "model", StartTime: time.Now().Add(-time.Second), PerformanceOutputTokens: 25}
+	RecordRelaySample(info, true, 25) // Old settlement sample is not a live result.
+	assert.Zero(t, liveMetrics.query(900, 60, "").Total.Requests)
+	RecordRelayResult(context.Background(), info, nil)
+	assert.Equal(t, int64(1), liveMetrics.query(900, 60, "").Total.Requests)
+	info.IsChannelTest = true
+	RecordRelayResult(context.Background(), info, nil)
+	assert.Equal(t, int64(1), liveMetrics.query(900, 60, "").Total.Requests)
+	info.IsChannelTest = false
+	info.PerformanceBusinessRejection = true
+	RecordRelayResult(context.Background(), info, nil)
+	assert.Equal(t, int64(1), liveMetrics.query(900, 60, "").Total.Requests)
+}
+
+func TestLiveDashboardSnapshotSurvivesCompletionsAndEviction(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC).Unix())
+	collector := liveCollector{now: func() time.Time { return time.Unix(clock.Load(), 0) }, instance: "snapshot"}
+	collector.start()
+	collector.record(Sample{Model: "a", Success: true, LatencyMs: 10})
+	clock.Add(60)
+	collector.record(Sample{Model: "b", Success: true, LatencyMs: 20})
+	snapshot := collector.snapshot(900, 60, "")
+	filtered := collector.snapshot(900, 60, "a")
+	// Start both workers from a barrier; the reader owns one sealed minute and
+	// a copy of the still-open minute. A completion must not alter either view.
+	start := make(chan struct{})
+	var readers sync.WaitGroup
+	var observed LiveDashboardResponse
+	readers.Go(func() { <-start; observed = snapshot.summarize("") })
+	readers.Go(func() { <-start; collector.record(Sample{Model: "b", LatencyMs: 900}) })
+	close(start)
+	readers.Wait()
+	assert.Equal(t, int64(2), observed.Total.Requests)
+	assert.Equal(t, int64(20), *observed.Total.P95Ms)
+	assert.Equal(t, int64(3), collector.query(900, 60, "").Total.Requests)
+	assert.Equal(t, int64(1), filtered.summarize("a").Total.Requests)
+	// Removing a sealed bucket from the retention ring cannot invalidate a
+	// reader which has already acquired that immutable snapshot.
+	clock.Add(25 * 3600)
+	assert.Zero(t, collector.query(900, 60, "").Total.Requests)
+	assert.Equal(t, int64(2), snapshot.summarize("").Total.Requests)
+	assert.Equal(t, int64(20), *snapshot.summarize("").Total.P95Ms)
+}
+
+func TestLiveDashboardQueryAdmissionReleasesCapacity(t *testing.T) {
+	previous := liveMetrics
+	liveMetrics = &liveCollector{now: time.Now, instance: "admission"}
+	liveMetrics.start()
+	t.Cleanup(func() { liveMetrics = previous })
+	// Occupied reader slots are the deterministic transport boundary here;
+	// a third request is rejected without allocating another 24-hour snapshot.
+	liveQuerySlots <- struct{}{}
+	liveQuerySlots <- struct{}{}
+	_, accepted := TryQueryLive(86400, 60, "")
+	assert.False(t, accepted)
+	<-liveQuerySlots
+	result, accepted := TryQueryLive(86400, 60, "")
+	assert.True(t, accepted)
+	assert.Equal(t, "admission", result.Instance)
+	<-liveQuerySlots
+	// The successful query released its own slot, allowing the next two readers.
+	liveQuerySlots <- struct{}{}
+	result, accepted = TryQueryLive(900, 60, "")
+	assert.True(t, accepted)
+	assert.Equal(t, "admission", result.Instance)
+	<-liveQuerySlots
 }

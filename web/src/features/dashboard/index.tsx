@@ -75,6 +75,12 @@ import type {
   UserChartsFilters,
 } from './types'
 
+const LazyCustomDashboardEditor = lazy(() =>
+  import('./custom/editor').then((module) => ({
+    default: module.CustomDashboardEditor,
+  }))
+)
+
 const route = getRouteApi('/_authenticated/dashboard/$section')
 
 const EMPTY_MODEL_DATA: QuotaDataItem[] = []
@@ -188,6 +194,7 @@ const SECTION_META: Record<DashboardSectionId, { titleKey: string }> = {
 
 export function Dashboard() {
   const { t, i18n } = useTranslation()
+  const [custom, setCustom] = useState(false)
   const navigate = useNavigate()
   const params = route.useParams()
   const userId = useAuthStore((state) => state.auth.user?.id)
@@ -237,7 +244,7 @@ export function Dashboard() {
   })
   const modelQuery = useQuery({
     queryKey: ['dashboard', 'model-analytics', userId, isAdmin, modelParams],
-    enabled: activeSection === 'models' && userId != null,
+    enabled: !custom && activeSection === 'models' && userId != null,
     staleTime: 60_000,
     queryFn: async () => {
       const response = requireServerSuccess(
@@ -363,8 +370,34 @@ export function Dashboard() {
     ) : null
   const sectionActions = modelActions ?? flowActions
 
+  if (custom && userId != null) {
+    return (
+      <SectionPageLayout className='dashboard-workbench'>
+        <SectionPageLayout.Title>{t('My dashboards')}</SectionPageLayout.Title>
+        <SectionPageLayout.Content>
+          <Suspense fallback={<ModelChartsFallback />}>
+            <LazyCustomDashboardEditor
+              userId={userId}
+              isAdmin={isAdmin}
+              onExit={() => setCustom(false)}
+            />
+          </Suspense>
+        </SectionPageLayout.Content>
+      </SectionPageLayout>
+    )
+  }
+
   if (activeSection === 'overview' || (activeSection === 'users' && !isAdmin)) {
-    return <OverviewDashboard />
+    return (
+      <div className='space-y-3'>
+        <div className='flex justify-end'>
+          <Button variant='outline' size='sm' onClick={() => setCustom(true)}>
+            {t('My dashboards')}
+          </Button>
+        </div>
+        <OverviewDashboard />
+      </div>
+    )
   }
 
   return (
@@ -386,6 +419,9 @@ export function Dashboard() {
             ) : (
               <div />
             )}
+            <Button variant='outline' size='sm' onClick={() => setCustom(true)}>
+              {t('My dashboards')}
+            </Button>
             {sectionActions != null && (
               <div className='flex shrink-0 flex-wrap items-center gap-1.5 sm:gap-2'>
                 {sectionActions}

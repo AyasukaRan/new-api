@@ -39,6 +39,11 @@ func joinPaths(absolutePath, relativePath string) string {
 }
 
 func registerChannelRoutes(apiRouter *gin.RouterGroup) {
+	accounts := apiRouter.Group("/sub2api/accounts", middleware.AdminAuth(), middleware.DisableCache())
+	handlePermissionRoute(accounts, http.MethodGet, "", authz.ChannelRead, controller.GetSub2APIAccounts)
+	for _, action := range []string{"login", "login/2fa", "import", "refresh", "disconnect"} {
+		handlePermissionRoute(accounts, http.MethodPost, "/"+action, authz.ChannelSensitiveWrite, middleware.CriticalRateLimit(), controller.ManageSub2APIAccounts)
+	}
 	channelRoute := apiRouter.Group("/channel")
 	channelRoute.Use(middleware.AdminAuth())
 
@@ -60,6 +65,8 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodPost, path: "/:id/sub2api/attach", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
+	{method: http.MethodPost, path: "/:id/sub2api/detach", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
 	{method: http.MethodGet, path: "/:id/sub2api", permission: authz.ChannelRead, handler: controller.GetSub2APIChannel},
 	{method: http.MethodPost, path: "/:id/sub2api/login", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
 	{method: http.MethodPost, path: "/:id/sub2api/login/2fa", permission: authz.ChannelSensitiveWrite, handler: controller.ManageSub2APIChannel},
