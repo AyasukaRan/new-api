@@ -19,6 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Enter a valid proxy URL without a path, query, or fragment.',
+  'The Sub2API connection timed out.',
+  'The Sub2API server address could not be resolved.',
+  'The Sub2API TLS connection could not be verified.',
+  'The Sub2API server could not be reached.',
+  'The Sub2API server returned an error.',
   'Thinking replay mismatch',
   'Unsupported image format',
   'Resource fetch failed',

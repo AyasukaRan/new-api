@@ -47,3 +47,65 @@ export const sub2APITotpSchema = z.object({
     .trim()
     .regex(/^\d{6}$/, 'Enter a 6-digit code'),
 })
+
+export const sub2APIProxySchema = z
+  .object({
+    proxy: z.string().default(''),
+    proxy_username: z.string().default(''),
+    proxy_password: z.string().default(''),
+  })
+  .transform((fields, context) => {
+    try {
+      const raw = fields.proxy.trim()
+      if (!raw && !fields.proxy_username && !fields.proxy_password) {
+        return { address: '', username: '', password: '', url: '' }
+      }
+      if (
+        /\p{Cc}/u.test(fields.proxy) ||
+        /[\\?#]/.test(raw) ||
+        !raw.includes('://')
+      ) {
+        throw new Error()
+      }
+      const parsed = new URL(raw)
+      if (
+        !['http:', 'https:', 'socks5:', 'socks5h:'].includes(parsed.protocol) ||
+        !parsed.hostname ||
+        parsed.port === '0' ||
+        (parsed.pathname !== '' && parsed.pathname !== '/') ||
+        parsed.search ||
+        parsed.hash
+      ) {
+        throw new Error()
+      }
+      const embeddedCredentials = Boolean(parsed.username || parsed.password)
+      const username = embeddedCredentials
+        ? decodeURIComponent(parsed.username)
+        : fields.proxy_username
+      const password = embeddedCredentials
+        ? decodeURIComponent(parsed.password)
+        : fields.proxy_password
+      if (/\p{Cc}/u.test(username + password)) {
+        throw new Error()
+      }
+      const address = `${parsed.protocol}//${parsed.host}`
+      let credentials = ''
+      if (username || password) {
+        credentials = encodeURIComponent(username)
+        if (password) credentials += `:${encodeURIComponent(password)}`
+        credentials += '@'
+      }
+      return {
+        address,
+        username,
+        password,
+        url: `${parsed.protocol}//${credentials}${parsed.host}`,
+      }
+    } catch {
+      context.addIssue({
+        code: 'custom',
+        message: 'Enter a valid proxy URL without a path, query, or fragment.',
+      })
+      return z.NEVER
+    }
+  })

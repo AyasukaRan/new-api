@@ -14,8 +14,10 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -41,6 +43,41 @@ import (
 
 const sub2APITestKey = "sk-sub2api-fixture-one"
 const sub2APITestOtherKey = "sk-sub2api-fixture-two"
+
+func TestSub2APISafeRequestFailures(t *testing.T) {
+	const secret = "fixture-private-credential"
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"timeout", fmt.Errorf("%s: %w", secret, context.DeadlineExceeded), "SUB2API_TIMEOUT"},
+		{"DNS", &net.DNSError{Err: secret, Name: secret + ".invalid"}, "SUB2API_DNS_FAILED"},
+		{"DNS timeout", &net.DNSError{Err: secret, Name: secret + ".invalid", IsTimeout: true}, "SUB2API_TIMEOUT"},
+		{"certificate", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, "SUB2API_TLS_FAILED"},
+		{"TLS record", tls.RecordHeaderError{Msg: secret}, "SUB2API_TLS_FAILED"},
+		{"network", fmt.Errorf("%s: %w", secret, io.EOF), "SUB2API_NETWORK_FAILED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failure := service.NewSub2APITransportError(&url.Error{Op: "Get", URL: "https://" + secret + ".invalid/private", Err: tc.err})
+			assert.Equal(t, tc.code, failure.Code)
+			assert.Equal(t, tc.code, failure.Error())
+			assert.Zero(t, failure.Status)
+			failure.Stage = "auth_me"
+			response := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(response)
+			fields := sub2APIManagementError(c, failure)
+			assert.Equal(t, http.StatusBadRequest, response.Code)
+			assert.Equal(t, "failure", fields["outcome"])
+			assert.Equal(t, "auth_me", fields["error_stage"])
+			assert.NotContains(t, fields, "upstream_status")
+			encoded, err := common.Marshal(fields)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded)+response.Body.String(), secret)
+			assert.NotContains(t, response.Body.String(), "https://")
+		})
+	}
+}
 
 func TestSub2APIEncryptionKeyWithoutPasswordLogin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -234,7 +271,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			identity, err := service.ParseAccessToken(bundle.AccessToken)
 			require.NoError(t, err)
 
-			var refreshes, completions, redirectHits atomic.Int32
+			var refreshes, completions, redirectHits, identityStatus, identityRequests atomic.Int32
 			var redirectMode, incompleteRate, ledgerFailure, refreshFailure, blockKeys, blockRefresh atomic.Bool
 			keysEntered, keysRelease := make(chan struct{}, 1), make(chan struct{})
 			refreshEntered, refreshRelease := make(chan struct{}, 1), make(chan struct{})
@@ -268,6 +305,12 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 					assert.Equal(t, "123456", input["totp_code"])
 					respond(service.Sub2APICredential{AccessToken: "fixture-access", RefreshToken: "fixture-refresh", ExpiresIn: 3600})
 				case "/api/v1/auth/me":
+					identityRequests.Add(1)
+					if status := identityStatus.Load(); status != 0 {
+						w.WriteHeader(int(status))
+						_, _ = w.Write([]byte(`{"error":"fixture-private-upstream-body"}`))
+						return
+					}
 					if redirectMode.Load() {
 						http.Redirect(w, r, server.URL+"/redirect-target", http.StatusFound)
 						return
@@ -625,6 +668,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			http.DefaultTransport = untrusted
 			err = service.Sub2APIAccountRequest(ctx, account.ID, http.MethodGet, "/api/v1/auth/me", nil, nil, &result)
 			require.Error(t, err)
+			assert.Equal(t, "SUB2API_TLS_FAILED", service.Sub2APIErrorCode(err))
 			http.DefaultTransport = transport
 			untrusted.CloseIdleConnections()
 			changed := server.URL + "/different-origin-path"
@@ -739,6 +783,44 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 				assert.NotContains(t, replayed.Body.String(), `"success":true`)
 				noProof := sub2APITestRequest(t, identity, 0, "import", input, "")
 				assert.NotContains(t, noProof.Body.String(), `"success":true`)
+				t.Run("failed imports retain safe upstream diagnostics and failed audit status", func(t *testing.T) {
+					t.Cleanup(func() { identityStatus.Store(0) })
+					for _, tc := range []struct {
+						status int32
+						code   string
+					}{{401, "SUB2API_LOGIN_REQUIRED"}, {403, "SUB2API_ACCESS_DENIED"}, {404, "SUB2API_UNSUPPORTED"}, {429, "SUB2API_RATE_LIMITED"}, {503, "SUB2API_UPSTREAM_ERROR"}} {
+						identityStatus.Store(tc.status)
+						proof := issueSecurityEnrollmentProof(t, identity, globalTarget, service.VerificationMethodPassword)
+						failed := sub2APITestRequest(t, identity, 0, "import", input, proof)
+						assert.Equal(t, http.StatusBadRequest, failed.Code)
+						var payload map[string]any
+						require.NoError(t, common.Unmarshal(failed.Body.Bytes(), &payload))
+						assert.Equal(t, tc.code, payload["code"])
+						assert.Equal(t, "auth_me", payload["error_stage"])
+						assert.EqualValues(t, tc.status, payload["upstream_status"])
+						assert.NotContains(t, failed.Body.String(), "fixture-private-upstream-body")
+						var audit model.AuditLog
+						require.NoError(t, model.LOG_DB.Where("route = ?", "/sub2api/accounts/import").Order("id DESC").First(&audit).Error)
+						assert.Equal(t, http.StatusBadRequest, audit.Status)
+						assert.False(t, audit.Success)
+						serialized, marshalErr := common.Marshal(audit.Other)
+						require.NoError(t, marshalErr)
+						assert.Contains(t, string(serialized), tc.code)
+						assert.Contains(t, string(serialized), `"error_stage":"auth_me"`)
+						assert.NotContains(t, string(serialized), "fixture-private-upstream-body")
+						assert.NotContains(t, string(serialized), credential.AccessToken)
+					}
+					for _, token := range []string{"invalid\ncredential", "invalid credential", "invalid\tcredential"} {
+						before := identityRequests.Load()
+						_, importErr := service.ImportIndependentSub2API(ctx, operation, "", service.Sub2APICredential{AccessToken: token}, authorizeShared(operation))
+						assert.Equal(t, "SUB2API_CREDENTIAL_INVALID", service.Sub2APIErrorCode(importErr))
+						assert.Equal(t, before, identityRequests.Load(), "invalid header values must never reach upstream")
+					}
+					before := identityRequests.Load()
+					_, importErr := service.ImportIndependentSub2API(ctx, operation, "", service.Sub2APICredential{AccessToken: "opaque+=-_/credential"}, authorizeShared(operation))
+					assert.Equal(t, "SUB2API_UPSTREAM_ERROR", service.Sub2APIErrorCode(importErr))
+					assert.Equal(t, before+1, identityRequests.Load(), "opaque token punctuation remains accepted")
+				})
 				// Global MFA remains session-bound, expires, and never returns the temporary token.
 				loginOperation := sharedOperation("login", upgraded.AccountID, "")
 				loginOperation.Email = loginInput.Email

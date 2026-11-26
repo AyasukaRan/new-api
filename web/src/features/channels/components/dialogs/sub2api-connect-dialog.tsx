@@ -37,6 +37,7 @@ import type { PluginLoginField, PluginLoginInput } from '../../lib/plugin-login'
 import {
   sub2APIImportSchema,
   sub2APILoginSchema,
+  sub2APIProxySchema,
   sub2APITotpSchema,
 } from '../../lib/sub2api-login'
 import {
@@ -68,6 +69,7 @@ export function Sub2APIConnectDialog(props: {
   const [nonSensitiveFields, setNonSensitiveFields] = useState({
     origin: '',
     email: '',
+    proxy: '',
   })
   const mutation = useMutation({
     mutationFn: (request: {
@@ -106,6 +108,7 @@ export function Sub2APIConnectDialog(props: {
       setNonSensitiveFields({
         origin: '',
         email: input.fields.email ?? '',
+        proxy: '',
       })
     }
     setBusy(true)
@@ -141,11 +144,19 @@ export function Sub2APIConnectDialog(props: {
           ) {
             throw new Error(t('Enter a valid HTTPS site URL.'))
           }
-          setNonSensitiveFields({ origin, email: input.fields.email ?? '' })
-          if (input.fields.proxy?.trim()) {
-            const encryptedProxy = await encryptChannelCredential(
-              input.fields.proxy.trim()
-            )
+          setNonSensitiveFields({
+            origin,
+            email: input.fields.email ?? '',
+            proxy: '',
+          })
+          const proxy = sub2APIProxySchema.parse(input.fields)
+          setNonSensitiveFields({
+            origin,
+            email: input.fields.email ?? '',
+            proxy: proxy.address,
+          })
+          if (proxy.url) {
+            const encryptedProxy = await encryptChannelCredential(proxy.url)
             proxyEncrypted = encryptedProxy.password_encrypted
             proxyKeyId = encryptedProxy.encryption_key_id
           }
@@ -295,8 +306,21 @@ export function Sub2APIConnectDialog(props: {
       {
         name: 'proxy',
         label: t('Proxy Address'),
+        type: 'text',
+        placeholder: 'http://192.168.1.2:7890',
+        description: t(
+          'HTTP, HTTPS, SOCKS5 or SOCKS5H. Leave empty for a direct connection.'
+        ),
+      },
+      {
+        name: 'proxy_username',
+        label: t('Proxy username'),
+        type: 'text',
+      },
+      {
+        name: 'proxy_password',
+        label: t('Proxy password'),
         type: 'password',
-        description: t('Leave empty for a direct connection.'),
       },
       ...fields,
     ]
@@ -368,6 +392,21 @@ export function Sub2APIConnectDialog(props: {
               key={formVersion}
               fields={fields}
               defaultValues={nonSensitiveFields}
+              halfWidthFields={
+                !challenge && !props.account
+                  ? ['proxy_username', 'proxy_password']
+                  : undefined
+              }
+              onFieldBlur={(name, values) => {
+                if (name !== 'proxy') return
+                const result = sub2APIProxySchema.safeParse(values)
+                if (!result.success) return
+                return {
+                  proxy: result.data.address,
+                  proxy_username: result.data.username,
+                  proxy_password: result.data.password,
+                }
+              }}
               formId={formId}
               disabled={false}
               onSubmit={(input) => void submit(input)}

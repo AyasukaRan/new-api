@@ -38,7 +38,10 @@ import { api } from '@/lib/api'
 import { AuthOperationError } from '@/lib/secure-verification'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { sub2APIImportSchema } from '../../lib/sub2api-login'
+import {
+  sub2APIImportSchema,
+  sub2APIProxySchema,
+} from '../../lib/sub2api-login'
 import type { Sub2APIStatus } from '../../sub2api-api'
 import { Sub2APIAccountsDialog } from '../dialogs/sub2api-accounts-dialog'
 import { Sub2APISettings } from '../sub2api-settings'
@@ -376,7 +379,7 @@ test('token import rejects multiple tokens and embedded request headers', () => 
   }
 })
 
-test('failed token import preserves the site but clears credentials and proxy', async () => {
+test('failed token import preserves safe addresses but clears all credentials', async () => {
   const user = userEvent.setup()
   serveActions(() => {
     throw new AuthOperationError(
@@ -394,6 +397,8 @@ test('failed token import preserves the site but clears credentials and proxy', 
     screen.getByLabelText(/Proxy Address/),
     'http://proxy.example:8080'
   )
+  await user.type(screen.getByLabelText('Proxy username'), 'proxy-user')
+  await user.type(screen.getByLabelText('Proxy password'), 'proxy-secret')
   await user.type(screen.getByLabelText(/Access token/), 'upstream-access')
   await user.type(screen.getByLabelText(/Refresh token/), 'upstream-refresh')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
@@ -405,7 +410,11 @@ test('failed token import preserves the site but clears credentials and proxy', 
   )
   expect(screen.getByLabelText(/Access token/)).toHaveValue('')
   expect(screen.getByLabelText(/Refresh token/)).toHaveValue('')
-  expect(screen.getByLabelText(/Proxy Address/)).toHaveValue('')
+  expect(screen.getByLabelText(/Proxy Address/)).toHaveValue(
+    'http://proxy.example:8080'
+  )
+  expect(screen.getByLabelText('Proxy username')).toHaveValue('')
+  expect(screen.getByLabelText('Proxy password')).toHaveValue('')
 })
 
 test.each([
@@ -838,6 +847,17 @@ test('a new independent login binds its encrypted proxy to proof before any chan
     screen.getByLabelText(/Proxy Address/),
     'socks5://proxy-user:proxy-secret@proxy.example:1080'
   )
+  await user.tab()
+  expect(screen.getByLabelText(/Proxy Address/)).toHaveProperty('type', 'text')
+  expect(screen.getByLabelText(/Proxy Address/)).toHaveValue(
+    'socks5://proxy.example:1080'
+  )
+  expect(screen.getByLabelText('Proxy username')).toHaveValue('proxy-user')
+  expect(screen.getByLabelText('Proxy password')).toHaveValue('proxy-secret')
+  expect(screen.getByLabelText('Proxy password')).toHaveAttribute(
+    'type',
+    'password'
+  )
   await user.type(screen.getByLabelText(/Email/), 'owner@example.com')
   await user.type(screen.getByLabelText(/Password/), 'upstream-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
@@ -998,4 +1018,46 @@ test('accounts manager requires channel credential permission before accepting s
   ).toBeDisabled()
   expect(screen.getByRole('button', { name: 'Import tokens' })).toBeDisabled()
   expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
+})
+
+test('separate proxy credentials are encoded once for all supported protocols', () => {
+  for (const protocol of ['http', 'https', 'socks5', 'socks5h']) {
+    const result = sub2APIProxySchema.parse({
+      proxy: `${protocol}://proxy.example:1080`,
+      proxy_username: 'proxy@user',
+      proxy_password: 'p:a%ss/?#',
+    })
+    expect(result.address).toBe(`${protocol}://proxy.example:1080`)
+    expect(result.url).toBe(
+      `${protocol}://proxy%40user:p%3Aa%25ss%2F%3F%23@proxy.example:1080`
+    )
+  }
+})
+
+test('invalid or ambiguous proxy addresses cannot reach credential encryption', () => {
+  for (const proxy of [
+    'ftp://proxy.example:21',
+    'http://proxy.example:8080/path',
+    'http://proxy.example:8080?token=secret',
+    'http://proxy.example:8080#fragment',
+    'http://proxy.example:0',
+    'http://proxy.example:8080\r\nInjected: value',
+    'http://bad%zz:secret@proxy.example:8080',
+  ]) {
+    expect(sub2APIProxySchema.safeParse({ proxy }).success).toBe(false)
+  }
+  expect(
+    sub2APIProxySchema.safeParse({ proxy: '', proxy_password: 'secret' })
+      .success
+  ).toBe(false)
+  expect(
+    sub2APIProxySchema.parse({ proxy: 'http://:secret@proxy.example:8080' }).url
+  ).toBe('http://:secret@proxy.example:8080')
+  expect(
+    sub2APIProxySchema.parse({
+      proxy: 'http://proxy.example:8080',
+      proxy_password: 'secret',
+    }).url
+  ).toBe('http://:secret@proxy.example:8080')
+  expect(sub2APIProxySchema.parse({ proxy: '' }).url).toBe('')
 })

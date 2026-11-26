@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -35,6 +37,7 @@ const sub2APIUserAgent = "new-api/Sub2API-account"
 type Sub2APIError struct {
 	Code   string
 	Status int
+	Stage  string
 }
 
 func (e *Sub2APIError) Error() string { return e.Code }
@@ -47,6 +50,29 @@ func Sub2APIErrorCode(err error) string {
 		return upstream.Code
 	}
 	return "SUB2API_SYNC_FAILED"
+}
+
+// NewSub2APITransportError classifies a connection failure without retaining
+// its message, URL, certificate contents or authentication material.
+func NewSub2APITransportError(err error) *Sub2APIError {
+	code := "SUB2API_NETWORK_FAILED"
+	var network net.Error
+	var dns *net.DNSError
+	var certificate *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var record tls.RecordHeaderError
+	var alert tls.AlertError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &network) && network.Timeout():
+		code = "SUB2API_TIMEOUT"
+	case errors.As(err, &dns):
+		code = "SUB2API_DNS_FAILED"
+	case errors.As(err, &certificate), errors.As(err, &authority), errors.As(err, &hostname), errors.As(err, &invalid), errors.As(err, &record), errors.As(err, &alert):
+		code = "SUB2API_TLS_FAILED"
+	}
+	return &Sub2APIError{Code: code}
 }
 
 type Sub2APICredential struct {
@@ -209,12 +235,40 @@ func sameSub2APIOrigin(left, right string) bool {
 	return leftErr == nil && rightErr == nil && leftOrigin == rightOrigin
 }
 
-func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path string, query url.Values, payload, result any, rawResponse bool) error {
+func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path string, query url.Values, payload, result any, rawResponse bool) (requestErr error) {
+	stage := "upstream_request"
+	switch path {
+	case "/api/v1/auth/me":
+		stage = "auth_me"
+	case "/api/v1/auth/login":
+		stage = "login"
+	case "/api/v1/auth/login/2fa":
+		stage = "login_2fa"
+	case "/api/v1/auth/refresh":
+		stage = "refresh"
+	case "/api/v1/auth/logout":
+		stage = "logout"
+	case "/api/v1/keys":
+		stage = "keys"
+	case "/api/v1/usage":
+		stage = "usage"
+	case "/v1/sub2api/billing":
+		stage = "billing"
+	}
+	defer func() {
+		var failure *Sub2APIError
+		if errors.As(requestErr, &failure) {
+			failure.Stage = stage
+		}
+	}()
 	if !strings.HasPrefix(path, "/api/v1/") && path != "/v1/sub2api/billing" {
 		return sub2APIError("SUB2API_PATH_INVALID")
 	}
 	if strings.ContainsAny(path, "?#\\") || strings.Contains(path, "..") {
 		return sub2APIError("SUB2API_PATH_INVALID")
+	}
+	if strings.ContainsFunc(token, func(char rune) bool { return unicode.IsControl(char) || unicode.IsSpace(char) }) {
+		return sub2APIError("SUB2API_CREDENTIAL_INVALID")
 	}
 	target := origin + path
 	if len(query) > 0 {
@@ -265,15 +319,12 @@ func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path stri
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(request)
 	if err != nil {
-		return sub2APIError("SUB2API_REQUEST_FAILED")
+		return NewSub2APITransportError(err)
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
-	if err != nil || len(data) > 4<<20 {
-		return sub2APIError("SUB2API_RESPONSE_INVALID")
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		code := "SUB2API_REQUEST_FAILED"
+		code := "SUB2API_UPSTREAM_ERROR"
 		switch response.StatusCode {
 		case http.StatusUnauthorized:
 			code = "SUB2API_LOGIN_REQUIRED"
@@ -288,14 +339,22 @@ func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path stri
 		var failure struct {
 			Reason string `json:"reason"`
 		}
-		if common.Unmarshal(data, &failure) == nil && (strings.Contains(failure.Reason, "CAPTCHA") || strings.Contains(failure.Reason, "TURNSTILE")) {
+		if err == nil && len(data) <= 4<<20 && common.Unmarshal(data, &failure) == nil && (strings.Contains(failure.Reason, "CAPTCHA") || strings.Contains(failure.Reason, "TURNSTILE")) {
 			code = "SUB2API_CAPTCHA_REQUIRED"
 		}
 		return &Sub2APIError{Code: code, Status: response.StatusCode}
 	}
+	if err != nil {
+		failure := NewSub2APITransportError(err)
+		failure.Status = response.StatusCode
+		return failure
+	}
+	if len(data) > 4<<20 {
+		return &Sub2APIError{Code: "SUB2API_RESPONSE_INVALID", Status: response.StatusCode}
+	}
 	if rawResponse {
 		if common.Unmarshal(data, result) != nil {
-			return sub2APIError("SUB2API_RESPONSE_INVALID")
+			return &Sub2APIError{Code: "SUB2API_RESPONSE_INVALID", Status: response.StatusCode}
 		}
 		return nil
 	}
@@ -304,10 +363,10 @@ func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path stri
 		Data json.RawMessage `json:"data"`
 	}
 	if common.Unmarshal(data, &envelope) != nil || envelope.Code != 0 || len(envelope.Data) == 0 {
-		return sub2APIError("SUB2API_RESPONSE_INVALID")
+		return &Sub2APIError{Code: "SUB2API_RESPONSE_INVALID", Status: response.StatusCode}
 	}
 	if result != nil && common.Unmarshal(envelope.Data, result) != nil {
-		return sub2APIError("SUB2API_RESPONSE_INVALID")
+		return &Sub2APIError{Code: "SUB2API_RESPONSE_INVALID", Status: response.StatusCode}
 	}
 	return nil
 }

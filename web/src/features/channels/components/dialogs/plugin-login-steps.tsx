@@ -40,6 +40,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { isHttpUrl } from '@/lib/content-format'
 import { formatTimestampToDate } from '@/lib/format'
 import { resolveLocalizedText } from '@/lib/localized-text'
+import { cn } from '@/lib/utils'
 
 import {
   pluginLoginFieldsSchema,
@@ -256,6 +257,11 @@ export function DeviceStep(props: {
 export function FieldsStep(props: {
   fields: PluginLoginField[]
   defaultValues?: Record<string, string>
+  halfWidthFields?: readonly string[]
+  onFieldBlur?: (
+    name: string,
+    values: Record<string, string>
+  ) => Record<string, string> | undefined
   formId: string
   disabled: boolean
   onSubmit: (input: PluginLoginInput) => void
@@ -275,7 +281,10 @@ export function FieldsStep(props: {
     <Form {...form}>
       <form
         id={props.formId}
-        className='flex flex-col gap-4'
+        className={cn(
+          'gap-4',
+          props.halfWidthFields ? 'grid grid-cols-2' : 'flex flex-col'
+        )}
         onSubmit={form.handleSubmit((values) =>
           props.onSubmit({ fields: values })
         )}
@@ -289,11 +298,24 @@ export function FieldsStep(props: {
               const placeholder =
                 resolveLocalizedText(field.placeholder, language) || undefined
               // Values are credentials: no autofill, no spellcheck service.
+              const controlProps = {
+                ...input,
+                onBlur: () => {
+                  input.onBlur()
+                  const updates = props.onFieldBlur?.(
+                    field.name,
+                    form.getValues()
+                  )
+                  for (const [name, value] of Object.entries(updates ?? {})) {
+                    form.setValue(name, value, { shouldDirty: true })
+                  }
+                },
+              }
               let control: ReactElement
               if (field.type === 'password') {
                 control = (
                   <PasswordInput
-                    {...input}
+                    {...controlProps}
                     placeholder={placeholder}
                     disabled={props.disabled}
                     autoComplete='new-password'
@@ -303,7 +325,7 @@ export function FieldsStep(props: {
               } else if (field.type === 'textarea') {
                 control = (
                   <Textarea
-                    {...input}
+                    {...controlProps}
                     rows={5}
                     placeholder={placeholder}
                     disabled={props.disabled}
@@ -315,7 +337,7 @@ export function FieldsStep(props: {
               } else {
                 control = (
                   <Input
-                    {...input}
+                    {...controlProps}
                     placeholder={placeholder}
                     disabled={props.disabled}
                     autoComplete='off'
@@ -324,7 +346,14 @@ export function FieldsStep(props: {
                 )
               }
               return (
-                <FormItem>
+                <FormItem
+                  className={cn(
+                    'min-w-0',
+                    props.halfWidthFields &&
+                      !props.halfWidthFields.includes(field.name) &&
+                      'col-span-2'
+                  )}
+                >
                   <FormLabel required={field.required}>
                     {resolveLocalizedText(field.label, language) || field.name}
                   </FormLabel>

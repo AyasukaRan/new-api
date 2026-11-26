@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -42,9 +44,30 @@ func GetSub2APIEncryptionKey(c *gin.Context) {
 }
 
 // Message keys are fixed rather than copied from untrusted upstream errors.
-func sub2APIManagementError(c *gin.Context, err error) {
+func sub2APIManagementError(c *gin.Context, err error) map[string]any {
 	code := service.Sub2APIErrorCode(err)
-	c.JSON(http.StatusBadRequest, gin.H{"success": false, "code": code, "message": sub2APIErrorMessage(code)})
+	body := gin.H{"success": false, "code": code, "message": sub2APIErrorMessage(code)}
+	audit := map[string]any{"outcome": "failure", "error_code": code}
+	var upstream *service.Sub2APIError
+	if errors.As(err, &upstream) {
+		if upstream.Stage != "" {
+			body["error_stage"], audit["error_stage"] = upstream.Stage, upstream.Stage
+		}
+		if upstream.Status >= 100 && upstream.Status <= 599 {
+			body["upstream_status"], audit["upstream_status"] = upstream.Status, upstream.Status
+		}
+	}
+	c.JSON(http.StatusBadRequest, body)
+	return audit
+}
+
+func recordSub2APIFailure(c *gin.Context, fields map[string]any) {
+	auditInfo := &model.AuditRequestInfo{
+		Method: c.Request.Method, Route: c.FullPath(), Path: c.FullPath(),
+		Status: c.Writer.Status(), Success: false,
+	}
+	model.RecordOperationAuditLog(c.GetInt("id"), c.GetInt("role"), auditContentEN("channel.update", fields), c.ClientIP(), "channel.update", fields, auditOperatorInfo(c), auditInfo, c)
+	markAuditLogged(c)
 }
 
 func sub2APIErrorMessage(code string) string {
@@ -68,6 +91,11 @@ func sub2APIErrorMessage(code string) string {
 		"SUB2API_2FA_INVALID":            "Enter the six-digit Sub2API verification code.",
 		"SUB2API_ACCOUNT_NOT_FOUND":      "The Sub2API account was not found.",
 		"SUB2API_RESPONSE_INVALID":       "The Sub2API response is incomplete or invalid.",
+		"SUB2API_TIMEOUT":                "The Sub2API connection timed out.",
+		"SUB2API_DNS_FAILED":             "The Sub2API server address could not be resolved.",
+		"SUB2API_TLS_FAILED":             "The Sub2API TLS connection could not be verified.",
+		"SUB2API_NETWORK_FAILED":         "The Sub2API server could not be reached.",
+		"SUB2API_UPSTREAM_ERROR":         "The Sub2API server returned an error.",
 		"SUB2API_KEY_NOT_BOUND":          "Connect the account that owns this key before syncing bills.",
 		"SUB2API_ACCOUNT_CONFLICT":       "This Sub2API account already has an independent connection.",
 		"SUB2API_ACCOUNT_LINKED":         "Detach this account from its channels before disconnecting.",
@@ -264,8 +292,9 @@ func ManageSub2APIChannel(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		sub2APIManagementError(c, err)
-		recordManageAudit(c, "channel.update", map[string]any{"id": channelID, "source": "sub2api", "action": action, "account_id": input.AccountID, "outcome": "failure", "error_code": service.Sub2APIErrorCode(err)})
+		fields := sub2APIManagementError(c, err)
+		maps.Copy(fields, map[string]any{"id": channelID, "source": "sub2api", "action": action, "account_id": input.AccountID})
+		recordSub2APIFailure(c, fields)
 		return
 	}
 	recordManageAudit(c, "channel.update", map[string]any{"id": channelID, "source": "sub2api", "action": action, "account_id": input.AccountID, "changed_fields": []string{"sub2api_account"}})
@@ -438,9 +467,8 @@ func ManageSub2APIAccounts(c *gin.Context) {
 	}
 	fields := map[string]any{"source": "sub2api_account", "action": action, "account_id": input.AccountID}
 	if err != nil {
-		fields["outcome"], fields["error_code"] = "failure", service.Sub2APIErrorCode(err)
-		recordManageAudit(c, "channel.update", fields)
-		sub2APIManagementError(c, err)
+		maps.Copy(fields, sub2APIManagementError(c, err))
+		recordSub2APIFailure(c, fields)
 		return
 	}
 	fields["changed_fields"] = []string{"sub2api_account"}
