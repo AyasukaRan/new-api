@@ -174,22 +174,27 @@ function OriginMapCanvas(props: {
     let delta = event.deltaY
     if (event.deltaMode === 1) delta *= 16
     if (event.deltaMode === 2) delta *= bounds.height
-    setManualView((previous) =>
-      zoomRequestOriginViewport(
-        previous ?? viewport,
+    setManualView((previous) => {
+      const current = previous ?? viewport
+      const unitsPerPixel = Math.max(
+        current.width / bounds.width,
+        current.height / bounds.height
+      )
+      const offsetX = (bounds.width - current.width / unitsPerPixel) / 2
+      const offsetY = (bounds.height - current.height / unitsPerPixel) / 2
+      return zoomRequestOriginViewport(
+        current,
         Math.exp(Math.max(-240, Math.min(240, delta)) * 0.002),
         {
-          x: Math.max(
-            0,
-            Math.min(1, (event.clientX - bounds.left) / bounds.width)
-          ),
-          y: Math.max(
-            0,
-            Math.min(1, (event.clientY - bounds.top) / bounds.height)
-          ),
+          x:
+            ((event.clientX - bounds.left - offsetX) * unitsPerPixel) /
+            current.width,
+          y:
+            ((event.clientY - bounds.top - offsetY) * unitsPerPixel) /
+            current.height,
         }
       )
-    )
+    })
   })
   useEffect(() => {
     const element = canvas.current

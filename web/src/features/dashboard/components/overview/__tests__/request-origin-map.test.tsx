@@ -498,6 +498,53 @@ it('zooms around the wheel pointer, pans by dragging, and supports keyboard rese
   expect(map).toHaveAttribute('data-origin-map-view', 'auto')
 })
 
+it('keeps the geographic wheel anchor after a manual view is resized into a wider canvas', async () => {
+  const measure = vi
+    .spyOn(SVGElement.prototype, 'getBoundingClientRect')
+    .mockReturnValue({
+      width: 1000,
+      height: 500,
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1000,
+      bottom: 500,
+      toJSON: () => ({}),
+    })
+  mockOrigins({ ...snapshot, points: [beijing] })
+  renderMap({ params: { start_timestamp: 50, end_timestamp: 200 } })
+  const map = await screen.findByRole('group', {
+    name: 'Request origin China map',
+  })
+  await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+  const before = (map.getAttribute('viewBox') ?? '').split(' ').map(Number)
+  measure.mockReturnValue({
+    width: 1600,
+    height: 680,
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 1600,
+    bottom: 680,
+    toJSON: () => ({}),
+  })
+  // The stored 2:1 view now has 120px of horizontal letterboxing on each side.
+  const anchorX = (1200 - 120) / 1360
+  const anchorY = 170 / 680
+  fireEvent.wheel(map, { deltaY: -100, clientX: 1200, clientY: 170 })
+  const after = (map.getAttribute('viewBox') ?? '').split(' ').map(Number)
+  expect(after[0] + after[2] * anchorX).toBeCloseTo(
+    before[0] + before[2] * anchorX,
+    8
+  )
+  expect(after[1] + after[3] * anchorY).toBeCloseTo(
+    before[1] + before[3] * anchorY,
+    8
+  )
+})
+
 it('allows zooming out from the domestic view to the entire world', async () => {
   mockOrigins({ ...snapshot, points: [beijing] })
   renderMap({ params: { start_timestamp: 50, end_timestamp: 200 } })
