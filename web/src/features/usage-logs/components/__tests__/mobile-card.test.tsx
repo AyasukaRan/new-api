@@ -142,6 +142,28 @@ function renderLogs(
   })
 }
 
+it('marks the active mobile request Processing without displaying final usage or cost', () => {
+  const active = { ...log, type: 0, in_progress: true }
+  renderLogs({ logs: [active] })
+  expect(screen.getByText('Processing...')).toBeVisible()
+  expect(
+    screen.getByRole('button', { name: `Model: ${longName}` })
+  ).toBeVisible()
+  expect(
+    screen.getByRole('button', { name: 'Token: backend-production-token' })
+  ).toBeVisible()
+  expect(
+    screen.getByRole('term', { name: 'Total input tokens' }).nextElementSibling
+  ).toHaveTextContent('—')
+  expect(screen.queryByText('Consume')).not.toBeInTheDocument()
+  expect(screen.queryByText('1,700')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', {
+      name: /Token Breakdown|Billing Details|Cost breakdown|Details · #1/,
+    })
+  ).not.toBeInTheDocument()
+})
+
 it('keeps the selected personal request open from Details when a newer request arrives with the event column hidden', async () => {
   const user = userEvent.setup()
   const clipboard = vi
@@ -278,9 +300,15 @@ it.each([false, true])(
 
 it('hides sensitive names and disables full-text inspection when privacy is enabled', async () => {
   const user = userEvent.setup()
-  renderLogs()
+  renderLogs({ logs: [{ ...log, user_admin_nickname: 'Operations' }] })
+  expect(screen.getByText('Operations')).toBeVisible()
+  expect(
+    screen.queryByText('Operations · production-admin')
+  ).not.toBeInTheDocument()
   await user.click(screen.getByRole('button', { name: 'Hide sensitive data' }))
   expect(screen.queryByText('production-admin')).not.toBeInTheDocument()
+  expect(screen.queryByText('Operations')).not.toBeInTheDocument()
+  expect(screen.queryByTitle('production-admin')).not.toBeInTheDocument()
   expect(
     screen.queryByRole('button', { name: /Channel:/ })
   ).not.toBeInTheDocument()
@@ -576,10 +604,10 @@ it('summarizes a failed stream while keeping timing, retry-stop explanation, and
     screen.queryByText('Upstream temporarily unavailable')
   ).not.toBeInTheDocument()
   expect(
-    screen.getByText(
+    screen.queryByText(
       'Response content has already been sent; retrying could duplicate output'
     )
-  ).toBeVisible()
+  ).not.toBeInTheDocument()
 
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: /Details · #1/ }))
@@ -589,5 +617,10 @@ it('summarizes a failed stream while keeping timing, retry-stop explanation, and
   )
   expect(
     within(dialog).getByText('Upstream temporarily unavailable')
+  ).toBeVisible()
+  expect(
+    within(dialog).getByText(
+      'Response content has already been sent; retrying could duplicate output'
+    )
   ).toBeVisible()
 })

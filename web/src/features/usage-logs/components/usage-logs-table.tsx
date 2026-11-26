@@ -319,7 +319,12 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   })
   const firstPage = view?.items ?? data?.items ?? []
   const total = view?.total ?? data?.total ?? 0
-  const loadOlder = () => history.loadOlder(firstPage as UsageLog[], total)
+  const loadOlder = () =>
+    history.loadOlder(
+      firstPage as UsageLog[],
+      total,
+      view?.committedItems ?? (firstPage as UsageLog[])
+    )
   const logs = history.rows ?? firstPage
   const columns = useColumnsByCategory(
     logCategory,

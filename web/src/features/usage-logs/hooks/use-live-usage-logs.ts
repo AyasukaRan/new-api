@@ -27,6 +27,7 @@ import type { LiveLogSnapshot } from '../types'
 interface LiveLogView {
   snapshot: LiveLogSnapshot
   items: UsageLog[]
+  committedItems: UsageLog[]
   total: number
   pending: number
   reset: boolean
@@ -56,6 +57,8 @@ export function useLiveUsageLogs({
   useEffect(() => {
     if (!snapshot || !preset) return
     let items = snapshot.items
+    let activeItems: UsageLog[] = []
+    let activeSignature: string | undefined
     let total = snapshot.total
     let pending = 0
     let reset = false
@@ -71,6 +74,7 @@ export function useLiveUsageLogs({
     const seen = new Set(items.map((log) => log.live_key))
     // Keep an immutable view behind the reader. Only the newest page needs buffering.
     let visibleItems = items
+    let visibleActiveItems = activeItems
     let visibleTotal = total
     const updateTotal = (count: number, generation: number) => {
       // A stats fetch for an earlier filter or account can finish after navigation.
@@ -92,9 +96,20 @@ export function useLiveUsageLogs({
     }
     const publish = () => {
       const generation = totalGeneration
+      const activeRequests = new Set(
+        visibleActiveItems.map((log) => `${log.user_id}:${log.request_id}`)
+      )
       setView({
         snapshot,
-        items: visibleItems,
+        // Active rows replace intermediate retry failures. Retain the full
+        // committed page so loading older rows keeps its original page tail.
+        items: [
+          ...visibleActiveItems,
+          ...visibleItems.filter(
+            (log) => !activeRequests.has(`${log.user_id}:${log.request_id}`)
+          ),
+        ],
+        committedItems: visibleItems,
         total: visibleTotal,
         pending,
         reset,
@@ -113,6 +128,7 @@ export function useLiveUsageLogs({
         return
       }
       visibleItems = items
+      visibleActiveItems = activeItems
       visibleTotal = total
       publish()
     }
@@ -149,6 +165,34 @@ export function useLiveUsageLogs({
             }
             if (event.event === 'ready') {
               retryDelay = 1000
+              return
+            }
+            if (event.event === 'active') {
+              const batch = JSON.parse(event.data) as { items: UsageLog[] }
+              if (
+                !Array.isArray(batch.items) ||
+                batch.items.some(
+                  (log) => !log.in_progress || !log.live_key || !log.request_id
+                )
+              ) {
+                requireSnapshot()
+                return
+              }
+              const signature = JSON.stringify(batch.items)
+              if (signature === activeSignature) return
+              const changed =
+                activeSignature !== undefined || batch.items.length > 0
+              activeSignature = signature
+              activeItems = batch.items
+              if (pending || reading()) {
+                if (changed) {
+                  pending = Math.max(1, pending)
+                  pendingUncertain = true
+                }
+                publish()
+              } else {
+                show()
+              }
               return
             }
             if (event.event !== 'logs') return

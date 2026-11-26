@@ -168,3 +168,14 @@ export function getLogColumnFilterKeys(
       !['channel', 'username', 'clientTool', 'requestPath'].includes(key)
   )
 }
+
+export const effortSuggestions = [
+  'disabled',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]

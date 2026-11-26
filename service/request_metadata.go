@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"regexp"
 	"slices"
@@ -36,6 +37,7 @@ const requestMetadataMaxNameBytes = 256
 const requestMetadataMaxUserAgentBytes = 512
 
 type requestMetadata struct {
+	activeKey         string
 	mu                sync.Mutex
 	format            types.RelayFormat
 	requestedStream   bool
@@ -76,16 +78,42 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 		modelParameters: captureRequestModelParameters(info.Request),
 	}
 	c.Set(requestMetadataContextKey, metadata)
+	if info.IsStream && !info.IsChannelTest && (common.LogConsumeEnabled || constant.ErrorLogEnabled) {
+		other := model.NewLogOther()
+		other.SetPublic("request_path", c.Request.URL.Path)
+		transport := "sse"
+		if info.ClientWs != nil {
+			transport = "ws"
+		}
+		other.SetPublic("response_transport", transport)
+		other.SetPublic("reasoning_effort", metadata.reasoningLabel)
+		other.SetPublic("client_tool", metadata.clientTool)
+		other.SetAdmin("user_agent", metadata.userAgent)
+		started := info.StartTime
+		if started.IsZero() {
+			started = time.Now()
+		}
+		metadata.activeKey = model.BeginActiveLog(model.Log{UserId: info.UserId, RequestId: info.RequestId, CreatedAt: started.Unix(), Username: c.GetString("username"), TokenName: c.GetString("token_name"), TokenId: info.TokenId, ModelName: info.OriginModelName, IsStream: true, ChannelId: info.GetChannelID(), ChannelName: c.GetString("channel_name"), Group: info.UsingGroup, Ip: common.RequestClientIP(c), Other: other.JSONString()})
+	}
+	// Cancellation must remove the projection even while an upstream ignores
+	// its cancelled context. Later retry updates cannot recreate a removed row.
+	activeKey := metadata.activeKey
+	finishActive := func() {}
+	if activeKey != "" {
+		stopCancelled := context.AfterFunc(c.Request.Context(), func() { model.FinishActiveLog(activeKey) })
+		finishActive = func() { stopCancelled(); model.FinishActiveLog(activeKey) }
+	}
 	supported := info.RelayFormat == types.RelayFormatClaude ||
 		info.RelayFormat == types.RelayFormatGemini && info.RelayMode != relayconstant.RelayModeEmbeddings ||
 		info.RelayFormat == types.RelayFormatOpenAIResponses && info.RelayMode == relayconstant.RelayModeResponses ||
 		info.RelayFormat == types.RelayFormatOpenAI && info.RelayMode == relayconstant.RelayModeChatCompletions
 	if !supported || info.ClientWs != nil {
-		return func() {}
+		return finishActive
 	}
 	writer := &requestMetadataWriter{ResponseWriter: c.Writer, metadata: metadata}
 	c.Writer = writer
 	return func() {
+		finishActive()
 		if c.Writer == writer {
 			c.Writer = writer.ResponseWriter
 		}
@@ -105,6 +133,7 @@ func ResetRequestToolObservation(c *gin.Context) {
 	if metadata == nil {
 		return
 	}
+	model.UpdateActiveLogChannel(metadata.activeKey, c.GetInt("channel_id"), c.GetString("channel_name"), common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
 	metadata.mu.Lock()
 	defer metadata.mu.Unlock()
 	metadata.buffer, metadata.event, metadata.names = nil, nil, nil

@@ -114,11 +114,15 @@ export function LogAccountCell({
   const { sensitiveVisible, setSelectedUserId, setUserInfoDialogOpen } =
     useUsageLogsContext()
   const other = getLogMetadata(log)
-  const displayable = isDisplayableLogType(log.type)
+  const displayable = log.in_progress || isDisplayableLogType(log.type)
   const token = displayable && logTokenName(log, t)
   const account =
     isAdmin && sensitiveVisible
       ? formatAdminUserLabel(log.username, log.user_admin_nickname)
+      : undefined
+  const displayName =
+    isAdmin && sensitiveVisible
+      ? log.user_admin_nickname?.trim() || log.username
       : undefined
   const usernameFilter = useLogValueFilter(
     'username',
@@ -155,8 +159,11 @@ export function LogAccountCell({
               aria-hidden
             />
             {!usernameFilter && (
-              <span className='truncate' title={account}>
-                {account ?? '••••'}
+              <span
+                className='truncate'
+                title={sensitiveVisible ? log.username : undefined}
+              >
+                {displayName ?? '••••'}
               </span>
             )}
           </Button>
@@ -167,7 +174,9 @@ export function LogAccountCell({
               label={account}
               className='shrink'
             >
-              <span className='truncate'>{account}</span>
+              <span className='truncate' title={log.username}>
+                {displayName}
+              </span>
             </LogFilterValue>
           )}
         </div>
@@ -235,7 +244,8 @@ export function LogSourceCell({
   const client =
     typeof other?.client_tool === 'string' ? other.client_tool.trim() : ''
   const ClientIcon = (sensitiveVisible && clientIcons.get(client)) || Terminal
-  const hasClient = isAdmin && isDisplayableLogType(log.type)
+  const hasClient =
+    isAdmin && (log.in_progress || isDisplayableLogType(log.type))
   const clientFilter = useLogValueFilter(
     'clientTool',
     sensitiveVisible ? client : undefined

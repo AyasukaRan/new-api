@@ -88,6 +88,9 @@ func streamLogChanges(c *gin.Context, all bool) {
 	defer check.Stop()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
+	var activeRevision uint64
+	activeSent := false
+	lastActive := ""
 	for {
 		refs, next, reset := model.LiveLogChanges(cursor, ownUserID)
 		if reset {
@@ -103,6 +106,29 @@ func streamLogChanges(c *gin.Context, all bool) {
 			if (len(page.Items) > 0 || page.Replace) && !write("logs", gin.H{"items": page.Items, "omitted": page.Omitted, "replace": page.Replace, "total": page.Total, "cursor": next}) {
 				return
 			}
+		}
+		// Deliver committed rows first; the authoritative active snapshot
+		// then removes its temporary counterpart without a blank transition.
+		revision := model.ActiveLogRevision()
+		if !activeSent || revision != activeRevision {
+			items, err := model.ActiveLogSnapshot(ctx, filter, ownUserID, role)
+			if err != nil {
+				write("reset", struct{}{})
+				return
+			}
+			encoded, err := common.Marshal(items)
+			if err != nil {
+				return
+			}
+			// A different user's activity must not reveal its timing through
+			// repeated empty snapshots on a personal or filtered stream.
+			if !activeSent || string(encoded) != lastActive {
+				if !write("active", gin.H{"items": items}) {
+					return
+				}
+				lastActive = string(encoded)
+			}
+			activeRevision, activeSent = revision, true
 		}
 		cursor = next
 		select {

@@ -26,6 +26,7 @@ import { z } from 'zod'
 export const usageLogSchema = z.object({
   id: z.number(),
   live_key: z.string().optional(),
+  in_progress: z.boolean().optional(),
   retry_count: z.number().optional(),
   retry_group_request_id: z.string().optional(),
   retry_started_at: z.number().optional(),

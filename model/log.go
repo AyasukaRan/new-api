@@ -62,6 +62,7 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 }
 
 type Log struct {
+	InProgress          bool   `json:"in_progress,omitempty" gorm:"-"`
 	RetryCount          int    `json:"retry_count,omitempty" gorm:"-"`
 	RetryGroupRequestID string `json:"retry_group_request_id,omitempty" gorm:"-"`
 	RetryStartedAt      int64  `json:"retry_started_at,omitempty" gorm:"-"`

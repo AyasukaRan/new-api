@@ -49,15 +49,20 @@ export function TokenPerformanceCell(props: {
 }) {
   const { t, i18n } = useTranslation()
   const { log, other } = props
-  const timing = isTimingLogType(log.type)
+  const timing = log.in_progress || isTimingLogType(log.type)
   if (!isDisplayableLogType(log.type) && !timing) return null
 
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const formatCount = (value: number | null) =>
     value == null ? '—' : formatNumber(value, locale)
-  const { cache, hasUsage: hasTokens } = getLogTokenTotals(log, other)
-  const metered = other?.metered_usage
+  const totals = getLogTokenTotals(log, other)
+  const cache = log.in_progress
+    ? { total: null, read: null, write: null, percent: null }
+    : totals.cache
+  const hasTokens = !log.in_progress && totals.hasUsage
+  const metered = log.in_progress ? undefined : other?.metered_usage
   const tokenlessTask =
+    !log.in_progress &&
     (other?.is_task === true || metered != null) &&
     !(
       log.prompt_tokens > 0 ||
@@ -69,7 +74,8 @@ export function TokenPerformanceCell(props: {
   const durationMs = other?.duration_ms
   const hasMeasuredDuration =
     durationMs != null && Number.isFinite(durationMs) && durationMs >= 0
-  const elapsed = hasMeasuredDuration ? durationMs / 1000 : log.use_time
+  const measuredElapsed = hasMeasuredDuration ? durationMs / 1000 : log.use_time
+  const elapsed = log.in_progress ? -1 : measuredElapsed
   const first =
     log.is_stream &&
     other?.frt != null &&
@@ -98,7 +104,7 @@ export function TokenPerformanceCell(props: {
           <span className='font-mono text-xs font-semibold'>
             {formatCount(metered.count)} {t(metered.unit)}
           </span>
-          {other.metered_usage_estimated && (
+          {other?.metered_usage_estimated && (
             <span className='text-muted-foreground'>
               {t('Estimated usage')}
             </span>

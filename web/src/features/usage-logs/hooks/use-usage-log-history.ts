@@ -29,6 +29,7 @@ interface HistorySession {
   id: number
   source: GetLogsParams
   head: UsageLog[]
+  tail?: UsageLog
   end: number
   total: number
 }
@@ -58,7 +59,7 @@ export function useUsageLogHistory(
       page: basePage + 1,
       end: active?.end ?? 0,
       total: active?.total ?? 0,
-      tail: active?.head.at(-1),
+      tail: active?.tail,
     } as HistoryCursor,
     queryFn: async ({ pageParam, signal }) => {
       if (!active) throw new Error('Inactive log history')
@@ -132,7 +133,11 @@ export function useUsageLogHistory(
     return result
   }, [active, query.data])
 
-  function loadOlder(head: UsageLog[], total: number) {
+  function loadOlder(
+    head: UsageLog[],
+    total: number,
+    committedHead: UsageLog[] = head
+  ) {
     if (!filters || query.isFetching) return
     if (active) {
       if (!query.data && query.isError) void query.refetch()
@@ -141,14 +146,25 @@ export function useUsageLogHistory(
       }
       return
     }
-    if (!head.length || basePage * pageSize >= total) return
+    if (!committedHead.length || basePage * pageSize >= total) return
     // Live page one may have advanced since its initial snapshot. Anchor older
     // pages to the visible head. Manual pages keep their original date range.
     const end =
       basePage === 1
-        ? Math.min(filters.end_timestamp ?? Infinity, head[0].created_at)
-        : (filters.end_timestamp ?? head[0].created_at)
-    const next = { id: ++sequence.current, source: filters, end, head, total }
+        ? Math.min(
+            filters.end_timestamp ?? Infinity,
+            committedHead[0].created_at
+          )
+        : (filters.end_timestamp ?? committedHead[0].created_at)
+    // Temporary active rows are visible, but cannot anchor database pagination.
+    const next = {
+      id: ++sequence.current,
+      source: filters,
+      end,
+      head,
+      tail: committedHead.at(-1),
+      total,
+    }
     setSession((previous) => (previous?.source === filters ? previous : next))
   }
 

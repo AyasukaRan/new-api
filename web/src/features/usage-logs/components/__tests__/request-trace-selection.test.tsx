@@ -200,6 +200,21 @@ function renderLogs(
     failNextRetryLoad: () => {
       rejectRetryLoad = true
     },
+    active: async (ids: number[]) => {
+      await waitFor(() => expect(stream).toBeDefined())
+      const items = ids.map((id) => ({
+        ...entry(id),
+        type: 0,
+        in_progress: true,
+      }))
+      await act(async () => {
+        stream?.enqueue(
+          new TextEncoder().encode(
+            `event: active\ndata: ${JSON.stringify({ items })}\n\n`
+          )
+        )
+      })
+    },
     replace: async (ids: number[], total: number, cursor = 'grouped') => {
       await waitFor(() => expect(stream).toBeDefined())
       records = ids.map(entry)
@@ -237,6 +252,32 @@ function renderLogs(
   }
 }
 
+test('an in-progress row shows Processing without finalized token, cost, or detail actions', async () => {
+  const active = {
+    ...entry(11),
+    type: 0,
+    in_progress: true,
+    quota: 34567,
+    prompt_tokens: 98765,
+    completion_tokens: 43210,
+  }
+  renderLogs(false, '/usage-logs/common', undefined, [11], undefined, active)
+  expect(await screen.findByText('Processing...')).toBeVisible()
+  expect(screen.getByText('model-11')).toBeVisible()
+  expect(screen.getByText('Codex CLI')).toBeVisible()
+  expect(
+    screen.getByRole('term', { name: 'Total input tokens' }).nextElementSibling
+  ).toHaveTextContent('—')
+  expect(screen.queryByText('Consume')).not.toBeInTheDocument()
+  expect(screen.queryByText('98,765')).not.toBeInTheDocument()
+  expect(screen.queryByText('43,210')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', {
+      name: /Token Breakdown|Billing Details|Cost breakdown|Details · request-11/,
+    })
+  ).not.toBeInTheDocument()
+})
+
 test('column filters apply across pages and clear only their own fields', async () => {
   const user = userEvent.setup()
   const { router } = renderLogs(false, '/usage-logs/common?page=2&username=fp')
@@ -250,7 +291,10 @@ test('column filters apply across pages and clear only their own fields', async 
     page: 2,
     username: 'fp',
   })
-  await user.click(screen.getByRole('button', { name: 'Apply' }))
+  expect(
+    screen.queryByRole('button', { name: 'Apply' })
+  ).not.toBeInTheDocument()
+  await user.keyboard('{Enter}')
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       page: 1,
@@ -270,7 +314,7 @@ test('column filters apply across pages and clear only their own fields', async 
     ).toBe(true)
   )
   await user.click(screen.getByRole('button', { name: 'Filter · Model (1)' }))
-  await user.click(screen.getByRole('button', { name: 'Clear' }))
+  await user.click(screen.getByRole('option', { name: 'All' }))
   await waitFor(() =>
     expect(router.state.location.search.model).toBeUndefined()
   )
@@ -279,7 +323,9 @@ test('column filters apply across pages and clear only their own fields', async 
   await user.click(screen.getByRole('button', { name: 'Filter · Channel' }))
   const channel = screen.getByLabelText('Channel ID')
   await user.type(channel, '-1{Enter}')
-  expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
+  expect(
+    screen.queryByRole('button', { name: 'Apply' })
+  ).not.toBeInTheDocument()
   expect(screen.getByRole('alert')).toHaveTextContent(
     'Enter a positive integer'
   )
@@ -586,36 +632,30 @@ test('persists independent identity columns and keeps hidden user and token filt
   })
 })
 
-test('filters user, token and group from their own columns without replacing the other conditions', async () => {
+test('single-condition columns open direct choices and apply without an extra form', async () => {
   const user = userEvent.setup()
   const { router } = renderLogs()
   await user.click(await screen.findByRole('button', { name: 'Filter · User' }))
   let panel = await screen.findByRole('dialog', { name: 'User' })
   const username = within(panel).getByRole('combobox', { name: 'Username' })
   await waitFor(() => expect(username).toHaveFocus())
-  expect(username).toHaveAttribute('aria-expanded', 'false')
-  expect(within(panel).queryByRole('listbox')).not.toBeInTheDocument()
   expect(
-    within(panel).queryByRole('textbox', { name: 'Token Name' })
+    within(panel).queryByRole('button', { name: 'Apply' })
   ).not.toBeInTheDocument()
-  expect(
-    within(panel).queryByRole('combobox', { name: 'Group' })
-  ).not.toBeInTheDocument()
-  await user.click(username)
   await user.click(
     await within(panel).findByRole('option', { name: 'recent-user' })
   )
-  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
   await waitFor(() =>
     expect(router.state.location.search.username).toBe('recent-user')
   )
+  expect(screen.queryByRole('dialog', { name: 'User' })).not.toBeInTheDocument()
 
   await user.click(screen.getByRole('button', { name: 'Filter · Token' }))
   panel = await screen.findByRole('dialog', { name: 'Token' })
-  const token = within(panel).getByRole('textbox', { name: 'Token Name' })
-  expect(within(panel).queryByRole('combobox')).not.toBeInTheDocument()
-  await user.type(token, 'work')
-  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
+  await user.type(
+    within(panel).getByRole('combobox', { name: 'Token Name' }),
+    'work{Enter}'
+  )
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       username: 'recent-user',
@@ -625,11 +665,9 @@ test('filters user, token and group from their own columns without replacing the
 
   await user.click(screen.getByRole('button', { name: 'Filter · Group' }))
   panel = await screen.findByRole('dialog', { name: 'Group' })
-  await user.click(within(panel).getByRole('combobox', { name: 'Group' }))
   await user.click(
     await within(panel).findByRole('option', { name: 'premium' })
   )
-  await user.click(within(panel).getByRole('button', { name: 'Apply' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       username: 'recent-user',
@@ -640,7 +678,7 @@ test('filters user, token and group from their own columns without replacing the
 
   await user.click(screen.getByRole('button', { name: 'Filter · Token (1)' }))
   panel = await screen.findByRole('dialog', { name: 'Token' })
-  await user.click(within(panel).getByRole('button', { name: 'Clear' }))
+  await user.click(within(panel).getByRole('option', { name: 'All' }))
   await waitFor(() =>
     expect(router.state.location.search.token).toBeUndefined()
   )
@@ -648,6 +686,38 @@ test('filters user, token and group from their own columns without replacing the
     username: 'recent-user',
     group: 'premium',
   })
+})
+
+test('shows only the private nickname in admin user cells and falls back to username', async () => {
+  const user = userEvent.setup()
+  renderLogs(false, '/usage-logs/common', undefined, [11], undefined, {
+    username: 'alice',
+    user_admin_nickname: 'Operations',
+  })
+  const account = await screen.findByRole('button', {
+    name: 'Filter · Username: Operations · alice',
+  })
+  expect(account).toHaveTextContent(/^Operations$/)
+  expect(within(account).getByText('Operations')).toHaveAttribute(
+    'title',
+    'alice'
+  )
+  await user.click(screen.getByRole('button', { name: 'Hide' }))
+  expect(screen.queryByText('Operations')).not.toBeInTheDocument()
+  expect(screen.queryByTitle('alice')).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Show' }))
+  await user.click(screen.getByRole('button', { name: 'Only Mine' }))
+  await screen.findByText('model-100')
+  expect(screen.queryByText('Operations')).not.toBeInTheDocument()
+  expect(screen.queryByTitle('alice')).not.toBeInTheDocument()
+  cleanup()
+  renderLogs(false, '/usage-logs/common', undefined, [11], undefined, {
+    username: 'alice',
+    user_admin_nickname: '',
+  })
+  expect(
+    await screen.findByRole('button', { name: 'Filter · Username: alice' })
+  ).toHaveTextContent(/^alice$/)
 })
 
 test('keeps client suggestions within the source form when clearing both fields', async () => {
@@ -975,6 +1045,37 @@ test('refreshes once for a continued upward wheel gesture even without buffered 
   await waitFor(() => expect(listRequests()).toHaveLength(2))
 })
 
+test('loading older logs anchors pagination to committed rows while an earlier request remains active', async () => {
+  const { active } = renderLogs(
+    true,
+    '/usage-logs/common?pageSize=2',
+    undefined,
+    [11, 10],
+    [9, 8]
+  )
+  const first = await screen.findByText('model-11')
+  const viewport = first.closest('table')?.parentElement
+  if (!viewport) throw new Error('Missing log list viewport')
+  Object.defineProperties(viewport, {
+    clientHeight: { value: 200 },
+    scrollHeight: { value: 600 },
+  })
+  await active([1])
+  expect(await screen.findByText('model-1')).toBeVisible()
+  viewport.scrollTop = 400
+  fireEvent.scroll(viewport)
+  fireEvent.wheel(viewport, { deltaY: 120 })
+  expect(await screen.findByText('model-8')).toBeVisible()
+  expect(screen.getByText('model-1')).toBeVisible()
+  expect(screen.getByText('model-10')).toBeVisible()
+  const pages = vi
+    .mocked(api.get)
+    .mock.calls.filter(([url]) => url.startsWith('/api/log/?'))
+    .map(([url]) => new URL(url, 'http://localhost').searchParams)
+  expect(pages[1].get('p')).toBe('2')
+  expect(pages[1].get('end_timestamp')).toBe(String(entry(11).created_at))
+})
+
 test('appends the next filtered page at the bottom, preserving the visible rows and stopping at the end', async () => {
   const { router, append } = renderLogs(
     true,
@@ -1026,9 +1127,7 @@ test('appends the next filtered page at the bottom, preserving the visible rows 
     screen.getByRole('button', { name: /^Filter · User(?: \(\d+\))?$/ })
   )
   const identityFilter = screen.getByRole('dialog', { name: 'User' })
-  await user.click(
-    within(identityFilter).getByRole('button', { name: 'Clear' })
-  )
+  await user.click(within(identityFilter).getByRole('option', { name: 'All' }))
   await waitFor(() =>
     expect(router.state.location.search.username).toBeUndefined()
   )

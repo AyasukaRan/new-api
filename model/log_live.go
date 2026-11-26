@@ -114,6 +114,7 @@ func StartLiveLogFeed(ctx context.Context) {
 		shared.client = nil
 	}
 	f := &usageLiveFeed
+	activeUsageLogs.sync(ctx, shared.client, shared.key+":active")
 	if shared.client != nil {
 		if err := shared.sync(ctx, f, liveLogBatch{Cursor: rand.Text(), Reset: true}); err != nil {
 			shared.offline = true
@@ -128,6 +129,7 @@ func StartLiveLogFeed(ctx context.Context) {
 				return
 			case <-ticker.C:
 			}
+			activeUsageLogs.sync(ctx, shared.client, shared.key+":active")
 			f.mu.Lock()
 			batch := liveLogBatch{Cursor: rand.Text(), Refs: f.pending, Reset: f.overflow}
 			f.pending = nil

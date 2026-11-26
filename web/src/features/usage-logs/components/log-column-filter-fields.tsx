@@ -16,18 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
 import { useId, type KeyboardEventHandler } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ComboboxInput } from '@/components/ui/combobox-input'
-import { getGroups } from '@/features/users/api'
-import { useModelAccessScope } from '@/hooks/use-model-access-scope'
-import { getUserGroups } from '@/lib/api'
-import { requireServerSuccess } from '@/lib/server-error-message'
 
+import { useLogGroupOptions } from '../hooks/use-log-group-options'
 import { useLogUserOptions } from '../hooks/use-log-user-options'
 import {
+  effortSuggestions,
   getLogColumnFilterKeys,
   logColumnFilterLabels,
   isValidLogChannelFilter,
@@ -78,22 +75,7 @@ export function LogUsernameFilter(props: FilterInputProps) {
 
 export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
   const { t } = useTranslation()
-  const scope = useModelAccessScope()
-  const adminGroups = useQuery({
-    queryKey: ['groups'],
-    queryFn: async () => requireServerSuccess(await getGroups()),
-    enabled: props.isAdmin,
-  })
-  const userGroups = useQuery({
-    queryKey: ['user-groups', ...scope],
-    queryFn: async ({ signal }) =>
-      requireServerSuccess(await getUserGroups(signal)),
-    enabled: !props.isAdmin,
-  })
-  const groups = props.isAdmin
-    ? (adminGroups.data?.data ?? [])
-    : Object.keys(userGroups.data?.data ?? {})
-  const loading = props.isAdmin ? adminGroups.isLoading : userGroups.isLoading
+  const { groups, loading } = useLogGroupOptions(props.isAdmin)
 
   return (
     <LogsFilterField caption={props.caption} className={props.maskClass}>
@@ -122,16 +104,6 @@ export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
   )
 }
 
-const effortSuggestions = [
-  'disabled',
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-]
 export function LogColumnFilterFields(props: {
   column: LogFilterColumn
   isAdmin: boolean

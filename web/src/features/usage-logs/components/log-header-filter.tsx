@@ -42,6 +42,7 @@ import {
 } from '../lib/filter'
 import { getLogMetadata } from '../lib/format'
 import { LogColumnFilterFields } from './log-column-filter-fields'
+import { LogSingleColumnFilter } from './log-single-column-filter'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
@@ -52,6 +53,7 @@ const suggestionsFromLog: Partial<
   clientTool: (log) => getLogMetadata(log)?.client_tool,
   reasoningEffort: (log) => getLogMetadata(log)?.reasoning_effort,
   model: (log) => log.model_name,
+  token: (log) => log.token_name,
   requestPath: (log) => getLogMetadata(log)?.request_path?.split('?', 1)[0],
   channel: (log) => (log.channel ? String(log.channel) : undefined),
 }
@@ -87,6 +89,10 @@ export function LogHeaderFilter(props: {
   )
   const active = keys.filter((key) => !!selected[key]).length
   const label = `${t('Filter')} · ${props.title}`
+  const singleKey =
+    keys.length === 1 && !['type', 'responseTransport'].includes(keys[0])
+      ? keys[0]
+      : undefined
 
   function handleOpen(nextOpen: boolean) {
     if (nextOpen) {
@@ -157,62 +163,89 @@ export function LogHeaderFilter(props: {
         align='start'
         sideOffset={6}
         collisionPadding={8}
-        className='max-h-(--available-height) w-80 max-w-(--available-width) gap-0 overflow-hidden rounded-xl p-0'
+        className={cn(
+          'max-h-(--available-height) max-w-(--available-width) gap-0 overflow-hidden p-0',
+          singleKey ? 'w-60' : 'w-80 rounded-xl'
+        )}
       >
-        <PopoverTitle className='flex shrink-0 items-center gap-2 border-b px-4 py-3 text-sm font-semibold'>
+        <PopoverTitle
+          className={
+            singleKey
+              ? 'sr-only'
+              : 'flex shrink-0 items-center gap-2 border-b px-4 py-3 text-sm font-semibold'
+          }
+        >
           <ListFilter
             aria-hidden='true'
             className='text-muted-foreground size-4'
           />
           {props.title}
         </PopoverTitle>
-        <form
-          className='flex min-h-0 flex-col'
-          onSubmit={(event) => {
-            event.preventDefault()
-            apply(draft)
-          }}
-        >
-          <div className='grid min-h-0 gap-2.5 overflow-y-auto overscroll-contain px-4 py-3.5 [&_:is(input,[data-slot=select-trigger])]:h-9 [&_:is(input,[data-slot=select-trigger])]:rounded-md [&_:is(input,[data-slot=select-trigger]):focus-visible]:ring-1'>
-            {columns.map((column) => (
-              <LogColumnFilterFields
-                showLabels
-                inlineSuggestions
-                key={column}
-                column={column}
-                isAdmin={props.isAdmin}
-                values={draft}
-                suggestions={suggestions}
-                maskClass={
-                  sensitiveVisible ? undefined : '[-webkit-text-security:disc]'
-                }
-                onChange={(key, value) =>
-                  setDraft((prev) => ({ ...prev, [key]: value }))
-                }
-              />
-            ))}
-          </div>
-          <div className='bg-muted/25 flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2.5'>
-            <Button
-              type='button'
-              variant='ghost'
-              size='sm'
-              className='text-muted-foreground -ms-2 rounded-md'
-              disabled={!active && !keys.some((key) => draft[key])}
-              onClick={() => apply({})}
-            >
-              {t('Clear')}
-            </Button>
-            <Button
-              type='submit'
-              size='sm'
-              className='min-w-16 rounded-md'
-              disabled={!isValidLogChannelFilter(draft.channel)}
-            >
-              {t('Apply')}
-            </Button>
-          </div>
-        </form>
+        {singleKey ? (
+          <LogSingleColumnFilter
+            field={singleKey}
+            value={selected[singleKey]}
+            suggestions={suggestions[singleKey]}
+            isAdmin={props.isAdmin}
+            maskClass={
+              !sensitiveVisible &&
+              ['username', 'token', 'group'].includes(singleKey)
+                ? '[-webkit-text-security:disc]'
+                : undefined
+            }
+            onSelect={(value) => apply({ [singleKey]: value })}
+          />
+        ) : (
+          <form
+            className='flex min-h-0 flex-col'
+            onSubmit={(event) => {
+              event.preventDefault()
+              apply(draft)
+            }}
+          >
+            <div className='grid min-h-0 gap-2.5 overflow-y-auto overscroll-contain px-4 py-3.5 [&_:is(input,[data-slot=select-trigger])]:h-9 [&_:is(input,[data-slot=select-trigger])]:rounded-md [&_:is(input,[data-slot=select-trigger]):focus-visible]:ring-1'>
+              {columns.map((column) => (
+                <LogColumnFilterFields
+                  showLabels
+                  inlineSuggestions
+                  key={column}
+                  column={column}
+                  isAdmin={props.isAdmin}
+                  values={draft}
+                  suggestions={suggestions}
+                  maskClass={
+                    sensitiveVisible
+                      ? undefined
+                      : '[-webkit-text-security:disc]'
+                  }
+                  onChange={(key, value) =>
+                    setDraft((prev) => ({ ...prev, [key]: value }))
+                  }
+                />
+              ))}
+            </div>
+            <div className='bg-muted/25 flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2.5'>
+              <Button
+                type='button'
+                variant='ghost'
+                size='sm'
+                className='text-muted-foreground -ms-2 rounded-md'
+                disabled={!active && !keys.some((key) => draft[key])}
+                onClick={() => apply({})}
+              >
+                {t('Clear')}
+              </Button>
+              <Button
+                type='submit'
+                size='sm'
+                className='min-w-16 rounded-md'
+                disabled={!isValidLogChannelFilter(draft.channel)}
+              >
+                {t('Apply')}
+              </Button>
+            </div>
+          </form>
+        )}
       </PopoverContent>
     </Popover>
   )

@@ -437,8 +437,12 @@ export function useCommonLogsColumns(
               <div className='text-muted-foreground flex items-center gap-2 text-[11px] leading-4 font-normal'>
                 {time && <span className='tabular-nums'>{date}</span>}
                 <StatusBadge
-                  label={t(config.label)}
-                  variant={config.color as StatusBadgeProps['variant']}
+                  label={log.in_progress ? t('Processing...') : t(config.label)}
+                  variant={
+                    log.in_progress
+                      ? 'info'
+                      : (config.color as StatusBadgeProps['variant'])
+                  }
                   type='text'
                   showDot
                   copyable={false}
@@ -496,14 +500,16 @@ export function useCommonLogsColumns(
           const filter = useLogValueFilter(
             'channel',
             sensitiveVisible &&
-              isDisplayableLogType(log.type) &&
+              (log.in_progress || isDisplayableLogType(log.type)) &&
               log.channel > 0
               ? String(log.channel)
               : undefined,
             log.channel_name
           )
 
-          if (!isDisplayableLogType(log.type)) return null
+          if (!log.in_progress && !isDisplayableLogType(log.type)) {
+            return null
+          }
 
           const other = getLogMetadata(log)
           const affinity = other?.admin_info?.channel_affinity
@@ -714,7 +720,12 @@ export function useCommonLogsColumns(
       accessorKey: 'model_name',
       header: t('Model'),
       cell: ({ row, table }) => {
-        if (!isDisplayableLogType(row.original.type)) return null
+        if (
+          !row.original.in_progress &&
+          !isDisplayableLogType(row.original.type)
+        ) {
+          return null
+        }
         const model = formatModelName(row.original)
         const requestPlugins = getLogMetadata(row.original)?.request_plugins
         return (
@@ -761,7 +772,8 @@ export function useCommonLogsColumns(
       cell: ({ row }) => {
         const metadata = getLogMetadata(row.original)
         return (
-          isDisplayableLogType(row.original.type) && (
+          (row.original.in_progress ||
+            isDisplayableLogType(row.original.type)) && (
             <div className='flex w-full min-w-0 justify-center'>
               {metadata?.reasoning_effort ? (
                 <RequestMetadataTags
@@ -806,7 +818,8 @@ export function useCommonLogsColumns(
         header: t('Tools'),
         accessorFn: (log) => getLogMetadata(log)?.invoked_tools,
         cell: ({ row }) =>
-          isDisplayableLogType(row.original.type) && (
+          (row.original.in_progress ||
+            isDisplayableLogType(row.original.type)) && (
             <div className='text-muted-foreground/65 flex w-full min-w-0 justify-center empty:after:content-["—"]'>
               <RequestMetadataTags
                 field='invoked_tools'
@@ -834,7 +847,7 @@ export function useCommonLogsColumns(
           return (
             <div className='flex w-full min-w-0 flex-col items-start justify-center gap-1'>
               {visibility.response_transport !== false &&
-                isTimingLogType(log.type) && (
+                (log.in_progress || isTimingLogType(log.type)) && (
                   <StreamModeCell
                     logType={log.type}
                     isStream={log.is_stream}
@@ -844,7 +857,7 @@ export function useCommonLogsColumns(
                 )}
               {isAdmin &&
                 visibility.request_path !== false &&
-                isDisplayableLogType(log.type) &&
+                (log.in_progress || isDisplayableLogType(log.type)) &&
                 log.type !== LOG_TYPE_ENUM.REFUND &&
                 other?.request_path && (
                   <LogFilterValue
@@ -877,6 +890,9 @@ export function useCommonLogsColumns(
         header: t('Cost'),
         cell: ({ row }) => {
           const log = row.original
+          if (log.in_progress) {
+            return <span className='text-muted-foreground'>—</span>
+          }
           if (!isDisplayableLogType(log.type)) return null
 
           const quota = row.getValue('quota') as number
@@ -1035,7 +1051,10 @@ export function useCommonLogsColumns(
       columns.push({
         accessorKey: 'content',
         header: t('Event'),
-        cell: ({ row }) => <LogEventPreview log={row.original} />,
+        cell: ({ row }) =>
+          row.original.in_progress ? null : (
+            <LogEventPreview log={row.original} />
+          ),
         size: 180,
         maxSize: 200,
       })
@@ -1050,6 +1069,7 @@ export function useCommonLogsColumns(
         : undefined,
       cell: ({ row, table }) => {
         const log = row.original
+        if (log.in_progress) return null
         const showEvent =
           inlineEvents &&
           table.getState().columnVisibility.content !== false &&

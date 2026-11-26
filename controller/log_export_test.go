@@ -3,6 +3,7 @@ package controller
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,12 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -1227,10 +1233,18 @@ func TestLiveLogStream(t *testing.T) {
 		defer resp.Body.Close()
 		require.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
 		s := bufio.NewScanner(resp.Body)
-		for _, line := range []string{"event: ready", "data: {}", "", "event: " + want} {
+		for _, line := range []string{"event: ready", "data: {}", ""} {
 			require.True(t, s.Scan(), "missing %q: %v", line, s.Err())
 			require.Equal(t, line, s.Text())
 		}
+		found := false
+		for s.Scan() {
+			if s.Text() == "event: "+want {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "missing %s event: %v", want, s.Err())
 		require.True(t, s.Scan())
 		payload, ok := strings.CutPrefix(s.Text(), "data: ")
 		require.True(t, ok)
@@ -1267,4 +1281,215 @@ func TestLiveLogStream(t *testing.T) {
 	restored := read(cursor, "logs")
 	require.Len(t, restored.Items, 1)
 	assert.Contains(t, restored.Items[0].Content, "recovered")
+}
+
+// A streaming response must be visible while the upstream is still open. It
+// remains ephemeral until the normal writer records its final usage.
+func TestActiveLogStreamLifecycle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := newAuditTestDatabase(t, "sqlite", "")
+	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Log{}, &model.User{}))
+	require.NoError(t, db.Create(&model.User{Id: 881, Username: "active-reader", AffCode: "active1"}).Error)
+	require.NoError(t, db.Create(&model.Channel{Id: 889, Name: "active-channel"}).Error)
+	oldEnabled := common.LogConsumeEnabled
+	common.LogConsumeEnabled = true
+	defer func() { common.LogConsumeEnabled = oldEnabled }()
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	engine := gin.New()
+	engine.GET("/self", func(c *gin.Context) { c.Set("id", 881); c.Set("role", common.RoleCommonUser); StreamUserLogChanges(c) })
+	engine.GET("/other", func(c *gin.Context) { c.Set("id", 882); c.Set("role", common.RoleCommonUser); StreamUserLogChanges(c) })
+	engine.GET("/admin", func(c *gin.Context) { c.Set("role", common.RoleAdminUser); StreamAllLogChanges(c) })
+	engine.POST("/v1/chat/completions", func(c *gin.Context) {
+		defer close(finished)
+		c.Set("id", 881)
+		c.Set("username", "active-reader")
+		c.Set("token_name", "active-token")
+		c.Set(common.RequestIdKey, "active-stream-request")
+		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+		info := &relaycommon.RelayInfo{UserId: 881, TokenId: 883, RequestId: "active-stream-request", OriginModelName: "active-model", UsingGroup: "active-group", StartTime: time.Now(), IsStream: true, RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions, ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 889}, Request: &dto.GeneralOpenAIRequest{ReasoningEffort: "high"}}
+		defer service.BeginRequestMetadata(c, info)()
+		c.Header("Content-Type", "text/event-stream")
+		_, _ = c.Writer.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"private response\"}}]}\n\n")
+		c.Writer.Flush()
+		<-release
+		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+		model.RecordConsumeLog(c, 881, model.RecordConsumeLogParams{ChannelId: 889, ModelName: "active-model", TokenName: "active-token", TokenId: 883, Group: "active-group", IsStream: true, PromptTokens: 20, CompletionTokens: 3, Quota: 7})
+	})
+	server := httptest.NewServer(engine)
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		server.Close()
+	}()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"stream":true,"messages":[{"content":"private prompt"}]}`))
+	require.NoError(t, err)
+	req.Header.Set("User-Agent", "codex_cli_rs/1.2.3")
+	response, err := server.Client().Do(req)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	readActive := func(path string) []map[string]any {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+path+"&cursor="+model.LiveLogCursor(), nil)
+		require.NoError(t, err)
+		res, err := server.Client().Do(req)
+		require.NoError(t, err)
+		defer res.Body.Close()
+		scan := bufio.NewScanner(res.Body)
+		for scan.Scan() {
+			if scan.Text() != "event: active" {
+				continue
+			}
+			require.True(t, scan.Scan())
+			var packet struct {
+				Items []map[string]any `json:"items"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(strings.TrimPrefix(scan.Text(), "data: "), &packet))
+			return packet.Items
+		}
+		require.FailNow(t, "active snapshot missing before the upstream stream completed", "%v", scan.Err())
+		return nil
+	}
+	self := readActive("/self?category=model")
+	require.Len(t, self, 1)
+	assert.Equal(t, true, self[0]["in_progress"])
+	assert.Equal(t, "active-stream-request", self[0]["request_id"])
+	assert.NotEmpty(t, self[0]["live_key"])
+	assert.Equal(t, float64(0), self[0]["quota"])
+	assert.Equal(t, float64(0), self[0]["prompt_tokens"])
+	assert.NotContains(t, self[0]["other"], "user_agent")
+	assert.NotContains(t, self[0]["other"], "private")
+	assert.Empty(t, self[0]["channel_name"])
+	assert.Empty(t, readActive("/other?category=model"))
+	assert.Empty(t, readActive("/self?category=model&result=success"))
+	assert.Empty(t, readActive("/self?category=model&result=failure"))
+	assert.Empty(t, readActive("/self?category=model&model_name=other"))
+	admin := readActive("/admin?category=model&model_name=active-model&group=active-group&token_name=active-token&channel=889&reasoning_effort=high&response_transport=sse")
+	require.Len(t, admin, 1)
+	assert.Contains(t, admin[0]["other"], "codex_cli_rs/1.2.3")
+	assert.Equal(t, self[0]["live_key"], admin[0]["live_key"])
+	reconnected := readActive("/self?category=model")
+	require.Len(t, reconnected, 1)
+	assert.Equal(t, self[0]["live_key"], reconnected[0]["live_key"])
+	var count int64
+	require.NoError(t, db.Model(&model.Log{}).Count(&count).Error)
+	assert.Zero(t, count, "in-progress data must not enter accounting or history")
+	// An intermediate retry error is committed, but only the request lifetime
+	// can remove the authoritative active projection.
+	require.NoError(t, db.Create(&model.Log{UserId: 881, RequestId: "active-stream-request", CreatedAt: time.Now().Unix(), Type: model.LogTypeError, ModelName: "active-model"}).Error)
+	retrying := readActive("/self?category=model")
+	require.Len(t, retrying, 1)
+	assert.Equal(t, self[0]["live_key"], retrying[0]["live_key"])
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream did not finish")
+	}
+	assert.Empty(t, readActive("/self?category=model"))
+	var logs []model.Log
+	require.NoError(t, db.Where("type = ?", model.LogTypeConsume).Find(&logs).Error)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "active-stream-request", logs[0].RequestId)
+	assert.Equal(t, 7, logs[0].Quota)
+	assert.Equal(t, 20, logs[0].PromptTokens)
+}
+
+func TestActiveLogRedisPeersAndCancellation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := newAuditTestDatabase(t, "sqlite", "")
+	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	require.NoError(t, db.AutoMigrate(&model.Log{}, &model.User{}))
+	require.NoError(t, db.Create(&model.User{Id: 901, Username: "active-owner", AffCode: "active-owner"}).Error)
+	require.NoError(t, db.Create(&model.User{Id: 902, Username: "active-other", AffCode: "active-other"}).Error)
+	previousClient, previousSecret := common.RDB, common.SessionSecret
+	defer func() { common.RDB, common.SessionSecret = previousClient, previousSecret }()
+	common.SessionSecret = "isolated-active-log-peer-regression"
+	options := &redis.Options{Addr: os.Getenv("TEST_REDIS_ADDR"), Password: os.Getenv("TEST_REDIS_PASSWORD"), MaxRetries: -1}
+	if options.Addr == "" {
+		options.Addr = miniredis.RunT(t).Addr()
+	}
+	client := redis.NewClient(options)
+	defer client.Close()
+	require.NoError(t, client.Ping(t.Context()).Err())
+	common.RDB, common.RedisEnabled = client, true
+	key := fmt.Sprintf("usage_log_events:%x:active", sha256.Sum256([]byte(common.SessionSecret)))
+	require.NoError(t, client.Del(t.Context(), key).Err())
+	defer client.Del(context.Background(), key)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	model.StartLiveLogFeed(ctx)
+	peer := func(expires int64, rows []model.Log) {
+		t.Helper()
+		data, err := common.Marshal(map[string]any{"expires": expires, "items": rows})
+		require.NoError(t, err)
+		require.NoError(t, client.HSet(t.Context(), key, "other-gateway", string(data)).Err())
+	}
+	snapshot := func(owner int) []*model.Log {
+		t.Helper()
+		rows, err := model.ActiveLogSnapshot(t.Context(), model.LogFilter{Source: model.LogSourceUsage, Category: "model"}, owner, common.RoleCommonUser)
+		require.NoError(t, err)
+		return rows
+	}
+	now := time.Now().Unix()
+	peer(now+30, []model.Log{
+		{LiveKey: "peer-a", InProgress: true, UserId: 901, CreatedAt: now, RequestId: "peer-request", IsStream: true, Other: `{"response_transport":"sse","admin_info":{"user_agent":"private peer UA"}}`},
+		{LiveKey: "peer-b", InProgress: true, UserId: 902, CreatedAt: now, RequestId: "other-account", IsStream: true},
+	})
+	require.Eventually(t, func() bool { return len(snapshot(901)) == 1 }, 4*time.Second, 20*time.Millisecond)
+	rows := snapshot(901)
+	assert.Equal(t, "peer-request", rows[0].RequestId)
+	assert.NotContains(t, rows[0].Other, "private peer UA")
+	peer(now+30, []model.Log{})
+	require.Eventually(t, func() bool { return len(snapshot(901)) == 0 }, 4*time.Second, 20*time.Millisecond, "a peer's replacement removes completed requests")
+	peer(now-1, []model.Log{{LiveKey: "peer-stale", InProgress: true, UserId: 901, CreatedAt: now, RequestId: "expired-request", IsStream: true}})
+	require.Eventually(t, func() bool { return !client.HExists(t.Context(), key, "other-gateway").Val() }, 4*time.Second, 20*time.Millisecond)
+	assert.Empty(t, snapshot(901), "crashed peers expire instead of leaving permanent pending rows")
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	defer cancelRequest()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(requestCtx)
+	c.Set("username", "active-owner")
+	info := &relaycommon.RelayInfo{UserId: 901, RequestId: "cancelled-active-request", OriginModelName: "model", IsStream: true, StartTime: time.Now(), RelayFormat: types.RelayFormatOpenAIResponses, RelayMode: relayconstant.RelayModeResponses}
+	finish := service.BeginRequestMetadata(c, info)
+	defer finish()
+	require.Len(t, snapshot(901), 1)
+	require.Eventually(t, func() bool {
+		for _, raw := range client.HGetAll(t.Context(), key).Val() {
+			if strings.Contains(raw, "cancelled-active-request") {
+				return true
+			}
+		}
+		return false
+	}, 4*time.Second, 20*time.Millisecond, "another gateway can discover the active local request")
+	cancelRequest()
+	require.Eventually(t, func() bool { return len(snapshot(901)) == 0 }, time.Second, 10*time.Millisecond)
+	c.Set("channel_id", 7)
+	service.ResetRequestToolObservation(c)
+	assert.Empty(t, snapshot(901), "a late retry update cannot resurrect cancellation")
+	finish()
+	require.Eventually(t, func() bool {
+		for _, raw := range client.HGetAll(t.Context(), key).Val() {
+			if strings.Contains(raw, "cancelled-active-request") {
+				return false
+			}
+		}
+		return true
+	}, 4*time.Second, 20*time.Millisecond, "completion is removed from the shared snapshot")
+	var count int64
+	require.NoError(t, db.Model(&model.Log{}).Count(&count).Error)
+	assert.Zero(t, count)
 }

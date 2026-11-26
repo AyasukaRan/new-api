@@ -61,8 +61,8 @@ export function CommonLogMobileCard<TData>(props: {
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = getLogMetadata(log)
-  const displayable = isDisplayableLogType(log.type)
-  const timing = isTimingLogType(log.type)
+  const displayable = log.in_progress || isDisplayableLogType(log.type)
+  const timing = log.in_progress || isTimingLogType(log.type)
   const model = formatModelName(log)
   const group = log.group || other?.group || ''
   const fields: Record<FieldName, LogField> = {
@@ -220,7 +220,20 @@ export function CommonLogMobileCard<TData>(props: {
           {visibleMetadata.map((id) => {
             const field = fields[id]
             const filter = fieldFilters[id]
-            let fieldContent = <span className='truncate'>{field.value}</span>
+            let fieldContent = (
+              <span
+                className='truncate'
+                title={
+                  id === 'user' && context.sensitiveVisible
+                    ? log.username
+                    : undefined
+                }
+              >
+                {id === 'user' && isAdminView && context.sensitiveVisible
+                  ? log.user_admin_nickname?.trim() || log.username
+                  : field.value}
+              </span>
+            )
             if (id === 'group') {
               fieldContent = (
                 <LogGroupLabel
