@@ -14,24 +14,56 @@ concurrency:
 
 jobs:
   build:
+    name: Build and verify home image
     if: github.repository == 'AyasukaRan/new-api' && (github.ref == 'refs/heads/ran' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, linux, x64, home-110]
     permissions:
       contents: read
-      packages: write
     timeout-minutes: 60
+    outputs:
+      image_id: ${{ steps.image.outputs.image_id }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - name: Build and verify the home image
-        run: bash deploy/home/build.sh
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash deploy/home/build.sh
+          image_id=$(docker image inspect "new-api:ran-${GITHUB_SHA:0:9}" --format '{{.Id}}')
+          printf 'image_id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish home image to GHCR
+    needs: build
+    # Reuse the verified image in the dedicated runner's persistent Docker store.
+    runs-on: [self-hosted, linux, x64, home-110]
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 30
+    steps:
       - name: Publish verified image to GHCR
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          VERIFIED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
         run: |
           set -euo pipefail
+          if [[ ! "$VERIFIED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo '::error::The build did not provide a verified image ID.'
+            exit 1
+          fi
+          if ! revision=$(docker image inspect "$VERIFIED_IMAGE_ID" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'); then
+            echo '::error::The verified image is missing from this runner. Rerun all jobs to restore it.'
+            exit 1
+          fi
+          if [[ "$revision" != "$GITHUB_SHA" ]]; then
+            echo '::error::The verified image does not match the workflow commit.'
+            exit 1
+          fi
           export DOCKER_CONFIG
           DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/ghcr.XXXXXXXX")
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf -- "$DOCKER_CONFIG"' EXIT
@@ -39,7 +71,7 @@ jobs:
 
           registry="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="ran-${GITHUB_SHA:0:9}"
-          docker tag "new-api:$version" "$registry:$version"
+          docker tag "$VERIFIED_IMAGE_ID" "$registry:$version"
           docker push "$registry:$version"
           digest=$(docker buildx imagetools inspect "$registry:$version" --format '{{.Manifest.Digest}}')
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
