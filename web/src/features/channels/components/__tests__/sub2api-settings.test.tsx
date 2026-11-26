@@ -154,6 +154,9 @@ function serveActions(
 function renderSettings(
   props: Partial<React.ComponentProps<typeof Sub2APISettings>> = {}
 ) {
+  const onChannelSubmit = vi.fn((event: React.FormEvent) =>
+    event.preventDefault()
+  )
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
@@ -162,15 +165,17 @@ function renderSettings(
   })
   const view = render(
     <QueryClientProvider client={client}>
-      <Sub2APISettings
-        channelId={7}
-        disabled={false}
-        hasUnsavedChanges={false}
-        {...props}
-      />
+      <form onSubmit={onChannelSubmit}>
+        <Sub2APISettings
+          channelId={7}
+          disabled={false}
+          hasUnsavedChanges={false}
+          {...props}
+        />
+      </form>
     </QueryClientProvider>
   )
-  return { ...view, client }
+  return { ...view, client, onChannelSubmit }
 }
 
 test('new channels require saving before connecting accounts, and locked channels cannot mutate credentials', async () => {
@@ -217,12 +222,13 @@ test('login encrypts credentials, completes upstream 2FA, and refreshes the boun
     }
     throw new Error(`Unexpected POST ${path}`)
   })
-  renderSettings()
+  const { onChannelSubmit } = renderSettings()
   await user.click(await screen.findByRole('button', { name: 'Add account' }))
   await user.type(screen.getByLabelText(/Email/), 'second@example.com')
   await user.type(screen.getByLabelText(/Password/), 'upstream-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
   await user.type(await screen.findByLabelText(/Authenticator code/), '123456')
+  expect(onChannelSubmit).not.toHaveBeenCalled()
   expect(screen.queryByLabelText(/Password/)).not.toBeInTheDocument()
   const loginCall = post.mock.calls.find(([path]) => path === `${url}/login`)
   expect(loginCall?.[1]).toEqual({
@@ -251,12 +257,13 @@ test('login encrypts credentials, completes upstream 2FA, and refreshes the boun
   await user.click(screen.getByRole('button', { name: 'Continue' }))
   expect(await screen.findByText('second@example.com')).toBeVisible()
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(onChannelSubmit).not.toHaveBeenCalled()
 })
 
 test('token import sends one encrypted payload and reopening starts with empty fields', async () => {
   const user = userEvent.setup()
   const post = serveActions(() => ({ requires_2fa: false, account_id: 1 }))
-  renderSettings()
+  const { onChannelSubmit } = renderSettings()
   await user.click(await screen.findByRole('button', { name: 'Import tokens' }))
   await user.type(screen.getByLabelText(/Access token/), 'upstream-access')
   await user.type(screen.getByLabelText(/Refresh token/), 'upstream-refresh')
@@ -271,6 +278,7 @@ test('token import sends one encrypted payload and reopening starts with empty f
   })
   expect(JSON.stringify(call?.[1])).not.toContain('upstream-access')
   expect(JSON.stringify(call?.[1])).not.toContain('upstream-refresh')
+  expect(onChannelSubmit).not.toHaveBeenCalled()
   await user.click(screen.getByRole('button', { name: 'Import tokens' }))
   expect(screen.getByLabelText(/Access token/)).toHaveValue('')
   expect(screen.getByLabelText(/Refresh token/)).toHaveValue('')

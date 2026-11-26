@@ -238,6 +238,7 @@ export function Sub2APISettings(props: {
     <section
       className='space-y-4'
       aria-label={t('Sub2API account and billing')}
+      onSubmit={(event) => event.stopPropagation()}
     >
       <div className='flex flex-wrap items-center justify-between gap-2'>
         <h3 className='text-sm font-medium'>
