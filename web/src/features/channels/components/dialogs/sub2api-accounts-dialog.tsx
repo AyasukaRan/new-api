@@ -197,7 +197,7 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
         <div className='space-y-4'>
           <div className='flex flex-wrap items-center gap-2'>
             <Input
-              className='min-w-0 flex-1'
+              className='min-w-0 basis-full sm:flex-1 sm:basis-0'
               aria-label={t('Search accounts')}
               placeholder={t('Search accounts')}
               value={search}
@@ -268,9 +268,9 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
                 key={account.id}
                 variant='outline'
                 size='sm'
-                className='items-start'
+                className='flex-col items-stretch sm:flex-row sm:items-start'
               >
-                <ItemContent className='min-w-0'>
+                <ItemContent className='w-full min-w-0 sm:w-auto'>
                   <ItemTitle className='flex min-w-0 flex-wrap items-center gap-2'>
                     <span className='break-all'>{account.email}</span>
                     <span className='text-muted-foreground text-xs'>
@@ -327,7 +327,7 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
                     </p>
                   )}
                 </ItemContent>
-                <ItemActions className='flex-wrap'>
+                <ItemActions className='flex-wrap sm:shrink-0'>
                   <Button
                     type='button'
                     variant='ghost'
