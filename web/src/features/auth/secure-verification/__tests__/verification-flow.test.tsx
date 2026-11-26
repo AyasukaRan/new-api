@@ -98,6 +98,7 @@ function pendingResponse<T>() {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   window.sessionStorage.clear()
@@ -599,4 +600,78 @@ it('verifies with the clicked provider when several linked accounts are availabl
   expect(
     screen.getByRole('button', { name: 'Continue with Linux DO' })
   ).toBeDisabled()
+})
+
+it('rate limiting clears the password, blocks every verification method, and never retries automatically', async () => {
+  vi.stubGlobal('PublicKeyCredential', class {})
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: {
+      success: true,
+      data: {
+        ...passwordRequirements,
+        methods: [
+          { method: 'password', available: true },
+          { method: 'passkey', available: true },
+        ],
+      },
+    },
+  })
+  const proof = {
+    proof_token: 'new-proof',
+    method: 'password',
+    scope: 'passkey.register',
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+  }
+  const posts = vi
+    .spyOn(api, 'post')
+    .mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 429, headers: { 'retry-after': '5' }, data: {} },
+    })
+    .mockResolvedValue({ data: { success: true, data: proof } })
+  const result = vi.fn()
+  const user = userEvent.setup()
+  render(<Harness onResult={result} />)
+  await user.click(screen.getByText('Protected action'))
+  await user.click(await screen.findByRole('tab', { name: 'Password' }))
+  await user.type(
+    screen.getByLabelText('Password', { selector: 'input' }),
+    'first-secret'
+  )
+  vi.useFakeTimers()
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
+  })
+  expect(screen.getByRole('alert')).toHaveTextContent('Too many requests')
+  expect(screen.getByText('Try again in 5s')).toBeVisible()
+  expect(screen.getByLabelText('Password', { selector: 'input' })).toHaveValue(
+    ''
+  )
+  expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled()
+  expect(screen.getByRole('tab', { name: 'Passkey' })).toHaveAttribute(
+    'aria-disabled',
+    'true'
+  )
+  fireEvent.click(screen.getByRole('tab', { name: 'Passkey' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
+  expect(posts).toHaveBeenCalledTimes(1)
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  expect(screen.queryByText('Try again in 5s')).not.toBeInTheDocument()
+  expect(screen.getByRole('tab', { name: 'Passkey' })).not.toHaveAttribute(
+    'aria-disabled',
+    'true'
+  )
+  expect(posts).toHaveBeenCalledTimes(1)
+  expect(result).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Password', { selector: 'input' }), {
+    target: { value: 'new-secret' },
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
+  })
+  expect(result).toHaveBeenCalledExactlyOnceWith(proof)
+  expect(posts).toHaveBeenCalledTimes(2)
+  expect(posts.mock.calls[1]?.[1]).toMatchObject({ password: 'new-secret' })
 })

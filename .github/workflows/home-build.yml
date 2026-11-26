@@ -67,7 +67,13 @@ jobs:
           export DOCKER_CONFIG
           DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/ghcr.XXXXXXXX")
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf -- "$DOCKER_CONFIG"' EXIT
-          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          for attempt in 1 2 3; do
+            if printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin; then
+              break
+            fi
+            [[ "$attempt" != 3 ]] || exit 1
+            sleep "$((attempt * 2))"
+          done
 
           registry="ghcr.io/${GITHUB_REPOSITORY,,}"
           version="ran-${GITHUB_SHA:0:9}"
@@ -78,7 +84,7 @@ jobs:
           printf 'Published `%s:%s` at `%s`.\n' "$registry" "$version" "$digest" >> "$GITHUB_STEP_SUMMARY"
 
           # A rerun of an older commit should publish only its version tag.
-          head_sha=$(curl --fail --silent --show-error --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
+          head_sha=$(curl --fail --silent --show-error --retry 3 --retry-all-errors --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $GH_TOKEN" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git/ref/heads/ran" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
           if [[ "$head_sha" == "$GITHUB_SHA" ]]; then
             docker buildx imagetools create --prefer-index=false --tag "$registry:ran" "$registry@$digest"

@@ -74,7 +74,7 @@ export type VerificationOperation =
   | {
       scope: 'sub2api.account.manage'
       context: {
-        action: 'login' | 'import' | 'refresh' | 'disconnect'
+        action: 'login' | 'import' | 'refresh' | 'disconnect' | 'sync'
         account_id: number
         origin: string
         proxy_encrypted: string

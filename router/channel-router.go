@@ -42,8 +42,9 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	accounts := apiRouter.Group("/sub2api/accounts", middleware.AdminAuth(), middleware.DisableCache())
 	handlePermissionRoute(accounts, http.MethodGet, "", authz.ChannelRead, controller.GetSub2APIAccounts)
 	handlePermissionRoute(accounts, http.MethodGet, "/encryption-key", authz.ChannelRead, controller.GetSub2APIEncryptionKey)
-	for _, action := range []string{"login", "login/2fa", "import", "refresh", "disconnect"} {
-		handlePermissionRoute(accounts, http.MethodPost, "/"+action, authz.ChannelSensitiveWrite, middleware.CriticalRateLimit(), controller.ManageSub2APIAccounts)
+	handlePermissionRoute(accounts, http.MethodGet, "/:id/inventory", authz.ChannelRead, controller.GetSub2APIInventory)
+	for _, action := range []string{"login", "login/2fa", "import", "refresh", "disconnect", "sync"} {
+		handlePermissionRoute(accounts, http.MethodPost, "/"+action, authz.ChannelSensitiveWrite, middleware.ScopedCriticalRateLimit("sub2api-management"), middleware.UserCriticalRateLimit("sub2api-management"), controller.ManageSub2APIAccounts)
 	}
 	channelRoute := apiRouter.Group("/channel")
 	channelRoute.Use(middleware.AdminAuth())
@@ -58,7 +59,7 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 
 	for _, route := range channelPermissionRoutes {
 		if route.method != http.MethodGet && strings.Contains(route.path, "/sub2api/") {
-			handlePermissionRoute(channelRoute, route.method, route.path, route.permission, middleware.CriticalRateLimit(), route.handler)
+			handlePermissionRoute(channelRoute, route.method, route.path, route.permission, middleware.ScopedCriticalRateLimit("sub2api-management"), middleware.UserCriticalRateLimit("sub2api-management"), route.handler)
 			continue
 		}
 		handlePermissionRoute(channelRoute, route.method, route.path, route.permission, route.handler)

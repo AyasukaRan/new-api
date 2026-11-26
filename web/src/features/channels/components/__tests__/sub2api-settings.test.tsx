@@ -32,6 +32,8 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { AxiosError, AxiosHeaders } from 'axios'
+import { toast } from 'sonner'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -42,7 +44,7 @@ import {
   sub2APIImportSchema,
   sub2APIProxySchema,
 } from '../../lib/sub2api-login'
-import type { Sub2APIStatus } from '../../sub2api-api'
+import type { Sub2APIInventory, Sub2APIStatus } from '../../sub2api-api'
 import { Sub2APIAccountsDialog } from '../dialogs/sub2api-accounts-dialog'
 import { Sub2APISettings } from '../sub2api-settings'
 
@@ -54,6 +56,7 @@ const { publicKey, privateKey } = generateKeyPairSync('rsa', {
 const url = '/api/channel/7/sub2api'
 const accountUrl = '/api/sub2api/accounts'
 let status: Sub2APIStatus
+let inventory: Sub2APIInventory
 
 beforeEach(() => {
   vi.stubGlobal('location', new URL('https://gateway.example'))
@@ -102,9 +105,48 @@ beforeEach(() => {
       },
     ],
   }
+  inventory = {
+    account_id: 1,
+    cached: false,
+    snapshot: {
+      synced_at: 1800000000,
+      keys: [
+        {
+          id: 10,
+          name: 'Upstream key one',
+          masked_key: 'sk-…1234',
+          group_id: 5,
+          status: 'active',
+          expires_at: null,
+        },
+      ],
+      groups: [
+        {
+          id: 5,
+          name: 'Upstream group',
+          description: '',
+          platform: 'claude',
+          group_rate_multiplier: 1.25,
+          user_rate_multiplier: 0,
+          resolved_rate_multiplier: 0,
+          peak_rate_enabled: false,
+          peak_start: '',
+          peak_end: '',
+          peak_rate_multiplier: 1,
+        },
+      ],
+    },
+    last_attempt_at: 1800000000,
+    next_attempt_at: 0,
+    last_error: '',
+    records: [],
+  }
   vi.spyOn(api, 'get').mockImplementation(async (path, config) => {
     if (path === url || path === accountUrl) {
       return { data: { success: true, data: structuredClone(status) } }
+    }
+    if (path === `${accountUrl}/1/inventory`) {
+      return { data: { success: true, data: structuredClone(inventory) } }
     }
     if (path === '/api/verify/methods') {
       return {
@@ -1060,4 +1102,160 @@ test('invalid or ambiguous proxy addresses cannot reach credential encryption', 
     }).url
   ).toBe('http://:secret@proxy.example:8080')
   expect(sub2APIProxySchema.parse({ proxy: '' }).url).toBe('')
+})
+
+test('account inventory loads only when expanded and shows masked keys with their group and explicit zero override', async () => {
+  const user = userEvent.setup()
+  renderAccounts()
+  const expand = await screen.findByRole('button', { name: 'Keys and groups' })
+  expect(api.get).not.toHaveBeenCalledWith(
+    `${accountUrl}/1/inventory`,
+    expect.anything()
+  )
+  await user.click(expand)
+  const content = screen.getByRole('region', { name: 'Keys and groups' })
+  expect(await within(content).findByText('sk-…1234')).toBeVisible()
+  expect(within(content).getByText('Upstream group')).toBeVisible()
+  expect(expand).toHaveAttribute('aria-expanded', 'true')
+  await user.click(within(content).getByRole('tab', { name: 'Groups (1)' }))
+  expect(within(content).getByText('1.25×')).toBeVisible()
+  expect(within(content).getAllByText('0×')).toHaveLength(2)
+  expect(
+    within(content).queryByText('Current effective multiplier')
+  ).not.toBeInTheDocument()
+  await user.click(expand)
+  expect(
+    screen.queryByRole('region', { name: 'Keys and groups' })
+  ).not.toBeInTheDocument()
+})
+
+test.each([false, true])(
+  'inventory sync binds an account proof without creating channel keys and only reports a fresh sync (cached=%s)',
+  async (cached) => {
+    const user = userEvent.setup()
+    const success = vi.spyOn(toast, 'success')
+    inventory.snapshot = null
+    const post = serveActions((path, data) => {
+      expect(path).toBe(`${accountUrl}/sync`)
+      expect(data).toEqual({ account_id: 1 })
+      inventory = {
+        ...inventory,
+        cached,
+        snapshot: { synced_at: 1800000001, keys: [], groups: [] },
+        records: [
+          {
+            at: 1800000001,
+            success: true,
+            error_code: '',
+            error_message: '',
+            upstream_status: 0,
+            keys: 0,
+            groups: 0,
+          },
+        ],
+      }
+      return inventory
+    })
+    renderAccounts()
+    await user.click(
+      await screen.findByRole('button', { name: 'Keys and groups' })
+    )
+    let content = screen.getByRole('region', { name: 'Keys and groups' })
+    await waitFor(() =>
+      expect(
+        within(content).getByRole('button', { name: 'Sync now' })
+      ).toBeEnabled()
+    )
+    await user.click(within(content).getByRole('button', { name: 'Sync now' }))
+    expect(
+      await screen.findByRole('tab', { name: 'API Keys (0)' })
+    ).toBeVisible()
+    content = screen.getByRole('region', { name: 'Keys and groups' })
+    expect(post).toHaveBeenCalledWith(
+      '/api/verify',
+      expect.objectContaining({
+        scope: 'sub2api.account.manage',
+        context: {
+          action: 'sync',
+          account_id: 1,
+          origin: '',
+          proxy_encrypted: '',
+          email: '',
+        },
+      }),
+      expect.anything()
+    )
+    expect(post).toHaveBeenCalledWith(
+      `${accountUrl}/sync`,
+      { account_id: 1 },
+      expect.objectContaining({
+        singleUseAuthorization: true,
+        headers: { 'X-Security-Proof': 'scoped-proof' },
+      })
+    )
+    expect(post.mock.calls).toHaveLength(2)
+    if (cached) expect(success).not.toHaveBeenCalled()
+    else expect(success).toHaveBeenCalledWith('Sync completed')
+    await user.click(
+      within(content).getByRole('button', { name: 'Sync records' })
+    )
+    expect(await within(content).findByText('Success')).toBeVisible()
+  }
+)
+
+test('rate-limited inventory sync keeps the successful snapshot and disables another attempt without replaying', async () => {
+  const user = userEvent.setup()
+  const post = serveActions(() => {
+    inventory.next_attempt_at = Math.ceil(Date.now() / 1000) + 60
+    inventory.last_error = 'Too many requests'
+    inventory.records = [
+      {
+        at: Math.floor(Date.now() / 1000),
+        success: false,
+        error_code: 'SUB2API_RATE_LIMITED',
+        error_message: 'Too many requests',
+        upstream_status: 429,
+        keys: 0,
+        groups: 0,
+      },
+    ]
+    throw new AxiosError(
+      'unsafe upstream body',
+      undefined,
+      undefined,
+      undefined,
+      {
+        status: 429,
+        statusText: '',
+        headers: { 'retry-after': '60' },
+        config: { headers: new AxiosHeaders() },
+        data: { success: false, next_attempt_at: inventory.next_attempt_at },
+      }
+    )
+  })
+  renderAccounts()
+  await user.click(
+    await screen.findByRole('button', { name: 'Keys and groups' })
+  )
+  let content = screen.getByRole('region', { name: 'Keys and groups' })
+  expect(await within(content).findByText('sk-…1234')).toBeVisible()
+  await user.click(within(content).getByRole('button', { name: 'Sync now' }))
+  expect(await screen.findByText(/Try again in \d+s/)).toBeVisible()
+  content = screen.getByRole('region', { name: 'Keys and groups' })
+  expect(within(content).getByText('sk-…1234')).toBeVisible()
+  expect(
+    within(content).getByRole('button', { name: 'Sync now' })
+  ).toBeDisabled()
+  expect(
+    within(content).queryByText('unsafe upstream body')
+  ).not.toBeInTheDocument()
+  await user.click(within(content).getByRole('button', { name: 'Sync now' }))
+  expect(
+    post.mock.calls.filter(([path]) => path === `${accountUrl}/sync`)
+  ).toHaveLength(1)
+  await user.click(
+    within(content).getByRole('button', { name: 'Sync records' })
+  )
+  expect(await within(content).findByText('Failed')).toBeVisible()
+  expect(within(content).getByText(/HTTP 429/)).toBeVisible()
 })

@@ -25,6 +25,7 @@ export const STATIC_I18N_KEYS = [
   'The Sub2API TLS connection could not be verified.',
   'The Sub2API server could not be reached.',
   'The Sub2API server returned an error.',
+  'The Sub2API inventory exceeds the supported page limit.',
   'Thinking replay mismatch',
   'Unsupported image format',
   'Resource fetch failed',

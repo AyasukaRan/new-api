@@ -61,7 +61,9 @@ import {
   getSub2APIAccounts,
   submitSub2APIAccountAction,
   type Sub2APIAccount,
+  type Sub2APIInventory,
 } from '../../sub2api-api'
+import { Sub2APIAccountInventory } from '../sub2api-account-inventory'
 import { Sub2APIConnectDialog } from './sub2api-connect-dialog'
 
 export function Sub2APIAccountsDialog(props: {
@@ -87,6 +89,7 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
     account?: Sub2APIAccount
   } | null>(null)
   const [disconnect, setDisconnect] = useState<Sub2APIAccount | null>(null)
+  const [inventoryAccount, setInventoryAccount] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const operation = useRef<AbortController | null>(null)
   const verification = useSecureVerification()
@@ -99,12 +102,12 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
   })
   const mutation = useMutation({
     mutationFn: (request: {
-      action: 'refresh' | 'disconnect'
+      action: 'refresh' | 'disconnect' | 'sync'
       accountId: number
       proof: string
       signal: AbortSignal
     }) =>
-      submitSub2APIAccountAction(
+      submitSub2APIAccountAction<Sub2APIInventory | undefined>(
         request.action,
         { account_id: request.accountId },
         request.proof,
@@ -129,7 +132,7 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
     void client.invalidateQueries({ queryKey: ['channel-sub2api'] })
   }
   const runAction = async (
-    action: 'refresh' | 'disconnect',
+    action: 'refresh' | 'disconnect' | 'sync',
     account: Sub2APIAccount
   ) => {
     if (
@@ -155,17 +158,33 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
         title: t('Verify to manage upstream account'),
       })
       if (!proof || operation.current !== current) return
-      await mutation.mutateAsync({
+      const result = await mutation.mutateAsync({
         action,
         accountId: account.id,
         proof: proof.proof_token,
         signal: current.signal,
       })
       if (operation.current !== current) return
+      if (action === 'sync' && result) {
+        await client.cancelQueries({
+          queryKey: ['sub2api-inventory', user?.id, account.id],
+        })
+        if (operation.current !== current) return
+        client.setQueryData(['sub2api-inventory', user?.id, account.id], result)
+      }
       invalidate()
-      toast.success(t('Saved successfully'))
+      if (action !== 'sync' || !result?.cached) {
+        toast.success(
+          action === 'sync' ? t('Sync completed') : t('Saved successfully')
+        )
+      }
     } catch (error) {
       if (operation.current === current && !current.signal.aborted) {
+        if (action === 'sync') {
+          void client.invalidateQueries({
+            queryKey: ['sub2api-inventory', user?.id, account.id],
+          })
+        }
         handleServerError(AuthOperationError.from(error))
       }
     } finally {
@@ -264,121 +283,146 @@ function Sub2APIAccountsContent(props: { onClose: () => void }) {
           )}
           <ItemGroup className='gap-2'>
             {accounts.map((account) => (
-              <Item
-                key={account.id}
-                variant='outline'
-                size='sm'
-                className='flex-col items-stretch sm:flex-row sm:items-start'
-              >
-                <ItemContent className='w-full min-w-0 sm:w-auto'>
-                  <ItemTitle className='flex min-w-0 flex-wrap items-center gap-2'>
-                    <span className='break-all'>{account.email}</span>
-                    <span className='text-muted-foreground text-xs'>
-                      #{account.id}
-                    </span>
-                    <StatusBadge
-                      label={
-                        account.needs_login ? t('Needs login') : t('Connected')
+              <div key={account.id}>
+                <Item
+                  variant='outline'
+                  size='sm'
+                  className='flex-col items-stretch sm:flex-row sm:items-start'
+                >
+                  <ItemContent className='w-full min-w-0 sm:w-auto'>
+                    <ItemTitle className='flex min-w-0 flex-wrap items-center gap-2'>
+                      <span className='break-all'>{account.email}</span>
+                      <span className='text-muted-foreground text-xs'>
+                        #{account.id}
+                      </span>
+                      <StatusBadge
+                        label={
+                          account.needs_login
+                            ? t('Needs login')
+                            : t('Connected')
+                        }
+                        variant={account.needs_login ? 'warning' : 'success'}
+                        copyable={false}
+                      />
+                    </ItemTitle>
+                    <ItemDescription className='break-all'>
+                      {account.origin}
+                    </ItemDescription>
+                    <ItemDescription>
+                      {account.has_proxy
+                        ? t('Proxy configured')
+                        : t('Direct connection')}
+                      {account.legacy ? ` · ${t('Channel account')}` : ''}
+                    </ItemDescription>
+                    <ItemDescription>
+                      {t('Linked channels')} ({account.channel_ids.length}):{' '}
+                      {account.channel_ids.length
+                        ? account.channels
+                            .map((channel) => `#${channel.id} ${channel.name}`)
+                            .join(', ')
+                        : t('None')}
+                    </ItemDescription>
+                    {account.expires_at > 0 && (
+                      <ItemDescription>
+                        {t('Expires {{time}}', {
+                          time: formatTimestampToDate(account.expires_at),
+                        })}
+                      </ItemDescription>
+                    )}
+                    {account.last_sync_at > 0 && (
+                      <ItemDescription>
+                        {t('Last synced')}:{' '}
+                        {formatTimestampToDate(account.last_sync_at)}
+                      </ItemDescription>
+                    )}
+                    {account.last_error && (
+                      <p className='text-destructive text-xs'>
+                        {translateServerText(t, account.last_error)}
+                      </p>
+                    )}
+                    {account.channel_ids.length > 0 && (
+                      <p className='text-muted-foreground text-xs'>
+                        {t(
+                          'Detach this account from its channels before disconnecting.'
+                        )}
+                      </p>
+                    )}
+                  </ItemContent>
+                  <ItemActions className='flex-wrap sm:shrink-0'>
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='sm'
+                      aria-expanded={inventoryAccount === account.id}
+                      aria-controls={`sub2api-inventory-${account.id}`}
+                      onClick={() =>
+                        setInventoryAccount(
+                          inventoryAccount === account.id ? null : account.id
+                        )
                       }
-                      variant={account.needs_login ? 'warning' : 'success'}
-                      copyable={false}
-                    />
-                  </ItemTitle>
-                  <ItemDescription className='break-all'>
-                    {account.origin}
-                  </ItemDescription>
-                  <ItemDescription>
-                    {account.has_proxy
-                      ? t('Proxy configured')
-                      : t('Direct connection')}
-                    {account.legacy ? ` · ${t('Channel account')}` : ''}
-                  </ItemDescription>
-                  <ItemDescription>
-                    {t('Linked channels')} ({account.channel_ids.length}):{' '}
-                    {account.channel_ids.length
-                      ? account.channels
-                          .map((channel) => `#${channel.id} ${channel.name}`)
-                          .join(', ')
-                      : t('None')}
-                  </ItemDescription>
-                  {account.expires_at > 0 && (
-                    <ItemDescription>
-                      {t('Expires {{time}}', {
-                        time: formatTimestampToDate(account.expires_at),
+                    >
+                      {t('Keys and groups')}
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='sm'
+                      disabled={locked || !status?.encryption_ready}
+                      onClick={() => setConnect({ mode: 'login', account })}
+                    >
+                      {t('Log in again')}
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='sm'
+                      aria-label={t('Import tokens for {{account}}', {
+                        account: account.email,
                       })}
-                    </ItemDescription>
-                  )}
-                  {account.last_sync_at > 0 && (
-                    <ItemDescription>
-                      {t('Last synced')}:{' '}
-                      {formatTimestampToDate(account.last_sync_at)}
-                    </ItemDescription>
-                  )}
-                  {account.last_error && (
-                    <p className='text-destructive text-xs'>
-                      {translateServerText(t, account.last_error)}
-                    </p>
-                  )}
-                  {account.channel_ids.length > 0 && (
-                    <p className='text-muted-foreground text-xs'>
-                      {t(
-                        'Detach this account from its channels before disconnecting.'
-                      )}
-                    </p>
-                  )}
-                </ItemContent>
-                <ItemActions className='flex-wrap sm:shrink-0'>
-                  <Button
-                    type='button'
-                    variant='ghost'
-                    size='sm'
-                    disabled={locked || !status?.encryption_ready}
-                    onClick={() => setConnect({ mode: 'login', account })}
-                  >
-                    {t('Log in again')}
-                  </Button>
-                  <Button
-                    type='button'
-                    variant='ghost'
-                    size='sm'
-                    aria-label={t('Import tokens for {{account}}', {
-                      account: account.email,
-                    })}
-                    disabled={locked || !status?.encryption_ready}
-                    onClick={() => setConnect({ mode: 'import', account })}
-                  >
-                    {t('Import tokens')}
-                  </Button>
-                  <Button
-                    type='button'
-                    variant='ghost'
-                    size='icon'
-                    aria-label={t('Refresh account {{account}}', {
-                      account: account.email,
-                    })}
-                    disabled={
-                      locked ||
-                      !account.has_refresh_token ||
-                      !status?.encryption_ready
-                    }
-                    onClick={() => void runAction('refresh', account)}
-                  >
-                    <RefreshCw />
-                  </Button>
-                  <Button
-                    type='button'
-                    variant='ghost'
-                    size='icon'
-                    aria-label={t('Disconnect account {{account}}', {
-                      account: account.email,
-                    })}
-                    disabled={locked || account.channel_ids.length > 0}
-                    onClick={() => setDisconnect(account)}
-                  >
-                    <Unplug />
-                  </Button>
-                </ItemActions>
-              </Item>
+                      disabled={locked || !status?.encryption_ready}
+                      onClick={() => setConnect({ mode: 'import', account })}
+                    >
+                      {t('Import tokens')}
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='icon'
+                      aria-label={t('Refresh account {{account}}', {
+                        account: account.email,
+                      })}
+                      disabled={
+                        locked ||
+                        !account.has_refresh_token ||
+                        !status?.encryption_ready
+                      }
+                      onClick={() => void runAction('refresh', account)}
+                    >
+                      <RefreshCw />
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='icon'
+                      aria-label={t('Disconnect account {{account}}', {
+                        account: account.email,
+                      })}
+                      disabled={locked || account.channel_ids.length > 0}
+                      onClick={() => setDisconnect(account)}
+                    >
+                      <Unplug />
+                    </Button>
+                  </ItemActions>
+                </Item>
+                {inventoryAccount === account.id && (
+                  <Sub2APIAccountInventory
+                    account={account}
+                    userId={user?.id}
+                    disabled={locked || account.needs_login}
+                    onSync={() => void runAction('sync', account)}
+                  />
+                )}
+              </div>
             ))}
           </ItemGroup>
         </div>

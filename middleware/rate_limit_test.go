@@ -96,6 +96,54 @@ func TestRedisUserRateLimiterUsesSharedFixedWindow(t *testing.T) {
 	assert.Equal(t, 23*time.Second, redisServer.TTL(key))
 }
 
+func TestScopedCriticalRateLimitPreservesVerificationAndManagementBudgets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousEnabled, previousNum, previousDuration := common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration
+	previousRedisEnabled := common.RedisEnabled
+	t.Cleanup(func() {
+		common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = previousEnabled, previousNum, previousDuration
+		common.RedisEnabled = previousRedisEnabled
+	})
+	common.CriticalRateLimitEnable, common.CriticalRateLimitNum, common.CriticalRateLimitDuration = true, 2, 1200
+
+	for _, useRedis := range []bool{false, true} {
+		name := "memory"
+		if useRedis {
+			name = "redis"
+		}
+		t.Run(name, func(t *testing.T) {
+			common.RedisEnabled = useRedis
+			if useRedis {
+				useRateLimitMiniRedis(t)
+			}
+			router := gin.New()
+			require.NoError(t, router.SetTrustedProxies(nil))
+			router.Use(func(c *gin.Context) {
+				userID := 821
+				if c.Param("user") == "other" {
+					userID = 822
+				}
+				c.Set("id", userID)
+			})
+			completed := func(c *gin.Context) { c.Status(http.StatusNoContent) }
+			router.GET("/verify", CriticalRateLimit(), UserCriticalRateLimit("security-verification"), completed)
+			router.GET("/manage/:user", ScopedCriticalRateLimit("sub2api-management"), UserCriticalRateLimit("sub2api-management"), completed)
+			const address = "192.0.2.82:12345"
+			assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/manage/self", address).Code)
+			assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/verify", address).Code)
+			assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/manage/self", address).Code)
+			// Changing IP cannot bypass the per-user management limit.
+			response := performRateLimitRequest(router, "/manage/self", "198.51.100.82:12345")
+			assert.Equal(t, http.StatusTooManyRequests, response.Code)
+			assert.Equal(t, "1200", response.Header().Get("Retry-After"))
+			assert.Equal(t, http.StatusTooManyRequests, performRateLimitRequest(router, "/manage/other", address).Code)
+			// Management has exhausted its limits, but has not counted as password attempts.
+			assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/verify", address).Code)
+			assert.Equal(t, http.StatusTooManyRequests, performRateLimitRequest(router, "/verify", address).Code)
+		})
+	}
+}
+
 func TestRedisEmailVerificationRateLimiterPreservesResponseAndTTL(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	redisServer, _ := useRateLimitMiniRedis(t)

@@ -130,7 +130,9 @@ def prepare_sub2api_shared_schema(database_container=None, database_name=None):
 SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='20s';
 ALTER TABLE sub2_api_accounts
  ADD COLUMN IF NOT EXISTS shared_identity char(64),
- ADD COLUMN IF NOT EXISTS proxy_credential text;
+ ADD COLUMN IF NOT EXISTS proxy_credential text,
+ ADD COLUMN IF NOT EXISTS inventory_json text,
+ ADD COLUMN IF NOT EXISTS sync_state_json text;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sub2_api_accounts_shared_identity
  ON sub2_api_accounts (shared_identity);
 DO $migration$
@@ -138,7 +140,7 @@ BEGIN
  IF (SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='sub2_api_accounts'
      AND is_nullable='YES' AND column_default IS NULL AND
      ((column_name='shared_identity' AND data_type='character' AND character_maximum_length=64) OR
-      (column_name='proxy_credential' AND data_type='text'))) <> 2
+      (column_name IN ('proxy_credential', 'inventory_json', 'sync_state_json') AND data_type='text'))) <> 4
  THEN RAISE EXCEPTION 'unexpected shared Sub2API account columns'; END IF;
  IF NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid
      JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace

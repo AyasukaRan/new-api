@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 
+import { useCountdown } from '@/hooks/use-countdown'
 import { AuthOperationError } from '@/lib/secure-verification'
 import type { AuthBundle } from '@/stores/auth-store'
 
@@ -141,6 +142,23 @@ type PendingVerification = PendingVerificationBase &
 export function useSecureVerification() {
   const [state, dispatch] = useReducer(verificationReducer, { phase: 'idle' })
   const pending = useRef<PendingVerification | null>(null)
+  const cooldownUntil = useRef(0)
+  const {
+    start: startCooldown,
+    isActive: coolingDown,
+    secondsLeft,
+  } = useCountdown()
+  const captureFailure = useCallback(
+    (error: unknown) => {
+      const failure = AuthOperationError.from(error)
+      if (failure.retryAfterSeconds) {
+        cooldownUntil.current = Date.now() + failure.retryAfterSeconds * 1000
+        startCooldown(failure.retryAfterSeconds)
+      }
+      return failure
+    },
+    [startCooldown]
+  )
   const [passkeyDomains, setPasskeyDomains] = useState<PasskeyDomains | null>(
     null
   )
@@ -157,32 +175,68 @@ export function useSecureVerification() {
 
   useEffect(() => cancel, [cancel])
 
-  const loadRequirements = useCallback(async (current: PendingVerification) => {
-    dispatch({ type: 'loading', request: current.request })
-    try {
-      const requirements =
-        current.kind === 'login'
-          ? await getLoginVerificationRequirements(
-              current.request.challenge,
+  const loadRequirements = useCallback(
+    async (current: PendingVerification) => {
+      dispatch({ type: 'loading', request: current.request })
+      if (cooldownUntil.current > Date.now()) {
+        current.initialPassword = undefined
+        dispatch({ type: 'error', error: 'Too many requests' })
+        return
+      }
+      try {
+        const requirements =
+          current.kind === 'login'
+            ? await getLoginVerificationRequirements(
+                current.request.challenge,
+                current.controller.signal
+              )
+            : await checkVerificationMethods(
+                current.request.scope,
+                current.controller.signal
+              )
+        if (pending.current !== current) return
+        const initialPassword = current.initialPassword
+        current.initialPassword = undefined
+        if (
+          current.kind === 'operation' &&
+          initialPassword !== undefined &&
+          requirements.methods.length === 1 &&
+          requirements.methods[0].method === 'password' &&
+          requirements.methods[0].available
+        ) {
+          try {
+            const proof = await verify(
+              { method: 'password', password: initialPassword },
+              current.request,
+              requirements.password_encryption_enabled,
               current.controller.signal
             )
-          : await checkVerificationMethods(
-              current.request.scope,
-              current.controller.signal
-            )
-      if (pending.current !== current) return
-      const initialPassword = current.initialPassword
-      current.initialPassword = undefined
-      if (
-        current.kind === 'operation' &&
-        initialPassword !== undefined &&
-        requirements.methods.length === 1 &&
-        requirements.methods[0].method === 'password' &&
-        requirements.methods[0].available
-      ) {
-        try {
+            if (pending.current !== current) return
+            pending.current = null
+            dispatch({ type: 'reset' })
+            current.resolve(proof)
+          } catch (error) {
+            if (pending.current !== current) return
+            const failure = captureFailure(error)
+            if (failure.retryAfterSeconds) {
+              dispatch({ type: 'loaded', requirements })
+              dispatch({ type: 'error', error: failure.message })
+              return
+            }
+            pending.current = null
+            dispatch({ type: 'reset' })
+            current.reject(error)
+          }
+          return
+        }
+        if (
+          current.kind === 'operation' &&
+          requirements.methods.length === 1 &&
+          requirements.methods[0].method === 'session' &&
+          requirements.methods[0].available
+        ) {
           const proof = await verify(
-            { method: 'password', password: initialPassword },
+            { method: 'session' },
             current.request,
             requirements.password_encryption_enabled,
             current.controller.signal
@@ -191,44 +245,23 @@ export function useSecureVerification() {
           pending.current = null
           dispatch({ type: 'reset' })
           current.resolve(proof)
-        } catch (error) {
-          if (pending.current !== current) return
-          pending.current = null
-          dispatch({ type: 'reset' })
-          current.reject(error)
+          return
         }
-        return
+        if (pending.current === current) {
+          dispatch({ type: 'loaded', requirements })
+        }
+      } catch (error) {
+        if (pending.current === current) {
+          current.initialPassword = undefined
+          dispatch({
+            type: 'error',
+            error: captureFailure(error).message,
+          })
+        }
       }
-      if (
-        current.kind === 'operation' &&
-        requirements.methods.length === 1 &&
-        requirements.methods[0].method === 'session' &&
-        requirements.methods[0].available
-      ) {
-        const proof = await verify(
-          { method: 'session' },
-          current.request,
-          requirements.password_encryption_enabled,
-          current.controller.signal
-        )
-        if (pending.current !== current) return
-        pending.current = null
-        dispatch({ type: 'reset' })
-        current.resolve(proof)
-        return
-      }
-      if (pending.current === current) {
-        dispatch({ type: 'loaded', requirements })
-      }
-    } catch (error) {
-      if (pending.current === current) {
-        dispatch({
-          type: 'error',
-          error: AuthOperationError.from(error).message,
-        })
-      }
-    }
-  }, [])
+    },
+    [captureFailure]
+  )
 
   const requestVerification = useCallback(
     (
@@ -280,7 +313,14 @@ export function useSecureVerification() {
   const executeVerification = useCallback(
     async (override?: VerificationInput) => {
       const current = pending.current
-      if (!current || current.submitting || state.phase !== 'ready') return
+      if (
+        !current ||
+        current.submitting ||
+        state.phase !== 'ready' ||
+        cooldownUntil.current > Date.now()
+      ) {
+        return
+      }
       const input = override ?? state.input
       if (!input) return
       const available = state.requirements.methods.some(
@@ -319,7 +359,7 @@ export function useSecureVerification() {
         dispatch({ type: 'reset' })
       } catch (error) {
         if (pending.current !== current) return
-        const failure = AuthOperationError.from(error)
+        const failure = captureFailure(error)
         if (failure.code === 'AUTH_CANCELLED') {
           cancel()
           return
@@ -329,11 +369,15 @@ export function useSecureVerification() {
         current.submitting = false
       }
     },
-    [cancel, state]
+    [cancel, captureFailure, state]
   )
 
   const retry = useCallback(() => {
-    if (pending.current && state.phase === 'error') {
+    if (
+      pending.current &&
+      state.phase === 'error' &&
+      cooldownUntil.current <= Date.now()
+    ) {
       void loadRequirements(pending.current)
     }
   }, [loadRequirements, state.phase])
@@ -349,6 +393,7 @@ export function useSecureVerification() {
     isActive: state.phase !== 'idle',
     dialogProps: {
       state,
+      retryAfterSeconds: coolingDown ? secondsLeft : 0,
       passkeyDomains,
       onCancel: cancel,
       onRetry: retry,

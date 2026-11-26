@@ -191,7 +191,7 @@ func BindVerificationOperation(operation VerificationOperation) (VerificationBin
 		normalized = context
 	case VerificationScopeSub2APIAccountManage:
 		var context Sub2APIAccountManageContext
-		if len(fields) != 5 || common.Unmarshal(operation.Context, &context) != nil || context.AccountID < 0 || len(context.Email) > 320 || len(context.ProxyEncrypted) > 16384 || !slices.Contains([]string{"login", "import", "refresh", "disconnect"}, context.Action) {
+		if len(fields) != 5 || common.Unmarshal(operation.Context, &context) != nil || context.AccountID < 0 || len(context.Email) > 320 || len(context.ProxyEncrypted) > 16384 || !slices.Contains([]string{"login", "import", "refresh", "disconnect", "sync"}, context.Action) {
 			return VerificationBinding{}, ErrVerificationContextInvalid
 		}
 		if context.Action == "login" || context.Action == "import" {

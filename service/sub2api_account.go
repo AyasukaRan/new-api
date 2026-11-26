@@ -35,9 +35,10 @@ const sub2APIUserAgent = "new-api/Sub2API-account"
 
 // Sub2APIError never embeds an upstream body, URL or credential.
 type Sub2APIError struct {
-	Code   string
-	Status int
-	Stage  string
+	Code    string
+	Status  int
+	Stage   string
+	RetryAt int64
 }
 
 func (e *Sub2APIError) Error() string { return e.Code }
@@ -342,7 +343,16 @@ func sub2APIRequest(ctx context.Context, origin, proxy, token, method, path stri
 		if err == nil && len(data) <= 4<<20 && common.Unmarshal(data, &failure) == nil && (strings.Contains(failure.Reason, "CAPTCHA") || strings.Contains(failure.Reason, "TURNSTILE")) {
 			code = "SUB2API_CAPTCHA_REQUIRED"
 		}
-		return &Sub2APIError{Code: code, Status: response.StatusCode}
+		responseError := &Sub2APIError{Code: code, Status: response.StatusCode}
+		if response.StatusCode == http.StatusTooManyRequests {
+			responseError.RetryAt = time.Now().Add(time.Minute).Unix()
+			if seconds, parseErr := strconv.ParseInt(response.Header.Get("Retry-After"), 10, 64); parseErr == nil && seconds > 0 && seconds <= 86400*7 {
+				responseError.RetryAt = time.Now().Unix() + seconds
+			} else if at, parseErr := http.ParseTime(response.Header.Get("Retry-After")); parseErr == nil && at.After(time.Now()) {
+				responseError.RetryAt = at.Unix()
+			}
+		}
+		return responseError
 	}
 	if err != nil {
 		failure := NewSub2APITransportError(err)
@@ -391,16 +401,24 @@ func verifySub2APICredential(ctx context.Context, channel *model.Channel, origin
 	}
 	bindings := make([]model.Sub2APIKeyBinding, 0)
 	matched := make(map[string]int64)
+	seen := make(map[int64]bool)
+	total := int64(-1)
+	pageSize := 0
 	for page := 1; page <= 100; page++ {
-		var list struct {
-			Items []sub2APIKey `json:"items"`
-			Pages int          `json:"pages"`
-		}
-		query := url.Values{"page": {strconv.Itoa(page)}, "page_size": {"100"}}
+		var list sub2APIPage[sub2APIKey]
+		query := url.Values{"page": {strconv.Itoa(page)}, "page_size": {"1000"}, "sort_by": {"id"}, "sort_order": {"asc"}}
 		if err := sub2APIRequest(ctx, origin, proxy, credential.AccessToken, http.MethodGet, "/api/v1/keys", query, nil, &list, false); err != nil {
 			return user, nil, err
 		}
+		if !list.valid(page, total) || pageSize > 0 && pageSize != list.PageSize {
+			return user, nil, sub2APIError("SUB2API_RESPONSE_INVALID")
+		}
+		total, pageSize = list.Total, list.PageSize
 		for _, key := range list.Items {
+			if key.ID <= 0 || key.UserID != user.ID || seen[key.ID] {
+				return user, nil, sub2APIError("SUB2API_RESPONSE_INVALID")
+			}
+			seen[key.ID] = true
 			identity := channel.KeyIdentity(key.Key)
 			if key.Key != "" && keys[identity] && key.ID > 0 && key.UserID == user.ID {
 				if previous, exists := matched[identity]; exists {
@@ -413,7 +431,10 @@ func verifySub2APICredential(ctx context.Context, channel *model.Channel, origin
 				bindings = append(bindings, model.Sub2APIKeyBinding{ChannelID: channel.Id, KeyIdentity: identity, UpstreamAPIKeyID: key.ID, UpstreamGroupID: key.GroupID})
 			}
 		}
-		if page >= list.Pages || len(list.Items) == 0 {
+		if page == list.Pages {
+			if int64(len(seen)) != total {
+				return user, nil, sub2APIError("SUB2API_RESPONSE_INVALID")
+			}
 			return user, bindings, nil
 		}
 	}
@@ -618,8 +639,8 @@ func RefreshSub2APIAccount(ctx context.Context, accountID int64, expectedRevisio
 
 // Sub2APIAccountRequest is the only management-token client exposed to billing
 // reconciliation. It returns typed decoded data, never the bearer credential.
-func Sub2APIAccountRequest(ctx context.Context, accountID int64, method, path string, query url.Values, payload, result any) error {
-	if method != http.MethodGet || path != "/api/v1/usage" && path != "/api/v1/keys" && path != "/api/v1/auth/me" && !strings.HasPrefix(path, "/api/v1/usage/") {
+func sub2APIAccountRequest(ctx context.Context, accountID int64, method, path string, query url.Values, payload, result any) error {
+	if method != http.MethodGet || path != "/api/v1/usage" && path != "/api/v1/keys" && path != "/api/v1/auth/me" && path != "/api/v1/groups/available" && path != "/api/v1/groups/rates" && !strings.HasPrefix(path, "/api/v1/usage/") {
 		return sub2APIError("SUB2API_PATH_INVALID")
 	}
 	account, proxy, credential, err := sub2APILoadAccount(accountID)
@@ -665,9 +686,17 @@ func DisconnectSub2API(ctx context.Context, channelID int, accountID int64, auth
 	})
 }
 
-// SyncSub2APIChannel refreshes only supplier metadata, not user model prices.
+// SyncSub2APIChannel reuses one account inventory across every linked channel.
 func SyncSub2APIChannel(ctx context.Context, channelID int, accountID int64) error {
-	channel, origin, err := sub2APIChannel(channelID)
+	return syncSub2APIChannel(ctx, channelID, accountID, false)
+}
+
+func SyncSub2APIChannelManual(ctx context.Context, channelID int, accountID int64) error {
+	return syncSub2APIChannel(ctx, channelID, accountID, true)
+}
+
+func syncSub2APIChannel(ctx context.Context, channelID int, accountID int64, manual bool) error {
+	channel, _, err := sub2APIChannel(channelID)
 	if err != nil {
 		return err
 	}
@@ -675,85 +704,59 @@ func SyncSub2APIChannel(ctx context.Context, channelID int, accountID int64) err
 	if err != nil {
 		return err
 	}
-	var lastErr error
+	var firstErr error
 	for _, account := range accounts {
 		if accountID > 0 && account.ID != accountID {
 			continue
 		}
-		var user sub2APIUser
-		if err := Sub2APIAccountRequest(ctx, account.ID, http.MethodGet, "/api/v1/auth/me", nil, nil, &user); err != nil {
-			lastErr = err
-			if saveErr := model.UpdateSub2APIAccountSync(account.ID, Sub2APIErrorCode(err)); saveErr != nil {
+		if _, err := SyncSub2APIInventory(ctx, account.ID, manual); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := SyncSub2APIDirectKeyRates(ctx, channel); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// Existing rate-only connections do not require importing a management login.
+func SyncSub2APIDirectKeyRates(ctx context.Context, channel *model.Channel) error {
+	_, origin, err := sub2APIChannel(channel.Id)
+	if err != nil {
+		return err
+	}
+	bindings, err := model.ListSub2APIKeyBindings(channel.Id)
+	if err != nil {
+		return err
+	}
+	enabled := map[string]bool{}
+	for _, binding := range bindings {
+		if binding.AccountID == 0 && binding.SyncRates {
+			enabled[binding.KeyIdentity] = true
+		}
+	}
+	var firstErr error
+	for _, raw := range channel.GetKeys() {
+		identity := channel.KeyIdentity(raw)
+		if !enabled[identity] {
+			continue
+		}
+		rate, err := readSub2APIKeyRate(ctx, origin, channel.GetSetting().Proxy, raw)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if saveErr := model.StoreSub2APIRate(channel.Id, identity, nil, Sub2APIErrorCode(err)); saveErr != nil {
 				return saveErr
 			}
 			continue
 		}
-		stored, proxy, credential, err := sub2APILoadAccount(account.ID)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if !sameSub2APIOrigin(stored.Origin, origin) {
-			return sub2APIError("SUB2API_CHANNEL_CHANGED")
-		}
-		verified, bindings, err := verifySub2APICredential(ctx, channel, origin, proxy, credential)
-		if err != nil || verified.ID != stored.UpstreamUserID {
-			if err == nil {
-				err = sub2APIError("SUB2API_CREDENTIAL_INVALID")
-			}
-			lastErr = err
-			if saveErr := model.UpdateSub2APIAccountSync(account.ID, Sub2APIErrorCode(err)); saveErr != nil {
-				return saveErr
-			}
-			continue
-		}
-		if err := model.ReplaceSub2APIAccountBindings(stored, channel, bindings); err != nil {
-			return err
-		}
-		if err := model.UpdateSub2APIAccountSync(account.ID, ""); err != nil {
+		rate.SourceIdentity = channel.Sub2APIConnectionIdentity()
+		if err := model.StoreSub2APIRate(channel.Id, identity, rate, ""); err != nil {
 			return err
 		}
 	}
-	for _, key := range channel.GetKeys() {
-		identity := channel.KeyIdentity(key)
-		var response struct {
-			model.Sub2APIRate
-			Object        string   `json:"object"`
-			SchemaVersion int      `json:"schema_version"`
-			BillingScope  string   `json:"billing_scope"`
-			Resolved      *float64 `json:"resolved_rate_multiplier"`
-			Effective     *float64 `json:"effective_rate_multiplier"`
-			PeakEnabled   *bool    `json:"peak_rate_enabled"`
-			PeakRate      *float64 `json:"peak_rate_multiplier"`
-		}
-		err := sub2APIRequest(ctx, origin, channel.GetSetting().Proxy, key, http.MethodGet, "/v1/sub2api/billing", nil, nil, &response, true)
-		if err == nil {
-			_, observedErr := time.Parse(time.RFC3339Nano, response.ObservedAt)
-			if response.Resolved == nil || response.Effective == nil || response.PeakEnabled == nil || observedErr != nil || response.Object != "sub2api.key_billing" || response.SchemaVersion != 1 || response.BillingScope != "token" {
-				err = sub2APIError("SUB2API_RESPONSE_INVALID")
-			} else {
-				response.ResolvedRateMultiplier, response.EffectiveRateMultiplier, response.PeakRateEnabled = *response.Resolved, *response.Effective, *response.PeakEnabled
-				if response.PeakRate != nil {
-					response.PeakRateMultiplier = *response.PeakRate
-				}
-				if _, valid := response.EffectiveAt(time.Now()); !valid || response.PeakRateEnabled && response.PeakRate == nil {
-					err = sub2APIError("SUB2API_RESPONSE_INVALID")
-				}
-			}
-		}
-		if err != nil {
-			lastErr = err
-			if storeErr := model.StoreSub2APIRate(channelID, identity, nil, Sub2APIErrorCode(err)); storeErr != nil {
-				return storeErr
-			}
-			continue
-		}
-		response.SourceIdentity = channel.Sub2APIConnectionIdentity()
-		if err := model.StoreSub2APIRate(channelID, identity, &response.Sub2APIRate, ""); err != nil {
-			return err
-		}
-	}
-	return lastErr
+	return firstErr
 }
 
 // Independent connections are fixed independently of channel routing settings.
@@ -929,32 +932,52 @@ func ImportIndependentSub2API(ctx context.Context, operation Sub2APIAccountManag
 }
 
 func AttachIndependentSub2API(ctx context.Context, channelID int, accountID int64, authorization *model.AuthFlowAuthorization) error {
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	return model.WithSub2APIAccountLock(ctx, accountID, func() error {
-		channel, origin, err := sub2APIChannel(channelID)
-		if err != nil {
-			return err
+	channel, origin, err := sub2APIChannel(channelID)
+	if err != nil {
+		return err
+	}
+	account, err := model.GetSub2APIAccount(accountID)
+	if err != nil {
+		return sub2APIError("SUB2API_ACCOUNT_NOT_FOUND")
+	}
+	if account.SharedIdentity == nil || !sameSub2APIOrigin(origin, account.Origin) {
+		return sub2APIError("SUB2API_CHANNEL_CHANGED")
+	}
+	if _, err := SyncSub2APIInventory(ctx, accountID, false); err != nil {
+		return err
+	}
+	account, err = model.GetSub2APIAccount(accountID)
+	if err != nil {
+		return err
+	}
+	var inventory model.Sub2APIInventory
+	if common.UnmarshalJsonStr(account.InventoryJSON, &inventory) != nil || inventory.Version != 1 || inventory.AccountRevision != account.Revision {
+		return sub2APIError("SUB2API_RESPONSE_INVALID")
+	}
+	byIdentity := map[string]model.Sub2APIInventoryKey{}
+	for _, key := range inventory.Snapshot.Keys {
+		byIdentity[inventory.KeyIdentities[key.ID]] = key
+	}
+	bindings := []model.Sub2APIKeyBinding{}
+	for _, raw := range channel.GetKeys() {
+		key, ok := byIdentity[sub2APIInventoryKeyIdentity(account, raw)]
+		if !ok {
+			continue
 		}
-		account, proxy, credential, err := sub2APILoadAccount(accountID)
-		if err != nil {
-			return err
+		group := int64(0)
+		if key.GroupID != nil {
+			group = *key.GroupID
 		}
-		if account.SharedIdentity == nil || !sameSub2APIOrigin(origin, account.Origin) {
-			return sub2APIError("SUB2API_CHANNEL_CHANGED")
-		}
-		user, bindings, err := verifySub2APICredential(ctx, channel, origin, proxy, credential)
-		if err != nil {
-			return err
-		}
-		if user.ID != account.UpstreamUserID {
-			return sub2APIError("SUB2API_CREDENTIAL_INVALID")
-		}
-		if len(bindings) == 0 {
-			return sub2APIError("SUB2API_NO_MATCHING_KEYS")
-		}
-		return model.AttachSub2APIAccount(channel, account, bindings, authorization)
-	})
+		bindings = append(bindings, model.Sub2APIKeyBinding{ChannelID: channel.Id, KeyIdentity: channel.KeyIdentity(raw), UpstreamAPIKeyID: key.ID, UpstreamGroupID: group})
+	}
+	if len(bindings) == 0 {
+		return sub2APIError("SUB2API_NO_MATCHING_KEYS")
+	}
+	rates := map[int64]*model.Sub2APIRate{}
+	for _, group := range inventory.Snapshot.Groups {
+		rates[group.ID] = group.Rate
+	}
+	return model.AttachSub2APIAccount(channel, account, bindings, rates, authorization)
 }
 
 func DisconnectIndependentSub2API(ctx context.Context, accountID int64, authorization *model.AuthFlowAuthorization) error {

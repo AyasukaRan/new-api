@@ -94,6 +94,15 @@ func SyncSub2APIBills(ctx context.Context, channelID int) (int, error) {
 	if !model.Sub2APIStorageReady() {
 		return 0, nil
 	}
+	matched := 0
+	err := model.WithSub2APISyncLock(ctx, 0, "ledger", func() error { var err error; matched, err = syncSub2APIBills(ctx, channelID); return err })
+	return matched, err
+}
+
+func syncSub2APIBills(ctx context.Context, channelID int) (int, error) {
+	if !model.Sub2APIStorageReady() {
+		return 0, nil
+	}
 	pending, err := model.PendingSub2APIBills(ctx, channelID, 500)
 	if err != nil {
 		return 0, err
@@ -125,13 +134,57 @@ func SyncSub2APIBills(ctx context.Context, channelID int) (int, error) {
 				wanted[bill.ResponseID] = append(wanted[bill.ResponseID], bill)
 			}
 		}
-		if err := model.DeferSub2APIBills(ctx, ids); err != nil {
-			return matched, err
-		}
 		day, _ := time.Parse("2006-01-02", window.day)
 		query := url.Values{"api_key_id": {strconv.FormatInt(window.key, 10)}, "page_size": {"1000"}, "timezone": {"UTC"},
 			"start_date": {day.AddDate(0, 0, -1).Format("2006-01-02")}, "end_date": {day.AddDate(0, 0, 1).Format("2006-01-02")}, "sort_order": {"asc"}, "sort_by": {"created_at"}}
-		for page := 1; len(remaining) > 0; page++ {
+		account, accountErr := model.GetSub2APIAccount(window.account)
+		if accountErr != nil {
+			if firstErr == nil {
+				firstErr = accountErr
+			}
+			continue
+		}
+		if account.Credential == "" || account.NeedsLogin {
+			if firstErr == nil {
+				firstErr = sub2APIError("SUB2API_LOGIN_REQUIRED")
+			}
+			continue
+		}
+		state, stateErr := model.ReadSub2APISyncState(account)
+		if stateErr != nil {
+			if firstErr == nil {
+				firstErr = stateErr
+			}
+			continue
+		}
+		cursorKey := strconv.FormatInt(window.key, 10) + ":" + window.day
+		if state.LedgerCheckedAt[cursorKey] > time.Now().Unix()-30 {
+			continue
+		}
+		if err := model.UpdateSub2APIInventory(ctx, window.account, nil, func(state *model.Sub2APISyncState) error {
+			if state.LedgerCheckedAt == nil {
+				state.LedgerCheckedAt = map[string]int64{}
+			}
+			now := time.Now().Unix()
+			for key, at := range state.LedgerCheckedAt {
+				if at < now-86400 {
+					delete(state.LedgerCheckedAt, key)
+					delete(state.LedgerPages, key)
+				}
+			}
+			state.LedgerCheckedAt[cursorKey] = now
+			return nil
+		}); err != nil {
+			return matched, err
+		}
+		if err := model.DeferSub2APIBills(ctx, ids); err != nil {
+			return matched, err
+		}
+		nextPage := max(state.LedgerPages[cursorKey], 1)
+		total := int64(-1)
+		pageSize := 0
+		seenUsage := map[int64]bool{}
+		for page := nextPage; len(remaining) > 0; page++ {
 			if page > 1000 {
 				if firstErr == nil {
 					firstErr = errors.New("Sub2API ledger page limit reached")
@@ -139,13 +192,32 @@ func SyncSub2APIBills(ctx context.Context, channelID int) (int, error) {
 				break
 			}
 			query.Set("page", strconv.Itoa(page))
-			var response struct {
-				Items []sub2APIUsageBill `json:"items"`
-				Pages int                `json:"pages"`
-			}
+			var response sub2APIPage[sub2APIUsageBill]
 			if err := Sub2APIAccountRequest(ctx, window.account, http.MethodGet, "/api/v1/usage", query, nil, &response); err != nil {
 				if firstErr == nil {
 					firstErr = err
+				}
+				break
+			}
+			if !response.valid(page, total) || pageSize > 0 && pageSize != response.PageSize {
+				_ = model.UpdateSub2APIInventory(ctx, window.account, nil, func(state *model.Sub2APISyncState) error { delete(state.LedgerPages, cursorKey); return nil })
+				if firstErr == nil {
+					firstErr = sub2APIError("SUB2API_RESPONSE_INVALID")
+				}
+				break
+			}
+			total, pageSize = response.Total, response.PageSize
+			duplicate := false
+			for _, usage := range response.Items {
+				if usage.ID <= 0 || seenUsage[usage.ID] {
+					duplicate = true
+					break
+				}
+				seenUsage[usage.ID] = true
+			}
+			if duplicate {
+				if firstErr == nil {
+					firstErr = sub2APIError("SUB2API_RESPONSE_INVALID")
 				}
 				break
 			}
@@ -167,7 +239,23 @@ func SyncSub2APIBills(ctx context.Context, channelID int) (int, error) {
 					matched++
 				}
 			}
-			if len(response.Items) == 0 || page >= response.Pages {
+			if err := model.UpdateSub2APIInventory(ctx, window.account, nil, func(state *model.Sub2APISyncState) error {
+				if state.LedgerPages == nil {
+					state.LedgerPages = map[string]int{}
+				}
+				if len(remaining) == 0 || page == response.Pages {
+					delete(state.LedgerPages, cursorKey)
+				} else {
+					state.LedgerPages[cursorKey] = page + 1
+				}
+				return nil
+			}); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				break
+			}
+			if page == response.Pages {
 				break
 			}
 		}
@@ -204,28 +292,33 @@ func StartSub2APIBillingSync() {
 						}
 					}
 					if time.Now().Unix()-lastMetadata >= 300 {
-						channels := make([]int, 0, len(bindings))
-						for _, binding := range bindings {
-							if binding.SyncRates || binding.SyncBills || binding.AccountID > 0 {
-								channels = append(channels, binding.ChannelID)
-							}
-						}
-						accounts, err := model.ListSub2APIAccounts(0)
-						if err == nil {
+						accounts, listErr := model.ListSub2APIAccounts(0)
+						if listErr == nil {
 							for _, account := range accounts {
 								if account.NeedsLogin {
 									continue
 								}
-								if account.HasRefreshToken && account.ExpiresAt > 0 && account.ExpiresAt <= time.Now().Unix()+300 {
-									_ = RefreshSub2APIAccount(ctx, account.ID, account.Revision)
-								}
+								metadataCtx, metadataCancel := context.WithTimeout(context.Background(), 90*time.Second)
+								_, _ = SyncSub2APIInventory(metadataCtx, account.ID, false)
+								metadataCancel()
 							}
 						}
-						slices.Sort(channels)
-						for _, channel := range slices.Compact(channels) {
-							_ = SyncSub2APIChannel(ctx, channel, 0)
+						direct := map[int]bool{}
+						for _, binding := range bindings {
+							if binding.AccountID == 0 && binding.SyncRates {
+								direct[binding.ChannelID] = true
+							}
+						}
+						for channelID := range direct {
+							if channel, _, loadErr := sub2APIChannel(channelID); loadErr == nil {
+								directCtx, directCancel := context.WithTimeout(context.Background(), 30*time.Second)
+								_ = SyncSub2APIDirectKeyRates(directCtx, channel)
+								directCancel()
+							}
 						}
 						lastMetadata = time.Now().Unix()
+						cancel()
+						ctx, cancel = context.WithTimeout(context.Background(), 50*time.Second)
 					}
 					_, err = SyncSub2APIBills(ctx, 0)
 					if err != nil {

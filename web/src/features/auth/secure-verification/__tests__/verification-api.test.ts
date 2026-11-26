@@ -498,3 +498,44 @@ it('displays a generic internal error even if the server includes database detai
   })
   expect(failure.message).toBe('Please try again later.')
 })
+
+it('normalizes HTTP 429 into a safe message and a bounded Retry-After delay', () => {
+  const now = Date.UTC(2026, 10, 26, 12, 0, 0)
+  vi.spyOn(Date, 'now').mockReturnValue(now)
+  for (const [header, seconds] of [
+    ['1200', 1200],
+    [new Date(now + 45000).toUTCString(), 45],
+    ['0', 1],
+    ['999999999', 86400],
+    ['1.5', 30],
+    ['-1', 30],
+    ['not a date', 30],
+    [undefined, 30],
+  ] as const) {
+    const failure = AuthOperationError.from({
+      isAxiosError: true,
+      message: 'Request failed with status code 429',
+      response: {
+        status: 429,
+        headers: { 'retry-after': header },
+        data: { message: 'private upstream context' },
+      },
+    })
+    expect(failure).toMatchObject({
+      message: 'Too many requests',
+      code: 'AUTH_RATE_LIMITED',
+      retryAfterSeconds: seconds,
+    })
+    expect(failure.message).not.toContain('private')
+  }
+  expect(
+    AuthOperationError.from({
+      isAxiosError: true,
+      response: {
+        status: 401,
+        headers: { 'retry-after': '1200' },
+        data: { message: 'Wrong password' },
+      },
+    }).retryAfterSeconds
+  ).toBeUndefined()
+})

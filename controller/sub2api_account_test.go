@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -273,6 +274,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 
 			var refreshes, completions, redirectHits, identityStatus, identityRequests atomic.Int32
 			var redirectMode, incompleteRate, ledgerFailure, refreshFailure, blockKeys, blockRefresh atomic.Bool
+			var poolMode, poolReads, rateReads, poolAccountID atomic.Int64
 			keysEntered, keysRelease := make(chan struct{}, 1), make(chan struct{})
 			refreshEntered, refreshRelease := make(chan struct{}, 1), make(chan struct{})
 			var refreshReleaseOnce sync.Once
@@ -325,20 +327,97 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 					}
 					respond(map[string]any{"id": 7, "email": "owner@example.com"})
 				case "/api/v1/keys":
+					poolReads.Add(1)
 					if blockKeys.CompareAndSwap(true, false) {
 						keysEntered <- struct{}{}
 						<-keysRelease
 					}
-					if r.Header.Get("Authorization") == "Bearer foreign-access" {
-						respond(map[string]any{"pages": 1, "items": []any{map[string]any{"id": 99, "user_id": 99, "key": "sk-unrelated"}}})
+					page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+					mode := poolMode.Load()
+					if mode == 5 || mode == 6 {
+						if mode == 5 {
+							w.Header().Set("Retry-After", "120")
+						} else {
+							w.Header().Set("Retry-After", time.Now().Add(3*time.Minute).UTC().Format(http.TimeFormat))
+						}
+						w.WriteHeader(http.StatusTooManyRequests)
 						return
 					}
-					// Matching keys may be beyond the first page.
-					if r.URL.Query().Get("page") == "1" {
-						respond(map[string]any{"pages": 2, "items": []any{map[string]any{"id": 9, "user_id": 7, "key": "sk-unrelated"}}})
-					} else {
-						respond(map[string]any{"pages": 2, "items": []any{map[string]any{"id": 71, "user_id": 7, "group_id": 3, "key": sub2APITestKey}}})
+					if mode == 1 && page == 2 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
 					}
+					if mode == 7 {
+						items := []any{}
+						for i := range 100 {
+							id := int64(1000 + (page-1)*100 + i)
+							raw := fmt.Sprintf("fixture-key-%d", id)
+							if page == 1 && i == 0 {
+								id = 71
+								raw = sub2APITestKey
+							}
+							items = append(items, map[string]any{"id": id, "user_id": 7, "group_id": 3, "status": "active", "name": strings.Repeat("inventory", 100), "key": raw})
+						}
+						respond(map[string]any{"page": page, "page_size": 100, "total": 200, "pages": 2, "items": items})
+						return
+					}
+					if r.Header.Get("Authorization") == "Bearer foreign-access" {
+						respond(map[string]any{"page": 1, "page_size": 1, "total": 1, "pages": 1, "items": []any{map[string]any{"id": 99, "user_id": 99, "key": "sk-unrelated"}}})
+						return
+					}
+					id, userID, total, pages := int64(9), int64(7), int64(2), 2
+					raw, groupID := "sk-unrelated", 0
+					if page == 2 {
+						id, raw, groupID = 71, sub2APITestKey, 3
+					}
+					if page == 2 && mode == 2 {
+						id = 9
+					}
+					if page == 2 && mode == 3 {
+						userID = 99
+					}
+					if page == 2 && mode == 4 {
+						total, pages = 3, 3
+					}
+					if page == 2 && mode == 10 {
+						assert.NoError(t, db.Model(&model.Sub2APIAccount{}).Where("id = ?", poolAccountID.Load()).Update("revision", gorm.Expr("revision + 1")).Error)
+					}
+					if mode == 8 {
+						total, pages = math.MaxInt64, 1
+					}
+					size := 1
+					if mode == 9 {
+						if page == 1 {
+							respond(map[string]any{"page": 1, "page_size": 1, "total": 4, "pages": 4, "items": []any{map[string]any{"id": 9, "user_id": 7, "key": "sk-unrelated"}}})
+						} else {
+							respond(map[string]any{"page": 2, "page_size": 2, "total": 4, "pages": 2, "items": []any{
+								map[string]any{"id": 71, "user_id": 7, "key": sub2APITestKey, "group_id": 3},
+								map[string]any{"id": 72, "user_id": 7, "key": sub2APITestOtherKey},
+							}})
+						}
+						return
+					}
+					respond(map[string]any{"page": page, "page_size": size, "total": total, "pages": pages, "items": []any{map[string]any{"id": id, "user_id": userID, "group_id": groupID, "status": "active", "key": raw}}})
+				case "/api/v1/groups/available":
+					if poolMode.Load() == 11 {
+						respond([]any{map[string]any{"id": 3, "peak_rate_enabled": false}})
+						return
+					}
+					if poolMode.Load() == 12 {
+						respond([]any{map[string]any{"id": 3, "rate_multiplier": 1}})
+						return
+					}
+					if poolMode.Load() == 13 {
+						respond([]any{map[string]any{"id": 3, "rate_multiplier": 0, "peak_rate_enabled": false}})
+						return
+					}
+					respond([]any{map[string]any{"id": 3, "name": "Fixture group", "platform": "openai", "rate_multiplier": 1, "peak_rate_enabled": incompleteRate.Load(), "peak_start": "08:00", "peak_end": "20:00", "peak_rate_multiplier": 1.5}})
+				case "/api/v1/groups/rates":
+					if poolMode.Load() == 13 {
+						respond(map[string]float64{"3": 0})
+						return
+					}
+					respond(map[string]float64{"3": 0.5})
 				case "/api/v1/auth/refresh":
 					refreshes.Add(1)
 					if blockRefresh.CompareAndSwap(true, false) {
@@ -361,21 +440,24 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 						w.WriteHeader(http.StatusServiceUnavailable)
 						return
 					}
-					if r.URL.Query().Get("page") == "1" {
-						respond(map[string]any{"pages": 2, "items": []any{
-							map[string]any{"id": 110, "api_key_id": 72, "request_id": "client:wrong-key", "actual_cost": 1, "billing_type": 0},
-							map[string]any{"id": 111, "api_key_id": 71, "request_id": "client:missing-amount", "billing_type": 0},
-						}})
-					} else {
-						respond(map[string]any{"pages": 2, "items": []any{
-							map[string]any{"id": 112, "api_key_id": 71, "request_id": "client:exact", "actual_cost": 0, "billing_type": 1, "rate_multiplier": 0.5},
-							map[string]any{"id": 113, "api_key_id": 71, "request_id": "resp_http", "actual_cost": 0.000001, "billing_type": 0},
-							map[string]any{"id": 114, "api_key_id": 71, "request_id": "resp_ws_second", "actual_cost": 0.000002, "billing_type": 0},
-							map[string]any{"id": 115, "api_key_id": 71, "request_id": "client:detached", "actual_cost": 0.000003, "billing_type": 0},
-							map[string]any{"id": 116, "api_key_id": 71, "request_id": "client:disconnected", "actual_cost": 0.000004, "billing_type": 0},
-						}})
+					rows := []any{
+						map[string]any{"id": 110, "api_key_id": 72, "request_id": "client:wrong-key", "actual_cost": 1, "billing_type": 0},
+						map[string]any{"id": 111, "api_key_id": 71, "request_id": "client:missing-amount", "billing_type": 0},
+						map[string]any{"id": 113, "api_key_id": 71, "request_id": "resp_http", "actual_cost": 0.000001, "billing_type": 0},
+						map[string]any{"id": 114, "api_key_id": 71, "request_id": "resp_ws_second", "actual_cost": 0.000002, "billing_type": 0},
+						map[string]any{"id": 112, "api_key_id": 71, "request_id": "client:exact", "actual_cost": 0, "billing_type": 1, "rate_multiplier": 0.5},
+						map[string]any{"id": 115, "api_key_id": 71, "request_id": "client:detached", "actual_cost": 0.000003, "billing_type": 0},
+						map[string]any{"id": 116, "api_key_id": 71, "request_id": "client:disconnected", "actual_cost": 0.000004, "billing_type": 0},
 					}
+					page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+					if page == 1 {
+						rows = rows[:4]
+					} else {
+						rows = rows[4:]
+					}
+					respond(map[string]any{"page": page, "page_size": 4, "total": 7, "pages": 2, "items": rows})
 				case "/v1/sub2api/billing":
+					rateReads.Add(1)
 					if incompleteRate.Load() {
 						_, _ = w.Write([]byte(`{"object":"sub2api.key_billing","schema_version":1,"billing_scope":"token"}`))
 						return
@@ -516,6 +598,13 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			assert.Equal(t, 0.8, *channel.UpstreamCostRatioForKey(sub2APITestKey))
 			err = model.SetSub2APIKeySync(channel.Id, channel.KeyIdentity(sub2APITestOtherKey), false, true, authorize("keys", 0, channel.KeyIdentity(sub2APITestOtherKey)))
 			require.Error(t, err)
+			// Rate-only Keys remain usable without an imported account.
+			otherIdentity := channel.KeyIdentity(sub2APITestOtherKey)
+			require.NoError(t, model.SetSub2APIKeySync(channel.Id, otherIdentity, true, false, authorize("keys", 0, otherIdentity)))
+			require.NoError(t, service.SyncSub2APIDirectKeyRates(ctx, &channel))
+			require.NotNil(t, channel.UpstreamCostRatioForKey(sub2APITestOtherKey))
+			assert.Equal(t, 0.5, *channel.UpstreamCostRatioForKey(sub2APITestOtherKey))
+			require.NoError(t, model.SetSub2APIKeySync(channel.Id, otherIdentity, false, false, authorize("keys", 0, otherIdentity)))
 			require.NoError(t, model.SetSub2APIKeySync(channel.Id, keyIdentity, true, true, authorize("keys", 0, keyIdentity)))
 			assert.Equal(t, 0.5, *channel.UpstreamCostRatioForKey(sub2APITestKey))
 			assert.Equal(t, 0.8, channel.ChannelInfo.KeyCostRatios[keyIdentity])
@@ -570,10 +659,27 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			require.Error(t, syncErr)
 			assert.Zero(t, settled)
 			ledgerFailure.Store(false)
+			require.NoError(t, model.UpdateSub2APIInventory(ctx, account.ID, nil, func(state *model.Sub2APISyncState) error {
+				state.LedgerCheckedAt = nil
+				state.WindowAt = time.Now().Unix()
+				state.Requests = 0
+				state.UsageRequests = 39
+				return nil
+			}))
 			require.NoError(t, db.Model(&model.Sub2APIBill{}).Where("channel_id = ?", channel.Id).Update("next_sync_at", 0).Error)
 			settled, syncErr = service.SyncSub2APIBills(ctx, channel.Id)
+			require.Error(t, syncErr)
+			assert.Equal(t, "SUB2API_RATE_LIMITED", service.Sub2APIErrorCode(syncErr))
+			assert.Equal(t, 2, settled, "already exact-matched rows may settle, while page2 remains pending")
+			paused, pausedErr := model.GetSub2APIAccount(account.ID)
+			require.NoError(t, pausedErr)
+			pausedState, pausedErr := model.ReadSub2APISyncState(paused)
+			require.NoError(t, pausedErr)
+			assert.Contains(t, pausedState.LedgerPages, "71:"+time.Now().UTC().Format("2006-01-02"))
+			require.NoError(t, model.UpdateSub2APIInventory(ctx, account.ID, nil, func(state *model.Sub2APISyncState) error { state.LedgerCheckedAt = nil; state.WindowAt = 0; return nil }))
+			settled, syncErr = service.SyncSub2APIBills(ctx, channel.Id)
 			require.NoError(t, syncErr)
-			assert.Equal(t, 3, settled)
+			assert.Equal(t, 1, settled, "resume page2 without replaying settled page1 charges")
 			var bills []model.Sub2APIBill
 			require.NoError(t, db.Where("channel_id = ?", channel.Id).Find(&bills).Error)
 			require.Len(t, bills, 5)
@@ -590,10 +696,12 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 				}
 			}
 			incompleteRate.Store(true)
+			require.NoError(t, model.UpdateSub2APIInventory(ctx, account.ID, nil, func(state *model.Sub2APISyncState) error { state.NextAttemptAt = 0; return nil }))
 			err = service.SyncSub2APIChannel(ctx, channel.Id, account.ID)
 			assert.Equal(t, "SUB2API_RESPONSE_INVALID", service.Sub2APIErrorCode(err))
 			assert.Equal(t, 0.5, *channel.UpstreamCostRatioForKey(sub2APITestKey), "missing amounts must not turn the supplier cost into zero")
 			incompleteRate.Store(false)
+			require.NoError(t, model.UpdateSub2APIInventory(ctx, account.ID, nil, func(state *model.Sub2APISyncState) error { state.NextAttemptAt = 0; return nil }))
 			peak := model.Sub2APIRate{ResolvedRateMultiplier: 0.5, EffectiveRateMultiplier: 0.75, PeakRateEnabled: true, PeakStart: "08:00", PeakEnd: "20:00", PeakRateMultiplier: 1.5, Timezone: "Asia/Shanghai"}
 			atPeak, valid := peak.EffectiveAt(time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC))
 			assert.True(t, valid)
@@ -792,7 +900,11 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 						identityStatus.Store(tc.status)
 						proof := issueSecurityEnrollmentProof(t, identity, globalTarget, service.VerificationMethodPassword)
 						failed := sub2APITestRequest(t, identity, 0, "import", input, proof)
-						assert.Equal(t, http.StatusBadRequest, failed.Code)
+						expectedStatus := http.StatusBadRequest
+						if tc.status == 429 {
+							expectedStatus = http.StatusTooManyRequests
+						}
+						assert.Equal(t, expectedStatus, failed.Code)
 						var payload map[string]any
 						require.NoError(t, common.Unmarshal(failed.Body.Bytes(), &payload))
 						assert.Equal(t, tc.code, payload["code"])
@@ -801,7 +913,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 						assert.NotContains(t, failed.Body.String(), "fixture-private-upstream-body")
 						var audit model.AuditLog
 						require.NoError(t, model.LOG_DB.Where("route = ?", "/sub2api/accounts/import").Order("id DESC").First(&audit).Error)
-						assert.Equal(t, http.StatusBadRequest, audit.Status)
+						assert.Equal(t, expectedStatus, audit.Status)
 						assert.False(t, audit.Success)
 						serialized, marshalErr := common.Marshal(audit.Other)
 						require.NoError(t, marshalErr)
@@ -925,6 +1037,139 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 				firstBinding, bindErr = model.GetSub2APIKeyBinding(channel.Id, keyIdentity)
 				require.NoError(t, bindErr)
 				assert.Equal(t, upgraded.AccountID, firstBinding.AccountID, "syncing one channel cannot clear another channel")
+
+				t.Run("complete shared inventory and bounded retries", func(t *testing.T) {
+					reset := func() {
+						require.NoError(t, model.UpdateSub2APIInventory(ctx, upgraded.AccountID, nil, func(state *model.Sub2APISyncState) error {
+							state.NextAttemptAt = 0
+							state.BlockedUntil = 0
+							state.Requests = 0
+							state.UsageRequests = 0
+							state.WindowAt = 0
+							return nil
+						}))
+					}
+					reset()
+					beforeKeys, beforeRates := poolReads.Load(), rateReads.Load()
+					syncErrors := make(chan error, 2)
+					var syncWorkers sync.WaitGroup
+					for _, channelID := range []int{channel.Id, second.Id} {
+						syncWorkers.Go(func() { syncErrors <- service.SyncSub2APIChannel(ctx, channelID, upgraded.AccountID) })
+					}
+					syncWorkers.Wait()
+					close(syncErrors)
+					for syncErr := range syncErrors {
+						require.NoError(t, syncErr)
+					}
+					assert.EqualValues(t, 2, poolReads.Load()-beforeKeys, "two linked channels share both clamped pages")
+					assert.EqualValues(t, 0, rateReads.Load()-beforeRates, "non-peak rates are authoritative in the account endpoints without key-auth requests")
+					require.NoError(t, model.DetachSub2APIAccount(second.Id, upgraded.AccountID, authorizeChannel(second.Id, "detach", upgraded.AccountID)))
+					require.NoError(t, service.AttachIndependentSub2API(ctx, second.Id, upgraded.AccountID, authorizeChannel(second.Id, "attach", upgraded.AccountID)))
+					assert.EqualValues(t, beforeKeys+2, poolReads.Load(), "attaching another channel reuses complete verified ownership")
+					view, viewErr := service.GetSub2APIInventory(upgraded.AccountID)
+					require.NoError(t, viewErr)
+					require.NotNil(t, view.Snapshot)
+					require.Len(t, view.Snapshot.Keys, 2)
+					assert.Equal(t, 0.5, view.Snapshot.Groups[0].ResolvedRateMultiplier)
+					saved, saveErr := model.GetSub2APIAccount(upgraded.AccountID)
+					require.NoError(t, saveErr)
+					cached, cooldownErr := service.SyncSub2APIInventory(ctx, upgraded.AccountID, true)
+					require.NoError(t, cooldownErr)
+					assert.True(t, cached.Cached)
+					assert.EqualValues(t, beforeKeys+2, poolReads.Load(), "cooldown sends no upstream requests")
+					for _, test := range []struct {
+						name string
+						mode int64
+						code string
+					}{
+						{"second page fails", 1, "SUB2API_UPSTREAM_ERROR"},
+						{"duplicate key", 2, "SUB2API_RESPONSE_INVALID"},
+						{"wrong owner", 3, "SUB2API_RESPONSE_INVALID"},
+						{"total changes", 4, "SUB2API_RESPONSE_INVALID"},
+						{"retry after seconds", 5, "SUB2API_RATE_LIMITED"},
+						{"retry after date", 6, "SUB2API_RATE_LIMITED"},
+						{"total overflow", 8, "SUB2API_RESPONSE_INVALID"},
+						{"page size changes", 9, "SUB2API_RESPONSE_INVALID"},
+						{"missing group rate", 11, "SUB2API_RESPONSE_INVALID"},
+						{"missing peak flag", 12, "SUB2API_RESPONSE_INVALID"},
+					} {
+						t.Run(test.name, func(t *testing.T) {
+							reset()
+							poolMode.Store(test.mode)
+							if test.mode == 9 {
+								_, importErr := service.ImportSub2API(ctx, channel.Id, service.Sub2APICredential{AccessToken: "fixture-access"}, authorizeChannel(channel.Id, "import", 0))
+								assert.Equal(t, "SUB2API_RESPONSE_INVALID", service.Sub2APIErrorCode(importErr), "legacy channel import must reject individually valid pages with a changed page size")
+							}
+							_, syncErr := service.SyncSub2APIInventory(ctx, upgraded.AccountID, true)
+							require.Error(t, syncErr)
+							assert.Equal(t, test.code, service.Sub2APIErrorCode(syncErr))
+							after, err := model.GetSub2APIAccount(upgraded.AccountID)
+							require.NoError(t, err)
+							assert.Equal(t, saved.InventoryJSON, after.InventoryJSON, "a failed or inconsistent page cannot publish partial ownership/rates")
+							assert.Equal(t, saved.LastSyncAt, after.LastSyncAt)
+							if test.mode == 5 || test.mode == 6 {
+								state, err := model.ReadSub2APISyncState(after)
+								require.NoError(t, err)
+								assert.GreaterOrEqual(t, state.BlockedUntil, time.Now().Unix()+110)
+								reads := poolReads.Load()
+								var result any
+								assert.Error(t, service.Sub2APIAccountRequest(ctx, upgraded.AccountID, http.MethodGet, "/api/v1/keys", nil, nil, &result))
+								assert.Equal(t, reads, poolReads.Load())
+							}
+						})
+					}
+					reset()
+					poolMode.Store(13)
+					zero, zeroErr := service.SyncSub2APIInventory(ctx, upgraded.AccountID, true)
+					require.NoError(t, zeroErr)
+					assert.Zero(t, zero.Snapshot.Groups[0].ResolvedRateMultiplier)
+					assert.Equal(t, 0.0, *channel.UpstreamCostRatioForKey(sub2APITestKey), "an explicit zero override is preserved")
+					reset()
+					poolMode.Store(7)
+					large, largeErr := service.SyncSub2APIInventory(ctx, upgraded.AccountID, true)
+					require.NoError(t, largeErr)
+					require.Len(t, large.Snapshot.Keys, 200)
+					stored, storeErr := model.GetSub2APIAccount(upgraded.AccountID)
+					require.NoError(t, storeErr)
+					assert.Greater(t, len(stored.InventoryJSON), 65535, "MySQL inventory must use longtext, not 64KiB TEXT")
+					public, marshalErr := common.Marshal(large)
+					require.NoError(t, marshalErr)
+					assert.NotContains(t, string(public), sub2APITestKey)
+					assert.NotContains(t, string(public), "key_identities")
+					assert.NotContains(t, string(public), "fixture-access")
+					// A retained peak snapshot must display the current schedule's
+					// multiplier without rewriting its successful synchronization time.
+					var peakInventory model.Sub2APIInventory
+					require.NoError(t, common.UnmarshalJsonStr(stored.InventoryJSON, &peakInventory))
+					start, end := "13:00", "23:00"
+					if time.Now().UTC().Hour() >= 12 {
+						start, end = "01:00", "11:00"
+					}
+					peakInventory.Snapshot.Groups[0].Rate = &model.Sub2APIRate{ResolvedRateMultiplier: 0.5, EffectiveRateMultiplier: 0.75, PeakRateEnabled: true, PeakStart: start, PeakEnd: end, PeakRateMultiplier: 1.5, Timezone: "UTC"}
+					peakJSON, peakErr := common.Marshal(peakInventory)
+					require.NoError(t, peakErr)
+					require.NoError(t, db.Model(&model.Sub2APIAccount{}).Where("id = ?", upgraded.AccountID).Update("inventory_json", string(peakJSON)).Error)
+					currentView, currentErr := service.GetSub2APIInventory(upgraded.AccountID)
+					require.NoError(t, currentErr)
+					assert.Equal(t, 0.5, currentView.Snapshot.Groups[0].Rate.EffectiveRateMultiplier)
+					assert.Equal(t, stored.LastSyncAt, currentView.Snapshot.SyncedAt)
+					unchanged, unchangedErr := model.GetSub2APIAccount(upgraded.AccountID)
+					require.NoError(t, unchangedErr)
+					assert.Equal(t, string(peakJSON), unchanged.InventoryJSON)
+					require.NoError(t, db.Model(&model.Sub2APIAccount{}).Where("id = ?", upgraded.AccountID).Update("inventory_json", stored.InventoryJSON).Error)
+					reset()
+					poolMode.Store(10)
+					poolAccountID.Store(upgraded.AccountID)
+					_, revisionErr := service.SyncSub2APIInventory(ctx, upgraded.AccountID, true)
+					require.Error(t, revisionErr)
+					after, afterErr := model.GetSub2APIAccount(upgraded.AccountID)
+					require.NoError(t, afterErr)
+					assert.Equal(t, stored.InventoryJSON, after.InventoryJSON, "reimported credentials fence the previous in-flight inventory")
+					reset()
+					poolMode.Store(0)
+					_, restoreErr := service.SyncSub2APIInventory(ctx, upgraded.AccountID, true)
+					require.NoError(t, restoreErr)
+				})
 				disconnect := sharedOperation("disconnect", upgraded.AccountID, "")
 				assert.Equal(t, "SUB2API_ACCOUNT_LINKED", service.Sub2APIErrorCode(service.DisconnectIndependentSub2API(ctx, upgraded.AccountID, authorizeShared(disconnect))))
 				pendingJSON, marshalErr := common.Marshal(map[string]any{"admin_info": map[string]any{"sub2api_billing": model.Sub2APIBillingRef{AccountID: upgraded.AccountID, APIKeyID: 71, KeyIdentity: keyIdentity, RequestID: "client:detached"}}})
@@ -933,6 +1178,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 				require.NoError(t, db.Create(&detachedLog).Error)
 				require.NoError(t, model.QueueSub2APIBill(ctx, &detachedLog))
 				// An in-flight metadata sync cannot undo an explicit detach.
+				require.NoError(t, model.UpdateSub2APIInventory(ctx, upgraded.AccountID, nil, func(state *model.Sub2APISyncState) error { state.NextAttemptAt = 0; state.BlockedUntil = 0; return nil }))
 				blockKeys.Store(true)
 				syncResult := make(chan error, 1)
 				go func() { syncResult <- service.SyncSub2APIChannel(ctx, channel.Id, upgraded.AccountID) }()
@@ -943,7 +1189,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 				}
 				require.NoError(t, model.DetachSub2APIAccount(channel.Id, upgraded.AccountID, authorizeChannel(channel.Id, "detach", upgraded.AccountID)))
 				keysReleaseOnce.Do(func() { close(keysRelease) })
-				require.Error(t, <-syncResult)
+				require.NoError(t, <-syncResult)
 				firstBinding, bindErr = model.GetSub2APIKeyBinding(channel.Id, keyIdentity)
 				require.NoError(t, bindErr)
 				assert.Zero(t, firstBinding.AccountID)
@@ -951,6 +1197,7 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 				require.NoError(t, bindErr)
 				assert.Equal(t, upgraded.AccountID, secondBinding.AccountID)
 				require.NoError(t, db.Model(&model.Sub2APIBill{}).Where("account_id = ?", upgraded.AccountID).Update("next_sync_at", 0).Error)
+				require.NoError(t, model.UpdateSub2APIInventory(ctx, upgraded.AccountID, nil, func(state *model.Sub2APISyncState) error { state.LedgerCheckedAt = nil; return nil }))
 				reconciled, reconcileErr := service.SyncSub2APIBills(ctx, 0)
 				require.NoError(t, reconcileErr)
 				assert.Equal(t, 1, reconciled)

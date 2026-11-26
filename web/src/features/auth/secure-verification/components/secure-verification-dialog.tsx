@@ -37,6 +37,7 @@ import type {
 
 interface SecureVerificationDialogProps {
   state: SecureVerificationState
+  retryAfterSeconds?: number
   passkeyDomains?: PasskeyDomains | null
   onVerify: (input?: VerificationInput) => void | Promise<void>
   onCancel: () => void
@@ -61,10 +62,12 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
     state.phase === 'ready' || state.phase === 'verifying' ? state : null
   const input = ready?.input
   const verifying = state.phase === 'verifying'
+  const coolingDown = (props.retryAfterSeconds ?? 0) > 0
+  const busy = verifying || coolingDown
   const login = state.request.scope === 'auth.login'
   const acceptsBackupCode =
     state.request.scope !== '2fa.backup_codes.regenerate'
-  let canVerify = state.phase === 'ready' && Boolean(input)
+  let canVerify = state.phase === 'ready' && Boolean(input) && !coolingDown
   if (input?.method === 'password') {
     canVerify = canVerify && input.password.length > 0
   }
@@ -124,7 +127,11 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
             {t('Cancel')}
           </Button>
           {state.phase === 'error' && (
-            <Button type='button' onClick={props.onRetry}>
+            <Button
+              type='button'
+              onClick={props.onRetry}
+              disabled={coolingDown}
+            >
               {t('Retry')}
             </Button>
           )}
@@ -146,6 +153,11 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
       {error && (
         <p role='alert' className='text-destructive text-sm'>
           {t(error)}
+        </p>
+      )}
+      {coolingDown && (
+        <p role='status' className='text-muted-foreground text-sm'>
+          {t('Try again in {{seconds}}s', { seconds: props.retryAfterSeconds })}
         </p>
       )}
       {ready && (
@@ -199,7 +211,7 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
                   <TabsTrigger
                     key={option.method}
                     value={option.method}
-                    disabled={!option.available || verifying}
+                    disabled={!option.available || busy}
                   >
                     {t(methodLabels[option.method])}
                   </TabsTrigger>
@@ -212,7 +224,7 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
                   type='password'
                   autoComplete='current-password'
                   autoFocus
-                  disabled={verifying}
+                  disabled={busy}
                   value={input.method === 'password' ? input.password : ''}
                   onChange={(event) =>
                     props.onInputChange({
@@ -233,7 +245,7 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
                   autoComplete='one-time-code'
                   maxLength={acceptsBackupCode ? 9 : 6}
                   autoFocus
-                  disabled={verifying}
+                  disabled={busy}
                   value={input.method === '2fa' ? input.code : ''}
                   onChange={(event) =>
                     props.onInputChange({
@@ -257,7 +269,7 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
                   onChange={(rpID) =>
                     props.onInputChange({ method: 'passkey', rpID })
                   }
-                  disabled={verifying}
+                  disabled={busy}
                 />
                 <p className='text-muted-foreground flex items-center gap-2 text-sm'>
                   <KeyRound className='size-5' />
@@ -277,7 +289,7 @@ export function SecureVerificationDialog(props: SecureVerificationDialogProps) {
                     <Button
                       key={provider.slug}
                       type='button'
-                      disabled={verifying}
+                      disabled={busy}
                       onClick={() =>
                         void props.onVerify({
                           method: 'oauth',

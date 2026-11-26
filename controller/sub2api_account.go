@@ -6,7 +6,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -57,7 +59,13 @@ func sub2APIManagementError(c *gin.Context, err error) map[string]any {
 			body["upstream_status"], audit["upstream_status"] = upstream.Status, upstream.Status
 		}
 	}
-	c.JSON(http.StatusBadRequest, body)
+	status := http.StatusBadRequest
+	if upstream != nil && upstream.RetryAt > time.Now().Unix() {
+		status = http.StatusTooManyRequests
+		body["next_attempt_at"] = upstream.RetryAt
+		c.Header("Retry-After", strconv.FormatInt(upstream.RetryAt-time.Now().Unix(), 10))
+	}
+	c.JSON(status, body)
 	return audit
 }
 
@@ -83,6 +91,7 @@ func sub2APIErrorMessage(code string) string {
 		"SUB2API_LOGIN_REQUIRED":         "Sign in to the Sub2API account again.",
 		"SUB2API_ACCESS_DENIED":          "The Sub2API account does not allow this action.",
 		"SUB2API_UNSUPPORTED":            "This Sub2API server does not support this capability.",
+		"SUB2API_INVENTORY_LIMIT":        "The Sub2API inventory exceeds the supported page limit.",
 		"SUB2API_RATE_LIMITED":           "Sub2API rate limited this operation. Try again later.",
 		"SUB2API_CAPTCHA_REQUIRED":       "Complete verification on the Sub2API website, then import its account token.",
 		"SUB2API_NO_MATCHING_KEYS":       "This Sub2API account does not own any keys in this channel.",
@@ -269,10 +278,9 @@ func ManageSub2APIChannel(c *gin.Context) {
 	case "disconnect":
 		err = service.DisconnectSub2API(c.Request.Context(), channelID, input.AccountID, authorization)
 	case "sync":
-		err = service.SyncSub2APIChannel(c.Request.Context(), channelID, input.AccountID)
-		_, billErr := service.SyncSub2APIBills(c.Request.Context(), channelID)
+		err = service.SyncSub2APIChannelManual(c.Request.Context(), channelID, input.AccountID)
 		if err == nil {
-			err = billErr
+			_, err = service.SyncSub2APIBills(c.Request.Context(), channelID)
 		}
 	case "attach":
 		err = service.AttachIndependentSub2API(c.Request.Context(), channelID, input.AccountID, authorization)
@@ -401,6 +409,28 @@ func GetSub2APIAccounts(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{"encryption_ready": service.Sub2APIEncryptionReady(), "management_allowed": sub2APIManagementAllowed(c.Request), "accounts": result})
 }
 
+func GetSub2APIInventory(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	result, err := service.GetSub2APIInventory(id)
+	if err != nil {
+		sub2APIManagementError(c, err)
+		return
+	}
+	common.ApiSuccess(c, sub2APIInventoryResponse(result))
+}
+
+func sub2APIInventoryResponse(view service.Sub2APIInventoryView) gin.H {
+	records := make([]gin.H, 0, len(view.Records))
+	for _, record := range view.Records {
+		records = append(records, gin.H{"at": record.At, "success": record.Success, "error_code": record.ErrorCode, "error_message": sub2APIErrorMessage(record.ErrorCode), "upstream_status": record.UpstreamStatus, "keys": record.Keys, "groups": record.Groups})
+	}
+	return gin.H{"account_id": view.AccountID, "cached": view.Cached, "snapshot": view.Snapshot, "last_attempt_at": view.LastAttemptAt, "next_attempt_at": view.NextAttemptAt, "last_error": sub2APIErrorMessage(view.LastError), "records": records}
+}
+
 func ManageSub2APIAccounts(c *gin.Context) {
 	if !sub2APIManagementAllowed(c.Request) {
 		sub2APIManagementError(c, &service.Sub2APIError{Code: "SUB2API_SECURE_ENTRY_REQUIRED"})
@@ -456,6 +486,10 @@ func ManageSub2APIAccounts(c *gin.Context) {
 					result, err = service.ImportIndependentSub2API(c.Request.Context(), operation, proxy, credential, authorization)
 				}
 			}
+		case "sync":
+			var inventory service.Sub2APIInventoryView
+			inventory, err = service.SyncSub2APIInventory(c.Request.Context(), input.AccountID, true)
+			result = sub2APIInventoryResponse(inventory)
 		case "refresh":
 			err = service.RefreshSub2APIAccount(c.Request.Context(), input.AccountID, 0)
 		case "disconnect":

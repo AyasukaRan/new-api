@@ -75,7 +75,64 @@ export type Sub2APILoginResult =
 
 export type Sub2APIAction = 'attach' | 'detach' | 'sync' | 'keys'
 
-export type Sub2APIAccountAction = 'login' | 'import' | 'refresh' | 'disconnect'
+export type Sub2APIAccountAction =
+  | 'login'
+  | 'import'
+  | 'refresh'
+  | 'disconnect'
+  | 'sync'
+
+export interface Sub2APIInventory {
+  account_id: number
+  cached: boolean
+  snapshot: null | {
+    synced_at: number
+    keys: {
+      id: number
+      name: string
+      masked_key: string
+      group_id: number | null
+      status: string
+      expires_at: string | null
+    }[]
+    groups: {
+      id: number
+      name: string
+      description: string
+      platform: string
+      group_rate_multiplier: number
+      user_rate_multiplier: number | null
+      resolved_rate_multiplier: number
+      peak_rate_enabled: boolean
+      peak_start: string
+      peak_end: string
+      peak_rate_multiplier: number
+      rate?: Sub2APIKey['rate']
+    }[]
+  }
+  last_attempt_at: number
+  next_attempt_at: number
+  last_error: string
+  records: {
+    at: number
+    success: boolean
+    error_code: string
+    error_message: string
+    upstream_status: number
+    keys: number
+    groups: number
+  }[]
+}
+
+export function getSub2APIInventory(accountId: number, signal?: AbortSignal) {
+  return authResult<Sub2APIInventory>(
+    api.get(`/api/sub2api/accounts/${accountId}/inventory`, {
+      ...authRequestOptions,
+      signal,
+      disableDuplicate: true,
+    })
+  )
+}
 
 export type Sub2APIAccountsStatus = Pick<
   Sub2APIStatus,

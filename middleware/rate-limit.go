@@ -188,8 +188,18 @@ func GlobalAPIRateLimit() func(c *gin.Context) {
 }
 
 func CriticalRateLimit() func(c *gin.Context) {
+	return ScopedCriticalRateLimit("")
+}
+
+// ScopedCriticalRateLimit keeps authenticated management operations from
+// consuming the credential-verification budget. Scopes are server-defined.
+func ScopedCriticalRateLimit(scope string) func(c *gin.Context) {
 	if common.CriticalRateLimitEnable {
-		return rateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, "CT")
+		mark := "CT"
+		if scope != "" {
+			mark += ":" + scope
+		}
+		return rateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, mark)
 	}
 	return defNext
 }

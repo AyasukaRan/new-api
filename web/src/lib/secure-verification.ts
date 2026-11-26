@@ -26,13 +26,15 @@ import {
 
 export class AuthOperationError extends Error {
   readonly [safeServerErrorMessage] = true
+  readonly retryAfterSeconds?: number
   constructor(
     message: string,
     readonly code?: string,
-    options?: ErrorOptions
+    options?: ErrorOptions & { retryAfterSeconds?: number }
   ) {
     super(message, options)
     this.name = 'AuthOperationError'
+    this.retryAfterSeconds = options?.retryAfterSeconds
   }
 
   static from(
@@ -41,6 +43,29 @@ export class AuthOperationError extends Error {
   ): AuthOperationError {
     if (error instanceof AuthOperationError) return error
     if (axios.isAxiosError<{ message?: string; code?: string }>(error)) {
+      if (error.response?.status === 429) {
+        const headers = error.response.headers
+        const raw = headers?.['retry-after'] ?? headers?.['Retry-After']
+        const value = typeof raw === 'string' ? raw.trim() : ''
+        let delay = 30
+        if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value))) {
+          delay = Number(value)
+        } else if (/^[A-Za-z]{3,9}[ ,]/.test(value) && value.length <= 128) {
+          const date = Date.parse(value)
+          if (Number.isFinite(date)) {
+            delay = Math.ceil((date - Date.now()) / 1000)
+          }
+        }
+        const knownMessage = getServerErrorMessageKey(error)
+        return new AuthOperationError(
+          knownMessage || 'Too many requests',
+          knownMessage ? error.response.data?.code : 'AUTH_RATE_LIMITED',
+          {
+            cause: error,
+            retryAfterSeconds: Math.min(86400, Math.max(1, delay)),
+          }
+        )
+      }
       return new AuthOperationError(
         getServerErrorMessageKey(error) ||
           (error.response && error.response.status >= 500

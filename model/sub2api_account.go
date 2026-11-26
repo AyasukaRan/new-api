@@ -38,6 +38,8 @@ type Sub2APIAccount struct {
 	HasRefreshToken bool    `json:"has_refresh_token"`
 	NeedsLogin      bool    `json:"needs_login"`
 	Revision        int64   `json:"-"`
+	InventoryJSON   string  `json:"-"`
+	SyncStateJSON   string  `json:"-"`
 	LastSyncAt      int64   `json:"last_sync_at"`
 	LastError       string  `json:"last_error" gorm:"type:varchar(128)"`
 }
@@ -125,7 +127,7 @@ func MigrateSub2APIStorage(db *gorm.DB) error {
 func Sub2APIStorageReady() bool { return DB != nil && sub2APIStorageDB.Load() == DB }
 
 func detectSub2APIStorage(db *gorm.DB) {
-	if db.Migrator().HasTable(&Sub2APIAccount{}) && db.Migrator().HasTable(&Sub2APIKeyBinding{}) && db.Migrator().HasTable(&Sub2APIBill{}) && db.Migrator().HasColumn(&Sub2APIAccount{}, "shared_identity") && db.Migrator().HasColumn(&Sub2APIAccount{}, "proxy_credential") {
+	if db.Migrator().HasTable(&Sub2APIAccount{}) && db.Migrator().HasTable(&Sub2APIKeyBinding{}) && db.Migrator().HasTable(&Sub2APIBill{}) && db.Migrator().HasColumn(&Sub2APIAccount{}, "shared_identity") && db.Migrator().HasColumn(&Sub2APIAccount{}, "proxy_credential") && db.Migrator().HasColumn(&Sub2APIAccount{}, "inventory_json") && db.Migrator().HasColumn(&Sub2APIAccount{}, "sync_state_json") {
 		sub2APIBindingsCache.Clear()
 		sub2APIStorageDB.Store(db)
 	}
@@ -350,11 +352,6 @@ func SetSub2APIKeySync(channelID int, identity string, rates, bills bool, author
 	return err
 }
 
-func UpdateSub2APIAccountSync(accountID int64, errorCode string) error {
-	return DB.Model(&Sub2APIAccount{}).Where("id = ?", accountID).
-		Updates(map[string]any{"last_sync_at": time.Now().Unix(), "last_error": errorCode}).Error
-}
-
 func StoreSub2APIRate(channelID int, identity string, rate *Sub2APIRate, errorCode string) error {
 	binding := Sub2APIKeyBinding{ChannelID: channelID, KeyIdentity: identity, LastError: strings.TrimSpace(errorCode)}
 	columns := []string{"last_error"}
@@ -407,7 +404,7 @@ func FindIndependentSub2APIAccount(identity string) (*Sub2APIAccount, error) {
 
 // Binding writes recheck the exact channel snapshot after upstream ownership
 // verification, and never erase another channel's association or key settings.
-func AttachSub2APIAccount(channel *Channel, account *Sub2APIAccount, bindings []Sub2APIKeyBinding, authorization *AuthFlowAuthorization) error {
+func AttachSub2APIAccount(channel *Channel, account *Sub2APIAccount, bindings []Sub2APIKeyBinding, rates map[int64]*Sub2APIRate, authorization *AuthFlowAuthorization) error {
 	if authorization == nil {
 		return ErrUserSessionInactive
 	}
@@ -435,7 +432,10 @@ func AttachSub2APIAccount(channel *Channel, account *Sub2APIAccount, bindings []
 				return gorm.ErrRecordNotFound
 			}
 		}
-		return replaceSub2APIBindings(tx, account, channel.Id, bindings)
+		if err := replaceSub2APIBindings(tx, account, channel.Id, bindings); err != nil {
+			return err
+		}
+		return storeSub2APIInventoryRates(tx, channel, bindings, rates)
 	})
 	InvalidateSub2APIBindings(channel.Id)
 	return err
