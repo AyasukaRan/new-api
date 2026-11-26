@@ -255,6 +255,7 @@ export function DeviceStep(props: {
 
 export function FieldsStep(props: {
   fields: PluginLoginField[]
+  defaultValues?: Record<string, string>
   formId: string
   disabled: boolean
   onSubmit: (input: PluginLoginInput) => void
@@ -263,7 +264,10 @@ export function FieldsStep(props: {
   const form = useForm<Record<string, string>>({
     resolver: zodResolver(pluginLoginFieldsSchema(props.fields)),
     defaultValues: Object.fromEntries(
-      props.fields.map((field) => [field.name, ''])
+      props.fields.map((field) => [
+        field.name,
+        props.defaultValues?.[field.name] ?? '',
+      ])
     ),
   })
   const language = i18n.resolvedLanguage || i18n.language

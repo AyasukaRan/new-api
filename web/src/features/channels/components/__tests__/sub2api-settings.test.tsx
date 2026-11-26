@@ -34,11 +34,11 @@ import {
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
-import { clearPasswordEncryptionCache } from '@/features/auth/lib/password-encryption'
 import { api } from '@/lib/api'
 import { AuthOperationError } from '@/lib/secure-verification'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { sub2APIImportSchema } from '../../lib/sub2api-login'
 import type { Sub2APIStatus } from '../../sub2api-api'
 import { Sub2APIAccountsDialog } from '../dialogs/sub2api-accounts-dialog'
 import { Sub2APISettings } from '../sub2api-settings'
@@ -54,7 +54,6 @@ let status: Sub2APIStatus
 
 beforeEach(() => {
   vi.stubGlobal('location', new URL('https://gateway.example'))
-  clearPasswordEncryptionCache()
   useAuthStore.getState().auth.setUser({ id: 77, username: 'admin', role: 100 })
   status = {
     encryption_ready: true,
@@ -117,7 +116,7 @@ beforeEach(() => {
         },
       }
     }
-    if (path === '/api/user/login/encryption-key') {
+    if (path === '/api/sub2api/accounts/encryption-key') {
       return {
         data: { success: true, data: { kid: 'key-1', public_key: publicKey } },
       }
@@ -130,7 +129,6 @@ afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
-  clearPasswordEncryptionCache()
   useAuthStore.getState().auth.reset()
 })
 
@@ -326,6 +324,129 @@ test('token import sends one encrypted payload and reopening starts with empty f
   expect(screen.getByLabelText(/Refresh token/)).toHaveValue('')
 })
 
+test.each(['upstream-access', '  bEaReR upstream-access  '])(
+  'imports one access token without a refresh token and normalizes a pasted prefix (%s)',
+  async (accessToken) => {
+    const user = userEvent.setup()
+    const post = serveActions(() => ({ requires_2fa: false, account_id: 1 }))
+    renderAccounts()
+    await user.click(
+      await screen.findByRole('button', { name: 'Import tokens' })
+    )
+    expect(
+      screen.getByText(
+        'Refresh token is optional. With only an access token, import it again when it expires.'
+      )
+    ).toBeVisible()
+    await user.type(
+      screen.getByLabelText(/Site URL/),
+      'https://upstream.example'
+    )
+    await user.type(screen.getByLabelText(/Access token/), accessToken)
+    await user.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByRole('dialog', { name: 'Upstream accounts' })
+    const call = post.mock.calls.find(
+      ([path]) => path === `${accountUrl}/import`
+    )
+    const payload = call?.[1] as Record<string, string>
+    const plaintext = privateDecrypt(
+      { key: privateKey, oaepHash: 'sha256' },
+      Buffer.from(payload.credential_encrypted, 'base64')
+    ).toString()
+    expect(JSON.parse(plaintext)).toEqual({ access_token: 'upstream-access' })
+    expect(call?.[2]).toMatchObject({
+      headers: { 'X-Security-Proof': 'scoped-proof' },
+      singleUseAuthorization: true,
+    })
+  }
+)
+
+test('token import rejects multiple tokens and embedded request headers', () => {
+  for (const accessToken of [
+    'Bearer Bearer upstream-access',
+    'upstream-access other-access',
+    'Bearer upstream-access\r\nX-Injected: value',
+  ]) {
+    expect(
+      sub2APIImportSchema.safeParse({
+        access_token: accessToken,
+        refresh_token: '',
+      }).success
+    ).toBe(false)
+  }
+})
+
+test('failed token import preserves the site but clears credentials and proxy', async () => {
+  const user = userEvent.setup()
+  serveActions(() => {
+    throw new AuthOperationError(
+      'The Sub2API credential is invalid.',
+      'SUB2API_CREDENTIAL_INVALID'
+    )
+  })
+  renderAccounts()
+  await user.click(await screen.findByRole('button', { name: 'Import tokens' }))
+  await user.type(
+    screen.getByLabelText(/Site URL/),
+    'https://upstream.example/prefix'
+  )
+  await user.type(
+    screen.getByLabelText(/Proxy Address/),
+    'http://proxy.example:8080'
+  )
+  await user.type(screen.getByLabelText(/Access token/), 'upstream-access')
+  await user.type(screen.getByLabelText(/Refresh token/), 'upstream-refresh')
+  await user.click(screen.getByRole('button', { name: 'Continue' }))
+  expect(
+    await screen.findByText('The Sub2API credential is invalid.')
+  ).toBeVisible()
+  expect(screen.getByLabelText(/Site URL/)).toHaveValue(
+    'https://upstream.example/prefix'
+  )
+  expect(screen.getByLabelText(/Access token/)).toHaveValue('')
+  expect(screen.getByLabelText(/Refresh token/)).toHaveValue('')
+  expect(screen.getByLabelText(/Proxy Address/)).toHaveValue('')
+})
+
+test.each([
+  [
+    'https://upstream.example',
+    'Credential encryption failed. Please try again.',
+    'https://upstream.example',
+  ],
+  [
+    'https://example-user:example-password@upstream.example',
+    'Enter a valid HTTPS site URL.',
+    '',
+  ],
+])(
+  'local import failure clears credentials, retains only a safe site and sends no request (%s)',
+  async (origin, message, retainedOrigin) => {
+    const respond = vi.mocked(api.get).getMockImplementation()
+    if (!respond) throw new Error('Missing GET fixture')
+    vi.mocked(api.get).mockImplementation((path, config) => {
+      if (path.endsWith('/encryption-key')) {
+        return Promise.reject(new Error('Synthetic encryption key failure'))
+      }
+      return respond(path, config)
+    })
+    const user = userEvent.setup()
+    const post = serveActions()
+    renderAccounts()
+    await user.click(
+      await screen.findByRole('button', { name: 'Import tokens' })
+    )
+    await user.type(screen.getByLabelText(/Site URL/), origin)
+    await user.type(screen.getByLabelText(/Access token/), 'upstream-access')
+    await user.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByText(message)).toBeVisible()
+    expect(screen.queryByText('Login failed')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/Site URL/)).toHaveValue(retainedOrigin)
+    expect(screen.getByLabelText(/Access token/)).toHaveValue('')
+    expect(post).not.toHaveBeenCalled()
+  }
+)
+
 test('a canceled login ignores its late response and does not reopen a 2FA form', async () => {
   const user = userEvent.setup()
   let finish: (value: unknown) => void = () => undefined
@@ -472,7 +593,7 @@ test('refresh and disconnect authorize the selected account and refresh the stat
   await screen.findByText('No upstream accounts')
 })
 
-test('failed login clears passwords and surfaces the safe error without creating an account', async () => {
+test('failed login preserves the site and email while clearing passwords without creating an account', async () => {
   const user = userEvent.setup()
   const post = serveActions()
   post.mockImplementation(async (path) =>
@@ -506,6 +627,10 @@ test('failed login clears passwords and surfaces the safe error without creating
   await user.type(screen.getByLabelText(/Password/), 'wrong-password')
   await user.click(screen.getByRole('button', { name: 'Continue' }))
   expect(await screen.findByText('Upstream login failed')).toBeVisible()
+  expect(screen.getByLabelText(/Site URL/)).toHaveValue(
+    'https://upstream.example'
+  )
+  expect(screen.getByLabelText(/Email/)).toHaveValue('second@example.com')
   expect(screen.getByLabelText(/Password/)).toHaveValue('')
   expect(screen.queryByText('second@example.com')).not.toBeInTheDocument()
 })
@@ -632,7 +757,7 @@ test.each(['login', 'import'] as const)(
   }
 )
 
-test('an expired upstream 2FA flow returns to an empty login form', async () => {
+test('an expired upstream 2FA flow keeps site and email but returns to an empty password', async () => {
   const user = userEvent.setup()
   serveActions((path) => {
     if (path === `${accountUrl}/login`) {
@@ -663,7 +788,10 @@ test('an expired upstream 2FA flow returns to an empty login form', async () => 
       'The Sub2API verification expired or was already used. Sign in again.'
     )
   ).toBeVisible()
-  expect(screen.getByLabelText(/Email/)).toHaveValue('')
+  expect(screen.getByLabelText(/Site URL/)).toHaveValue(
+    'https://upstream.example'
+  )
+  expect(screen.getByLabelText(/Email/)).toHaveValue('second@example.com')
   expect(screen.getByLabelText(/Password/)).toHaveValue('')
   expect(screen.queryByLabelText(/Authenticator code/)).not.toBeInTheDocument()
 })

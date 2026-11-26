@@ -32,6 +32,15 @@ type sub2APIManagementRequest struct {
 	SyncBills             bool   `json:"sync_bills"`
 }
 
+func GetSub2APIEncryptionKey(c *gin.Context) {
+	keyID, publicKey := common.PasswordEncryptionPublicKey()
+	if keyID == "" || publicKey == "" {
+		common.ApiErrorT(c, "Database error, please contact the administrator")
+		return
+	}
+	common.ApiSuccess(c, gin.H{"kid": keyID, "public_key": publicKey})
+}
+
 // Message keys are fixed rather than copied from untrusted upstream errors.
 func sub2APIManagementError(c *gin.Context, err error) {
 	code := service.Sub2APIErrorCode(err)

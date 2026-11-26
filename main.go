@@ -371,11 +371,11 @@ func InitResources() error {
 		// The master rewrote the built-in role policies.
 		model.BumpSyncTopic(model.SyncTopicAuthz)
 	}
-	if common.PasswordLoginEncryptionEnabled {
-		if err = model.InitPasswordEncryption(); err != nil {
-			common.FatalLog(common.LogText("failed to initialize password encryption: %s", err.Error()))
-			return err
-		}
+	// Channel credentials use the same browser envelope even when password-login
+	// encryption is disabled. Replicas must load the shared key in either case.
+	if err = model.InitPasswordEncryption(); err != nil {
+		common.FatalLog(common.LogText("failed to initialize password encryption: %s", err.Error()))
+		return err
 	}
 
 	model.CheckSetup()

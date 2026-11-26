@@ -27,10 +27,12 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	relayopenai "github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +41,78 @@ import (
 
 const sub2APITestKey = "sk-sub2api-fixture-one"
 const sub2APITestOtherKey = "sk-sub2api-fixture-two"
+
+func TestSub2APIEncryptionKeyWithoutPasswordLogin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	admin, _ := setupAccessTokenAudit(t)
+	previousEnabled := common.PasswordLoginEncryptionEnabled
+	common.PasswordLoginEncryptionEnabled = false
+	t.Cleanup(func() { common.PasswordLoginEncryptionEnabled = previousEnabled })
+	require.NoError(t, model.DB.AutoMigrate(&model.LoginEncryptionKey{}))
+	require.NoError(t, model.InitPasswordEncryption())
+	user := &model.User{Username: "encryption-user", Password: "unused", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AuthVersion: 1, Group: "default", AffCode: "encryption-user"}
+	require.NoError(t, model.DB.Create(user).Error)
+	_, adminToken := createAccessTokenTestSession(t, admin.Id, "encryption-admin")
+	_, userToken := createAccessTokenTestSession(t, user.Id, "encryption-user")
+	readToken, _ := createScopedAccessToken(t, admin.Id, time.Now().Unix()+3600, "channel:read")
+	unrelatedToken, _ := createScopedAccessToken(t, admin.Id, time.Now().Unix()+3600, "profile:read")
+
+	const route = "/api/sub2api/accounts/encryption-key"
+	middleware.DeclareAccessTokenPermissionRoute(http.MethodGet, route, authz.ChannelRead)
+	router := gin.New()
+	router.GET(route, middleware.AdminAuth(), middleware.DisableCache(), middleware.RequirePermission(authz.ChannelRead), GetSub2APIEncryptionKey)
+	router.GET("/api/user/login/encryption-key", GetPasswordEncryptionKey)
+	for _, tc := range []struct {
+		name, token string
+		status      int
+	}{
+		{"anonymous", "", http.StatusUnauthorized},
+		{"ordinary user", userToken, http.StatusForbidden},
+		{"administrator without token scope", unrelatedToken, http.StatusForbidden},
+		{"administrator session", adminToken, http.StatusOK},
+		{"administrator read token", readToken, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := accessTokenRequest(router, http.MethodGet, route, tc.token, "", "")
+			require.Equal(t, tc.status, response.Code, response.Body.String())
+			if tc.status != http.StatusOK {
+				assert.NotContains(t, response.Body.String(), "BEGIN PUBLIC KEY")
+				return
+			}
+			var result struct {
+				Success bool `json:"success"`
+				Data    struct {
+					KeyID     string `json:"kid"`
+					PublicKey string `json:"public_key"`
+				} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+			require.True(t, result.Success)
+			require.NotEmpty(t, result.Data.KeyID)
+			assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
+			assert.NotContains(t, response.Body.String(), "PRIVATE KEY")
+			block, _ := pem.Decode([]byte(result.Data.PublicKey))
+			require.NotNil(t, block)
+			parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+			require.NoError(t, err)
+			public, ok := parsed.(*rsa.PublicKey)
+			require.True(t, ok)
+			ciphertext, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, public, []byte("fixture-channel-credential"), nil)
+			require.NoError(t, err)
+			plain, err := common.DecryptChannelCredential(base64.StdEncoding.EncodeToString(ciphertext), result.Data.KeyID)
+			require.NoError(t, err)
+			assert.Equal(t, "fixture-channel-credential", plain)
+			longCredential := strings.Repeat("fixture-token-", 100)
+			envelope, keyID := sub2APITestEncrypt(t, longCredential)
+			require.Equal(t, result.Data.KeyID, keyID)
+			plain, err = common.DecryptChannelCredential(envelope, result.Data.KeyID)
+			require.NoError(t, err)
+			assert.Equal(t, longCredential, plain)
+		})
+	}
+	response := accessTokenRequest(router, http.MethodGet, "/api/user/login/encryption-key", "", "", "")
+	assert.JSONEq(t, `{"success":true,"message":"","data":{"enabled":false}}`, response.Body.String())
+}
 
 func TestSub2APICanonicalOrigins(t *testing.T) {
 	for _, tc := range []struct{ raw, want string }{
@@ -113,6 +187,39 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 			t.Setenv("SUB2API_CREDENTIAL_SECRET", strings.Repeat("fixture-secret-", 4))
 			require.NoError(t, i18n.Init())
 			gin.SetMode(gin.TestMode)
+			t.Run("credential encryption works without password login encryption", func(t *testing.T) {
+				previousEnabled := common.PasswordLoginEncryptionEnabled
+				common.PasswordLoginEncryptionEnabled = false
+				t.Cleanup(func() { common.PasswordLoginEncryptionEnabled = previousEnabled })
+				require.NoError(t, db.AutoMigrate(&model.LoginEncryptionKey{}))
+				var count int64
+				require.NoError(t, db.Model(&model.LoginEncryptionKey{}).Count(&count).Error)
+				require.Zero(t, count)
+				require.NoError(t, model.InitPasswordEncryption())
+				keyID, publicKey := common.PasswordEncryptionPublicKey()
+				require.NotEmpty(t, keyID)
+				require.NotEmpty(t, publicKey)
+				var stored model.LoginEncryptionKey
+				require.NoError(t, db.First(&stored).Error)
+				errors := make(chan error, 2)
+				var replicas sync.WaitGroup
+				for range 2 {
+					replicas.Go(func() { errors <- model.InitPasswordEncryption() })
+				}
+				replicas.Wait()
+				close(errors)
+				for err := range errors {
+					require.NoError(t, err)
+				}
+				currentID, currentPublic := common.PasswordEncryptionPublicKey()
+				assert.Equal(t, keyID, currentID)
+				assert.Equal(t, publicKey, currentPublic)
+				require.NoError(t, db.Model(&model.LoginEncryptionKey{}).Count(&count).Error)
+				assert.EqualValues(t, 1, count)
+				var reloaded model.LoginEncryptionKey
+				require.NoError(t, db.First(&reloaded).Error)
+				assert.True(t, stored.PrivateKeyPEM == reloaded.PrivateKeyPEM, "replicas must retain the persisted private key")
+			})
 			previousLogin, previousSession := common.PasswordLoginEnabled, common.SessionSecret
 			common.PasswordLoginEnabled, common.SessionSecret = true, "sub2api-session-fixture"
 			t.Cleanup(func() { common.PasswordLoginEnabled, common.SessionSecret = previousLogin, previousSession })

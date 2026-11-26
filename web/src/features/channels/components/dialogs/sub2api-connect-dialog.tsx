@@ -25,7 +25,7 @@ import { Dialog } from '@/components/dialog'
 import { LoadingState } from '@/components/loading-state'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { encryptPassword } from '@/features/auth/lib/password-encryption'
+import { encryptChannelCredential } from '@/features/auth/lib/password-encryption'
 import {
   SecureVerificationDialog,
   useSecureVerification,
@@ -64,6 +64,11 @@ export function Sub2APIConnectDialog(props: {
   } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [formVersion, setFormVersion] = useState(0)
+  const [nonSensitiveFields, setNonSensitiveFields] = useState({
+    origin: '',
+    email: '',
+  })
   const mutation = useMutation({
     mutationFn: (request: {
       action: 'login' | 'import' | 'login/2fa'
@@ -97,6 +102,12 @@ export function Sub2APIConnectDialog(props: {
     }
     const current = new AbortController()
     operation.current = current
+    if (!challenge) {
+      setNonSensitiveFields({
+        origin: '',
+        email: input.fields.email ?? '',
+      })
+    }
     setBusy(true)
     setError('')
     try {
@@ -130,8 +141,9 @@ export function Sub2APIConnectDialog(props: {
           ) {
             throw new Error(t('Enter a valid HTTPS site URL.'))
           }
+          setNonSensitiveFields({ origin, email: input.fields.email ?? '' })
           if (input.fields.proxy?.trim()) {
-            const encryptedProxy = await encryptPassword(
+            const encryptedProxy = await encryptChannelCredential(
               input.fields.proxy.trim()
             )
             proxyEncrypted = encryptedProxy.password_encrypted
@@ -143,12 +155,12 @@ export function Sub2APIConnectDialog(props: {
             ...input.fields,
             email: props.account?.email ?? input.fields.email,
           })
-          const encrypted = await encryptPassword(credentials.password)
+          const encrypted = await encryptChannelCredential(credentials.password)
           credentials.password = ''
           data = { email: credentials.email, ...encrypted }
         } else {
           const credentials = sub2APIImportSchema.parse(input.fields)
-          const encrypted = await encryptPassword(
+          const encrypted = await encryptChannelCredential(
             JSON.stringify({
               access_token: credentials.access_token,
               ...(credentials.refresh_token
@@ -217,6 +229,7 @@ export function Sub2APIConnectDialog(props: {
       mutation.reset()
       if (operation.current === current) {
         operation.current = null
+        setFormVersion((version) => version + 1)
         setBusy(false)
       }
     }
@@ -240,7 +253,14 @@ export function Sub2APIConnectDialog(props: {
         type: 'password',
         required: true,
       },
-      { name: 'refresh_token', label: t('Refresh token'), type: 'password' },
+      {
+        name: 'refresh_token',
+        label: t('Refresh token'),
+        type: 'password',
+        description: t(
+          'Refresh token is optional. With only an access token, import it again when it expires.'
+        ),
+      },
     ]
   } else {
     fields = [
@@ -345,7 +365,9 @@ export function Sub2APIConnectDialog(props: {
           {props.managementAllowed && busy && <LoadingState inline size='sm' />}
           {props.managementAllowed && !busy && (
             <FieldsStep
+              key={formVersion}
               fields={fields}
+              defaultValues={nonSensitiveFields}
               formId={formId}
               disabled={false}
               onSubmit={(input) => void submit(input)}
