@@ -185,6 +185,9 @@ export async function streamUsageLogs(
     `${buildApiPath('/api/log', isAdmin)}/stream`,
     {
       params: { ...params, cursor, compact: isAdmin ? 1 : undefined },
+      paramsSerializer: {
+        serialize: (values) => buildQueryParams(values).toString(),
+      },
       headers: { Accept: 'text/event-stream' },
       // The server rotates this stream every 45 seconds. Recover a stalled hop.
       timeout: 75_000,

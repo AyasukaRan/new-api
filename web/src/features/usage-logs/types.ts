@@ -58,17 +58,20 @@ export interface CommonFilters {
 /**
  * Common logs specific filters
  */
-export interface CommonLogFilters extends CommonFilters {
+export type LogFilterValue = string | string[]
+
+export interface CommonLogFilters extends Omit<CommonFilters, 'channel'> {
   timeRange?: LogTimePreset
-  model?: string
-  token?: string
-  group?: string
-  username?: string
-  reasoningEffort?: string
-  clientTool?: string
-  responseTransport?: string
-  requestPath?: string
-  ip?: string
+  channel?: LogFilterValue
+  model?: LogFilterValue
+  token?: LogFilterValue
+  group?: LogFilterValue
+  username?: LogFilterValue
+  reasoningEffort?: LogFilterValue
+  clientTool?: LogFilterValue
+  responseTransport?: LogFilterValue
+  requestPath?: LogFilterValue
+  ip?: LogFilterValue
   requestId?: string
   upstreamRequestId?: string
 }
@@ -654,18 +657,18 @@ export interface GetLogsParams {
   p?: number
   page_size?: number
   type?: number
-  username?: string
-  token_name?: string
-  model_name?: string
-  reasoning_effort?: string
-  client_tool?: string
-  response_transport?: string
-  request_path?: string
-  ip?: string
+  username?: LogFilterValue
+  token_name?: LogFilterValue
+  model_name?: LogFilterValue
+  reasoning_effort?: LogFilterValue
+  client_tool?: LogFilterValue
+  response_transport?: LogFilterValue
+  request_path?: LogFilterValue
+  ip?: LogFilterValue
   start_timestamp?: number
   end_timestamp?: number
-  channel?: number
-  group?: string
+  channel?: number | number[]
+  group?: LogFilterValue
   request_id?: string
   upstream_request_id?: string
 }
@@ -695,18 +698,18 @@ export interface GetLogStatsParams {
   category?: 'model'
   result?: 'success' | 'failure'
   type?: number
-  username?: string
-  token_name?: string
-  model_name?: string
-  reasoning_effort?: string
-  client_tool?: string
-  response_transport?: string
-  request_path?: string
-  ip?: string
+  username?: LogFilterValue
+  token_name?: LogFilterValue
+  model_name?: LogFilterValue
+  reasoning_effort?: LogFilterValue
+  client_tool?: LogFilterValue
+  response_transport?: LogFilterValue
+  request_path?: LogFilterValue
+  ip?: LogFilterValue
   start_timestamp?: number
   end_timestamp?: number
-  channel?: number
-  group?: string
+  channel?: number | number[]
+  group?: LogFilterValue
   request_id?: string
   upstream_request_id?: string
 }

@@ -22,8 +22,10 @@ export function buildQueryParams(
   const queryParams = new URLSearchParams()
 
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== '') {
-      queryParams.append(key, String(value))
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (item !== undefined && item !== null && item !== '') {
+        queryParams.append(key, String(item))
+      }
     }
   })
 

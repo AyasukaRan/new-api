@@ -27,6 +27,7 @@ func GetRequestOriginRows(ctx context.Context, filter LogFilter, userID int, ref
 	var err error
 	if userID > 0 {
 		filter.Username = ""
+		filter.Usernames = nil
 		tx, err = filter.forUser(tx, userID)
 	} else {
 		tx, err = filter.apply(tx)

@@ -34,11 +34,12 @@ import { useMediaQuery } from '@/hooks'
 import { useLiveLogRange } from '../hooks/use-live-log-range'
 import {
   buildSearchParams,
+  getLogFilterValues,
   isValidLogChannelFilter,
   type LogColumnFilterKey,
 } from '../lib/filter'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
-import type { CommonLogFilters } from '../types'
+import type { CommonLogFilters, LogFilterValue } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
 import { CompactDateTimeRangePicker } from './compact-date-time-range-picker'
 import { ExportLogsDialog } from './dialogs/export-logs-dialog'
@@ -95,7 +96,7 @@ function buildSearchSourceKey(values: {
     values.requestId,
     values.upstreamRequestId,
   ]
-    .map((value) => String(value ?? ''))
+    .map((value) => JSON.stringify(value ?? ''))
     .join('\u001f')
 }
 
@@ -224,7 +225,10 @@ export function CommonLogsFilterBar<TData>(
   )
 
   const handleChange = useCallback(
-    (field: keyof CommonLogFilters, value: Date | string | undefined) => {
+    (
+      field: keyof CommonLogFilters,
+      value: Date | LogFilterValue | undefined
+    ) => {
       setDraft((current) => {
         const base =
           current.sourceKey === searchState.sourceKey ? current : searchState
@@ -336,7 +340,7 @@ export function CommonLogsFilterBar<TData>(
     transportInToolbar && isAdmin && filters.requestPath,
     filters.requestId,
     isAdmin && filters.upstreamRequestId,
-  ].filter(Boolean).length
+  ].filter((value) => getLogFilterValues(value).length > 0).length
   const activeFilterCount = [
     filters.token,
     filters.model,
@@ -351,7 +355,9 @@ export function CommonLogsFilterBar<TData>(
     !isTest && isAdmin && filters.requestPath,
     filters.requestId,
     isAdmin && filters.upstreamRequestId,
-  ].filter(Boolean).length
+  ].filter(
+    (value) => value === true || getLogFilterValues(value).length > 0
+  ).length
   const sensitiveInputClass = sensitiveVisible
     ? undefined
     : '[-webkit-text-security:disc]'
@@ -455,10 +461,14 @@ export function CommonLogsFilterBar<TData>(
   )
   const inlineSuggestions = isMobile && !isTest
   const columnFieldProps = {
+    multiple: !isTest,
     inlineSuggestions,
     isAdmin,
     values: filters,
-    onChange: (field: LogColumnFilterKey, value: string) => {
+    onChange: (
+      field: LogColumnFilterKey,
+      value: LogFilterValue | undefined
+    ) => {
       if (field !== 'type') {
         handleChange(field, value)
       }
@@ -471,6 +481,7 @@ export function CommonLogsFilterBar<TData>(
   )
   const groupFilter = (
     <LogGroupFilter
+      multiple={!isTest}
       inlineSuggestions={inlineSuggestions}
       isAdmin={isAdmin}
       value={filters.group}
@@ -482,19 +493,11 @@ export function CommonLogsFilterBar<TData>(
   const advancedFilters = (
     <>
       {tokenInToolbar && (
-        <LogsFilterField>
-          <LogsFilterInput
-            placeholder={t('Token Name')}
-            aria-label={t('Token Name')}
-            className={sensitiveInputClass}
-            value={filters.token || ''}
-            onChange={(e) => handleChange('token', e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-        </LogsFilterField>
+        <LogColumnFilterFields column='token' {...columnFieldProps} />
       )}
       {userInToolbar && (
         <LogUsernameFilter
+          multiple={!isTest}
           inlineSuggestions={inlineSuggestions}
           value={filters.username}
           maskClass={sensitiveInputClass}

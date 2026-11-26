@@ -34,6 +34,8 @@ import { LOG_TYPE_ALL_VALUE } from '../constants'
 import type { UsageLog } from '../data/schema'
 import {
   getLogColumnFilterKeys,
+  getLogFilterValues,
+  normalizeLogFilterValue,
   getLogTypeValue,
   isValidLogChannelFilter,
   type LogColumnFilterKey,
@@ -50,6 +52,7 @@ const route = getRouteApi('/_authenticated/usage-logs/$section')
 const suggestionsFromLog: Partial<
   Record<LogColumnFilterKey, (log: UsageLog) => string | undefined>
 > = {
+  ip: (log) => log.ip,
   clientTool: (log) => getLogMetadata(log)?.client_tool,
   reasoningEffort: (log) => getLogMetadata(log)?.reasoning_effort,
   model: (log) => log.model_name,
@@ -87,12 +90,13 @@ export function LogHeaderFilter(props: {
       return [key, type === LOG_TYPE_ALL_VALUE ? '' : type]
     })
   )
-  const active = keys.filter((key) => !!selected[key]).length
+  const active = keys.reduce(
+    (count, key) => count + getLogFilterValues(selected[key]).length,
+    0
+  )
   const label = `${t('Filter')} · ${props.title}`
   const singleKey =
-    keys.length === 1 && !['type', 'responseTransport'].includes(keys[0])
-      ? keys[0]
-      : undefined
+    keys.length === 1 && keys[0] !== 'type' ? keys[0] : undefined
 
   function handleOpen(nextOpen: boolean) {
     if (nextOpen) {
@@ -116,18 +120,20 @@ export function LogHeaderFilter(props: {
     setOpen(nextOpen)
   }
 
-  function apply(values: LogColumnFilterValues) {
+  function apply(values: LogColumnFilterValues, close = true) {
     if (!isValidLogChannelFilter(values.channel)) return
     void navigate({
       search: (previous) => ({
         ...previous,
         ...Object.fromEntries(
           keys.map((key) => {
-            const value = values[key]?.trim()
+            const value = normalizeLogFilterValue(values[key])
             if (key === 'type') {
               return [
                 key,
-                value && value !== LOG_TYPE_ALL_VALUE ? [value] : undefined,
+                typeof value === 'string' && value !== LOG_TYPE_ALL_VALUE
+                  ? [value]
+                  : undefined,
               ]
             }
             return [key, value || undefined]
@@ -137,7 +143,7 @@ export function LogHeaderFilter(props: {
       }),
       resetScroll: false,
     })
-    setOpen(false)
+    if (close) setOpen(false)
   }
 
   return (
@@ -193,7 +199,7 @@ export function LogHeaderFilter(props: {
                 ? '[-webkit-text-security:disc]'
                 : undefined
             }
-            onSelect={(value) => apply({ [singleKey]: value })}
+            onSelect={(value) => apply({ [singleKey]: value }, false)}
           />
         ) : (
           <form
@@ -207,6 +213,7 @@ export function LogHeaderFilter(props: {
               {columns.map((column) => (
                 <LogColumnFilterFields
                   showLabels
+                  multiple
                   inlineSuggestions
                   key={column}
                   column={column}
@@ -230,7 +237,10 @@ export function LogHeaderFilter(props: {
                 variant='ghost'
                 size='sm'
                 className='text-muted-foreground -ms-2 rounded-md'
-                disabled={!active && !keys.some((key) => draft[key])}
+                disabled={
+                  !active &&
+                  !keys.some((key) => getLogFilterValues(draft[key]).length)
+                }
                 onClick={() => apply({})}
               >
                 {t('Clear')}

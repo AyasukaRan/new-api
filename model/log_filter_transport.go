@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"gorm.io/gorm"
 )
 
 // Keys and types are fixed by the log schema. Missing and malformed fields have
@@ -101,4 +102,15 @@ func logTransportCaseSQL(logType, streaming string) string {
 		" AND " + fact("string", "stream_status", "end_reason") + " IN ('', 'done', 'eof')" +
 		" AND (" + responseStatus + " = 'completed' OR (" + responseStatus + " = '' AND " + fact("number", "frt") + " > 0)) THEN 'sse'" +
 		" WHEN " + streaming + " THEN 'unknown' ELSE 'non_streamed' END END END"
+}
+
+func filterLogRequestPath(tx *gorm.DB, value string) (*gorm.DB, error) {
+	path := logRequestPathSQL()
+	if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
+		tx = tx.Where("left("+path+", 128) = left(CAST(? AS text), 128)", value)
+		if len(value) < 128 {
+			return tx, nil
+		}
+	}
+	return tx.Where(path+" = ?", value), nil
 }

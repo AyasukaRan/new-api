@@ -21,6 +21,10 @@ import z from 'zod'
 
 import { UsageLogs } from '@/features/usage-logs'
 import { LOG_RESPONSE_TRANSPORTS } from '@/features/usage-logs/constants'
+import {
+  getLogFilterValues,
+  normalizeLogFilterValue,
+} from '@/features/usage-logs/lib/filter'
 import { LOG_TIME_PRESETS } from '@/features/usage-logs/lib/time-range'
 import {
   isUsageLogsSectionId,
@@ -40,30 +44,51 @@ const logTypeSearchSchema = z
   )
   .catch([])
 
+// Raw query strings are decoded to numbers/booleans by the router. Preserve
+// numeric usernames and channel IDs when opening shared repeated-key links.
+const logFilterItemSchema = z.union([z.string(), z.number(), z.boolean()])
+const logFilterSearchSchema = z
+  .union([logFilterItemSchema, z.array(logFilterItemSchema)])
+  .optional()
+  .transform((value) =>
+    normalizeLogFilterValue(
+      value === undefined
+        ? undefined
+        : (Array.isArray(value) ? value : [value]).map(String)
+    )
+  )
+  .catch(undefined)
+
 const usageLogsSearchSchema = z.object({
   page: z.number().optional().catch(1),
   pageSize: z.number().optional().catch(undefined),
   type: logTypeSearchSchema.optional(),
   result: z.enum(['all', 'success', 'failure']).optional().catch(undefined),
   filter: z.string().optional().catch(''),
-  model: z.string().optional().catch(''),
-  token: z.string().optional().catch(''),
-  channel: z.string().optional().catch(''),
-  group: z.string().optional().catch(''),
-  username: z.string().optional().catch(''),
-  reasoningEffort: z.string().optional().catch(''),
-  clientTool: z.string().optional().catch(''),
-  responseTransport: z
-    .enum(LOG_RESPONSE_TRANSPORTS)
-    .optional()
+  model: logFilterSearchSchema,
+  token: logFilterSearchSchema,
+  channel: logFilterSearchSchema,
+  group: logFilterSearchSchema,
+  username: logFilterSearchSchema,
+  reasoningEffort: logFilterSearchSchema,
+  clientTool: logFilterSearchSchema,
+  responseTransport: logFilterSearchSchema
+    .pipe(
+      z
+        .union([
+          z.enum(LOG_RESPONSE_TRANSPORTS),
+          z.array(z.enum(LOG_RESPONSE_TRANSPORTS)),
+        ])
+        .optional()
+    )
+    .transform(normalizeLogFilterValue)
     .catch(undefined),
-  requestPath: z
-    .string()
-    .trim()
-    .transform((value) => value.split('?', 1)[0] || undefined)
-    .optional()
-    .catch(undefined),
-  ip: z.string().optional().catch(''),
+  requestPath: logFilterSearchSchema.transform((value) =>
+    normalizeLogFilterValue(
+      getLogFilterValues(value).map((path) => path.split('?', 1)[0])
+    )
+  ),
+  ip: logFilterSearchSchema,
   requestId: z.string().optional().catch(''),
   upstreamRequestId: z.string().optional().catch(''),
   startTime: z.number().optional(),

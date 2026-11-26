@@ -30,7 +30,40 @@ import type {
   CommonLogFilters,
   DrawingLogFilters,
   TaskLogFilters,
+  LogFilterValue,
 } from '../types'
+
+export function getLogFilterValues(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value]
+  return [
+    ...new Set(
+      values
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    ),
+  ]
+}
+
+export function normalizeLogFilterValue(
+  value: unknown
+): LogFilterValue | undefined {
+  const values = getLogFilterValues(value)
+  return values.length > 1 ? values : values[0]
+}
+
+export function toggleLogFilterValue(
+  value: unknown,
+  selected: string
+): LogFilterValue | undefined {
+  const values = getLogFilterValues(value)
+  const item = selected.trim()
+  return normalizeLogFilterValue(
+    values.includes(item)
+      ? values.filter((value) => value !== item)
+      : [...values, item]
+  )
+}
 
 export function getLogTypeValue(value: unknown): string {
   return Array.isArray(value) &&
@@ -126,7 +159,9 @@ const columnKeys = {
 } as const
 export type LogFilterColumn = keyof typeof columnKeys
 export type LogColumnFilterKey = (typeof columnKeys)[LogFilterColumn][number]
-export type LogColumnFilterValues = Partial<Record<LogColumnFilterKey, string>>
+export type LogColumnFilterValues = Partial<
+  Record<LogColumnFilterKey, LogFilterValue>
+>
 
 export const logColumnFilterLabels = {
   type: 'Type',
@@ -148,13 +183,12 @@ export function getLogValueFilterKeys(isAdmin: boolean) {
     .filter((key) => key !== 'type')
 }
 
-export function isValidLogChannelFilter(value?: string) {
-  const text = value?.trim() ?? ''
-  return (
-    !text ||
-    (/^\d+$/.test(text) &&
+export function isValidLogChannelFilter(value?: LogFilterValue) {
+  return getLogFilterValues(value).every(
+    (text) =>
+      /^\d+$/.test(text) &&
       Number(text) > 0 &&
-      Number.isSafeInteger(Number(text)))
+      Number.isSafeInteger(Number(text))
   )
 }
 

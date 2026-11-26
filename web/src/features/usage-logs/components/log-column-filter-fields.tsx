@@ -25,6 +25,7 @@ import { useLogGroupOptions } from '../hooks/use-log-group-options'
 import { useLogUserOptions } from '../hooks/use-log-user-options'
 import {
   effortSuggestions,
+  getLogFilterValues,
   getLogColumnFilterKeys,
   logColumnFilterLabels,
   isValidLogChannelFilter,
@@ -32,13 +33,16 @@ import {
   type LogColumnFilterValues,
   type LogFilterColumn,
 } from '../lib/filter'
+import type { LogFilterValue } from '../types'
 import { LogChoiceFilter } from './log-choice-filter'
+import { LogMultipleColumnField } from './log-single-column-filter'
 import { LogsFilterField, LogsFilterInput } from './logs-filter-toolbar'
 
 type FilterInputProps = {
   caption?: { id: string; text: string }
-  value?: string
-  onValueChange: (value: string) => void
+  value?: LogFilterValue
+  multiple?: boolean
+  onValueChange: (value: LogFilterValue | undefined) => void
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>
   maskClass?: string
   inlineSuggestions?: boolean
@@ -47,6 +51,16 @@ type FilterInputProps = {
 export function LogUsernameFilter(props: FilterInputProps) {
   const { t } = useTranslation()
   const { users, loading, setSearch } = useLogUserOptions()
+  if (props.multiple) {
+    return (
+      <LogMultipleColumnField
+        field='username'
+        {...props}
+        isAdmin
+        onSelect={props.onValueChange}
+      />
+    )
+  }
   return (
     <LogsFilterField caption={props.caption} className={props.maskClass}>
       <ComboboxInput
@@ -64,7 +78,7 @@ export function LogUsernameFilter(props: FilterInputProps) {
         emptyText={loading ? t('Loading...') : t('No matching results')}
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={props.maskClass}
-        value={props.value}
+        value={getLogFilterValues(props.value)[0] ?? ''}
         onSearchChange={setSearch}
         onValueChange={props.onValueChange}
         onKeyDown={props.onKeyDown}
@@ -76,6 +90,15 @@ export function LogUsernameFilter(props: FilterInputProps) {
 export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
   const { t } = useTranslation()
   const { groups, loading } = useLogGroupOptions(props.isAdmin)
+  if (props.multiple) {
+    return (
+      <LogMultipleColumnField
+        field='group'
+        {...props}
+        onSelect={props.onValueChange}
+      />
+    )
+  }
 
   return (
     <LogsFilterField caption={props.caption} className={props.maskClass}>
@@ -96,7 +119,7 @@ export function LogGroupFilter(props: FilterInputProps & { isAdmin: boolean }) {
         emptyText={loading ? t('Loading...') : t('No group found.')}
         className='h-8 min-w-0 text-sm leading-5'
         popupClassName={props.maskClass}
-        value={props.value}
+        value={getLogFilterValues(props.value)[0] ?? ''}
         onValueChange={props.onValueChange}
         onKeyDown={props.onKeyDown}
       />
@@ -108,7 +131,8 @@ export function LogColumnFilterFields(props: {
   column: LogFilterColumn
   isAdmin: boolean
   values: LogColumnFilterValues
-  onChange: (key: LogColumnFilterKey, value: string) => void
+  onChange: (key: LogColumnFilterKey, value: LogFilterValue | undefined) => void
+  multiple?: boolean
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>
   maskClass?: string
   showLabels?: boolean
@@ -124,10 +148,29 @@ export function LogColumnFilterFields(props: {
         const caption = props.showLabels
           ? { id: `${id}-${key}`, text: label }
           : undefined
+        if (props.multiple && key !== 'type') {
+          return (
+            <LogMultipleColumnField
+              key={key}
+              field={key}
+              caption={caption}
+              value={props.values[key]}
+              suggestions={props.suggestions?.[key]}
+              isAdmin={props.isAdmin}
+              maskClass={
+                ['username', 'token', 'group', 'clientTool', 'ip'].includes(key)
+                  ? props.maskClass
+                  : undefined
+              }
+              onSelect={(value) => props.onChange(key, value)}
+            />
+          )
+        }
         const input = {
           caption,
-          value: props.values[key] ?? '',
-          onValueChange: (value: string) => props.onChange(key, value),
+          value: getLogFilterValues(props.values[key])[0] ?? '',
+          onValueChange: (value: LogFilterValue | undefined) =>
+            props.onChange(key, value),
           onKeyDown: props.onKeyDown,
           maskClass: props.maskClass,
           inlineSuggestions: props.inlineSuggestions,

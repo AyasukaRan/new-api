@@ -151,10 +151,15 @@ it('applies mobile drawer filters only when Search is pressed', async () => {
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: 'Filter' }))
   const dialog = await screen.findByRole('dialog', { name: 'Filter' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Model Name' }))
+  const models = screen.getByRole('dialog', { name: 'Model Name' })
   await user.type(
-    within(dialog).getByPlaceholderText('Model Name'),
-    'gemini-3.7-flash'
+    within(models).getByRole('combobox'),
+    'gemini-3.7-flash{Enter}'
   )
+  await user.type(within(models).getByRole('combobox'), 'model-two{Enter}')
+  expect(models).toBeVisible()
+  await user.keyboard('{Escape}')
   expect(
     within(dialog).queryByRole('combobox', { name: 'Type' })
   ).not.toBeInTheDocument()
@@ -163,12 +168,13 @@ it('applies mobile drawer filters only when Search is pressed', async () => {
     within(dialog).getByRole('combobox', { name: 'Response mode' })
   )
   await user.click(await screen.findByRole('option', { name: 'WS' }))
+  await user.keyboard('{Escape}')
   expect(router.state.location.search).not.toHaveProperty('model')
   await user.click(within(dialog).getByRole('button', { name: 'Search' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
       page: 1,
-      model: 'gemini-3.7-flash',
+      model: ['gemini-3.7-flash', 'model-two'],
       responseTransport: 'ws',
     })
   )

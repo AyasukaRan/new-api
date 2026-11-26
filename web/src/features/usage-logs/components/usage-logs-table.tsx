@@ -50,7 +50,12 @@ import { useLiveUsageLogs } from '../hooks/use-live-usage-logs'
 import { useUsageLogHistory } from '../hooks/use-usage-log-history'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
-import { getLogValueFilterKeys } from '../lib/filter'
+import {
+  getLogValueFilterKeys,
+  getLogFilterValues,
+  normalizeLogFilterValue,
+  toggleLogFilterValue,
+} from '../lib/filter'
 import { getLogMetadata } from '../lib/format'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../lib/time-range'
 import { fetchLogsByCategory } from '../lib/utils'
@@ -225,7 +230,16 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
             },
           ]
         : []),
-    ],
+    ].map((filter) =>
+      logCategory === 'common'
+        ? {
+            ...filter,
+            type: 'array' as const,
+            deserialize: getLogFilterValues,
+            serialize: normalizeLogFilterValue,
+          }
+        : filter
+    ),
   })
 
   const { data, isLoading, isFetching, refetch, isPlaceholderData } = useQuery({
@@ -296,7 +310,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       void navigate({
         search: (previous) => ({
           ...previous,
-          [field]: previous[field] === value ? undefined : value,
+          [field]: toggleLogFilterValue(previous[field], value),
           page: 1,
         }),
         resetScroll: false,

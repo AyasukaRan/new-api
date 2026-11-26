@@ -210,11 +210,16 @@ func ActiveLogSnapshot(ctx context.Context, filter LogFilter, ownUserID, role in
 	for _, row := range rows {
 		row.useCurrentUser(users)
 	}
+	channels := logFilterChannels(filter.Channel, filter.Channels)
 	rows = slices.DeleteFunc(rows, func(row *Log) bool {
-		if !activeLogTextMatches(row.ModelName, filter.ModelName) || !activeLogTextMatches(row.Username, filter.Username) {
+		if !activeLogFilterMatches(row.ModelName, filter.ModelName, filter.ModelNames, true) ||
+			!activeLogFilterMatches(row.Username, filter.Username, filter.Usernames, true) {
 			return true
 		}
-		if filter.IP != "" && filter.IP != row.Ip || filter.TokenName != "" && filter.TokenName != row.TokenName || filter.Group != "" && filter.Group != row.Group || filter.Channel != 0 && filter.Channel != row.ChannelId {
+		if !activeLogFilterMatches(row.Ip, filter.IP, filter.IPs, false) ||
+			!activeLogFilterMatches(row.TokenName, filter.TokenName, filter.TokenNames, false) ||
+			!activeLogFilterMatches(row.Group, filter.Group, filter.Groups, false) ||
+			len(channels) > 0 && !slices.Contains(channels, row.ChannelId) {
 			return true
 		}
 		if filter.RequestId != "" && filter.RequestId != row.RequestId || filter.UpstreamRequestId != "" {
@@ -224,7 +229,11 @@ func ActiveLogSnapshot(ctx context.Context, filter LogFilter, ownUserID, role in
 			return true
 		}
 		metadata := gjson.Parse(row.Other)
-		return filter.ReasoningEffort != "" && metadata.Get("reasoning_effort").String() != filter.ReasoningEffort || filter.ClientTool != "" && metadata.Get("client_tool").String() != filter.ClientTool || filter.RequestPath != "" && metadata.Get("request_path").String() != filter.RequestPath || filter.ResponseTransport != "" && metadata.Get("response_transport").String() != filter.ResponseTransport
+		path, _, _ := strings.Cut(strings.TrimSpace(metadata.Get("request_path").String()), "?")
+		return !activeLogFilterMatches(strings.TrimSpace(metadata.Get("reasoning_effort").String()), filter.ReasoningEffort, filter.ReasoningEfforts, false) ||
+			!activeLogFilterMatches(strings.TrimSpace(metadata.Get("client_tool").String()), filter.ClientTool, filter.ClientTools, false) ||
+			!activeLogFilterMatches(path, filter.RequestPath, filter.RequestPaths, false) ||
+			!activeLogFilterMatches(metadata.Get("response_transport").String(), filter.ResponseTransport, filter.ResponseTransports, false)
 	})
 	slices.SortFunc(rows, func(a, b *Log) int {
 		return cmp.Or(cmp.Compare(b.CreatedAt, a.CreatedAt), strings.Compare(a.LiveKey, b.LiveKey))
@@ -248,4 +257,17 @@ func activeLogTextMatches(value, filter string) bool {
 		return value == filter
 	}
 	return regexp.MustCompile("(?s)^" + strings.ReplaceAll(regexp.QuoteMeta(filter), "%", ".*") + "$").MatchString(value)
+}
+
+func activeLogFilterMatches(value, scalar string, plural []string, wildcards bool) bool {
+	values := logFilterValues(scalar, plural)
+	if len(values) == 0 {
+		return true
+	}
+	for _, filter := range values {
+		if wildcards && activeLogTextMatches(value, filter) || !wildcards && value == filter {
+			return true
+		}
+	}
+	return false
 }

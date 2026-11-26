@@ -29,6 +29,12 @@ import {
   DrawerTitle,
 } from '../drawer'
 import {
+  Popover,
+  PopoverContent,
+  PopoverTitle,
+  PopoverTrigger,
+} from '../popover'
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -75,7 +81,7 @@ function ProviderSelect(props: {
 
 function FilterDrawer(props: { children: ReactNode }) {
   return (
-    <Drawer open>
+    <Drawer defaultOpen>
       <DrawerContent>
         <DrawerTitle>Filters</DrawerTitle>
         <DrawerDescription>Adjust the result filters</DrawerDescription>
@@ -128,6 +134,42 @@ describe('popups inside a drawer', () => {
 
     expect(change).toHaveBeenCalledWith('gemini')
     expect(screen.getByRole('dialog', { name: 'Filters' })).toBeInTheDocument()
+  })
+
+  it('keeps a popover inside the drawer interactive without closing the drawer', async () => {
+    const click = vi.fn()
+    render(
+      <FilterDrawer>
+        <Popover>
+          <PopoverTrigger>Choose models</PopoverTrigger>
+          <PopoverContent>
+            <PopoverTitle>Models</PopoverTitle>
+            <button type='button' onClick={click}>
+              Model one
+            </button>
+          </PopoverContent>
+        </Popover>
+      </FilterDrawer>
+    )
+    const user = userEvent.setup()
+    const drawer = screen.getByRole('dialog', { name: 'Filters' })
+    await user.click(
+      within(drawer).getByRole('button', { name: 'Choose models' })
+    )
+    const popup = await within(drawer).findByRole('dialog', { name: 'Models' })
+    await user.click(within(popup).getByRole('button', { name: 'Model one' }))
+    expect(click).toHaveBeenCalledOnce()
+    expect(drawer).toBeVisible()
+    expect(popup).toBeVisible()
+    await user.keyboard('{Escape}')
+    expect(
+      screen.queryByRole('dialog', { name: 'Models' })
+    ).not.toBeInTheDocument()
+    expect(drawer).toBeVisible()
+    await user.keyboard('{Escape}')
+    expect(
+      screen.queryByRole('dialog', { name: 'Filters' })
+    ).not.toBeInTheDocument()
   })
 
   it('renders select options inside the drawer dialog and clicking one applies it without closing the drawer', async () => {

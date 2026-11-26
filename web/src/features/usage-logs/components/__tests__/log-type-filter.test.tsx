@@ -25,7 +25,13 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 import { getCoreRowModel, useReactTable } from '@tanstack/react-table'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 
@@ -77,7 +83,7 @@ async function renderFilter(search = '') {
       <RouterProvider router={router} />
     </QueryClientProvider>
   )
-  await screen.findByPlaceholderText('Model Name')
+  await screen.findByRole('combobox', { name: 'Model Name' })
   return router
 }
 
@@ -95,7 +101,14 @@ it.each([1, 10])(
     expect(
       screen.queryByRole('combobox', { name: 'Type' })
     ).not.toBeInTheDocument()
-    await userEvent.type(screen.getByPlaceholderText('Model Name'), 'model-a')
+    await userEvent.click(screen.getByRole('combobox', { name: 'Model Name' }))
+    await userEvent.type(
+      within(screen.getByRole('dialog', { name: 'Model Name' })).getByRole(
+        'combobox'
+      ),
+      'model-a{Enter}'
+    )
+    await userEvent.keyboard('{Escape}')
     await userEvent.click(screen.getByRole('button', { name: 'Search' }))
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({

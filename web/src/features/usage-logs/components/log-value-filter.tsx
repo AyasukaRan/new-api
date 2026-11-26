@@ -32,9 +32,11 @@ import { cn } from '@/lib/utils'
 
 import {
   getLogValueFilterKeys,
+  getLogFilterValues,
   logColumnFilterLabels,
   type LogColumnFilterKey,
 } from '../lib/filter'
+import type { LogFilterValue } from '../types'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 export type LogValueFilterKey = Exclude<LogColumnFilterKey, 'type'>
@@ -42,7 +44,7 @@ export type LogValueFilterKey = Exclude<LogColumnFilterKey, 'type'>
 interface LogValueFilterState {
   sensitiveVisible: boolean
   keys: LogValueFilterKey[]
-  values: Partial<Record<LogValueFilterKey, string>>
+  values: Partial<Record<LogValueFilterKey, LogFilterValue>>
   onFilter: (field: LogValueFilterKey, value: string) => void
 }
 
@@ -96,7 +98,7 @@ export function useLogValueFilter(
   ) {
     return null
   }
-  const active = context.values[field] === value
+  const active = getLogFilterValues(context.values[field]).includes(value)
   const title = `${t(active ? 'Remove filter' : 'Filter')} · ${t(logColumnFilterLabels[field])}: ${label || value}`
   const onClick: MouseEventHandler<HTMLElement> = (event) => {
     event.stopPropagation()
@@ -134,7 +136,10 @@ export function LogFilterValue(props: {
 export function LogValueFilterChips() {
   const context = useContext(LogValueFilterContext)
   const { t } = useTranslation()
-  const active = context?.keys.filter((key) => !!context.values[key]) ?? []
+  const active =
+    context?.keys.flatMap((key) =>
+      getLogFilterValues(context.values[key]).map((value) => ({ key, value }))
+    ) ?? []
   if (!context || !active.length) return null
   return (
     <div
@@ -142,13 +147,11 @@ export function LogValueFilterChips() {
       aria-label={t('Filters')}
       className='flex min-w-0 flex-wrap items-center gap-1.5 px-1 pb-2'
     >
-      {active.map((key) => {
-        const value = context.values[key]
-        if (!value) return null
+      {active.map(({ key, value }) => {
         const label = `${t(logColumnFilterLabels[key])}: ${context.sensitiveVisible ? value : '••••'}`
         return (
           <Button
-            key={key}
+            key={JSON.stringify([key, value])}
             type='button'
             variant='secondary'
             size='xs'

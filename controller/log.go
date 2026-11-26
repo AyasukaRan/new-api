@@ -23,30 +23,61 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	filter := model.LogFilter{
-		Source:            model.LogSourceUsage,
-		Category:          c.Query("category"),
-		Result:            c.Query("result"),
-		AdminSelfView:     c.GetInt("role") >= common.RoleAdminUser,
-		Type:              logType,
-		StartTimestamp:    startTimestamp,
-		EndTimestamp:      endTimestamp,
-		ModelName:         c.Query("model_name"),
-		ReasoningEffort:   strings.TrimSpace(c.Query("reasoning_effort")),
-		ResponseTransport: strings.TrimSpace(c.Query("response_transport")),
-		IP:                strings.TrimSpace(c.Query("ip")),
-		TokenName:         c.Query("token_name"),
-		Group:             c.Query("group"),
-		RequestId:         c.Query("request_id"),
+		Source:             model.LogSourceUsage,
+		Category:           c.Query("category"),
+		Result:             c.Query("result"),
+		AdminSelfView:      c.GetInt("role") >= common.RoleAdminUser,
+		Type:               logType,
+		StartTimestamp:     startTimestamp,
+		EndTimestamp:       endTimestamp,
+		ModelNames:         logQueryValues(c, "model_name"),
+		ReasoningEfforts:   logQueryValues(c, "reasoning_effort"),
+		ResponseTransports: logQueryValues(c, "response_transport"),
+		IPs:                logQueryValues(c, "ip"),
+		TokenNames:         logQueryValues(c, "token_name"),
+		Groups:             logQueryValues(c, "group"),
+		RequestId:          c.Query("request_id"),
 	}
 	if admin {
-		filter.ClientTool = strings.TrimSpace(c.Query("client_tool"))
-		filter.RequestPath, _, _ = strings.Cut(strings.TrimSpace(c.Query("request_path")), "?")
+		filter.ClientTools = logQueryValues(c, "client_tool")
+		for _, path := range logQueryValues(c, "request_path") {
+			path, _, _ = strings.Cut(path, "?")
+			filter.RequestPaths = append(filter.RequestPaths, path)
+		}
 		filter.UpstreamRequestId = c.Query("upstream_request_id")
 		filter.Source = model.LogSource(c.DefaultQuery("source", string(model.LogSourceUsage)))
-		filter.Username = c.Query("username")
-		filter.Channel, _ = strconv.Atoi(c.Query("channel"))
+		filter.Usernames = logQueryValues(c, "username")
+		channels := logQueryValues(c, "channel")
+		for _, raw := range channels {
+			id, err := strconv.Atoi(raw)
+			if err != nil {
+				id = -1
+			}
+			// Older clients use a lone zero to clear this filter. Zero alongside
+			// actual selections is invalid, not an unrestricted alternative.
+			if len(channels) == 1 && id == 0 {
+				continue
+			}
+			filter.Channels = append(filter.Channels, id)
+		}
 	}
 	return filter
+}
+
+// Repeated query keys are the wire format. Bracketed keys remain compatible
+// with clients whose URL encoder uses array notation.
+func logQueryValues(c *gin.Context, key string) []string {
+	values := append(c.QueryArray(key), c.QueryArray(key+"[]")...)
+	result := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+	}
+	return result
 }
 
 // limitLogTimeRange returns the start of a log or dashboard search kept within

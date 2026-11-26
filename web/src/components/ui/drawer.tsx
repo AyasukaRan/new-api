@@ -68,6 +68,7 @@ function DrawerContent({
   className,
   children,
   ref,
+  onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof DrawerPrimitive.Content>) {
   // Popups rendered inside the drawer portal into this element so they stay
@@ -81,6 +82,16 @@ function DrawerContent({
           content.current = node
           if (typeof ref === 'function') return ref(node)
           if (ref) ref.current = node
+        }}
+        onEscapeKeyDown={(event) => {
+          onEscapeKeyDown?.(event)
+          // Base UI popovers handle their own Escape; do not also dismiss the Radix drawer.
+          if (
+            content.current?.querySelector(
+              '[data-slot=popover-content][data-open]'
+            )
+          )
+            event.preventDefault()
         }}
         data-slot='drawer-content'
         className={cn(

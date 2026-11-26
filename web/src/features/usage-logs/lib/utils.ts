@@ -43,6 +43,7 @@ import type {
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
 } from '../types'
+import { getLogFilterValues, normalizeLogFilterValue } from './filter'
 import { getRelativeLogTimeRange } from './time-range'
 
 export { buildQueryParams } from './query-params'
@@ -203,29 +204,47 @@ export function buildApiParams(config: {
     ...(config.source === 'test' && searchParams.type
       ? { type: processType(searchParams.type) }
       : {}),
-    ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
-    ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
-    ...(searchParams.group ? { group: String(searchParams.group) } : {}),
+    ...(searchParams.model
+      ? { model_name: normalizeLogFilterValue(searchParams.model) }
+      : {}),
+    ...(searchParams.token
+      ? { token_name: normalizeLogFilterValue(searchParams.token) }
+      : {}),
+    ...(searchParams.group
+      ? { group: normalizeLogFilterValue(searchParams.group) }
+      : {}),
     ...(config.source !== 'test' && searchParams.reasoningEffort
-      ? { reasoning_effort: String(searchParams.reasoningEffort) }
+      ? {
+          reasoning_effort: normalizeLogFilterValue(
+            searchParams.reasoningEffort
+          ),
+        }
       : {}),
     ...(config.source !== 'test' && isAdmin && searchParams.clientTool
-      ? { client_tool: String(searchParams.clientTool) }
+      ? { client_tool: normalizeLogFilterValue(searchParams.clientTool) }
       : {}),
     ...(config.source !== 'test' && searchParams.responseTransport
-      ? { response_transport: String(searchParams.responseTransport) }
+      ? {
+          response_transport: normalizeLogFilterValue(
+            searchParams.responseTransport
+          ),
+        }
       : {}),
     ...(config.source !== 'test' && isAdmin && searchParams.requestPath
-      ? { request_path: String(searchParams.requestPath) }
+      ? { request_path: normalizeLogFilterValue(searchParams.requestPath) }
       : {}),
     ...(config.source !== 'test' && searchParams.ip
-      ? { ip: String(searchParams.ip) }
+      ? { ip: normalizeLogFilterValue(searchParams.ip) }
       : {}),
     ...(isAdmin && searchParams.channel
-      ? { channel: Number(searchParams.channel) || 0 }
+      ? {
+          channel: Array.isArray(searchParams.channel)
+            ? getLogFilterValues(searchParams.channel).map(Number)
+            : Number(searchParams.channel),
+        }
       : {}),
     ...(isAdmin && searchParams.username
-      ? { username: String(searchParams.username) }
+      ? { username: normalizeLogFilterValue(searchParams.username) }
       : {}),
     ...(searchParams.requestId
       ? { request_id: String(searchParams.requestId) }
@@ -246,19 +265,23 @@ export function buildApiParams(config: {
           if (config.source === 'test') params.type = processType(value)
           break
         case 'model_name':
-          params.model_name = String(value)
+          params.model_name = normalizeLogFilterValue(value)
           break
         case 'token_name':
-          params.token_name = String(value)
+          params.token_name = normalizeLogFilterValue(value)
           break
         case 'group':
-          params.group = String(value)
+          params.group = normalizeLogFilterValue(value)
           break
         case 'channel':
-          if (isAdmin) params.channel = Number(value) || 0
+          if (isAdmin) {
+            params.channel = Array.isArray(value)
+              ? getLogFilterValues(value).map(Number)
+              : Number(value)
+          }
           break
         case 'username':
-          if (isAdmin) params.username = String(value)
+          if (isAdmin) params.username = normalizeLogFilterValue(value)
           break
       }
     })

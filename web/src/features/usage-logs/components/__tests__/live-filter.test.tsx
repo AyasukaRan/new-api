@@ -32,6 +32,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -87,7 +88,7 @@ async function renderFilter(search = '') {
       <RouterProvider router={router} />
     </QueryClientProvider>
   )
-  await screen.findByPlaceholderText('Model Name')
+  await screen.findByRole('combobox', { name: 'Model Name' })
   await waitFor(() => expect(client.isFetching()).toBe(0))
   return { router, client }
 }
@@ -196,18 +197,42 @@ it('updates the displayed time and statistics without changing the URL or unsubm
   const originalHref = router.state.location.href
   const user = userEvent.setup()
   await user.click(screen.getByRole('button', { name: /^Expand/ }))
-  const model = screen.getByPlaceholderText('Model Name')
+  const model = screen.getByRole('combobox', { name: 'Model Name' })
   const username = screen.getByRole('combobox', { name: 'Username' })
-  await user.clear(model)
-  await user.type(model, 'draft-model')
-  await user.clear(username)
-  await user.type(username, 'draft-user')
+  await user.click(model)
+  await user.click(
+    within(screen.getByRole('dialog', { name: 'Model Name' })).getByRole(
+      'button',
+      { name: 'Clear' }
+    )
+  )
+  await user.type(
+    within(screen.getByRole('dialog', { name: 'Model Name' })).getByRole(
+      'combobox'
+    ),
+    'draft-model{Enter}'
+  )
+  await user.keyboard('{Escape}')
+  await user.click(username)
+  await user.click(
+    within(screen.getByRole('dialog', { name: 'Username' })).getByRole(
+      'button',
+      { name: 'Clear' }
+    )
+  )
+  await user.type(
+    within(screen.getByRole('dialog', { name: 'Username' })).getByRole(
+      'combobox'
+    ),
+    'draft-user{Enter}'
+  )
+  await user.keyboard('{Escape}')
   await user.tab()
   const next = new Date(2026, 10, 12, 12, 35, 26)
   await act(() => vi.advanceTimersByTimeAsync(30_000))
   await waitFor(() => expect(client.isFetching()).toBe(0))
-  expect(model).toHaveValue('draft-model')
-  expect(username).toHaveValue('draft-user')
+  expect(model).toHaveTextContent('draft-model')
+  expect(username).toHaveTextContent('draft-user')
   expect(router.state.location.href).toBe(originalHref)
   expect(latestStatsParams()).toMatchObject({
     model_name: 'saved-model',
@@ -266,9 +291,21 @@ it('keeps saved filters and a pending model draft when automatic refresh is paus
     '?timeRange=today&model=saved-model&group=default&token=main&result=success'
   )
   const user = userEvent.setup()
-  const model = screen.getByPlaceholderText('Model Name')
-  await user.clear(model)
-  await user.type(model, 'draft-model')
+  const model = screen.getByRole('combobox', { name: 'Model Name' })
+  await user.click(model)
+  await user.click(
+    within(screen.getByRole('dialog', { name: 'Model Name' })).getByRole(
+      'button',
+      { name: 'Clear' }
+    )
+  )
+  await user.type(
+    within(screen.getByRole('dialog', { name: 'Model Name' })).getByRole(
+      'combobox'
+    ),
+    'draft-model{Enter}'
+  )
+  await user.keyboard('{Escape}')
   const toggle = screen.getByRole('button', { name: 'Auto refresh' })
   await user.click(toggle)
   await waitFor(() =>
@@ -281,7 +318,7 @@ it('keeps saved filters and a pending model draft when automatic refresh is paus
     })
   )
   expect(toggle).toHaveAttribute('aria-pressed', 'false')
-  expect(model).toHaveValue('draft-model')
+  expect(model).toHaveTextContent('draft-model')
   vi.setSystemTime(new Date(2026, 10, 12, 12, 36, 26))
   await user.click(toggle)
   await waitFor(() =>
@@ -295,7 +332,7 @@ it('keeps saved filters and a pending model draft when automatic refresh is paus
     })
   )
   expect(toggle).toHaveAttribute('aria-pressed', 'true')
-  expect(model).toHaveValue('draft-model')
+  expect(model).toHaveTextContent('draft-model')
 })
 
 it('advances a paused relative range to now when Search is pressed without resuming automatic refresh', async () => {

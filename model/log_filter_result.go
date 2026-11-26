@@ -2,12 +2,52 @@ package model
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
 func (f LogFilter) Validate() error {
+	totalBytes := 0
+	for _, values := range [][]string{
+		logFilterValues(f.ModelName, f.ModelNames),
+		logFilterValues(f.Username, f.Usernames),
+		logFilterValues(f.TokenName, f.TokenNames),
+		logFilterValues(f.Group, f.Groups),
+		logFilterValues(f.IP, f.IPs),
+		logFilterValues(f.ReasoningEffort, f.ReasoningEfforts),
+		logFilterValues(f.ClientTool, f.ClientTools),
+		logFilterValues(f.RequestPath, f.RequestPaths),
+		logFilterValues(f.ResponseTransport, f.ResponseTransports),
+	} {
+		if len(values) > 50 {
+			return common.NewMessage("Invalid parameters")
+		}
+		for _, value := range values {
+			if len(value) > 1024 || strings.ContainsRune(value, '\x00') {
+				return common.NewMessage("Invalid parameters")
+			}
+			totalBytes += len(value)
+		}
+	}
+	if totalBytes > 32768 {
+		return common.NewMessage("Invalid parameters")
+	}
+	channels := logFilterChannels(f.Channel, f.Channels)
+	if len(channels) > 50 {
+		return common.NewMessage("Invalid parameters")
+	}
+	for _, channel := range channels {
+		if channel <= 0 {
+			return common.NewMessage("Invalid parameters")
+		}
+	}
+	for _, value := range logFilterValues(f.ResponseTransport, f.ResponseTransports) {
+		if !slices.Contains([]string{"sse", "ws", "http", "sync", "async", "unknown", "non_streamed"}, value) {
+			return common.NewMessage("Invalid parameters")
+		}
+	}
 	if f.Category != "" && f.Category != "model" {
 		return common.NewMessage("Invalid parameters")
 	}
@@ -87,4 +127,33 @@ func appendLogErrorSummary(log *Log) {
 	if encoded, err = common.Marshal(metadata); err == nil {
 		log.Other = string(encoded)
 	}
+}
+
+func logFilterValues(scalar string, values []string) []string {
+	result := make([]string, 0, len(values)+1)
+	seen := make(map[string]bool, len(values)+1)
+	for _, value := range append([]string{scalar}, values...) {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+	}
+	return result
+}
+
+func logFilterChannels(scalar int, values []int) []int {
+	result := make([]int, 0, len(values)+1)
+	seen := make(map[int]bool, len(values)+1)
+	if scalar != 0 {
+		result = append(result, scalar)
+		seen[scalar] = true
+	}
+	for _, value := range values {
+		if !seen[value] {
+			result = append(result, value)
+			seen[value] = true
+		}
+	}
+	return result
 }

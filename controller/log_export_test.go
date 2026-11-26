@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -123,6 +124,13 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				require.NoError(t, model.InitLogDB())
 			} else {
 				require.NoError(t, db.AutoMigrate(&model.Log{}))
+				// Initialize the same reserved-column quoting as real startup without
+				// running unrelated migrations in this focused log fixture.
+				t.Setenv("LOG_SQL_DSN", "")
+				common.IsMasterNode = false
+				initErr := model.InitLogDB()
+				common.IsMasterNode = true
+				require.NoError(t, initErr)
 			}
 			require.NoError(t, model.MigrateRequestTraces())
 			versionSQL := "SELECT version()"
@@ -963,6 +971,106 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 				require.Len(t, attempts, 2)
 				assert.Empty(t, attempts[0].Content)
 				assert.Equal(t, "final failure", attempts[1].Content)
+			})
+
+			t.Run("multi value column filters", func(t *testing.T) {
+				require.NoError(t, model.MigrateLogFilterIndexes())
+				for _, user := range []model.User{{Id: 2011, Username: "multi-alice", AffCode: "multi1"}, {Id: 2012, Username: "multi-bob", AffCode: "multi2"}, {Id: 2013, Username: "multi-carol", AffCode: "multi3"}} {
+					require.NoError(t, mainDB.Create(&user).Error)
+				}
+				rows := []model.Log{
+					{Id: 980001, UserId: 2011, Username: "renamed-alice", ModelName: "multi-a", TokenName: "key-a", Group: "group-a", ChannelId: 2011, Ip: "192.0.2.11", Quota: 10, RequestId: "multi-a", Other: `{"reasoning_effort":"high","client_tool":"CLI_A","response_transport":"sse","request_path":"/v1/responses?beta=1"}`},
+					{Id: 980002, UserId: 2012, Username: "multi-bob", ModelName: "multi-b", TokenName: "key-b", Group: "group-b", ChannelId: 2012, Ip: "2001:db8::12", Quota: 20, RequestId: "multi-b", Other: `{"reasoning_effort":"low","client_tool":"CLI_B","response_transport":"ws","request_path":"/v1/messages"}`},
+					{Id: 980003, UserId: 2011, Username: "renamed-alice", ModelName: "multi-a", TokenName: "key-a", Group: "group-c", ChannelId: 2011, Ip: "192.0.2.11", Quota: 30, RequestId: "multi-wrong-group", Other: `{"reasoning_effort":"high","client_tool":"CLI_A","response_transport":"sse","request_path":"/v1/responses"}`},
+					{Id: 980004, UserId: 2013, Username: "multi-carol", ModelName: "multi-b", TokenName: "key-b", Group: "group-b", ChannelId: 2012, Ip: "2001:db8::12", Quota: 40, RequestId: "multi-other-user", Other: `{"reasoning_effort":"low","client_tool":"CLI_B","response_transport":"ws","request_path":"/v1/messages"}`},
+				}
+				refs := make([]model.LiveLogRef, 0, len(rows))
+				for i := range rows {
+					rows[i].CreatedAt = now
+					rows[i].Type = model.LogTypeConsume
+					require.NoError(t, model.LOG_DB.Create(&rows[i]).Error)
+					refs = append(refs, model.LiveLogRef{ID: rows[i].Id, UserID: rows[i].UserId, RequestID: rows[i].RequestId, CreatedAt: now})
+				}
+				values := url.Values{"username": {"multi-alice", "multi-bob"}, "token_name": {"key-a", "key-b"}, "model_name": {"multi-a", "multi-b"}, "group": {"group-a", "group-b"}, "channel": {"2011", "2012"}, "reasoning_effort": {"high", "low"}, "client_tool": {"CLI_A", "CLI_B"}, "ip": {"192.0.2.11", "2001:db8::12"}, "response_transport": {"sse", "ws"}, "request_path": {"/v1/responses", "/v1/messages"}, "live_total": {"1"}}
+				query := values.Encode()
+				listed := callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, query)[0]
+				require.Equal(t, true, listed["success"])
+				assert.EqualValues(t, 2, listed["data"].(map[string]any)["total"], "OR within each field, AND between fields")
+				exported := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, query)
+				assert.ElementsMatch(t, []any{"multi-a", "multi-b"}, exportedRequestIds(exported))
+				stats := callLogHandler(t, GetLogsStat, 3, common.RoleAdminUser, query)[0]
+				require.Equal(t, true, stats["success"])
+				assert.EqualValues(t, 30, stats["data"].(map[string]any)["quota"])
+				assert.EqualValues(t, 2, stats["data"].(map[string]any)["live_total"])
+				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ctx.Request = httptest.NewRequest(http.MethodGet, "/?"+query, nil)
+				filter := logFilterFromQuery(ctx, true)
+				changed, omitted, err := model.GetChangedLogs(t.Context(), filter, 0, common.RoleAdminUser, true, 10, refs)
+				require.NoError(t, err)
+				assert.Zero(t, omitted)
+				var changedIDs []string
+				for _, row := range changed {
+					changedIDs = append(changedIDs, row.RequestId)
+				}
+				assert.ElementsMatch(t, []string{"multi-a", "multi-b"}, changedIDs)
+				activeKeys := make([]string, 0, len(rows))
+				for _, row := range rows {
+					row.IsStream = true
+					key := model.BeginActiveLog(row)
+					require.NotEmpty(t, key, "the fixture must register a running request")
+					activeKeys = append(activeKeys, key)
+				}
+				defer func() {
+					for _, key := range activeKeys {
+						model.FinishActiveLog(key)
+					}
+				}()
+				active, err := model.ActiveLogSnapshot(t.Context(), filter, 0, common.RoleAdminUser)
+				require.NoError(t, err)
+				var activeIDs []string
+				for _, row := range active {
+					activeIDs = append(activeIDs, row.RequestId)
+				}
+				assert.ElementsMatch(t, []string{"multi-a", "multi-b"}, activeIDs)
+				own := callLogHandler(t, ExportUserLogs, 2011, common.RoleCommonUser, query)
+				assert.Equal(t, []any{"multi-a"}, exportedRequestIds(own), "self owner scope cannot be widened by admin filters")
+				// Existing scalar clients and explicit percent wildcards keep their meaning.
+				scalar := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, "username=multi-alice&model_name=multi-a&group=group-a")
+				assert.Equal(t, []any{"multi-a"}, exportedRequestIds(scalar))
+				zeroChannel := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, "username=multi-alice&model_name=multi-a&group=group-a&channel=0")
+				assert.Equal(t, []any{"multi-a"}, exportedRequestIds(zeroChannel))
+				wildcard := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, "model_name=multi-a%25&model_name=multi-b&group=group-a&group=group-b")
+				assert.ElementsMatch(t, []any{"multi-a", "multi-b", "multi-other-user"}, exportedRequestIds(wildcard))
+				bracket := callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, "model_name[]=multi-a&model_name[]=multi-b&username=multi-alice&username=multi-bob&group=group-a&group=group-b")
+				assert.ElementsMatch(t, []any{"multi-a", "multi-b"}, exportedRequestIds(bracket))
+				for _, invalid := range []string{"channel=2011&channel=oops", "channel=0&channel=2011", "channel=-1", "response_transport=sse&response_transport=invalid", "model_name=" + strings.Repeat("x", 1025)} {
+					assert.Equal(t, false, callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, invalid)[0]["success"], invalid)
+				}
+				excessive := url.Values{}
+				for i := range 51 {
+					excessive.Add("token_name", fmt.Sprintf("key-%d", i))
+				}
+				assert.Equal(t, false, callLogHandler(t, GetAllLogs, 3, common.RoleAdminUser, excessive.Encode())[0]["success"])
+
+				mixed, total, err := model.GetAllLogs(model.LogFilter{ModelName: "multi-a", ModelNames: []string{"multi-b", "multi-a"}, Group: "group-a", Groups: []string{"group-b"}, Username: "multi-alice", Usernames: []string{"multi-bob"}}, 0, 10)
+				require.NoError(t, err)
+				assert.EqualValues(t, 2, total)
+				assert.Len(t, mixed, 2, "internal scalar and plural form one union")
+				repeated := url.Values{"model_name": {"multi-a"}, "group": {"group-a"}}
+				for range 51 {
+					repeated.Add("token_name", "key-a")
+				}
+				repeated.Add("token_name", " ")
+				assert.Equal(t, []any{"multi-a"}, exportedRequestIds(callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, repeated.Encode())), "duplicates and empty values do not consume the selection limit")
+				prefix := strings.Repeat("x", 128)
+				for i, suffix := range []string{"first", "second"} {
+					other, err := common.Marshal(map[string]string{"client_tool": prefix + suffix, "request_path": "/" + prefix + suffix})
+					require.NoError(t, err)
+					row := model.Log{Id: 981001 + i, UserId: 2011, Username: "renamed-alice", Type: model.LogTypeConsume, ModelName: "multi-long", CreatedAt: now, RequestId: "multi-long-" + suffix, Other: string(other)}
+					require.NoError(t, model.LOG_DB.Create(&row).Error)
+				}
+				longQuery := url.Values{"model_name": {"multi-long"}, "client_tool": {"missing", prefix + "second"}, "request_path": {"/missing", "/" + prefix + "second"}}
+				assert.Equal(t, []any{"multi-long-second"}, exportedRequestIds(callLogHandler(t, ExportAllLogs, 3, common.RoleAdminUser, longQuery.Encode())), "OR alternatives retain the full-text guard after PostgreSQL's indexed prefix")
 			})
 
 		})

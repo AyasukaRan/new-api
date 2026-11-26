@@ -33,8 +33,10 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { Route as UsageLogsRoute } from '@/routes/_authenticated/usage-logs/$section'
 
 import { getLogStats } from '../../api'
+import { buildQueryParams } from '../../lib/query-params'
 import { getLogTimePreset, getRelativeLogTimeRange } from '../../lib/time-range'
 import { buildApiParams, fetchLogsByCategory } from '../../lib/utils'
 import { useLiveLogRange } from '../use-live-log-range'
@@ -42,6 +44,61 @@ import { useLiveLogRange } from '../use-live-log-range'
 const route = getRouteApi('/_authenticated/usage-logs/$section')
 const clients: QueryClient[] = []
 const now = new Date(2026, 10, 12, 12, 0, 0)
+
+it('keeps multiple log filter values separate across request serialization', () => {
+  const params = buildApiParams({
+    page: 1,
+    pageSize: 20,
+    isAdmin: true,
+    searchParams: {
+      username: ['alice', 'bob'],
+      group: ['standard', 'vip'],
+      channel: ['2', '11'],
+      responseTransport: ['sse', 'ws'],
+      requestPath: ['/v1/messages', '/v1/responses'],
+      model: ['model-a', 'model,b'],
+      token: ['token-a', 'token-b'],
+      reasoningEffort: ['high', 'medium'],
+      clientTool: ['Codex', 'Claude Code'],
+      ip: ['192.0.2.1', '2001:db8::1'],
+    },
+  })
+  const query = buildQueryParams(params as Record<string, unknown>)
+  expect(query.getAll('username')).toEqual(['alice', 'bob'])
+  expect(query.getAll('group')).toEqual(['standard', 'vip'])
+  expect(query.getAll('channel')).toEqual(['2', '11'])
+  expect(query.getAll('response_transport')).toEqual(['sse', 'ws'])
+  expect(query.getAll('request_path')).toEqual([
+    '/v1/messages',
+    '/v1/responses',
+  ])
+  expect(query.getAll('model_name')).toEqual(['model-a', 'model,b'])
+  expect(query.getAll('token_name')).toEqual(['token-a', 'token-b'])
+  expect(query.getAll('reasoning_effort')).toEqual(['high', 'medium'])
+  expect(query.getAll('client_tool')).toEqual(['Codex', 'Claude Code'])
+  expect(query.getAll('ip')).toEqual(['192.0.2.1', '2001:db8::1'])
+  expect(query.has('username[]')).toBe(false)
+})
+
+it('retains single filters and excludes administrator multi-filters from self requests', () => {
+  const params = buildApiParams({
+    page: 1,
+    pageSize: 20,
+    isAdmin: false,
+    searchParams: {
+      model: 'model-a',
+      username: ['alice', 'bob'],
+      channel: ['2', '11'],
+      clientTool: ['curl', 'Codex'],
+      requestPath: ['/v1/responses'],
+    },
+  })
+  expect(params.model_name).toBe('model-a')
+  expect(params).not.toHaveProperty('username')
+  expect(params).not.toHaveProperty('channel')
+  expect(params).not.toHaveProperty('client_tool')
+  expect(params).not.toHaveProperty('request_path')
+})
 
 function LiveLogsFixture() {
   const search = route.useSearch()
@@ -79,7 +136,7 @@ async function renderLiveLogs(search = '') {
   const logs = createRoute({
     getParentRoute: () => auth,
     path: '/usage-logs/$section',
-    validateSearch: (value: Record<string, unknown>) => value,
+    validateSearch: UsageLogsRoute.options.validateSearch,
     component: LiveLogsFixture,
   })
   const history = createMemoryHistory({
@@ -133,6 +190,28 @@ it('recognizes relative presets while preserving explicit fixed or partial range
   expect(
     getLogTimePreset({ timeRange: 'invalid', startTime: 1000 })
   ).toBeUndefined()
+})
+
+it('keeps numeric usernames and channels from repeated URL parameters', async () => {
+  const { router } = await renderLiveLogs(
+    '?username=463360046&username=fp&channel=2&channel=11&model=model-a&model=model%2Cb&startTime=1000&endTime=2000'
+  )
+  expect(router.state.location.search).toMatchObject({
+    username: ['463360046', 'fp'],
+    channel: ['2', '11'],
+    model: ['model-a', 'model,b'],
+  })
+  const query = buildQueryParams(
+    buildApiParams({
+      page: 1,
+      pageSize: 20,
+      isAdmin: true,
+      searchParams: router.state.location.search,
+    }) as Record<string, unknown>
+  )
+  expect(query.getAll('username')).toEqual(['463360046', 'fp'])
+  expect(query.getAll('channel')).toEqual(['2', '11'])
+  expect(query.getAll('model_name')).toEqual(['model-a', 'model,b'])
 })
 
 it.each([

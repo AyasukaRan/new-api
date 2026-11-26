@@ -683,6 +683,17 @@ type LogFilter struct {
 	Group             string
 	RequestId         string
 	UpstreamRequestId string
+	// Scalar callers remain supported; each scalar and its plural form are a union.
+	ModelNames         []string
+	ReasoningEfforts   []string
+	ResponseTransports []string
+	RequestPaths       []string
+	ClientTools        []string
+	IPs                []string
+	Usernames          []string
+	TokenNames         []string
+	Channels           []int
+	Groups             []string
 }
 
 // A registered username identifies its current owner, even if another account
@@ -735,6 +746,31 @@ func filterLogsByUsername(tx *gorm.DB, username string) (*gorm.DB, error) {
 	return tx.Where("("+condition+" OR logs.user_id IN ("+list.String()+"))", logPattern), nil
 }
 
+func filterLogsByUsernames(tx *gorm.DB, scalar string, values []string) (*gorm.DB, error) {
+	return applyLogAnyFilter(tx, logFilterValues(scalar, values), filterLogsByUsername)
+}
+
+// Each alternative starts without prior conditions. Nest the resulting OR under
+// the caller's WHERE so an alternative can never bypass its owner/time scope.
+func applyLogAnyFilter(tx *gorm.DB, values []string, filter func(*gorm.DB, string) (*gorm.DB, error)) (*gorm.DB, error) {
+	if len(values) == 0 {
+		return tx, nil
+	}
+	var alternatives *gorm.DB
+	for _, value := range values {
+		part, err := filter(tx.Session(&gorm.Session{NewDB: true}), value)
+		if err != nil {
+			return nil, err
+		}
+		if alternatives == nil {
+			alternatives = part
+		} else {
+			alternatives = alternatives.Or(part)
+		}
+	}
+	return tx.Where(alternatives), nil
+}
+
 func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	var err error
 	if err = f.Validate(); err != nil {
@@ -754,42 +790,49 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 			tx = tx.Where("logs.type = ?", f.Type)
 		}
 	}
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", f.ModelName); err != nil {
+	if tx, err = applyLogAnyFilter(tx, logFilterValues(f.ModelName, f.ModelNames), func(query *gorm.DB, value string) (*gorm.DB, error) {
+		return applyExplicitLogTextFilter(query, "logs.model_name", value)
+	}); err != nil {
 		return nil, err
 	}
-	if tx, err = filterLogsByUsername(tx, f.Username); err != nil {
+	if tx, err = filterLogsByUsernames(tx, f.Username, f.Usernames); err != nil {
 		return nil, err
 	}
-	if f.IP != "" {
-		tx = tx.Where("logs.ip = ?", f.IP)
-	}
-	if f.ReasoningEffort != "" {
-		tx = filterLogMetadataText(tx, "reasoning_effort", f.ReasoningEffort)
-	}
-	if f.ResponseTransport != "" {
-		switch f.ResponseTransport {
-		case "sse", "ws", "http", "sync", "async", "unknown", "non_streamed":
-			tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeError, LogTypeTestConsume}).
-				Where(logTransportFilterSQL()+" = ?", f.ResponseTransport)
-		default:
-			return nil, common.NewMessage("Invalid parameters")
+	for _, exact := range []struct {
+		column, scalar string
+		values         []string
+	}{
+		{"logs.ip", f.IP, f.IPs},
+		{"logs.token_name", f.TokenName, f.TokenNames},
+		{"logs." + logGroupCol, f.Group, f.Groups},
+	} {
+		if values := logFilterValues(exact.scalar, exact.values); len(values) > 0 {
+			tx = tx.Where(exact.column+" IN ?", values)
 		}
 	}
-	if f.RequestPath != "" {
+	for _, metadata := range []struct {
+		key, scalar string
+		values      []string
+	}{
+		{"reasoning_effort", f.ReasoningEffort, f.ReasoningEfforts},
+		{"client_tool", f.ClientTool, f.ClientTools},
+	} {
+		tx, err = applyLogAnyFilter(tx, logFilterValues(metadata.scalar, metadata.values), func(query *gorm.DB, value string) (*gorm.DB, error) {
+			return filterLogMetadataText(query, metadata.key, value), nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if values := logFilterValues(f.ResponseTransport, f.ResponseTransports); len(values) > 0 {
+		tx = tx.Where("logs.type IN ?", []int{LogTypeConsume, LogTypeError, LogTypeTestConsume}).Where(logTransportFilterSQL()+" IN ?", values)
+	}
+	if values := logFilterValues(f.RequestPath, f.RequestPaths); len(values) > 0 {
 		tx = tx.Where("logs.type IN ?", []int{LogTypeUnknown, LogTypeConsume, LogTypeError, LogTypeTestConsume})
-		path := logRequestPathSQL()
-		if common.UsingLogDatabase(common.DatabaseTypePostgreSQL) {
-			tx = tx.Where("left("+path+", 128) = left(CAST(? AS text), 128)", f.RequestPath)
+		tx, err = applyLogAnyFilter(tx, values, filterLogRequestPath)
+		if err != nil {
+			return nil, err
 		}
-		if !common.UsingLogDatabase(common.DatabaseTypePostgreSQL) || len(f.RequestPath) >= 128 {
-			tx = tx.Where(path+" = ?", f.RequestPath)
-		}
-	}
-	if f.ClientTool != "" {
-		tx = filterLogMetadataText(tx, "client_tool", f.ClientTool)
-	}
-	if f.TokenName != "" {
-		tx = tx.Where("logs.token_name = ?", f.TokenName)
 	}
 	if f.RequestId != "" {
 		tx = tx.Where("logs.request_id = ?", f.RequestId)
@@ -803,11 +846,8 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	if f.EndTimestamp != 0 {
 		tx = tx.Where("logs.created_at <= ?", f.EndTimestamp)
 	}
-	if f.Channel != 0 {
-		tx = tx.Where("logs.channel_id = ?", f.Channel)
-	}
-	if f.Group != "" {
-		tx = tx.Where("logs."+logGroupCol+" = ?", f.Group)
+	if channels := logFilterChannels(f.Channel, f.Channels); len(channels) > 0 {
+		tx = tx.Where("logs.channel_id IN ?", channels)
 	}
 	return tx, nil
 }

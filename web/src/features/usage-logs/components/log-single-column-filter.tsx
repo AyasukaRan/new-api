@@ -1,3 +1,20 @@
+import { ChevronDown } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+
+import { Button } from '@/components/ui/button'
+import {
+  Combobox,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@/components/ui/combobox'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTitle,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,38 +33,37 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
+import { cn } from '@/lib/utils'
 
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command'
-
+import { LOG_RESPONSE_TRANSPORTS } from '../constants'
 import { useLogGroupOptions } from '../hooks/use-log-group-options'
 import { useLogUserOptions } from '../hooks/use-log-user-options'
 import {
   effortSuggestions,
+  getLogFilterValues,
+  normalizeLogFilterValue,
   isValidLogChannelFilter,
   logColumnFilterLabels,
   type LogColumnFilterKey,
 } from '../lib/filter'
+import type { LogFilterValue } from '../types'
+import { LogsFilterField } from './logs-filter-toolbar'
 
 export function LogSingleColumnFilter(props: {
   field: LogColumnFilterKey
-  value?: string
+  value?: LogFilterValue
   suggestions?: string[]
   isAdmin: boolean
   maskClass?: string
-  onSelect: (value: string) => void
+  onSelect: (
+    value: LogFilterValue | undefined,
+    labels?: Record<string, string>
+  ) => void
 }) {
   const { t } = useTranslation()
   const [search, setSearch] = useState('')
   const query = search.trim()
+  const selected = getLogFilterValues(props.value)
   const {
     users,
     loading: usersLoading,
@@ -79,8 +95,26 @@ export function LogSingleColumnFilter(props: {
       ...new Set([...effortSuggestions, ...(props.suggestions ?? [])]),
     ].map((value) => ({ value, label: value }))
   }
-  if (props.value && !options.some((option) => option.value === props.value)) {
-    options.unshift({ value: props.value, label: props.value })
+  if (props.field === 'responseTransport') {
+    const labels = {
+      sse: 'SSE',
+      ws: 'WS',
+      http: 'HTTP',
+      sync: t('Sync'),
+      async: t('Async'),
+      unknown: t('Protocol not recorded'),
+      non_streamed: t('Non-streamed response'),
+    }
+    options = LOG_RESPONSE_TRANSPORTS.map((value) => ({
+      value,
+      label: labels[value],
+    }))
+  }
+  for (const value of selected) {
+    if (props.field === 'group' && value === 'auto') continue
+    if (!options.some((option) => option.value === value)) {
+      options.unshift({ value, label: value })
+    }
   }
   const matches = options.filter((option) =>
     `${option.label} ${option.value}`
@@ -89,57 +123,175 @@ export function LogSingleColumnFilter(props: {
   )
   const invalid = props.field === 'channel' && !isValidLogChannelFilter(query)
   const custom =
-    query && !invalid && !matches.some((option) => option.value === query)
+    props.field !== 'responseTransport' &&
+    query &&
+    !invalid &&
+    !matches.some((option) => option.value === query)
   const label = t(logColumnFilterLabels[props.field])
+  const items = [
+    ...(!query ? [''] : []),
+    ...matches.map((option) => option.value),
+    ...(custom ? [query] : []),
+  ]
+  const labels = Object.fromEntries(
+    options.map((option) => [option.value, option.label])
+  )
   return (
-    <Command label={label} shouldFilter={false} className={props.maskClass}>
-      <CommandInput
-        aria-label={label}
-        aria-invalid={invalid || undefined}
-        placeholder={label}
-        value={search}
-        onValueChange={setSearch}
-      />
-      <CommandList>
-        <CommandEmpty>
-          {loading ? t('Loading...') : t('No matching results')}
-        </CommandEmpty>
-        <CommandGroup>
-          {!query && (
-            <CommandItem
-              value='__all'
-              data-checked={!props.value}
-              onSelect={() => props.onSelect('')}
+    <div className={cn('flex min-w-0 flex-col p-1', props.maskClass)}>
+      <Combobox<string, true>
+        multiple
+        inline
+        open
+        autoHighlight
+        items={items}
+        filter={null}
+        value={selected.length ? selected : ['']}
+        inputValue={search}
+        onInputValueChange={(value, details) => {
+          if (details.reason === 'input-change') setSearch(value)
+        }}
+        onValueChange={(values) => {
+          const next =
+            values.includes('') && selected.length
+              ? []
+              : values.filter((value) => value !== '')
+          props.onSelect(normalizeLogFilterValue(next), labels)
+          setSearch('')
+        }}
+      >
+        <ComboboxInput
+          aria-label={label}
+          aria-invalid={invalid || undefined}
+          placeholder={label}
+          showTrigger={false}
+          className='border-input/30 bg-input/30 m-1 h-8 rounded-lg shadow-none'
+        />
+        <ComboboxList className='max-h-72'>
+          {items.map((value) => (
+            <ComboboxItem
+              key={value}
+              value={value}
+              data-checked={
+                value === '' ? selected.length === 0 : selected.includes(value)
+              }
             >
-              {t('All')}
-            </CommandItem>
-          )}
-          {matches.map((option) => (
-            <CommandItem
-              key={option.value}
-              value={option.value}
-              data-checked={option.value === props.value}
-              onSelect={() => props.onSelect(option.value)}
-            >
-              <span className='min-w-0 truncate' title={option.label}>
-                {option.label}
+              <span className='min-w-0 truncate' title={labels[value]}>
+                {value === ''
+                  ? t('All')
+                  : (labels[value] ?? `${t('Search')} · ${value}`)}
               </span>
-            </CommandItem>
+            </ComboboxItem>
           ))}
-          {custom && (
-            <CommandItem value={query} onSelect={() => props.onSelect(query)}>
-              <span className='min-w-0 truncate'>
-                {t('Search')} · {query}
-              </span>
-            </CommandItem>
+          {items.length === 0 && (
+            <p className='text-muted-foreground px-2 py-4 text-center text-sm'>
+              {loading ? t('Loading...') : t('No matching results')}
+            </p>
           )}
-        </CommandGroup>
-      </CommandList>
+        </ComboboxList>
+      </Combobox>
+      <div className='flex items-center justify-between gap-2 border-t px-2 py-1'>
+        <span className='text-muted-foreground text-xs'>
+          {t('{{count}} selected', { count: selected.length })}
+        </span>
+        <Button
+          type='button'
+          variant='ghost'
+          size='xs'
+          disabled={selected.length === 0}
+          onClick={() => {
+            props.onSelect(undefined)
+            setSearch('')
+          }}
+        >
+          {t('Clear')}
+        </Button>
+      </div>
       {invalid && (
         <p role='alert' className='text-destructive px-2 pb-2 text-xs'>
           {t('Enter a positive integer')}
         </p>
       )}
-    </Command>
+    </div>
+  )
+}
+
+export function LogMultipleColumnField(props: {
+  field: LogColumnFilterKey
+  value?: LogFilterValue
+  suggestions?: string[]
+  isAdmin: boolean
+  maskClass?: string
+  caption?: { id: string; text: string }
+  onSelect: (value: LogFilterValue | undefined) => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [selectedLabels, setSelectedLabels] = useState<Record<string, string>>(
+    {}
+  )
+  const selected = getLogFilterValues(props.value)
+  const label = t(logColumnFilterLabels[props.field])
+  let display = label
+  if (selected.length === 1) {
+    const value = selected[0]
+    const transportLabels: Record<string, string> = {
+      sse: 'SSE',
+      ws: 'WS',
+      http: 'HTTP',
+      sync: t('Sync'),
+      async: t('Async'),
+      unknown: t('Protocol not recorded'),
+      non_streamed: t('Non-streamed response'),
+    }
+    display =
+      props.field === 'responseTransport'
+        ? (transportLabels[value] ?? value)
+        : (selectedLabels[value] ?? value)
+    if (props.field === 'username' && display.endsWith(` · ${value}`)) {
+      display = display.slice(0, -` · ${value}`.length)
+    }
+  } else if (selected.length > 1) {
+    display = t('{{count}} selected', { count: selected.length })
+  }
+  return (
+    <LogsFilterField caption={props.caption}>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger
+          render={
+            <Button
+              id={props.caption?.id}
+              type='button'
+              role='combobox'
+              aria-label={label}
+              aria-expanded={open}
+              variant='outline'
+              className={cn(
+                'h-8 w-full min-w-0 justify-between rounded-md px-3 text-sm leading-5 font-normal',
+                props.maskClass
+              )}
+            />
+          }
+        >
+          <span className='truncate'>{display}</span>
+          <ChevronDown
+            aria-hidden
+            className='text-muted-foreground size-3.5 shrink-0'
+          />
+        </PopoverTrigger>
+        <PopoverContent
+          align='start'
+          className='w-60 max-w-(--available-width) gap-0 p-0'
+        >
+          <PopoverTitle className='sr-only'>{label}</PopoverTitle>
+          <LogSingleColumnFilter
+            {...props}
+            onSelect={(value, labels) => {
+              if (labels) setSelectedLabels(labels)
+              props.onSelect(value)
+            }}
+          />
+        </PopoverContent>
+      </Popover>
+    </LogsFilterField>
   )
 }

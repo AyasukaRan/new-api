@@ -313,8 +313,8 @@ test('column filters apply across pages and clear only their own fields', async 
       })
     ).toBe(true)
   )
-  await user.click(screen.getByRole('button', { name: 'Filter · Model (1)' }))
   await user.click(screen.getByRole('option', { name: 'All' }))
+  await user.keyboard('{Escape}')
   await waitFor(() =>
     expect(router.state.location.search.model).toBeUndefined()
   )
@@ -332,7 +332,7 @@ test('column filters apply across pages and clear only their own fields', async 
   expect(router.state.location.search.channel).toBeUndefined()
 })
 
-test('row values combine filters, replace or remove one field, and preserve the selected time and result', async () => {
+test('row values combine filters, toggle individual values, and preserve the selected time and result', async () => {
   const user = userEvent.setup()
   const { router } = renderLogs(
     false,
@@ -409,7 +409,7 @@ test('row values combine filters, replace or remove one field, and preserve the 
     screen.getByRole('button', { name: 'Filter · Model Name: model-10' })
   )
   await waitFor(() =>
-    expect(router.state.location.search.model).toBe('model-10')
+    expect(router.state.location.search.model).toEqual(['model-11', 'model-10'])
   )
   await user.click(
     screen.getByRole('button', {
@@ -418,7 +418,7 @@ test('row values combine filters, replace or remove one field, and preserve the 
     })
   )
   await waitFor(() =>
-    expect(router.state.location.search.model).toBeUndefined()
+    expect(router.state.location.search.model).toBe('model-11')
   )
   await user.click(
     within(screen.getByRole('group', { name: 'Filters' })).getByRole('button', {
@@ -514,7 +514,16 @@ test('can select a protocol and enter an off-page endpoint from an empty log tab
     within(panel).getByRole('combobox', { name: 'Response mode' })
   )
   await user.click(await screen.findByRole('option', { name: 'SSE' }))
-  await user.type(within(panel).getByLabelText('Endpoint'), '/v1/responses')
+  await user.keyboard('{Escape}')
+  await user.click(within(panel).getByRole('combobox', { name: 'Endpoint' }))
+  await user.type(
+    within(screen.getByRole('dialog', { name: 'Endpoint' })).getByRole(
+      'combobox',
+      { name: 'Endpoint' }
+    ),
+    '/v1/responses{Enter}'
+  )
+  await user.keyboard('{Escape}')
   await user.click(within(panel).getByRole('button', { name: 'Apply' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
@@ -563,13 +572,16 @@ test('keeps transport filters editable in the toolbar when the column is hidden'
   await user.click(screen.getByRole('button', { name: /^Expand/ }))
   const mode = screen.getByRole('combobox', { name: 'Response mode' })
   expect(mode).toHaveTextContent('SSE')
-  expect(screen.getByLabelText('Endpoint')).toHaveValue('/v1/messages')
+  expect(screen.getByRole('combobox', { name: 'Endpoint' })).toHaveTextContent(
+    '/v1/messages'
+  )
   await user.click(mode)
   await user.click(await screen.findByRole('option', { name: 'HTTP' }))
+  await user.keyboard('{Escape}')
   await user.click(screen.getByRole('button', { name: 'Search' }))
   await waitFor(() =>
     expect(router.state.location.search).toMatchObject({
-      responseTransport: 'http',
+      responseTransport: ['sse', 'http'],
       requestPath: '/v1/messages',
     })
   )
@@ -616,12 +628,12 @@ test('persists independent identity columns and keeps hidden user and token filt
   )
   const expand = screen.queryByRole('button', { name: /^Expand/ })
   if (expand) await user.click(expand)
-  expect(screen.getByRole('combobox', { name: 'Username' })).toHaveValue(
+  expect(screen.getByRole('combobox', { name: 'Username' })).toHaveTextContent(
     'alice'
   )
-  expect(screen.getByRole('textbox', { name: 'Token Name' })).toHaveValue(
-    'work'
-  )
+  expect(
+    screen.getByRole('combobox', { name: 'Token Name' })
+  ).toHaveTextContent('work')
   expect(
     screen.queryByRole('combobox', { name: 'Group' })
   ).not.toBeInTheDocument()
@@ -630,6 +642,58 @@ test('persists independent identity columns and keeps hidden user and token filt
     token: 'work',
     group: 'premium',
   })
+})
+
+test('column multi-select keeps choices open, combines values, toggles one off and clears only that field', async () => {
+  const user = userEvent.setup()
+  const { router } = renderLogs(false, '/usage-logs/common?username=alice')
+  await user.click(
+    await screen.findByRole('button', { name: 'Filter · Model' })
+  )
+  const panel = await screen.findByRole('dialog', { name: 'Model' })
+  await user.click(within(panel).getByRole('option', { name: 'model-11' }))
+  expect(panel).toBeVisible()
+  await user.click(within(panel).getByRole('option', { name: 'model-10' }))
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      username: 'alice',
+      model: ['model-11', 'model-10'],
+      page: 1,
+    })
+  )
+  await waitFor(() =>
+    expect(
+      vi.mocked(api.get).mock.calls.some(([path]) => {
+        const url = new URL(path, 'http://localhost')
+        return (
+          url.pathname === '/api/log/' &&
+          url.searchParams.getAll('model_name').join('|') ===
+            'model-11|model-10' &&
+          url.searchParams.get('username') === 'alice'
+        )
+      })
+    ).toBe(true)
+  )
+  expect(within(panel).getByRole('listbox')).toHaveAttribute(
+    'aria-multiselectable',
+    'true'
+  )
+  expect(
+    within(panel).getByRole('option', { name: 'model-11' })
+  ).toHaveAttribute('aria-selected', 'true')
+  expect(
+    within(panel).getByRole('option', { name: 'model-10' })
+  ).toHaveAttribute('aria-selected', 'true')
+  await user.click(within(panel).getByRole('option', { name: 'model-11' }))
+  await waitFor(() =>
+    expect(router.state.location.search.model).toBe('model-10')
+  )
+  await user.click(within(panel).getByRole('button', { name: 'Clear' }))
+  await waitFor(() =>
+    expect(router.state.location.search.model).toBeUndefined()
+  )
+  expect(router.state.location.search.username).toBe('alice')
+  expect(panel).toBeVisible()
 })
 
 test('single-condition columns open direct choices and apply without an extra form', async () => {
@@ -648,7 +712,8 @@ test('single-condition columns open direct choices and apply without an extra fo
   await waitFor(() =>
     expect(router.state.location.search.username).toBe('recent-user')
   )
-  expect(screen.queryByRole('dialog', { name: 'User' })).not.toBeInTheDocument()
+  expect(panel).toBeVisible()
+  await user.keyboard('{Escape}')
 
   await user.click(screen.getByRole('button', { name: 'Filter · Token' }))
   panel = await screen.findByRole('dialog', { name: 'Token' })
@@ -663,6 +728,7 @@ test('single-condition columns open direct choices and apply without an extra fo
     })
   )
 
+  await user.keyboard('{Escape}')
   await user.click(screen.getByRole('button', { name: 'Filter · Group' }))
   panel = await screen.findByRole('dialog', { name: 'Group' })
   await user.click(
@@ -676,6 +742,7 @@ test('single-condition columns open direct choices and apply without an extra fo
     })
   )
 
+  await user.keyboard('{Escape}')
   await user.click(screen.getByRole('button', { name: 'Filter · Token (1)' }))
   panel = await screen.findByRole('dialog', { name: 'Token' })
   await user.click(within(panel).getByRole('option', { name: 'All' }))
@@ -732,12 +799,12 @@ test('keeps client suggestions within the source form when clearing both fields'
   const panel = await screen.findByRole('dialog', { name: 'Request source' })
   const clientInput = within(panel).getByRole('combobox', { name: 'Client' })
   await user.click(clientInput)
-  const suggestions = await within(panel).findByRole('listbox')
-  expect(clientInput.closest('form')).toContainElement(suggestions)
-  const clear = within(panel).getByRole('button', { name: 'Clear' })
-  await user.pointer({ target: clear, keys: '[MouseLeft>]' })
-  expect(suggestions).toBeVisible()
-  await user.pointer({ target: clear, keys: '[/MouseLeft]' })
+  const choices = await screen.findByRole('dialog', { name: 'Client' })
+  expect(
+    within(choices).getByRole('option', { name: 'Codex CLI' })
+  ).toHaveAttribute('data-checked', 'true')
+  await user.keyboard('{Escape}')
+  await user.click(within(panel).getByRole('button', { name: 'Clear' }))
   await waitFor(() =>
     expect(router.state.location.search.clientTool).toBeUndefined()
   )

@@ -50,7 +50,7 @@ func (f LogFilter) withRetries(ctx context.Context, ownUserID int) (LogFilter, e
 		base = base.Where("user_id = ?", ownUserID)
 	}
 	var err error
-	if base, err = filterLogsByUsername(base, f.Username); err != nil {
+	if base, err = filterLogsByUsernames(base, f.Username, f.Usernames); err != nil {
 		return f, err
 	}
 	// Other filters apply to the final row, so they must not split a retry chain.
