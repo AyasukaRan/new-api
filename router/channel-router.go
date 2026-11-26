@@ -41,6 +41,7 @@ func joinPaths(absolutePath, relativePath string) string {
 func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	accounts := apiRouter.Group("/sub2api/accounts", middleware.AdminAuth(), middleware.DisableCache())
 	handlePermissionRoute(accounts, http.MethodGet, "", authz.ChannelRead, controller.GetSub2APIAccounts)
+	handlePermissionRoute(accounts, http.MethodGet, "/encryption-key", authz.ChannelRead, controller.GetSub2APIEncryptionKey)
 	for _, action := range []string{"login", "login/2fa", "import", "refresh", "disconnect"} {
 		handlePermissionRoute(accounts, http.MethodPost, "/"+action, authz.ChannelSensitiveWrite, middleware.CriticalRateLimit(), controller.ManageSub2APIAccounts)
 	}

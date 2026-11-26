@@ -56,6 +56,35 @@ export async function encryptPassword(
   }
 }
 
+export async function encryptChannelCredential(
+  credential: string
+): Promise<EncryptedPassword> {
+  try {
+    // Channel credentials must remain encrypted even when password login
+    // encryption is disabled. Fetch through the authenticated management API.
+    const response = await api.get<{
+      success: boolean
+      data?: PasswordEncryptionKey
+    }>('/api/sub2api/accounts/encryption-key')
+    const key = response.data?.data
+    if (!response.data?.success || !key?.kid || !key.public_key) {
+      throw new Error('Credential encryption key is unavailable')
+    }
+    return {
+      password_encrypted: await rsaOaepEncrypt(
+        credential,
+        key.public_key,
+        key.kid
+      ),
+      encryption_key_id: key.kid,
+    }
+  } catch (error: unknown) {
+    throw new Error(t('Credential encryption failed. Please try again.'), {
+      cause: error,
+    })
+  }
+}
+
 async function getPasswordEncryptionKey(): Promise<PasswordEncryptionKey> {
   const now = Date.now()
   if (cachedKey && now - cachedAt < KEY_CACHE_TTL_MS) {

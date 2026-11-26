@@ -30,8 +30,14 @@ export const sub2APIImportSchema = z.object({
   access_token: z
     .string()
     .trim()
-    .min(1, 'Access token is required')
-    .max(15000, 'Invalid parameters'),
+    .transform((value) => value.replace(/^Bearer[ \t]+/i, ''))
+    .pipe(
+      z
+        .string()
+        .min(1, 'Access token is required')
+        .max(15000, 'Invalid parameters')
+        .regex(/^\S+$/, 'Invalid parameters')
+    ),
   refresh_token: z.string().trim().max(15000, 'Invalid parameters'),
 })
 
