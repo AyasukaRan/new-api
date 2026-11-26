@@ -17,6 +17,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 .origin-world-map {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
   --origin-water: color-mix(in srgb, var(--muted) 14%, transparent);
   --origin-land: color-mix(in srgb, var(--muted-foreground) 17%, var(--card));
   --origin-edge: color-mix(in srgb, var(--muted-foreground) 24%, transparent);
@@ -26,6 +29,14 @@ For commercial licensing, please contact support@quantumnous.com
     var(--origin-water),
     transparent 72%
   );
+}
+.origin-world-map.origin-map-dragging {
+  cursor: grabbing;
+}
+.origin-world-map:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  border-radius: var(--radius);
 }
 .dark .origin-world-map {
   --origin-flow: #45d6b3;

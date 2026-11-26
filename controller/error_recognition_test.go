@@ -52,6 +52,45 @@ func TestErrorRecognitionRules(t *testing.T) {
 	assert.Equal(t, "Response incomplete", operation_setting.ClassifyRequestError("", `{"stream_status":{"status":"ok","response_status":"incomplete"}}`).Label)
 }
 
+func TestErrorRecognitionUpstreamStatusFallback(t *testing.T) {
+	previous := operation_setting.ErrorRecognitionRulesJSONString()
+	t.Cleanup(func() { require.NoError(t, operation_setting.LoadErrorRecognitionRulesJSON(previous)) })
+	for _, tc := range []struct {
+		name, content, metadata, label string
+		status                         int
+		matched                        bool
+	}{
+		{"generic 502 content identifies upstream unavailability", "status_code=502, Upstream request failed", "", "Upstream unavailable", 502, true},
+		{"503 metadata identifies upstream unavailability", "Upstream request failed", `{"status_code":503}`, "Upstream unavailable", 503, true},
+		{"529 metadata identifies upstream unavailability", "Upstream request failed", `{"status_code":529}`, "Upstream unavailable", 529, true},
+		{"specific connection error takes precedence over 502", "connection reset by peer", `{"status_code":502}`, "Upstream connection failed", 502, true},
+		{"unrelated status remains unmatched", "Upstream request failed", `{"status_code":500}`, "Request failed", 500, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := operation_setting.ClassifyRequestError(tc.content, tc.metadata)
+			assert.Equal(t, tc.label, got.Label)
+			assert.Equal(t, tc.status, got.StatusCode)
+			assert.Equal(t, tc.matched, got.Matched)
+		})
+	}
+	for _, tc := range []struct {
+		name, rules, label string
+		matched            bool
+	}{
+		{"empty rules keep 502 unmatched", `[]`, "Request failed", false},
+		{"disabled status rule keeps 502 unmatched", `[{"name":"unavailable","enabled":false,"label":"Upstream unavailable","match":"regex","pattern":".*","status_codes":[502,503,529]}]`, "Request failed", false},
+		{"custom rules control 502 classification", `[{"name":"custom","enabled":true,"label":"Custom upstream failure","match":"contains","pattern":"Upstream request failed"}]`, "Custom upstream failure", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, operation_setting.LoadErrorRecognitionRulesJSON(tc.rules))
+			got := operation_setting.ClassifyRequestError("status_code=502, Upstream request failed", "")
+			assert.Equal(t, tc.label, got.Label)
+			assert.Equal(t, 502, got.StatusCode)
+			assert.Equal(t, tc.matched, got.Matched)
+		})
+	}
+}
+
 func TestErrorRecognitionPreviewValidation(t *testing.T) {
 	for _, input := range []string{`{"error":"x","status_code":200}`, `{"rules":null,"error":"x"}`, `{"rules":[{"pattern":"["}],"error":"x"}`} {
 		w := httptest.NewRecorder()

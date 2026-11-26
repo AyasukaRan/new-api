@@ -20,9 +20,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   calculateRequestOriginLayout,
+  clampRequestOriginViewport,
   createRequestOriginRoute,
   projectRequestOrigin,
   REQUEST_ORIGIN_GATEWAY,
+  zoomRequestOriginViewport,
 } from '../request-origin-layout'
 
 describe('request origin map layout', () => {
@@ -114,4 +116,46 @@ describe('request origin map layout', () => {
   it('omits a flight when the source is already at the gateway', () => {
     expect(createRequestOriginRoute(REQUEST_ORIGIN_GATEWAY)).toBeNull()
   })
+
+  it('keeps the wheel anchor fixed while bounding zoom from city detail to the whole world', () => {
+    const viewport = { x: 300, y: 80, width: 300, height: 150 }
+    const zoomed = zoomRequestOriginViewport(viewport, 0.5, {
+      x: 0.75,
+      y: 0.25,
+    })
+    expect(zoomed.x + zoomed.width * 0.75).toBe(525)
+    expect(zoomed.y + zoomed.height * 0.25).toBe(117.5)
+    expect(zoomRequestOriginViewport(viewport, 100)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1000,
+      height: 500,
+    })
+    expect(zoomRequestOriginViewport(viewport, 0.001).width).toBe(40)
+  })
+
+  it('keeps a dragged viewport inside the world boundaries', () => {
+    expect(
+      clampRequestOriginViewport({ x: -100, y: 480, width: 300, height: 150 })
+    ).toEqual({ x: 0, y: 350, width: 300, height: 150 })
+  })
+
+  it.each([
+    {
+      viewport: { x: 300, y: 80, width: 300, height: 100 },
+      expected: { x: -250, y: 0, width: 1500, height: 500 },
+    },
+    {
+      viewport: { x: 300, y: 80, width: 200, height: 200 },
+      expected: { x: 0, y: -250, width: 1000, height: 1000 },
+    },
+  ])(
+    'fits the whole world in a non-2:1 viewport without cropping an axis',
+    ({ viewport, expected }) => {
+      expect(zoomRequestOriginViewport(viewport, 100)).toEqual(expected)
+      expect(
+        clampRequestOriginViewport({ ...expected, x: -999, y: 999 })
+      ).toEqual(expected)
+    }
+  )
 })

@@ -926,7 +926,6 @@ export function useCommonLogsColumns(
       const failedRequest =
         log.type === LOG_TYPE_ENUM.ERROR ||
         isFailedStreamResponse(other?.stream_status)
-      const retryReason = getRetryDecisionReason(other?.retry_decision, t)
       if (failedRequest) {
         const failureReason =
           other?.stream_status?.end_error ||
@@ -935,15 +934,13 @@ export function useCommonLogsColumns(
           other?.stream_status?.errors?.at(-1)
         const failure = summarizeRequestFailure(failureReason, other)
         detailPreview = (
-          <span className='flex min-w-0 flex-col gap-0.5 leading-snug'>
-            <span className='text-destructive truncate'>
-              {t(failure.label)}
-            </span>
-            {retryReason && (
-              <span className='text-muted-foreground truncate'>
-                {retryReason}
+          <span className='text-destructive flex min-w-0 items-center gap-1.5 leading-snug'>
+            {failure.statusCode ? (
+              <span className='shrink-0 font-mono tabular-nums'>
+                {failure.statusCode}
               </span>
-            )}
+            ) : null}{' '}
+            <span className='truncate'>{t(failure.label)}</span>
           </span>
         )
       } else if (primary) {
@@ -982,6 +979,7 @@ export function useCommonLogsColumns(
           variant='ghost'
           size='sm'
           data-log-event={inlineEvents || undefined}
+          data-log-failure={failedRequest || undefined}
           aria-haspopup='dialog'
           type='button'
           className='group flex h-auto max-w-[200px] min-w-0 items-center justify-start gap-1 rounded-sm p-0 text-start text-xs font-normal hover:bg-transparent'

@@ -16,8 +16,28 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Globe2, MapPin, Pause, Play, Radio, RefreshCw } from 'lucide-react'
-import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  Globe2,
+  Info,
+  MapPin,
+  Minus,
+  Pause,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+} from 'lucide-react'
+import {
+  memo,
+  useEffect,
+  useEffectEvent,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { EmptyState } from '@/components/empty-state'
@@ -40,8 +60,11 @@ import {
 } from '../../hooks/use-request-origins'
 import {
   calculateRequestOriginLayout,
+  clampRequestOriginViewport,
   createRequestOriginRoute,
   projectRequestOrigin,
+  zoomRequestOriginViewport,
+  type RequestOriginViewport,
 } from '../../lib/request-origin-layout'
 import type {
   RequestOriginPoint,
@@ -92,6 +115,15 @@ function OriginMapCanvas(props: {
   const gridId = useId()
   const canvas = useRef<SVGSVGElement>(null)
   const [canvasSize, setCanvasSize] = useState({ width: 1000, height: 500 })
+  const [manualView, setManualView] = useState<RequestOriginViewport>()
+  const [dragging, setDragging] = useState(false)
+  const drag = useRef<{
+    pointerId: number
+    x: number
+    y: number
+    viewport: RequestOriginViewport
+    scale: number
+  }>(undefined)
   useLayoutEffect(() => {
     const element = canvas.current
     if (!element) return
@@ -118,194 +150,400 @@ function OriginMapCanvas(props: {
     [props.points, props.hasInternationalActivity]
   )
   const points = props.points.slice(0, 500)
+  const [left, top] = layout.viewBox.split(' ').map(Number)
+  const aspect = canvasSize.width / canvasSize.height
+  const autoWidth = Math.max(layout.width, layout.height * aspect)
+  const autoHeight = Math.max(layout.height, layout.width / aspect)
+  const viewport = manualView ?? {
+    x: left - (autoWidth - layout.width) / 2,
+    y: top - (autoHeight - layout.height) / 2,
+    width: autoWidth,
+    height: autoHeight,
+  }
   const scale = Math.max(
-    layout.width / canvasSize.width,
-    layout.height / canvasSize.height
+    viewport.width / canvasSize.width,
+    viewport.height / canvasSize.height
   )
+  const handleWheel = useEffectEvent((event: WheelEvent) => {
+    const element = canvas.current
+    if (!element || event.deltaY === 0) return
+    const bounds = element.getBoundingClientRect()
+    if (!bounds.width || !bounds.height) return
+    event.preventDefault()
+    if (drag.current) return
+    let delta = event.deltaY
+    if (event.deltaMode === 1) delta *= 16
+    if (event.deltaMode === 2) delta *= bounds.height
+    setManualView((previous) =>
+      zoomRequestOriginViewport(
+        previous ?? viewport,
+        Math.exp(Math.max(-240, Math.min(240, delta)) * 0.002),
+        {
+          x: Math.max(
+            0,
+            Math.min(1, (event.clientX - bounds.left) / bounds.width)
+          ),
+          y: Math.max(
+            0,
+            Math.min(1, (event.clientY - bounds.top) / bounds.height)
+          ),
+        }
+      )
+    )
+  })
+  useEffect(() => {
+    const element = canvas.current
+    if (!element) return
+    // Wheel zoom must prevent page scrolling while the pointer is over the map.
+    element.addEventListener('wheel', handleWheel, { passive: false })
+    return () => element.removeEventListener('wheel', handleWheel)
+  }, [])
+  const endPan = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (drag.current?.pointerId !== event.pointerId) return
+    drag.current = undefined
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
   const maxCount = Math.max(1, ...points.map((point) => point.count))
   return (
-    <svg
-      ref={canvas}
-      viewBox={layout.viewBox}
-      data-origin-map-mode={layout.mode}
-      className='origin-world-map h-full w-full'
-      role='group'
-      aria-label={
-        layout.mode === 'china'
-          ? t('Request origin China map')
-          : t('Request origin world map')
-      }
-    >
-      <defs>
-        <pattern
-          id={gridId}
-          width='83.333'
-          height='83.333'
-          patternUnits='userSpaceOnUse'
-        >
-          <path
-            d='M83.333 0H0V83.333'
-            fill='none'
-            className='origin-map-grid'
-          />
-        </pattern>
-      </defs>
-      <rect
-        width='1000'
-        height='500'
-        fill={`url(#${gridId})`}
-        aria-hidden='true'
-      />
-      <g aria-hidden='true'>
-        <WorldLand />
-      </g>
-      <g aria-hidden='true' className='origin-map-routes'>
-        {points.map((point) => {
-          const route = createRequestOriginRoute(point)
-          if (!route) return null
-          return (
-            <path
-              key={point.location_id}
-              d={route}
-              data-origin-route={point.location_id}
-              strokeWidth={
-                (0.8 + Math.sqrt(point.count / maxCount) * 2.4) * scale
-              }
-              className={cn(
-                'origin-map-route',
-                point.location_id === props.selected &&
-                  'origin-map-route-selected',
-                props.selected &&
-                  point.location_id !== props.selected &&
-                  'origin-map-route-dimmed'
-              )}
-            />
+    <>
+      <svg
+        ref={canvas}
+        viewBox={
+          manualView
+            ? `${manualView.x} ${manualView.y} ${manualView.width} ${manualView.height}`
+            : layout.viewBox
+        }
+        data-origin-map-mode={layout.mode}
+        data-origin-map-view={manualView ? 'manual' : 'auto'}
+        className={cn(
+          'origin-world-map h-full w-full outline-none',
+          dragging && 'origin-map-dragging'
+        )}
+        role='group'
+        tabIndex={0}
+        aria-label={
+          layout.mode === 'china'
+            ? t('Request origin China map')
+            : t('Request origin world map')
+        }
+        onPointerDown={(event) => {
+          if (event.button !== 0 || !event.isPrimary) return
+          if (
+            event.target instanceof Element &&
+            event.target.closest('[role="button"]')
+          ) {
+            return
+          }
+          drag.current = {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            viewport,
+            scale,
+          }
+          event.currentTarget.setPointerCapture?.(event.pointerId)
+        }}
+        onPointerMove={(event) => {
+          const start = drag.current
+          if (!start || start.pointerId !== event.pointerId) return
+          const dx = event.clientX - start.x
+          const dy = event.clientY - start.y
+          if (Math.hypot(dx, dy) < 3) return
+          setDragging(true)
+          setManualView(
+            clampRequestOriginViewport({
+              ...start.viewport,
+              x: start.viewport.x - dx * start.scale,
+              y: start.viewport.y - dy * start.scale,
+            })
           )
-        })}
-      </g>
-      {points.map((point, index) => {
-        const { x, y } = projectRequestOrigin(point)
-        const radius = (2.7 + Math.sqrt(point.count / maxCount) * 5) * scale
-        const selected = point.location_id === props.selected
-        const label = `${locationName(point, countryNames)} · ${t('{{count}} request records', { count: point.count })}`
-        const nearGateway =
-          Math.hypot(x - layout.gateway.x, y - layout.gateway.y) < 40 * scale
-        return (
-          <g
-            key={point.location_id}
-            data-origin-location={point.location_id}
-            transform={`translate(${x} ${y})`}
-            role='button'
-            tabIndex={0}
-            aria-label={label}
-            aria-pressed={selected}
-            className='origin-map-marker outline-none'
-            onClick={() => props.onSelect(point.location_id)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault()
-                props.onSelect(point.location_id)
-              }
-            }}
+        }}
+        onPointerUp={endPan}
+        onPointerCancel={endPan}
+        onLostPointerCapture={endPan}
+        onKeyDown={(event) => {
+          if (
+            event.target !== event.currentTarget ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey
+          ) {
+            return
+          }
+          if (event.key === '+' || event.key === '=' || event.key === '-') {
+            event.preventDefault()
+            setManualView((previous) =>
+              zoomRequestOriginViewport(
+                previous ?? viewport,
+                event.key === '-' ? 1.25 : 0.8
+              )
+            )
+            return
+          }
+          if (event.key === 'Home' || event.key === '0') {
+            event.preventDefault()
+            setManualView(undefined)
+            return
+          }
+          const directions: Record<string, [number, number]> = {
+            ArrowLeft: [-1, 0],
+            ArrowRight: [1, 0],
+            ArrowUp: [0, -1],
+            ArrowDown: [0, 1],
+          }
+          const direction = directions[event.key]
+          if (!direction) return
+          event.preventDefault()
+          setManualView((previous) => {
+            const current = previous ?? viewport
+            return clampRequestOriginViewport({
+              ...current,
+              x: current.x + direction[0] * current.width * 0.15,
+              y: current.y + direction[1] * current.height * 0.15,
+            })
+          })
+        }}
+      >
+        <defs>
+          <pattern
+            id={gridId}
+            width='83.333'
+            height='83.333'
+            patternUnits='userSpaceOnUse'
           >
-            <title>
-              {locationName(point, countryNames)} ·{' '}
-              {formatNumber(point.count, locale)}
-            </title>
-            <circle
-              r={Math.max(12 * scale, radius + 5 * scale)}
-              fill='transparent'
+            <path
+              d='M83.333 0H0V83.333'
+              fill='none'
+              className='origin-map-grid'
             />
-            <circle
-              r={radius + 5 * scale}
-              className={cn(
-                'origin-map-halo',
-                selected && 'origin-map-halo-selected'
-              )}
-            />
-            <circle r={radius} className='origin-map-dot' />
-            <circle r={radius + 9 * scale} className='origin-map-focus' />
-            {(selected ||
-              (!props.selected && canvasSize.width >= 600 && index === 0)) && (
-              <text
-                y={(nearGateway ? -22 : 25) * scale}
-                textAnchor='middle'
-                fontSize={12 * scale}
-                className='origin-map-location-label'
-                aria-hidden='true'
-              >
-                {point.city || point.region || countryName(point, countryNames)}
-                <tspan className='origin-map-count'>
-                  {' · '}
-                  {formatCompactNumber(point.count, locale)}
-                </tspan>
-              </text>
-            )}
-          </g>
-        )
-      })}
-      {points.length > 0 && (
-        <g
-          transform={`translate(${layout.gateway.x} ${layout.gateway.y})`}
-          className='origin-map-gateway'
-          aria-label={t('Shiyan, Hubei · Gateway')}
-        >
-          <circle r={15 * scale} className='origin-map-gateway-ring' />
-          <circle r={9 * scale} className='origin-map-gateway-ring' />
-          <circle r={5 * scale} className='origin-map-dot' />
-          <text
-            y={46 * scale}
-            textAnchor='middle'
-            fontSize={13 * scale}
-            className='origin-map-gateway-label'
-          >
-            {t('Shiyan, Hubei · Gateway')}
-          </text>
+          </pattern>
+        </defs>
+        <rect
+          width='1000'
+          height='500'
+          fill={`url(#${gridId})`}
+          aria-hidden='true'
+        />
+        <g aria-hidden='true'>
+          <WorldLand />
         </g>
-      )}
-      {!props.reducedMotion &&
-        props.pulses.map((point) => {
+        <g aria-hidden='true' className='origin-map-routes'>
+          {points.map((point) => {
+            const route = createRequestOriginRoute(point)
+            if (!route) return null
+            return (
+              <path
+                key={point.location_id}
+                d={route}
+                data-origin-route={point.location_id}
+                strokeWidth={
+                  (0.8 + Math.sqrt(point.count / maxCount) * 2.4) * scale
+                }
+                className={cn(
+                  'origin-map-route',
+                  point.location_id === props.selected &&
+                    'origin-map-route-selected',
+                  props.selected &&
+                    point.location_id !== props.selected &&
+                    'origin-map-route-dimmed'
+                )}
+              />
+            )
+          })}
+        </g>
+        {points.map((point, index) => {
           const { x, y } = projectRequestOrigin(point)
-          const route = createRequestOriginRoute(point)
+          const radius = (2.7 + Math.sqrt(point.count / maxCount) * 5) * scale
+          const selected = point.location_id === props.selected
+          const label = `${locationName(point, countryNames)} · ${t('{{count}} request records', { count: point.count })}`
+          const nearGateway =
+            Math.hypot(x - layout.gateway.x, y - layout.gateway.y) < 40 * scale
           return (
             <g
-              key={point.pulse_id}
-              aria-hidden='true'
-              data-origin-pulse={point.pulse_id}
-              className='origin-map-activity'
+              key={point.location_id}
+              data-origin-location={point.location_id}
+              transform={`translate(${x} ${y})`}
+              role='button'
+              tabIndex={0}
+              aria-label={label}
+              aria-pressed={selected}
+              className='origin-map-marker outline-none'
+              onClick={() => props.onSelect(point.location_id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  props.onSelect(point.location_id)
+                }
+              }}
             >
-              <g transform={`translate(${x} ${y}) scale(${scale})`}>
-                <circle r='4' className='origin-map-pulse' />
-              </g>
-              {route && (
-                <>
-                  <path
-                    d={route}
-                    pathLength='1'
-                    strokeWidth={2.2 * scale}
-                    className='origin-map-flight-trail'
-                  />
-                  <circle
-                    r={5 * scale}
-                    style={{ offsetPath: `path("${route}")` }}
-                    className='origin-map-flight-head origin-map-flight-glow'
-                  />
-                  <circle
-                    r={2.6 * scale}
-                    style={{ offsetPath: `path("${route}")` }}
-                    className='origin-map-flight-head'
-                  />
-                  <g
-                    transform={`translate(${layout.gateway.x} ${layout.gateway.y}) scale(${scale})`}
-                  >
-                    <circle r='5' className='origin-map-arrival' />
-                  </g>
-                </>
+              <title>
+                {locationName(point, countryNames)} ·{' '}
+                {formatNumber(point.count, locale)}
+              </title>
+              <circle
+                r={Math.max(12 * scale, radius + 5 * scale)}
+                fill='transparent'
+              />
+              <circle
+                r={radius + 5 * scale}
+                className={cn(
+                  'origin-map-halo',
+                  selected && 'origin-map-halo-selected'
+                )}
+              />
+              <circle r={radius} className='origin-map-dot' />
+              <circle r={radius + 9 * scale} className='origin-map-focus' />
+              {(selected ||
+                (!props.selected &&
+                  canvasSize.width >= 600 &&
+                  index === 0)) && (
+                <text
+                  y={(nearGateway ? -22 : 25) * scale}
+                  textAnchor='middle'
+                  fontSize={12 * scale}
+                  className='origin-map-location-label'
+                  aria-hidden='true'
+                >
+                  {point.city ||
+                    point.region ||
+                    countryName(point, countryNames)}
+                  <tspan className='origin-map-count'>
+                    {' · '}
+                    {formatCompactNumber(point.count, locale)}
+                  </tspan>
+                </text>
               )}
             </g>
           )
         })}
-    </svg>
+        {points.length > 0 && (
+          <g
+            transform={`translate(${layout.gateway.x} ${layout.gateway.y})`}
+            className='origin-map-gateway'
+            aria-label={t('Shiyan, Hubei · Gateway')}
+          >
+            <circle r={15 * scale} className='origin-map-gateway-ring' />
+            <circle r={9 * scale} className='origin-map-gateway-ring' />
+            <circle r={5 * scale} className='origin-map-dot' />
+            <text
+              y={46 * scale}
+              textAnchor='middle'
+              fontSize={13 * scale}
+              className='origin-map-gateway-label'
+            >
+              {t('Shiyan, Hubei · Gateway')}
+            </text>
+          </g>
+        )}
+        {!props.reducedMotion &&
+          props.pulses.map((point) => {
+            const { x, y } = projectRequestOrigin(point)
+            const route = createRequestOriginRoute(point)
+            return (
+              <g
+                key={point.pulse_id}
+                aria-hidden='true'
+                data-origin-pulse={point.pulse_id}
+                className='origin-map-activity'
+              >
+                <g transform={`translate(${x} ${y}) scale(${scale})`}>
+                  <circle r='4' className='origin-map-pulse' />
+                </g>
+                {route && (
+                  <>
+                    <path
+                      d={route}
+                      pathLength='1'
+                      strokeWidth={2.2 * scale}
+                      className='origin-map-flight-trail'
+                    />
+                    <circle
+                      r={5 * scale}
+                      style={{ offsetPath: `path("${route}")` }}
+                      className='origin-map-flight-head origin-map-flight-glow'
+                    />
+                    <circle
+                      r={2.6 * scale}
+                      style={{ offsetPath: `path("${route}")` }}
+                      className='origin-map-flight-head'
+                    />
+                    <g
+                      transform={`translate(${layout.gateway.x} ${layout.gateway.y}) scale(${scale})`}
+                    >
+                      <circle r='5' className='origin-map-arrival' />
+                    </g>
+                  </>
+                )}
+              </g>
+            )
+          })}
+      </svg>
+      <div
+        className='bg-card/95 absolute right-2 bottom-2 flex items-center gap-0.5 rounded-lg border p-0.5 shadow-sm'
+        role='group'
+        aria-label={t('Zoom')}
+      >
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant='ghost'
+                size='icon'
+                aria-label={t('Zoom in')}
+                disabled={viewport.width <= 40}
+                onClick={() =>
+                  setManualView((previous) =>
+                    zoomRequestOriginViewport(previous ?? viewport, 0.8)
+                  )
+                }
+              />
+            }
+          >
+            <Plus className='size-4' />
+          </TooltipTrigger>
+          <TooltipContent>{t('Zoom in')}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant='ghost'
+                size='icon'
+                aria-label={t('Zoom out')}
+                disabled={viewport.width >= 1000 && viewport.height >= 500}
+                onClick={() =>
+                  setManualView((previous) =>
+                    zoomRequestOriginViewport(previous ?? viewport, 1.25)
+                  )
+                }
+              />
+            }
+          >
+            <Minus className='size-4' />
+          </TooltipTrigger>
+          <TooltipContent>{t('Zoom out')}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant='ghost'
+                size='icon'
+                aria-label={t('Reset view')}
+                disabled={!manualView}
+                onClick={() => setManualView(undefined)}
+              />
+            }
+          >
+            <RotateCcw className='size-3.5' />
+          </TooltipTrigger>
+          <TooltipContent>{t('Reset view')}</TooltipContent>
+        </Tooltip>
+      </div>
+    </>
   )
 }
 
@@ -353,18 +591,54 @@ export function RequestOriginMap(props: {
           {t('Request origins')}
         </span>
       }
-      description={
-        props.params
-          ? t('Locations in the selected range')
-          : t('Request origins in the last {{hours}} hours', {
-              hours: props.hours ?? 24,
-            })
-      }
       loading={query.isPending}
       height='h-72'
       contentClassName='p-0 sm:p-0'
       headerActions={
         <div className='flex items-center gap-2'>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant='ghost'
+                  size='icon'
+                  className='size-7'
+                  aria-label={t('Details')}
+                />
+              }
+            >
+              <Info className='size-3.5' />
+            </TooltipTrigger>
+            <TooltipContent className='max-w-xs space-y-2'>
+              <p>
+                {props.params
+                  ? t('Locations in the selected range')
+                  : t('Request origins in the last {{hours}} hours', {
+                      hours: props.hours ?? 24,
+                    })}
+              </p>
+              <p>{t('Marker size and route width show request counts.')}</p>
+              <p>
+                {t(
+                  'Locations are approximate and may reflect a proxy or gateway.'
+                )}{' '}
+                {t('Routes show request direction only.')}
+              </p>
+              {data?.truncated && (
+                <p>
+                  {t(
+                    'Showing the latest {{count}} request records. Locations are approximate.',
+                    { count: data.total }
+                  )}
+                </p>
+              )}
+              {points.length > 500 && (
+                <p>
+                  {t('Map shows the top {{count}} locations.', { count: 500 })}
+                </p>
+              )}
+            </TooltipContent>
+          </Tooltip>
           <span className='text-muted-foreground mr-1 max-w-40 truncate text-xs'>
             {isAdmin
               ? props.params?.username || t('All users')
@@ -485,21 +759,12 @@ export function RequestOriginMap(props: {
                             ? t('No located requests')
                             : t('GeoIP database unavailable')
                         }
-                        description={
-                          data?.geoip_available
-                            ? t(
-                                'Private or unrecognized addresses are not plotted.'
-                              )
-                            : t(
-                                'Request locations will appear when the GeoIP database is available.'
-                              )
-                        }
                       />
                     </div>
                   </div>
                 )}
               </div>
-              {selected ? (
+              {selected && (
                 <div className='flex min-h-8 items-center gap-2 px-1 text-xs'>
                   <MapPin
                     className='text-primary size-3.5 shrink-0'
@@ -512,15 +777,7 @@ export function RequestOriginMap(props: {
                     {t('{{count}} request records', { count: selected.count })}
                   </strong>
                 </div>
-              ) : (
-                <div className='text-muted-foreground flex min-h-8 items-center gap-1.5 px-1 text-xs'>
-                  <Radio className='size-3.5 shrink-0' aria-hidden='true' />
-                  {t('New requests travel from their source to Shiyan, Hubei.')}
-                </div>
               )}
-              <p className='text-muted-foreground px-1 pt-1 text-[11px]'>
-                {t('Marker size and route width show request counts.')}
-              </p>
             </div>
             <div className='border-t px-4 py-4 sm:px-5 xl:border-t-0 xl:border-l'>
               <h4 className='mb-3 text-xs font-semibold'>
@@ -604,22 +861,7 @@ export function RequestOriginMap(props: {
               )}
             </p>
           )}
-          <div className='text-muted-foreground flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t px-4 py-2.5 text-[11px] sm:px-5'>
-            <span>
-              {data?.truncated
-                ? t(
-                    'Showing the latest {{count}} request records. Locations are approximate.',
-                    { count: data.total }
-                  )
-                : t(
-                    'Locations are approximate and may reflect a proxy or gateway.'
-                  )}{' '}
-              {points.length > 500 &&
-                t('Map shows the top {{count}} locations.', {
-                  count: 500,
-                })}{' '}
-              {t('Routes show request direction only.')}
-            </span>
+          <div className='text-muted-foreground flex justify-end px-4 py-2 text-[10px] sm:px-5'>
             <a
               href='https://db-ip.com'
               target='_blank'

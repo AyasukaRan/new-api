@@ -105,6 +105,7 @@ function DetailPreview(props: {
   source?: LogSource
   columnId?: 'content' | 'prompt_tokens' | 'created_at' | 'request_details'
   createdAt?: number
+  inlineEvents?: boolean
 }) {
   const [selectedLog, setSelectedLog] =
     useState<UsageLogDetailSelection | null>(null)
@@ -112,7 +113,14 @@ function DetailPreview(props: {
     data: [
       { ...makeLog(props.other, props.type), created_at: props.createdAt ?? 1 },
     ],
-    columns: useCommonLogsColumns(props.isAdmin, setSelectedLog, props.source),
+    columns: useCommonLogsColumns(
+      props.isAdmin,
+      setSelectedLog,
+      props.source,
+      false,
+      false,
+      props.inlineEvents
+    ),
     getCoreRowModel: getCoreRowModel(),
   })
   const cell = table
@@ -1316,18 +1324,68 @@ test.each([
       expect(screen.getByText(label)).toBeVisible()
       expect(screen.queryByText(error)).not.toBeInTheDocument()
       expect(
-        screen.getByText(
+        screen.queryByText(
           'Response content has already been sent; retrying could duplicate output'
         )
-      ).toBeVisible()
+      ).not.toBeInTheDocument()
       await userEvent.click(
         screen.getByRole('button', { name: new RegExp(label) })
       )
       const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
       expect(within(dialog).getByText('Original error')).toBeVisible()
       expect(within(dialog).getByText(error)).toBeVisible()
+      expect(
+        within(dialog).getByText(
+          'Response content has already been sent; retrying could duplicate output'
+        )
+      ).toBeVisible()
     } finally {
       queryClient.clear()
     }
+  }
+)
+
+test.each([
+  ['retry_other_key', 'retry_status_matched', 'Status matches the retry rules'],
+  [
+    'retry_same_key',
+    'same_key_transient_retry',
+    'Retry the same key once after a temporary upstream error',
+  ],
+] as const)(
+  'inline failed rows show the HTTP cause and keep %s decisions in details',
+  async (action, reason, explanation) => {
+    const error = 'status_code=502, Upstream request failed'
+    render(
+      <DetailPreview
+        isAdmin={false}
+        type={5}
+        inlineEvents
+        columnId='request_details'
+        other={{
+          content_parts: [{ key: error }],
+          error_summary: {
+            label: 'Upstream unavailable',
+            matched: true,
+            status_code: 502,
+            rule_id: 'http_unavailable',
+          },
+          retry_decision: { action, reason },
+        }}
+      />,
+      { wrapper: DetailProviders }
+    )
+    const trigger = screen.getByRole('button', {
+      name: '502 Upstream unavailable',
+    })
+    expect(screen.queryByText(explanation)).not.toBeInTheDocument()
+    expect(screen.queryByText(error)).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Details · req-1' })
+    ).toBeVisible()
+    await userEvent.click(trigger)
+    const dialog = await screen.findByRole('dialog', { name: /Log Details/ })
+    expect(within(dialog).getByText(error)).toBeVisible()
+    expect(within(dialog).getByText(explanation)).toBeVisible()
   }
 )

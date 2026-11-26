@@ -25,6 +25,11 @@ export interface RequestOriginPosition {
   y: number
 }
 
+export interface RequestOriginViewport extends RequestOriginPosition {
+  width: number
+  height: number
+}
+
 export interface RequestOriginLayout {
   viewBox: string
   mode: 'china' | 'world'
@@ -88,4 +93,39 @@ export function createRequestOriginRoute(
     Math.min(origin.y, gateway.y) - Math.min(72, distance * 0.22)
   )
   return `M ${origin.x} ${origin.y} Q ${controlX} ${controlY} ${gateway.x} ${gateway.y}`
+}
+
+export function clampRequestOriginViewport(
+  viewport: RequestOriginViewport
+): RequestOriginViewport {
+  return {
+    ...viewport,
+    x:
+      viewport.width >= 1000
+        ? (1000 - viewport.width) / 2
+        : Math.max(0, Math.min(1000 - viewport.width, viewport.x)),
+    y:
+      viewport.height >= 500
+        ? (500 - viewport.height) / 2
+        : Math.max(0, Math.min(500 - viewport.height, viewport.y)),
+  }
+}
+
+export function zoomRequestOriginViewport(
+  viewport: RequestOriginViewport,
+  factor: number,
+  anchor: RequestOriginPosition = { x: 0.5, y: 0.5 }
+): RequestOriginViewport {
+  const aspect = viewport.width / viewport.height
+  const width = Math.max(
+    40,
+    Math.min(Math.max(1000, 500 * aspect), viewport.width * factor)
+  )
+  const height = width / aspect
+  return clampRequestOriginViewport({
+    x: viewport.x + (viewport.width - width) * anchor.x,
+    y: viewport.y + (viewport.height - height) * anchor.y,
+    width,
+    height,
+  })
 }

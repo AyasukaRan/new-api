@@ -20,6 +20,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -288,8 +289,8 @@ it.each([{ points: [beijing] }, { points: [beijing, shanghai] }])(
       screen.getByText('7 request records', { selector: 'strong' })
     ).toBeInTheDocument()
     expect(
-      screen.getByText('Marker size and route width show request counts.')
-    ).toBeInTheDocument()
+      screen.queryByText('Marker size and route width show request counts.')
+    ).not.toBeInTheDocument()
   }
 )
 
@@ -421,6 +422,111 @@ it('keeps the gateway readable and shows only the selected source label on a nar
   expect(
     view.container.querySelector('.origin-map-location-label')
   ).toHaveTextContent('Beijing · 7')
+})
+
+it('keeps manual zoom through live updates and resets to the current automatic view', async () => {
+  mockOrigins({ ...snapshot, points: [beijing] })
+  renderMap()
+  await screen.findByText('Live')
+  const map = screen.getByRole('group', { name: 'Request origin China map' })
+  await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+  const manualView = map.getAttribute('viewBox')
+  expect(map).toHaveAttribute('data-origin-map-view', 'manual')
+  expect(Number(manualView?.split(' ')[2])).toBeLessThan(310)
+  await act(async () => {
+    streams[0].enqueue(
+      encoder.encode(
+        `event: origins\ndata: ${JSON.stringify({ cursor: 'manual-overseas', points: [{ ...point, last_seen: 102 }] })}\n\n`
+      )
+    )
+  })
+  expect(map).toHaveAttribute('viewBox', manualView)
+  expect(screen.getByText('Request records').parentElement).toHaveTextContent(
+    '10'
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Reset view' }))
+  expect(map).toHaveAttribute('data-origin-map-view', 'auto')
+  expect(map).toHaveAttribute('viewBox', '0 0 1000 500')
+})
+
+it('zooms around the wheel pointer, pans by dragging, and supports keyboard reset', async () => {
+  vi.spyOn(SVGElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    width: 360,
+    height: 180,
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 360,
+    bottom: 180,
+    toJSON: () => ({}),
+  })
+  mockOrigins({ ...snapshot, points: [beijing] })
+  renderMap({ params: { start_timestamp: 50, end_timestamp: 200 } })
+  const map = await screen.findByRole('group', {
+    name: 'Request origin China map',
+  })
+  const automatic = map.getAttribute('viewBox')
+  expect(
+    fireEvent.wheel(map, {
+      deltaY: -100,
+      clientX: 270,
+      clientY: 45,
+      cancelable: true,
+    })
+  ).toBe(false)
+  const zoomed = (map.getAttribute('viewBox') ?? '').split(' ').map(Number)
+  expect(zoomed[0] + zoomed[2] * 0.75).toBeCloseTo(561.94)
+  expect(zoomed[1] + zoomed[3] * 0.25).toBeCloseTo(108.75)
+  const user = userEvent.setup()
+  await user.pointer([
+    { target: map, keys: '[MouseLeft>]', coords: { x: 180, y: 90 } },
+    { target: map, coords: { x: 220, y: 105 } },
+    { keys: '[/MouseLeft]' },
+  ])
+  const panned = (map.getAttribute('viewBox') ?? '').split(' ').map(Number)
+  expect(panned[0]).toBeLessThan(zoomed[0])
+  expect(panned[1]).toBeLessThan(zoomed[1])
+  expect(panned.slice(2)).toEqual(zoomed.slice(2))
+  map.focus()
+  await user.keyboard('{ArrowRight}')
+  expect(Number(map.getAttribute('viewBox')?.split(' ')[0])).toBeGreaterThan(
+    panned[0]
+  )
+  await user.keyboard('{Home}')
+  expect(map).toHaveAttribute('viewBox', automatic)
+  expect(map).toHaveAttribute('data-origin-map-view', 'auto')
+})
+
+it('allows zooming out from the domestic view to the entire world', async () => {
+  mockOrigins({ ...snapshot, points: [beijing] })
+  renderMap({ params: { start_timestamp: 50, end_timestamp: 200 } })
+  const map = await screen.findByRole('group', {
+    name: 'Request origin China map',
+  })
+  const zoomOut = screen.getByRole('button', { name: 'Zoom out' })
+  for (let step = 0; step < 6; step++) await userEvent.click(zoomOut)
+  expect(map).toHaveAttribute('viewBox', '0 0 1000 500')
+  expect(zoomOut).toBeDisabled()
+  await userEvent.click(screen.getByRole('button', { name: 'Reset view' }))
+  expect(map).toHaveAttribute('viewBox', '374.44 70 220 155')
+})
+
+it('keeps map explanations in the details tooltip while counts remain visible', async () => {
+  mockOrigins()
+  renderMap({ params: { start_timestamp: 50, end_timestamp: 200 } })
+  await screen.findByRole('group', { name: 'Request origin world map' })
+  expect(
+    screen.queryByText('Marker size and route width show request counts.')
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByText('Routes show request direction only.')
+  ).not.toBeInTheDocument()
+  expect(screen.getByText('Request records')).toBeInTheDocument()
+  await userEvent.hover(screen.getByRole('button', { name: 'Details' }))
+  expect(
+    await screen.findByText('Marker size and route width show request counts.')
+  ).toBeVisible()
 })
 
 it('keeps real location counts but suppresses pulse motion when reduced motion is requested', async () => {

@@ -8784,6 +8784,8 @@
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V 4",
     "Zoom": "ズーム",
-    "Zoom into {{name}} ({{value}}, {{share}}%)": "{{name}} を拡大（{{value}}、{{share}}%）"
+    "Zoom in": "拡大",
+    "Zoom into {{name}} ({{value}}, {{share}}%)": "{{name}} を拡大（{{value}}、{{share}}%）",
+    "Zoom out": "縮小"
   }
 }

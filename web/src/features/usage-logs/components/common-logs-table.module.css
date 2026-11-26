@@ -73,8 +73,14 @@
 .grid table:has([data-fee-tool-lanes='3']) {
   --log-fee-tool-track: 3.5rem;
 }
-.grid :is(td[data-column-id='content'] button, [data-log-event]) {
+.grid
+  :is(td[data-column-id='content'] button, [data-log-event]):not(
+    [data-log-failure]
+  ) {
   max-width: clamp(6rem, 8vw, 10rem);
+}
+.grid [data-log-failure] {
+  max-width: 13rem;
 }
 .grid td[data-column-id='request_source'] {
   max-width: 14rem;
@@ -117,8 +123,14 @@
 .compact td {
   padding-inline: 5px;
 }
-.compact :is(td[data-column-id='content'] button, [data-log-event]) {
+.compact
+  :is(td[data-column-id='content'] button, [data-log-event]):not(
+    [data-log-failure]
+  ) {
   max-width: 5.5rem;
+}
+.compact [data-log-failure] {
+  max-width: 10rem;
 }
 .compact td[data-column-id='request_source'] {
   max-width: 9rem;

@@ -80,6 +80,10 @@ var defaultErrorRules = sync.OnceValue(func() *errorRulesSnapshot {
 	for _, d := range definitions {
 		rules = append(rules, ErrorRecognitionRule{Name: d[0], Label: d[1], Enabled: true, Match: "regex", Pattern: d[2]})
 	}
+	rules = append(rules, ErrorRecognitionRule{
+		Name: "upstream_unavailable_status", Label: "Upstream unavailable",
+		Enabled: true, Match: "regex", Pattern: ".*", StatusCodes: []int{502, 503, 529},
+	})
 	raw, err := common.Marshal(rules)
 	if err != nil {
 		panic(err)

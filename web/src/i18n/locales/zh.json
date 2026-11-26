@@ -8784,6 +8784,8 @@
     "Zhipu GLM": "智谱GLM",
     "Zhipu V4": "智谱 V4",
     "Zoom": "缩放",
-    "Zoom into {{name}} ({{value}}, {{share}}%)": "放大 {{name}}（{{value}}，{{share}}%）"
+    "Zoom in": "放大",
+    "Zoom into {{name}} ({{value}}, {{share}}%)": "放大 {{name}}（{{value}}，{{share}}%）",
+    "Zoom out": "缩小"
   }
 }
