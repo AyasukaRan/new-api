@@ -7507,6 +7507,7 @@
     "Test Mode": "Mode test",
     "Test Model": "Tester le modèle",
     "Test models and prompts from the browser": "Tester les modèles et les prompts depuis le navigateur",
+    "Test request": "Requête de test",
     "Test selected models": "Tester les modèles sélectionnés",
     "Test the current draft without saving or sending an upstream request.": "Testez le brouillon sans l’enregistrer ni envoyer de requête en amont.",
     "Testing all configured models has started. Results will appear in monitoring.": "Le test de tous les modèles configurés a démarré. Les résultats apparaîtront dans la surveillance.",

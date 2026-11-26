@@ -7507,6 +7507,7 @@
     "Test Mode": "Тестовый режим",
     "Test Model": "Проверить модель",
     "Test models and prompts from the browser": "Тестируйте модели и промпты в браузере",
+    "Test request": "Тестовый запрос",
     "Test selected models": "Проверить выбранные модели",
     "Test the current draft without saving or sending an upstream request.": "Проверьте черновик без сохранения и отправки запроса провайдеру.",
     "Testing all configured models has started. Results will appear in monitoring.": "Запущена проверка всех настроенных моделей. Результаты появятся в мониторинге.",

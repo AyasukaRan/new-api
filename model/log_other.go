@@ -270,7 +270,7 @@ func projectLogOtherJSON(value string, visibility logOtherVisibility, deferBody 
 
 	changed := false
 	if visibility == logOtherVisibilityUser {
-		for _, key := range []string{logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey, "client_tool", "invoked_tools", "invoked_tool_counts", "tool_observation"} {
+		for _, key := range []string{logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey, "client_tool", "request_purpose", "invoked_tools", "invoked_tool_counts", "tool_observation"} {
 			if _, exists := values[key]; exists {
 				delete(values, key)
 				changed = true

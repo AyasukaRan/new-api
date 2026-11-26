@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,10 +19,121 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+func TestRequestMetadataIdentifiesConfirmedArithmeticProbe(t *testing.T) {
+	const prompt = "Calculate and respond with ONLY the number, nothing else.\n\nQ: 3 + 5 = ?\nA: 8\n\nQ: 12 - 7 = ?\nA: 5\n\nQ: 28 + 43 = ?\nA:"
+	for _, tc := range []struct {
+		name, text, userAgent, path string
+		messages                    []dto.Message
+		tools                       []dto.ToolCallRequest
+		functions                   json.RawMessage
+		want                        string
+	}{
+		{name: "confirmed request template", text: prompt, want: "test"},
+		{name: "different probe operands", text: strings.Replace(prompt, "28 + 43", "14 + 86", 1), want: "test"},
+		{name: "ordinary greeting", text: "hi"},
+		{name: "ordinary arithmetic question", text: "Calculate 28 + 43 and respond with only the number."},
+		{name: "changed instruction", text: strings.Replace(prompt, "ONLY the number", "a detailed explanation", 1)},
+		{name: "changed example", text: strings.Replace(prompt, "A: 8", "A: 9", 1)},
+		{name: "trailing user content", text: prompt + "\nExplain the result."},
+		{name: "unsupported operands", text: strings.Replace(prompt, "28 + 43", "100 + 43", 1)},
+		{name: "different operation", text: strings.Replace(prompt, "28 + 43", "28 - 43", 1)},
+		{name: "conversation history", messages: []dto.Message{{Role: "assistant", Content: "Earlier reply"}, {Role: "user", Content: prompt}}},
+		{name: "system message", messages: []dto.Message{{Role: "system", Content: prompt}}},
+		{name: "structured content", messages: []dto.Message{{Role: "user", Content: []any{map[string]any{"type": "text", "text": prompt}}}}},
+		{name: "tool declarations", text: prompt, tools: []dto.ToolCallRequest{{Type: "function"}}},
+		{name: "legacy function declarations", text: prompt, functions: json.RawMessage(`[{"name":"lookup"}]`)},
+		{name: "message tool calls", messages: []dto.Message{{Role: "user", Content: prompt, ToolCalls: json.RawMessage(`[{"id":"call_1"}]`)}}},
+		{name: "different application", text: prompt, userAgent: "curl/8.0"},
+		{name: "similar application name", text: prompt, userAgent: "Sub2API/DeepSeek-extra"},
+		{name: "different endpoint", text: prompt, path: "/v1/responses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, userAgent := tc.path, tc.userAgent
+			if path == "" {
+				path = "/v1/chat/completions"
+			}
+			if userAgent == "" {
+				userAgent = "Sub2API/DeepSeek"
+			}
+			messages := tc.messages
+			if messages == nil {
+				messages = []dto.Message{{Role: "user", Content: tc.text}}
+			}
+			request := &dto.GeneralOpenAIRequest{Model: "deepseek-flash", Messages: messages, Tools: tc.tools, Functions: tc.functions}
+			before, err := common.Marshal(request)
+			require.NoError(t, err)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, path, nil)
+			c.Request.Header.Set("User-Agent", userAgent)
+			info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions, Request: request}
+			finish := BeginRequestMetadata(c, info)
+			t.Cleanup(finish)
+			c.Request.Header.Set("User-Agent", "upstream-only/1.0")
+			other := model.NewLogOther()
+			AppendRequestMetadata(c, info, other)
+			if tc.want == "" {
+				assert.NotContains(t, other.Snapshot(), "request_purpose")
+			} else {
+				assert.Equal(t, tc.want, other.Snapshot()["request_purpose"])
+				assert.Equal(t, "Sub2-API", other.Snapshot()["client_tool"])
+			}
+			assert.False(t, info.IsChannelTest, "a client probe remains an ordinary billed relay request")
+			after, err := common.Marshal(request)
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "classification must not change request or billing parameters")
+		})
+	}
+
+	t.Run("active and completed metadata agree", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+		require.NoError(t, err)
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+		require.NoError(t, db.AutoMigrate(&model.User{}))
+		require.NoError(t, db.Create(&model.User{Id: 731, Username: "probe-owner"}).Error)
+		previousDB, previousLogging := model.DB, common.LogConsumeEnabled
+		model.DB, common.LogConsumeEnabled = db, true
+		t.Cleanup(func() { model.DB, common.LogConsumeEnabled = previousDB, previousLogging })
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Request.Header.Set("User-Agent", "Sub2API/DeepSeek")
+		info := &relaycommon.RelayInfo{UserId: 731, RequestId: "confirmed-arithmetic-probe", IsStream: true, RelayFormat: types.RelayFormatOpenAI,
+			RelayMode: relayconstant.RelayModeChatCompletions, Request: &dto.GeneralOpenAIRequest{Messages: []dto.Message{{Role: "user", Content: prompt}}}}
+		finish := BeginRequestMetadata(c, info)
+		t.Cleanup(finish)
+		rows, err := model.ActiveLogSnapshot(context.Background(), model.LogFilter{RequestId: info.RequestId}, 0, common.RoleAdminUser)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		var active map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(rows[0].Other, &active))
+		assert.Equal(t, "test", active["request_purpose"])
+		assert.Equal(t, "Sub2-API", active["client_tool"])
+		assert.True(t, rows[0].InProgress)
+		assert.Equal(t, model.LogTypeUnknown, rows[0].Type)
+		other := model.NewLogOther()
+		AppendRequestMetadata(c, info, other)
+		assert.Equal(t, active["request_purpose"], other.Snapshot()["request_purpose"])
+		assert.False(t, info.IsChannelTest)
+		personal := &model.Log{Other: other.JSONString()}
+		model.FormatLogList([]*model.Log{personal}, common.RoleCommonUser, false)
+		var personalOther map[string]any
+		require.NoError(t, common.UnmarshalJsonStr(personal.Other, &personalOther))
+		assert.NotContains(t, personalOther, "request_purpose")
+		assert.NotContains(t, personalOther, "client_tool")
+		finish()
+		rows, err = model.ActiveLogSnapshot(context.Background(), model.LogFilter{RequestId: info.RequestId}, 0, common.RoleAdminUser)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	})
+}
 
 func TestRequestMetadataObservesOnlyCurrentResponseTools(t *testing.T) {
 	for _, test := range []struct {

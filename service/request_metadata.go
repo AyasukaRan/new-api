@@ -43,6 +43,7 @@ type requestMetadata struct {
 	requestedStream   bool
 	stream            bool
 	clientTool        string
+	requestPurpose    string
 	userAgent         string
 	reasoningLabel    string
 	modelParameters   requestModelParameters
@@ -73,6 +74,7 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 		requestedStream: info.IsStream,
 		stream:          info.IsStream,
 		clientTool:      IdentifyRequestClient(c.Request.Header),
+		requestPurpose:  IdentifyRequestPurpose(c.Request.Header, c.Request.URL.Path, info.Request),
 		userAgent:       strings.Clone(strings.ToValidUTF8(ua[:min(len(ua), requestMetadataMaxUserAgentBytes)], "")),
 		reasoningLabel:  strings.Clone(requestReasoningLabel(info)),
 		modelParameters: captureRequestModelParameters(info.Request),
@@ -88,6 +90,9 @@ func BeginRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo) func() {
 		other.SetPublic("response_transport", transport)
 		other.SetPublic("reasoning_effort", metadata.reasoningLabel)
 		other.SetPublic("client_tool", metadata.clientTool)
+		if metadata.requestPurpose != "" {
+			other.SetPublic("request_purpose", metadata.requestPurpose)
+		}
 		other.SetAdmin("user_agent", metadata.userAgent)
 		started := info.StartTime
 		if started.IsZero() {
@@ -553,6 +558,9 @@ func AppendRequestMetadata(c *gin.Context, info *relaycommon.RelayInfo, other *m
 	if metadata.clientTool != "" {
 		other.SetPublic("client_tool", metadata.clientTool)
 	}
+	if metadata.requestPurpose != "" {
+		other.SetPublic("request_purpose", metadata.requestPurpose)
+	}
 	if !metadata.stream {
 		if len(metadata.buffer) > 0 {
 			metadata.acceptResponse(metadata.buffer)
@@ -652,6 +660,32 @@ func requestReasoningLabel(info *relaycommon.RelayInfo) string {
 		return ""
 	}
 	return effort
+}
+
+// This user-confirmed probe has two fixed examples and a two-digit addition.
+// Ordinary arithmetic questions and greetings do not establish a test purpose.
+var arithmeticProbePrompt = regexp.MustCompile(`\ACalculate and respond with ONLY the number, nothing else\.\n\nQ: 3 \+ 5 = \?\nA: 8\n\nQ: 12 - 7 = \?\nA: 5\n\nQ: [1-9][0-9] \+ [1-9][0-9] = \?\nA:\z`)
+
+// IdentifyRequestPurpose adds a display label only; it never grants the
+// server's channel-test privileges or changes normal relay billing.
+func IdentifyRequestPurpose(header http.Header, path string, request dto.Request) string {
+	userAgents := header.Values("User-Agent")
+	if path != "/v1/chat/completions" || len(userAgents) != 1 || userAgents[0] != "Sub2API/DeepSeek" {
+		return ""
+	}
+	chat, ok := request.(*dto.GeneralOpenAIRequest)
+	if !ok || chat == nil || len(chat.Messages) != 1 || len(chat.Tools) != 0 || len(chat.Functions) != 0 || len(chat.FunctionCall) != 0 {
+		return ""
+	}
+	message := chat.Messages[0]
+	if message.Role != "user" || len(message.ToolCalls) != 0 || len(message.Tools) != 0 || len(message.ServerToolCalls) != 0 || message.ToolCallId != "" {
+		return ""
+	}
+	text, ok := message.Content.(string)
+	if !ok || len(text) > 256 || !arithmeticProbePrompt.MatchString(text) {
+		return ""
+	}
+	return "test"
 }
 
 // IdentifyRequestClient returns the public source label for original client headers.

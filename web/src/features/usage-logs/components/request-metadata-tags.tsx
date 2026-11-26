@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Brain, Terminal, Unlink, Wrench } from 'lucide-react'
+import { Brain, FlaskConical, Terminal, Unlink, Wrench } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -122,6 +122,26 @@ const fieldLabels: Record<RequestMetadataField, string> = {
   invoked_tools: 'Tools',
 }
 
+export function RequestPurposeTag(props: {
+  isAdmin: boolean
+  metadata?: LogOtherData | null
+}) {
+  const { t } = useTranslation()
+  if (!props.isAdmin || props.metadata?.request_purpose !== 'test') return null
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={<span role='img' tabIndex={0} />}
+        aria-label={t('Test request')}
+        className='text-muted-foreground focus-visible:ring-ring inline-flex size-5 shrink-0 cursor-help items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none'
+      >
+        <FlaskConical aria-hidden className='size-3.5' />
+      </TooltipTrigger>
+      <TooltipContent role='tooltip'>{t('Test request')}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 export function RequestMetadataTags(props: {
   isAdmin: boolean
   metadata?: LogOtherData | null
@@ -142,6 +162,7 @@ export function RequestMetadataTags(props: {
     showClient && typeof adminMetadata?.client_tool === 'string'
       ? adminMetadata.client_tool.trim()
       : ''
+  const testRequest = showClient && adminMetadata?.request_purpose === 'test'
   const tools =
     showTools && Array.isArray(adminMetadata?.invoked_tools)
       ? [
@@ -183,7 +204,14 @@ export function RequestMetadataTags(props: {
     )
   }
 
-  if (!effort && !client && tools.length === 0 && !partial && !noTools) {
+  if (
+    !effort &&
+    !client &&
+    !testRequest &&
+    tools.length === 0 &&
+    !partial &&
+    !noTools
+  ) {
     return null
   }
 
@@ -285,6 +313,9 @@ export function RequestMetadataTags(props: {
           icon={Terminal}
           copyable={false}
         />
+      )}
+      {testRequest && (
+        <RequestPurposeTag isAdmin={props.isAdmin} metadata={metadata} />
       )}
       {toolTags.length > 0 &&
         (props.expanded ? (

@@ -442,6 +442,7 @@ export interface LogOtherData {
   }
   reasoning_effort?: string
   client_tool?: string
+  request_purpose?: 'test'
   invoked_tools?: string[]
   invoked_tool_counts?: Record<string, number>
   tool_observation?: 'complete' | 'partial'

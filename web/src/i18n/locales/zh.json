@@ -7507,6 +7507,7 @@
     "Test Mode": "测试模式",
     "Test Model": "测试模型",
     "Test models and prompts from the browser": "在浏览器中测试模型和提示词",
+    "Test request": "测试请求",
     "Test selected models": "测试所选模型",
     "Test the current draft without saving or sending an upstream request.": "测试当前草稿，不保存，也不向上游发请求。",
     "Testing all configured models has started. Results will appear in monitoring.": "已开始测试全部已配置模型，结果将显示在监控中。",

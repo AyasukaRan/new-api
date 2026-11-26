@@ -7507,6 +7507,7 @@
     "Test Mode": "テストモード",
     "Test Model": "モデルをテスト",
     "Test models and prompts from the browser": "ブラウザでモデルとプロンプトをテスト",
+    "Test request": "テストリクエスト",
     "Test selected models": "選択したモデルをテスト",
     "Test the current draft without saving or sending an upstream request.": "保存や上流リクエストを行わず現在の下書きをテストします。",
     "Testing all configured models has started. Results will appear in monitoring.": "設定された全モデルのテストを開始しました。結果は監視画面に表示されます。",

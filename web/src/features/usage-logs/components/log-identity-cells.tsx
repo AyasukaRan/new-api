@@ -43,6 +43,7 @@ import { getLogMetadata, logTokenName } from '../lib/format'
 import { isDisplayableLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { LogFilterValue, useLogValueFilter } from './log-value-filter'
+import { RequestPurposeTag } from './request-metadata-tags'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 export function LogGroupLabel({
@@ -283,6 +284,10 @@ export function LogSourceCell({
               {sensitiveVisible ? client || t('Unidentified source') : '••••'}
             </TruncatedCell>
           </LogFilterValue>
+          <RequestPurposeTag
+            isAdmin={isAdmin && sensitiveVisible}
+            metadata={other}
+          />
         </div>
       )}
       {details.map(

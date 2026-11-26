@@ -155,6 +155,76 @@ test('distinguishes an identified client from an unrecorded User-Agent', () => {
   expect(screen.getByText('Not recorded')).toBeVisible()
 })
 
+test.each(['source', 'details'] as const)(
+  'marks test requests without replacing their client and explains the marker on focus (%s)',
+  async (surface) => {
+    const user = userEvent.setup()
+    const markedMetadata = {
+      client_tool: 'Sub2-API',
+      request_purpose: 'test',
+    } as const
+    render(
+      <UsageLogsProvider>
+        {surface === 'source' ? (
+          <LogSourceCell
+            log={{ ...log, other: JSON.stringify(markedMetadata) }}
+            isAdmin
+            visibility={{ user_agent: false, ip: false }}
+          />
+        ) : (
+          <RequestMetadataTags isAdmin metadata={markedMetadata} expanded />
+        )}
+      </UsageLogsProvider>
+    )
+    expect(screen.getByText('Sub2-API')).toBeVisible()
+    const marker = screen.getByRole('img', { name: 'Test request' })
+    expect(screen.queryByText('Test request')).not.toBeInTheDocument()
+    await user.tab()
+    if (surface === 'source') await user.tab()
+    expect(marker).toHaveFocus()
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Test request')
+  }
+)
+
+test.each(['source', 'details'] as const)(
+  'does not label ordinary, unknown-purpose or personal requests as tests (%s)',
+  (surface) => {
+    const view = render(<UsageLogsProvider>{null}</UsageLogsProvider>)
+    for (const [purpose, isAdmin] of [
+      [undefined, true],
+      ['load_test', true],
+      [['test'], true],
+      ['test', false],
+    ] as const) {
+      const row = {
+        ...log,
+        other: JSON.stringify({
+          client_tool: 'Sub2-API',
+          request_purpose: purpose,
+        }),
+      }
+      const rowMetadata: LogOtherData = JSON.parse(row.other)
+      view.rerender(
+        <UsageLogsProvider>
+          {surface === 'source' ? (
+            <LogSourceCell log={row} isAdmin={isAdmin} visibility={{}} />
+          ) : (
+            <RequestMetadataTags
+              isAdmin={isAdmin}
+              metadata={rowMetadata}
+              expanded
+            />
+          )}
+        </UsageLogsProvider>
+      )
+      expect(
+        screen.queryByRole('img', { name: 'Test request' })
+      ).not.toBeInTheDocument()
+      if (isAdmin) expect(screen.getByText('Sub2-API')).toBeVisible()
+    }
+  }
+)
+
 test('leaves old records without metadata unlabelled instead of claiming no tools were called', () => {
   const view = render(<RequestMetadataTags isAdmin metadata={{}} expanded />)
   expect(
@@ -312,8 +382,10 @@ test('separates user, token and group while preserving request source and token 
     /Codex CLI|high|exec_command/
   )
   expect(cell('reasoning_effort')).toHaveTextContent('high')
-  expect(cell('username')).toHaveTextContent(
-    'Private account alias · account-user'
+  expect(cell('username')).toHaveTextContent('Private account alias')
+  expect(cell('username')).not.toHaveTextContent(log.username)
+  expect(within(cell('username')).getByTitle(log.username)).toHaveTextContent(
+    'Private account alias'
   )
   expect(cell('username')).not.toHaveTextContent(log.token_name)
   expect(cell('token_name')).toHaveTextContent(log.token_name)
