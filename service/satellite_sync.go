@@ -86,6 +86,12 @@ func SyncSatelliteOnce(ctx context.Context, includeEvents bool) error {
 	if err := ValidateSatelliteSyncConfiguration(); err != nil {
 		return err
 	}
+	return model.WithSatelliteSyncLock(ctx, func() error {
+		return syncSatelliteExchange(ctx, includeEvents)
+	})
+}
+
+func syncSatelliteExchange(ctx context.Context, includeEvents bool) error {
 	request := SatelliteSyncRequest{Version: 1}
 	var err error
 	request.Accounting, err = model.GetSatelliteAccountingDeltas(ctx)

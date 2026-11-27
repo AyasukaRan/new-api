@@ -2,6 +2,11 @@
 
 DO NOT send optional commentary
 
+## Home deployment backups
+
+- Store all new home-instance backups directly on the SSD at `/data/new-api-ran-backups/` on server 110. Do not write backups to `/storage/` and then copy them to the SSD.
+- Keep backup validation reads on the SSD as well. An interrupted or explicitly skipped backup must never be recorded as successfully verified.
+
 ## Overview
 
 This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI providers (OpenAI, Claude, Gemini, Azure, AWS Bedrock, etc.) behind a unified API, with user management, billing, rate limiting, and an admin dashboard.

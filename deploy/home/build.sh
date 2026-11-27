@@ -33,7 +33,8 @@ if [[ ! -f "$release/$receipt" ]]; then
   docker buildx build "${args[@]}" --load -t "$temporary_image" \
     --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
     --label "org.opencontainers.image.revision=$commit" --label "org.opencontainers.image.version=$version" \
-    --label "io.new-api.source-manifest-sha256=$manifest" --label 'io.new-api.frontend-base-path=/' "$work/candidate"
+    --label "io.new-api.source-manifest-sha256=$manifest" --label 'io.new-api.frontend-base-path=/' \
+    --label 'io.new-api.satellite-sync-lock=postgres-v1' "$work/candidate"
   docker buildx build "${args[@]}" --target web-dist --output "type=local,dest=$work/dist" "$work/candidate"
   python3 deploy/home/build_receipt.py finish "$work" --dist "$work/dist" --built-image "$temporary_image" \
     --runtime-base "$runtime_base" --runtime-base-id "$runtime_id"

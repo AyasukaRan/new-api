@@ -100,6 +100,7 @@ function LogSurface(props: {
   compact?: boolean
   visibility?: VisibilityState
   showViewMenu?: boolean
+  metadata?: LogOtherData
 }) {
   const columns = useCommonLogsColumns(
     props.isAdmin,
@@ -109,7 +110,9 @@ function LogSurface(props: {
     props.compact
   )
   const table = useReactTable({
-    data: [log],
+    data: [
+      props.metadata ? { ...log, other: JSON.stringify(props.metadata) } : log,
+    ],
     columns,
     state: { columnVisibility: props.visibility ?? {} },
     getCoreRowModel: getCoreRowModel(),
@@ -153,6 +156,48 @@ test('distinguishes an identified client from an unrecorded User-Agent', () => {
   )
   expect(screen.getByText('Claude Code')).toBeVisible()
   expect(screen.getByText('Not recorded')).toBeVisible()
+})
+
+test.each([
+  ['ran-110', 'Home node'],
+  ['ran-us2', 'US2 node'],
+  ['custom-gateway', 'custom-gateway'],
+])(
+  'shows the recorded gateway %s to administrators with the exact node on focus',
+  async (node, label) => {
+    const user = userEvent.setup()
+    renderWithQueries(
+      <LogSurface
+        mobile={false}
+        isAdmin
+        metadata={{ ...metadata, admin_info: { node_name: node } }}
+      />
+    )
+    expect(screen.getByText(label)).toBeVisible()
+    screen.getByRole('img', { name: `Node Name: ${label}` }).focus()
+    await user.keyboard('{Shift}')
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(
+      `Node Name: ${node}`
+    )
+  }
+)
+
+test('does not expose cached node metadata to personal views or guess an unrecorded node', () => {
+  renderWithQueries(
+    <LogSurface
+      mobile={false}
+      isAdmin={false}
+      metadata={{
+        ...metadata,
+        admin_info: { node_name: 'ran-us2' },
+        root_info: { node_name: 'ran-110' },
+      }}
+    />
+  )
+  expect(screen.queryByText('US2 node')).not.toBeInTheDocument()
+  expect(screen.queryByText('Home node')).not.toBeInTheDocument()
+  renderWithQueries(<LogSurface mobile={false} isAdmin metadata={{}} />)
+  expect(screen.queryByText('Home node')).not.toBeInTheDocument()
 })
 
 test.each(['source', 'details'] as const)(

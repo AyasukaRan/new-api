@@ -1756,6 +1756,10 @@ func (channel *Channel) GetSetting() dto.ChannelSettings {
 			_ = DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("setting", nil).Error
 		}
 	}
+	// A remote node may not be able to reach the primary's private proxy.
+	if common.IsSatellite() && common.GetEnvOrDefaultBool("SATELLITE_DIRECT_UPSTREAM", false) {
+		setting.Proxy = ""
+	}
 	return setting
 }
 

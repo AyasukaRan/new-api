@@ -183,6 +183,7 @@ func ensureLogRequestId(log *Log) {
 
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
+	ensureLogNodeName(log, common.NodeName)
 	// ClickHouse has no generated row ID. Distinguish separate attempts even
 	// when a request produces multiple identical entries in the same second.
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) && log.Id == 0 {

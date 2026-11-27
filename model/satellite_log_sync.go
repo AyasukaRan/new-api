@@ -276,6 +276,7 @@ func ImportSatelliteLogEvent(ctx context.Context, sourceNode string, event Satel
 				return errors.New("invalid satellite log payload")
 			}
 			row.Id = 0
+			ensureLogNodeName(&row, sourceNode)
 			if err := tx.Create(&row).Error; err != nil {
 				return err
 			}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -18,6 +19,67 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestChannelGetSettingSatelliteDirectUpstream(t *testing.T) {
+	const stored = `{"proxy":"http://192.0.2.120:7890","system_prompt":"preserved","http_protocol":"http1","pass_through_body_enabled":true,"upstream_cost_ratio":0.75}`
+	channel := &Channel{Id: 7247, Type: constant.ChannelTypeSub2API, Key: "fixture-key", BaseURL: common.GetPointer("https://supplier.example"), Setting: common.GetPointer(stored)}
+	identity := channel.Sub2APIConnectionIdentity()
+	rate, err := common.Marshal(Sub2APIRate{SourceIdentity: identity, ResolvedRateMultiplier: 0.25, EffectiveRateMultiplier: 0.25})
+	require.NoError(t, err)
+	previousDB, previousStorage := DB, sub2APIStorageDB.Load()
+	previousBinding, hadBinding := sub2APIBindingsCache.Load(channel.Id)
+	// The cached rate must be usable without a database round trip.
+	DB = &gorm.DB{}
+	sub2APIStorageDB.Store(DB)
+	sub2APIBindingsCache.Store(channel.Id, sub2APIBindingsCacheEntry{
+		items:     []Sub2APIKeyBinding{{ChannelID: channel.Id, KeyIdentity: channel.KeyIdentity(channel.Key), SyncRates: true, RateJSON: string(rate)}},
+		expiresAt: time.Now().Add(time.Hour),
+	})
+	t.Cleanup(func() {
+		DB = previousDB
+		sub2APIStorageDB.Store(previousStorage)
+		if hadBinding {
+			sub2APIBindingsCache.Store(channel.Id, previousBinding)
+		} else {
+			sub2APIBindingsCache.Delete(channel.Id)
+		}
+	})
+	for _, tc := range []struct {
+		name, role, direct string
+		wantDirect         bool
+	}{
+		{"primary inherits", "", "", false},
+		{"primary ignores override", "", "true", false},
+		{"satellite inherits by default", "satellite", "", false},
+		{"satellite explicit inheritance", "satellite", "false", false},
+		{"satellite direct", "satellite", "true", true},
+		{"invalid override preserves proxy", "satellite", "invalid", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SATELLITE_ROLE", tc.role)
+			t.Setenv("SATELLITE_DIRECT_UPSTREAM", tc.direct)
+			var expected dto.ChannelSettings
+			require.NoError(t, common.UnmarshalJsonStr(stored, &expected))
+			if tc.wantDirect {
+				expected.Proxy = ""
+			}
+			assert.Equal(t, expected, channel.GetSetting(), "only the runtime proxy may change")
+			assert.Equal(t, stored, *channel.Setting, "the synchronized setting must remain intact")
+			assert.Equal(t, identity, channel.Sub2APIConnectionIdentity())
+			assert.Equal(t, common.GetPointer(0.25), channel.UpstreamCostRatioForKey(channel.Key), "primary-synchronized rates still match on a direct satellite")
+			t.Setenv("SATELLITE_DIRECT_UPSTREAM", "false")
+			assert.Equal(t, "http://192.0.2.120:7890", channel.GetSetting().Proxy, "the inherited proxy remains available")
+		})
+	}
+	t.Run("stored proxy edits still invalidate the old rate", func(t *testing.T) {
+		t.Setenv("SATELLITE_ROLE", "satellite")
+		t.Setenv("SATELLITE_DIRECT_UPSTREAM", "true")
+		changed := *channel
+		changed.SetSetting(dto.ChannelSettings{Proxy: "http://192.0.2.121:7890", UpstreamCostRatio: common.GetPointer(0.75)})
+		assert.NotEqual(t, identity, changed.Sub2APIConnectionIdentity())
+		assert.Equal(t, common.GetPointer(0.75), changed.UpstreamCostRatioForKey(changed.Key), "stale supplier rates must not override the configured fallback")
+	})
+}
 
 func TestChannelBalanceRechargeMultiplier(t *testing.T) {
 	const invalidMultiplier = "Enter a finite recharge multiplier between 0.000001 and 1000000."

@@ -90,7 +90,11 @@ import type {
 import { BillingTierIcon, type BillingTier } from '../billing-tier-icon'
 import { LogCostDisplay } from '../log-cost-display'
 import { LogHeaderFilter } from '../log-header-filter'
-import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
+import {
+  LogAccountCell,
+  LogNodeBadge,
+  LogSourceCell,
+} from '../log-identity-cells'
 import { LogFilterValue, useLogValueFilter } from '../log-value-filter'
 import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
@@ -847,15 +851,20 @@ export function useCommonLogsColumns(
           const visibility = table.getState().columnVisibility
           return (
             <div className='flex w-full min-w-0 flex-col items-start justify-center gap-1'>
-              {visibility.response_transport !== false &&
-                (log.in_progress || isTimingLogType(log.type)) && (
-                  <StreamModeCell
-                    logType={log.type}
-                    isStream={log.is_stream}
-                    metadata={other}
-                    showEndpoint={isAdmin && visibility.request_path !== false}
-                  />
-                )}
+              <div className='flex max-w-full min-w-0 items-center gap-2'>
+                {visibility.response_transport !== false &&
+                  (log.in_progress || isTimingLogType(log.type)) && (
+                    <StreamModeCell
+                      logType={log.type}
+                      isStream={log.is_stream}
+                      metadata={other}
+                      showEndpoint={
+                        isAdmin && visibility.request_path !== false
+                      }
+                    />
+                  )}
+                <LogNodeBadge isAdmin={isAdmin} metadata={other} />
+              </div>
               {isAdmin &&
                 visibility.request_path !== false &&
                 (log.in_progress || isDisplayableLogType(log.type)) &&

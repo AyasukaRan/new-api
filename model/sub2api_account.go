@@ -3,8 +3,6 @@ package model
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
@@ -103,7 +102,12 @@ func (rate Sub2APIRate) EffectiveAt(now time.Time) (float64, bool) {
 
 // A rate snapshot must not survive a change to the supplier or its connection.
 func (channel *Channel) Sub2APIConnectionIdentity() string {
-	hash := sha256.Sum256([]byte(strings.TrimSuffix(channel.GetBaseURL(), "/") + "\x00" + channel.GetSetting().Proxy))
+	// Rate snapshots follow the stored supplier configuration, not node-local routing.
+	setting := dto.ChannelSettings{}
+	if channel.Setting != nil {
+		_ = common.UnmarshalJsonStr(*channel.Setting, &setting)
+	}
+	hash := sha256.Sum256([]byte(strings.TrimSuffix(channel.GetBaseURL(), "/") + "\x00" + setting.Proxy))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -505,8 +509,6 @@ func DisconnectIndependentSub2APIAccount(accountID int64, authorization *AuthFlo
 	return err
 }
 
-var sub2APIRefreshLocks sync.Map
-
 // Account-scoped advisory locks serialize refresh-token rotation across channels
 // and gateway nodes. SQLite deployments use the same process-local fallback.
 func WithSub2APIAccountLock(ctx context.Context, accountID int64, operation func() error) error {
@@ -518,42 +520,9 @@ func WithSub2APIIdentityLock(ctx context.Context, identity string, operation fun
 }
 
 func withSub2APICredentialLock(ctx context.Context, key string, operation func() error) error {
-	digest := sha256.Sum256([]byte("new-api:sub2api:" + key))
-	name := "sub2api:" + hex.EncodeToString(digest[:24])
-	switch {
-	case common.UsingMainDatabase(common.DatabaseTypeMySQL):
-		wait := 0
-		if deadline, ok := ctx.Deadline(); ok {
-			wait = max(int(time.Until(deadline)/time.Second), 0)
-		}
-		return DB.WithContext(ctx).Connection(func(conn *gorm.DB) error {
-			var acquired sql.NullInt64
-			if err := conn.Raw("SELECT GET_LOCK(?, ?)", name, wait).Row().Scan(&acquired); err != nil {
-				return err
-			}
-			if acquired.Int64 != 1 {
-				return ErrPluginRefreshLockTimeout
-			}
-			defer conn.WithContext(context.Background()).Exec("DO RELEASE_LOCK(?)", name)
-			return operation()
-		})
-	case common.UsingMainDatabase(common.DatabaseTypePostgreSQL):
-		advisoryKey := int64(binary.BigEndian.Uint64(digest[:8]))
-		return DB.Transaction(func(tx *gorm.DB) error {
-			if err := tx.WithContext(ctx).Exec("SELECT pg_advisory_xact_lock(?)", advisoryKey).Error; err != nil {
-				return err
-			}
-			return operation()
-		})
-	default:
-		value, _ := sub2APIRefreshLocks.LoadOrStore(name, make(chan struct{}, 1))
-		lock := value.(chan struct{})
-		select {
-		case lock <- struct{}{}:
-		case <-ctx.Done():
-			return ErrPluginRefreshLockTimeout
-		}
-		defer func() { <-lock }()
-		return operation()
+	err := withDatabaseOperationLock(DB, ctx, "sub2api", key, operation)
+	if errors.Is(err, errDatabaseOperationLockTimeout) {
+		return ErrPluginRefreshLockTimeout
 	}
+	return err
 }

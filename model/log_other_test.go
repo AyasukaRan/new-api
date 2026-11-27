@@ -88,6 +88,46 @@ func TestLogOtherJSONStringDoesNotMutateReceiver(t *testing.T) {
 	require.Equal(t, first, second)
 }
 
+func TestLogNodeMetadataPreservesOriginAndScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		other    string
+		wantNode string
+	}{
+		{"new error", "", "ran-us2"},
+		{"recorded task origin", `{"root_info":{"node_name":"ran-110","task_plugin":{"private":true}},"large":9007199254740993}`, "ran-110"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := &Log{Other: tc.other}
+			ensureLogNodeName(row, "ran-us2")
+			var stored map[string]common.RawMessage
+			require.NoError(t, common.UnmarshalJsonStr(row.Other, &stored))
+			var root map[string]common.RawMessage
+			require.NoError(t, common.Unmarshal(stored["root_info"], &root))
+			var node string
+			require.NoError(t, common.Unmarshal(root["node_name"], &node))
+			assert.Equal(t, tc.wantNode, node)
+			for _, visibility := range []logOtherVisibility{logOtherVisibilityAdmin, logOtherVisibilityRoot} {
+				var projected struct {
+					Admin struct {
+						NodeName string `json:"node_name"`
+					} `json:"admin_info"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(projectLogOtherJSON(row.Other, visibility, true), &projected))
+				assert.Equal(t, tc.wantNode, projected.Admin.NodeName)
+			}
+			admin := formatLogOtherJSON(row.Other, logOtherVisibilityAdmin)
+			assert.NotContains(t, admin, "task_plugin")
+			assert.NotContains(t, admin, "root_info")
+			owner := formatLogOtherJSON(row.Other, logOtherVisibilityUser)
+			assert.NotContains(t, owner, "node_name")
+			if tc.other != "" {
+				assert.Contains(t, owner, "9007199254740993")
+			}
+		})
+	}
+}
+
 func newRequestBodyContext(t *testing.T, contentType string, body string) *gin.Context {
 	t.Helper()
 	gin.SetMode(gin.TestMode)

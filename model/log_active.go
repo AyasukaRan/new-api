@@ -47,6 +47,7 @@ func BeginActiveLog(row Log) string {
 	// Only the explicitly supplied display metadata enters this registry. No
 	// usage estimates, cost, raw request, or credential are recorded here.
 	row = Log{LiveKey: key, InProgress: true, UserId: row.UserId, CreatedAt: row.CreatedAt, Username: row.Username, TokenName: row.TokenName, TokenId: row.TokenId, ModelName: row.ModelName, IsStream: true, ChannelId: row.ChannelId, ChannelName: row.ChannelName, Group: row.Group, Ip: row.Ip, RequestId: row.RequestId, Other: row.Other}
+	ensureLogNodeName(&row, common.NodeName)
 	f := &activeUsageLogs
 	f.mu.Lock()
 	defer f.mu.Unlock()

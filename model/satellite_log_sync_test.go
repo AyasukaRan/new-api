@@ -3,16 +3,104 @@ package model
 import (
 	"context"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestSatelliteSyncLockDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := useSystemTaskMatrixDB(t, dialect)
+			previousKind := common.MainDatabaseType()
+			common.SetMainDatabaseType(common.DatabaseType(dialect))
+			t.Cleanup(func() { common.SetMainDatabaseType(previousKind) })
+			t.Setenv("SATELLITE_NODE_ID", "lock-test-node")
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(4)
+			peer := db
+			if dialect != "sqlite" {
+				var driver gorm.Dialector
+				if dialect == "mysql" {
+					driver = mysql.Open(os.Getenv("TEST_MYSQL_DSN"))
+				} else {
+					driver = postgres.Open(os.Getenv("TEST_POSTGRES_DSN"))
+				}
+				peer, err = gorm.Open(driver, &gorm.Config{})
+				require.NoError(t, err)
+				peerSQL, err := peer.DB()
+				require.NoError(t, err)
+				require.NotSame(t, sqlDB, peerSQL, "overlapping gateways use independent connection pools")
+				t.Cleanup(func() { assert.NoError(t, peerSQL.Close()) })
+			}
+			for _, scope := range []struct {
+				name, key string
+				acquire   func(context.Context, func() error) error
+			}{
+				{"satellite-sync", "lock-test-node", WithSatelliteSyncLock},
+				{"sub2api", "account:41", func(ctx context.Context, operation func() error) error {
+					return WithSub2APIAccountLock(ctx, 41, operation)
+				}},
+			} {
+				t.Run(scope.name, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					entered, release := make(chan struct{}), make(chan struct{})
+					finished := make(chan error, 1)
+					operationErr := errors.New("sync exchange failed")
+					go func() {
+						finished <- withDatabaseOperationLock(peer, ctx, scope.name, scope.key, func() error {
+							close(entered)
+							select {
+							case <-release:
+								return operationErr
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						})
+					}()
+					defer func() {
+						close(release)
+						assert.ErrorIs(t, <-finished, operationErr)
+						called := false
+						assert.NoError(t, scope.acquire(ctx, func() error { called = true; return nil }))
+						assert.True(t, called, "a failed exchange releases the lock for the next process")
+					}()
+					select {
+					case <-entered:
+					case err := <-finished:
+						// Keep the result available to the cleanup above.
+						finished <- err
+						require.NoError(t, err)
+					case <-ctx.Done():
+						t.Fatal("lock owner did not start")
+					}
+					waiting, stopWaiting := context.WithTimeout(ctx, 100*time.Millisecond)
+					called := false
+					err := scope.acquire(waiting, func() error { called = true; return nil })
+					stopWaiting()
+					assert.Error(t, err)
+					assert.False(t, called, "a second gateway must not read or apply another sync snapshot while one is in flight")
+					if dialect != "postgres" && scope.name == "sub2api" {
+						assert.ErrorIs(t, err, ErrPluginRefreshLockTimeout, "credential refresh keeps its timeout contract")
+					}
+					require.NoError(t, withDatabaseOperationLock(db, ctx, scope.name, scope.key+"-other", func() error { return nil }), "unrelated nodes and accounts are not blocked")
+				})
+			}
+		})
+	}
+}
 
 func TestSatelliteLogDeliveryDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
@@ -21,6 +109,8 @@ func TestSatelliteLogDeliveryDatabaseMatrix(t *testing.T) {
 			previousLogDB, previousKind := LOG_DB, common.LogDatabaseType()
 			previousSub2Storage := sub2APIStorageDB.Load()
 			previousDataExport := common.DataExportEnabled
+			previousNodeName := common.NodeName
+			common.NodeName = "test-us2"
 			common.DataExportEnabled = true
 			LOG_DB = db
 			common.SetLogDatabaseType(common.DatabaseType(dialect))
@@ -32,6 +122,7 @@ func TestSatelliteLogDeliveryDatabaseMatrix(t *testing.T) {
 				common.SetLogDatabaseType(previousKind)
 				sub2APIStorageDB.Store(previousSub2Storage)
 				common.DataExportEnabled = previousDataExport
+				common.NodeName = previousNodeName
 			})
 			require.NoError(t, db.AutoMigrate(&Log{}, &RequestTrace{}, &RequestTracePayloadChunk{}, &Sub2APIBill{}, &QuotaData{}))
 			sub2APIStorageDB.Store(db)
@@ -82,12 +173,20 @@ func TestSatelliteLogDeliveryDatabaseMatrix(t *testing.T) {
 				require.NoError(t, db.Create(&Log{RequestId: "receiver-sequence", CreatedAt: 151}).Error)
 			}
 			t.Setenv("SATELLITE_ROLE", "primary")
+			common.NodeName = "test-home"
 			require.NoError(t, ImportSatelliteLogEvent(ctx, "test-us2", events[0]))
 			require.NoError(t, ImportSatelliteLogEvent(ctx, "test-us2", events[0]))
 			var imported Log
 			require.NoError(t, db.Where("request_id = ?", log.RequestId).First(&imported).Error)
 			assert.NotEqual(t, log.Id, imported.Id)
 			assert.Equal(t, log.Quota, imported.Quota)
+			var origin struct {
+				Root struct {
+					NodeName string `json:"node_name"`
+				} `json:"root_info"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(imported.Other, &origin))
+			assert.Equal(t, "test-us2", origin.Root.NodeName, "import preserves the request origin, not the receiving node")
 			require.NoError(t, db.Model(&Log{}).Where("request_id = ?", log.RequestId).Count(&count).Error)
 			assert.EqualValues(t, 1, count)
 			var bills []Sub2APIBill
@@ -128,6 +227,10 @@ func TestSatelliteLogDeliveryDatabaseMatrix(t *testing.T) {
 			require.NoError(t, db.Model(&Log{}).Where("request_id = ?", "").Count(&count).Error)
 			assert.EqualValues(t, 1, count)
 			require.NoError(t, AcknowledgeSatelliteLogEvents(ctx, []int64{taskEvents[0].ID}))
+			var legacyImported Log
+			require.NoError(t, db.Where("request_id = ?", "").First(&legacyImported).Error)
+			require.NoError(t, common.UnmarshalJsonStr(legacyImported.Other, &origin))
+			assert.Equal(t, "test-us2", origin.Root.NodeName, "missing historical metadata uses authenticated source node")
 			t.Setenv("SATELLITE_ROLE", "satellite")
 			client := "claude_code"
 			trace := &RequestTrace{TraceId: "late-trace", RequestId: log.RequestId, Direction: TraceDirectionClientRequest,

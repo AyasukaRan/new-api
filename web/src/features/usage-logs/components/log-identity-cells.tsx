@@ -22,6 +22,7 @@ import {
   Link,
   Monitor,
   Network,
+  Server,
   KeyRound,
   Tags,
   Terminal,
@@ -34,6 +35,11 @@ import { TruncatedCell } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { formatAdminUserLabel } from '@/features/users/lib/admin-nickname'
 import { toIntlLocale } from '@/i18n/languages'
 import { cn } from '@/lib/utils'
@@ -45,6 +51,51 @@ import type { LogOtherData } from '../types'
 import { LogFilterValue, useLogValueFilter } from './log-value-filter'
 import { RequestPurposeTag } from './request-metadata-tags'
 import { useUsageLogsContext } from './usage-logs-provider'
+
+export function LogNodeBadge(props: {
+  isAdmin: boolean
+  metadata: LogOtherData | null
+}) {
+  const { t } = useTranslation()
+  const { sensitiveVisible } = useUsageLogsContext()
+  const raw =
+    props.metadata?.admin_info?.node_name ??
+    props.metadata?.root_info?.node_name
+  if (
+    !props.isAdmin ||
+    !sensitiveVisible ||
+    typeof raw !== 'string' ||
+    !raw.trim()
+  ) {
+    return null
+  }
+  const node = raw.trim()
+  let label = node
+  if (node === 'ran-110') label = t('Home node')
+  if (node === 'ran-us2') label = t('US2 node')
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={<span role='img' tabIndex={0} />}
+        aria-label={`${t('Node Name')}: ${label}`}
+        className='focus-visible:ring-ring inline-flex max-w-28 min-w-0 cursor-help rounded-sm focus-visible:ring-2 focus-visible:outline-none'
+      >
+        <StatusBadge
+          type='text'
+          icon={Server}
+          variant={node === 'ran-us2' ? 'blue' : 'neutral'}
+          label={label}
+          copyable={false}
+          title={undefined}
+          className='gap-1 text-[11px] font-medium [&>svg]:size-3'
+        />
+      </TooltipTrigger>
+      <TooltipContent role='tooltip'>
+        {t('Node Name')}: {node}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
 
 export function LogGroupLabel({
   group,

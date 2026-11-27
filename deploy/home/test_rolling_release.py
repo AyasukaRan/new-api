@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import rolling_release as release
+import satellite_release as satellite
 
 
 def app(image, identity, running=True):
@@ -711,6 +712,113 @@ class RollingReleaseTests(unittest.TestCase):
                 with patch.object(release, 'EDGE_CONFIG', edge_config):
                     flow.switch('to-bridge', release.APP, release.BRIDGE, 'new')
                 self.assertEqual(actions, expected)
+
+
+class SatelliteReleaseTests(unittest.TestCase):
+    def runtime(self):
+        item = app('old', 'old-id')
+        item['Config'].update(Cmd=None, Env=[
+            'SATELLITE_ROLE=satellite', 'SATELLITE_NODE_ID=ran-us2', 'NODE_NAME=ran-us2',
+            'HOST=127.0.0.1', 'PORT=3000', 'BATCH_UPDATE_ENABLED=false',
+            'SQL_DSN=postgres://private:secret@127.0.0.1:25432/newapi',
+            'REDIS_CONN_STRING=redis://:private@127.0.0.1:26379/0', 'CRYPTO_SECRET=private',
+        ])
+        item['HostConfig'].update(NetworkMode='host', RestartPolicy={'Name': 'unless-stopped'})
+        item['Mounts'] = [{'Destination': '/data', 'RW': True}]
+        return item
+
+    def test_satellite_candidate_preserves_identity_secrets_and_shared_mounts(self):
+        old = self.runtime()
+        config = satellite.candidate_config(old, 'new', 'green', Path('/private/journal.json'))
+        before, after = release.environment(old['Config']['Env']), release.environment(config['Env'])
+        self.assertEqual(after.pop('PORT'), '3001')
+        self.assertEqual(after.pop('SATELLITE_DIRECT_UPSTREAM'), 'true')
+        before.pop('PORT')
+        self.assertEqual(after, before)
+        self.assertEqual(config['HostConfig'], old['HostConfig'])
+        self.assertEqual(config['Healthcheck']['Test'][-1], 'http://127.0.0.1:3001/api/status')
+        self.assertNotIn('com.docker.compose.project', config['Labels'])
+
+    def test_satellite_parallel_release_requires_local_postgresql(self):
+        for dsn in ('file:main.db', 'root:secret@tcp(localhost)/main', 'postgres://host.example/main'):
+            with self.subTest(dsn=dsn):
+                item = self.runtime()
+                item['Config']['Env'] = [value if not value.startswith('SQL_DSN=') else 'SQL_DSN=' + dsn
+                                         for value in item['Config']['Env']]
+                with self.assertRaisesRegex(RuntimeError, 'postgresql_local_database_required'):
+                    satellite.validate_runtime(item)
+
+    def test_satellite_readiness_is_a_successful_rollback_wait_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            item = self.runtime()
+            (root / 'app.before.json').write_text(json.dumps(item))
+            flow = object.__new__(satellite.SatelliteRollout)
+            flow.private, flow.state = root, {'new': {'id': 'new-id'}}
+            flow.item = lambda _: item
+            target = {'id': 'old-id', 'slot': 'blue', 'version': 'old'}
+            with patch.object(satellite.edge_switch, 'status', return_value=True):
+                satellite.edge_switch.wait_for(lambda: flow.ready(target), .01)
+
+    def test_satellite_switch_changes_marker_without_reloading_caddy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(satellite, 'ROLLOUT', root), patch.object(satellite, 'ACTIVE', root / 'active-blue'), \
+                    patch.object(satellite, 'command') as command:
+                satellite.route('blue')
+                self.assertEqual(satellite.current_slot(), 'blue')
+                satellite.route('green')
+                self.assertEqual(satellite.current_slot(), 'green')
+                command.assert_not_called()
+
+    def test_satellite_drain_requires_proxy_and_application_both_quiet(self):
+        flow = object.__new__(satellite.SatelliteRollout)
+        flow.state = {}
+        flow.save = lambda **values: flow.state.update(values)
+        flow.item = lambda _: self.runtime()
+        target = {'id': 'old-id', 'slot': 'blue'}
+        with patch.object(satellite, 'caddy_api', return_value=[{'address': '127.0.0.1:3000', 'num_requests': 1}]) as api, \
+                patch.object(satellite, 'application_connections', return_value=0) as connections, \
+                patch.object(satellite.time, 'time', return_value=10) as clock:
+            self.assertFalse(flow.drained(target))
+            api.return_value[0]['num_requests'] = 0
+            connections.return_value = 1
+            self.assertFalse(flow.drained(target))
+            connections.return_value = 0
+            self.assertFalse(flow.drained(target))
+            clock.return_value = 13
+            self.assertTrue(flow.drained(target))
+
+    def test_satellite_shutdown_signals_once_and_never_force_kills(self):
+        flow = object.__new__(satellite.SatelliteRollout)
+        flow.state = {'started_at': 1}
+        flow.save = lambda **values: flow.state.update(values)
+        item = self.runtime()
+        flow.item = lambda _: item
+        flow.drained = lambda _: True
+        target = {'id': 'old-id', 'name': 'old'}
+        with patch.object(satellite, 'command', return_value='') as command:
+            self.assertFalse(flow.terminate(target))
+            self.assertFalse(flow.terminate(target))
+            self.assertEqual(command.call_args_list, [unittest.mock.call('docker', 'kill', '--signal=TERM', 'old')])
+            item['State']['Running'] = False
+            self.assertTrue(flow.terminate(target))
+            self.assertFalse(any('stop' in call.args or '--signal=KILL' in call.args for call in command.call_args_list))
+
+    def test_satellite_legacy_bootstrap_does_not_touch_busy_ingress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'Caddyfile'
+            config.write_bytes(b'original')
+            (root / 'Caddyfile.before').write_bytes(b'original')
+            flow = object.__new__(satellite.SatelliteRollout)
+            flow.state = {'phase': 'prepared', 'bootstrap': True, 'old': {}, 'new': {}}
+            flow.private, flow.guard = root, lambda: None
+            flow.drained = lambda _: False
+            with patch.object(satellite, 'CONFIG', config), patch.object(satellite, 'load_caddy') as load:
+                self.assertFalse(flow.advance())
+                self.assertEqual(flow.state['phase'], 'prepared')
+                load.assert_not_called()
 
 
 if __name__ == '__main__':

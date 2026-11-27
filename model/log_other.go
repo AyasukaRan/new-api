@@ -246,6 +246,39 @@ func normalizeLegacyRejectReason(values map[string]json.RawMessage) bool {
 	return true
 }
 
+// A task or imported log keeps its original gateway rather than the node that
+// later persists or displays it. Keep other JSON values lossless.
+func ensureLogNodeName(log *Log, nodeName string) {
+	if log == nil || strings.TrimSpace(nodeName) == "" {
+		return
+	}
+	values := make(map[string]json.RawMessage)
+	if log.Other != "" && common.UnmarshalJsonStr(log.Other, &values) != nil {
+		return
+	}
+	if values == nil {
+		values = make(map[string]json.RawMessage)
+	}
+	root := make(map[string]json.RawMessage)
+	if raw := values[logOtherRootInfoKey]; len(raw) > 0 {
+		if common.Unmarshal(raw, &root) != nil {
+			return
+		}
+	}
+	if root == nil {
+		root = make(map[string]json.RawMessage)
+	}
+	var existing string
+	if common.Unmarshal(root["node_name"], &existing) == nil && strings.TrimSpace(existing) != "" {
+		return
+	}
+	root["node_name"], _ = common.Marshal(nodeName)
+	values[logOtherRootInfoKey], _ = common.Marshal(root)
+	if encoded, err := common.Marshal(values); err == nil {
+		log.Other = string(encoded)
+	}
+}
+
 // formatLogOtherJSON applies the role projection while keeping untouched JSON
 // values as RawMessage. This preserves integers larger than JavaScript's safe
 // range instead of round-tripping them through float64.
@@ -284,6 +317,23 @@ func projectLogOtherJSON(value string, visibility logOtherVisibility, deferBody 
 		}
 	} else {
 		changed = normalizeLegacyRejectReason(values)
+		// Gateway identity is useful to administrators without exposing root's
+		// runtime diagnostics. Also projects historical root-only node labels.
+		var root map[string]json.RawMessage
+		var node string
+		if common.Unmarshal(values[logOtherRootInfoKey], &root) == nil &&
+			common.Unmarshal(root["node_name"], &node) == nil && strings.TrimSpace(node) != "" {
+			admin := make(map[string]json.RawMessage)
+			_ = common.Unmarshal(values[logOtherAdminInfoKey], &admin)
+			if admin == nil {
+				admin = make(map[string]json.RawMessage)
+			}
+			if _, exists := admin["node_name"]; !exists {
+				admin["node_name"] = root["node_name"]
+				values[logOtherAdminInfoKey], _ = common.Marshal(admin)
+				changed = true
+			}
+		}
 		if deferBody && deferLogRequestBody(values) {
 			changed = true
 		}
