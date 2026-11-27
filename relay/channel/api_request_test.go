@@ -147,6 +147,88 @@ type privacyTestBody struct {
 
 func (b *privacyTestBody) Close() error { b.closed = true; return nil }
 
+func TestDeepSeekSystemFingerprintPrivacy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousSecret := common.CryptoSecret
+	common.CryptoSecret = "fingerprint-test-deployment-secret"
+	t.Cleanup(func() { common.CryptoSecret = previousSecret })
+	aliases := map[string]string{}
+	for _, tc := range []struct {
+		name, body string
+		stream     bool
+	}{
+		{name: "chat JSON", body: `{"id":"provider-response","system_fingerprint":"fp-backend-one","choices":[{"message":{"content":"fp-backend-one","tool_calls":[{"id":"call-functional","function":{"name":"lookup","arguments":"{\"system_fingerprint\":\"fp-backend-one\"}"}}]}}],"usage":{"prompt_tokens":17,"completion_tokens":3}}`},
+		{name: "changed backend", body: `{"system_fingerprint":"fp-backend-two","choices":[]}`},
+		{name: "response envelope", body: `{"type":"response.created","response":{"system_fingerprint":"fp-backend-one","output":[]}}`},
+		{name: "message envelope", body: `{"type":"message_start","message":{"system_fingerprint":"fp-backend-one","content":[]}}`},
+		{name: "missing", body: `{"choices":[]}`},
+		{name: "null", body: `{"system_fingerprint":null}`},
+		{name: "empty", body: `{"system_fingerprint":""}`},
+		{name: "non-string", body: `{"system_fingerprint":17}`},
+		{name: "chat SSE", stream: true, body: "data: {\"system_fingerprint\":\"fp-backend-one\",\"choices\":[{\"delta\":{\"content\":\"fp-backend-one\"}}]}\n\ndata: {\"system_fingerprint\":\"fp-backend-one\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, requestID := range []string{"local-request-one", "local-request-two"} {
+				c, _ := gin.CreateTestContext(httptest.NewRecorder())
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+				c.Set(common.RequestIdKey, requestID)
+				var originalCapture bytes.Buffer
+				source := &privacyTestBody{Reader: io.TeeReader(iotest.OneByteReader(strings.NewReader(tc.body)), &originalCapture)}
+				contentType := "application/json"
+				if tc.stream {
+					contentType = "text/event-stream"
+				}
+				response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{contentType}}, Body: source}
+				info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek}, RelayFormat: types.RelayFormatOpenAI, IsStream: tc.stream}
+				require.NoError(t, protectDeepSeekResponse(c, info, response))
+				body, err := io.ReadAll(response.Body)
+				require.NoError(t, err)
+				require.NoError(t, response.Body.Close())
+				assert.True(t, source.closed)
+				assert.Equal(t, tc.body, originalCapture.String(), "the upstream trace retains the original fingerprint")
+				beforeEvents, afterEvents := []string{tc.body}, []string{string(body)}
+				if tc.stream {
+					beforeEvents = strings.Split(strings.TrimSpace(tc.body), "\n\n")
+					afterEvents = strings.Split(strings.TrimSpace(string(body)), "\n\n")
+				}
+				require.Len(t, afterEvents, len(beforeEvents))
+				for i, before := range beforeEvents {
+					after := afterEvents[i]
+					if tc.stream {
+						before = strings.TrimPrefix(before, "data: ")
+						after = strings.TrimPrefix(after, "data: ")
+					}
+					if before == "[DONE]" {
+						assert.Equal(t, before, after)
+						continue
+					}
+					for _, path := range []string{"system_fingerprint", "response.system_fingerprint", "message.system_fingerprint"} {
+						original, rewritten := ojson.Get(before, path), ojson.Get(after, path)
+						if original.Type != ojson.String || original.String() == "" {
+							assert.Equal(t, original.Raw, rewritten.Raw, path)
+							continue
+						}
+						alias := rewritten.String()
+						assert.Regexp(t, `^gateway_fp_[0-9a-f]{32}$`, alias)
+						assert.NotContains(t, alias, original.String())
+						if previous, exists := aliases[original.String()]; exists {
+							assert.Equal(t, previous, alias, "the same backend stays stable across requests, chunks, and envelopes")
+						} else {
+							for _, previous := range aliases {
+								assert.NotEqual(t, previous, alias, "a backend change remains observable")
+							}
+							aliases[original.String()] = alias
+						}
+					}
+					for _, path := range []string{"choices", "usage", "response.output", "message.content"} {
+						assert.Equal(t, ojson.Get(before, path).Raw, ojson.Get(after, path).Raw, path)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestDeepSeekPrivacyReadBoundaries(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	require.NoError(t, i18n.Init())
@@ -215,7 +297,7 @@ func TestDeepSeekPrivacyReadBoundaries(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/relay", nil)
 		c.Set(common.RequestIdKey, "local-request")
-		original := []byte(`{"id":"provider-body-id","previous_response_id":"previous-id"}`)
+		original := []byte(`{"id":"provider-body-id","previous_response_id":"previous-id","system_fingerprint":"fp-backend-one"}`)
 		source := &privacyTestBody{Reader: bytes.NewReader(original)}
 		response := &http.Response{StatusCode: 200, Header: http.Header{"X-Request-Id": []string{"provider-header-id"}}, Body: source}
 		info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI}}

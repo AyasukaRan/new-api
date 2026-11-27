@@ -316,6 +316,14 @@ func (r *deepSeekPrivateResponse) rewriteJSON(payload []byte) ([]byte, error) {
 		}
 	}
 	for _, object := range objects {
+		if raw, exists := object.value["system_fingerprint"]; exists && common.GetJsonType(raw) == "string" {
+			var fingerprint string
+			if common.Unmarshal(raw, &fingerprint) == nil && fingerprint != "" {
+				// A backend fingerprint stays stable across requests and stream events.
+				local := "gateway_fp_" + common.GenerateHMAC("deepseek-system-fingerprint\x00" + fingerprint)[:32]
+				object.value["system_fingerprint"], _ = common.Marshal(local)
+			}
+		}
 		for _, key := range []string{"id", "request_id", "requestId", "trace_id", "traceId", "response_id", "responseId"} {
 			if raw, exists := object.value[key]; exists && string(raw) != "null" {
 				var id string
