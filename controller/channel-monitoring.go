@@ -37,19 +37,25 @@ func GetChannelMonitoring(c *gin.Context) {
 		return
 	}
 	end := time.Now().Unix()
-	history, err := model.ListChannelBalanceSamples(id, end-int64(hours)*3600, end, 10000)
+	// A 24-hour chart rarely spans a full observed day between its first and last sample.
+	dailyHistory, err := model.ListChannelBalanceSamples(id, end-30*24*3600, end, 10000)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	history := make([]model.ChannelBalanceSample, 0)
+	start := end - int64(hours)*3600
 	segment := 0
 	previousConfiguration := ""
-	for i := range history {
-		if i == 0 || history[i].ConfigurationHash != previousConfiguration {
+	for i := range dailyHistory {
+		if i == 0 || dailyHistory[i].ConfigurationHash != previousConfiguration {
 			segment++
 		}
-		history[i].ConfigurationSegment = segment
-		previousConfiguration = history[i].ConfigurationHash
+		dailyHistory[i].ConfigurationSegment = segment
+		previousConfiguration = dailyHistory[i].ConfigurationHash
+		if dailyHistory[i].CheckedAt >= start {
+			history = append(history, dailyHistory[i])
+		}
 	}
 	usage, err := perfmetrics.QueryChannelUsage(id, hours)
 	if err != nil {
@@ -101,7 +107,7 @@ func GetChannelMonitoring(c *gin.Context) {
 	if configured := channel.GetSetting().BalanceRechargeMultiplier; configured != nil && *configured > 0 && !math.IsNaN(*configured) && !math.IsInf(*configured, 0) {
 		multiplier = *configured
 	}
-	common.ApiSuccess(c, gin.H{"balance": channel.BalanceMonitor, "balance_history": history, "usage": usage, "used_quota": channel.UsedQuota, "key_usage": keyReport, "balance_currency": channelBalanceUnit(channel), "balance_recharge_multiplier": multiplier, "balance_detail": channel.GetBalanceDetail()})
+	common.ApiSuccess(c, gin.H{"balance": channel.BalanceMonitor, "balance_history": history, "balance_daily_history": dailyHistory, "usage": usage, "used_quota": channel.UsedQuota, "key_usage": keyReport, "balance_currency": channelBalanceUnit(channel), "balance_recharge_multiplier": multiplier, "balance_detail": channel.GetBalanceDetail()})
 }
 
 type channelKeyUsageView struct {

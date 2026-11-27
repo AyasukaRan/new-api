@@ -1007,6 +1007,7 @@
     "Base URL is required for this channel type": "Loại kênh này yêu cầu Base URL",
     "Base URL is required when an advanced route uses an upstream path": "Cần Base URL khi tuyến nâng cao dùng đường dẫn upstream",
     "Base URL of your Uptime Kuma instance": "URL cơ sở của phiên bản Uptime Kuma của bạn",
+    "Based on up to 30 days of balance history. Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.": "Dựa trên lịch sử số dư tối đa 30 ngày gần nhất. Cộng các mức giảm giữa hai lần đọc số dư hợp lệ liên tiếp rồi chia cho số ngày quan sát. Nạp tiền không tính là giảm; dữ liệu thiếu và thay đổi tài khoản ngắt khoảng tính. Cần ít nhất 24 giờ quan sát. Số dư dùng chung không đo chi tiêu riêng của từng khóa.",
     "Basic Authentication": "Xác thực cơ bản",
     "Basic Configuration": "Cấu hình cơ bản",
     "Basic Info": "Thông tin cơ bản",

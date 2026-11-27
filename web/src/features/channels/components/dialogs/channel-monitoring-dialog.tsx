@@ -135,7 +135,7 @@ export function ChannelMonitoringContent(props: {
         detail={data.balance_detail}
         storedCurrency={data.balance_currency}
         monitor={data.balance}
-        history={data.balance_history}
+        history={data.balance_daily_history ?? data.balance_history}
         queryDisabled={props.balanceQueryDisabled}
       />
       <ChannelKeyUsageMonitoring

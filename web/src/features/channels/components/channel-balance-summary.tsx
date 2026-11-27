@@ -306,7 +306,7 @@ export function ChannelBalanceSummary(props: {
                           </TooltipTrigger>
                           <TooltipContent>
                             {t(
-                              'Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.'
+                              'Based on up to 30 days of balance history. Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.'
                             )}
                           </TooltipContent>
                         </Tooltip>

@@ -390,6 +390,7 @@ export interface ChannelMonitoring {
   used_quota: number
   balance: ChannelBalanceMonitor | null
   balance_history: ChannelBalanceSample[]
+  balance_daily_history?: ChannelBalanceSample[]
   balance_detail?: ChannelBalanceDetail | null
   balance_currency?: string
   balance_recharge_multiplier?: number

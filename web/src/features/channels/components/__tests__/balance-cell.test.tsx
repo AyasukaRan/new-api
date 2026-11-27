@@ -826,30 +826,58 @@ test('missing historical key usage is an empty state rather than zero spending',
   expect(screen.queryByText('$0')).not.toBeInTheDocument()
 })
 
-test('balance monitoring shows daily declines from existing history before key usage recording is available', async () => {
+test('24h monitoring uses older balance readings for daily averages without expanding the chart period', async () => {
   const user = userEvent.setup()
-  const history = [6, 4].map((balance, index) => ({
+  const now = 200000
+  const history = [
+    { hoursAgo: 48, balance: 100 },
+    { hoursAgo: 25, balance: 77 },
+    { hoursAgo: 23, balance: 75 },
+    { hoursAgo: 1, balance: 53 },
+  ].map((sample, index) => ({
     ...complete,
     id: index + 1,
     channel_id: 1,
-    checked_at: 100 + index * 86400,
+    checked_at: now - sample.hoursAgo * 3600,
     used_quota: 0,
     configuration_segment: 1,
-    key_balances: [{ index: 0, balance }],
+    key_balances: [{ index: 0, balance: sample.balance }],
   }))
-  render(
-    <ChannelBalanceSummary
-      monitor={complete}
-      history={history}
-      storedCurrency='CNY'
-      balanceRechargeMultiplier={2}
-    />
-  )
+  const data = {
+    used_quota: 0,
+    balance: complete,
+    balance_history: history.slice(2),
+    balance_daily_history: history,
+    balance_currency: 'CNY',
+    balance_recharge_multiplier: 2,
+    usage: {
+      channel_id: 1,
+      hours: 24,
+      request_count: 0,
+      success_count: 0,
+      probe_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      used_quota: 0,
+      recorded_used_quota: 0,
+      recorded_input_tokens: 0,
+      recorded_output_tokens: 0,
+      billing_record_count: 0,
+      avg_latency_ms: 0,
+      series: [],
+    },
+  }
+  render(<ChannelMonitoringContent data={data} />)
   const daily = screen.getAllByRole('button', {
     name: /Daily balance decrease:/,
   })
-  expect(daily[0]).toHaveTextContent('CN¥1')
+  expect(daily[0]).toHaveTextContent('CN¥12')
   expect(daily[1]).toHaveTextContent('—')
+  const chartHistory = screen.getByRole('region', { name: 'Balance history' })
+  expect(within(chartHistory).getByText('CN¥37.5')).toBeVisible()
+  expect(within(chartHistory).getByText('CN¥26.5')).toBeVisible()
+  expect(within(chartHistory).queryByText('CN¥50')).not.toBeInTheDocument()
+  expect(within(chartHistory).queryByText('CN¥38.5')).not.toBeInTheDocument()
   await user.tab()
   expect(daily[0]).toHaveFocus()
   expect(

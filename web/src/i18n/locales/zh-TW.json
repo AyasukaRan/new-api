@@ -1007,6 +1007,7 @@
     "Base URL is required for this channel type": "此渠道類型需要填寫 Base URL",
     "Base URL is required when an advanced route uses an upstream path": "進階路由使用上游路徑時必須填寫 Base URL",
     "Base URL of your Uptime Kuma instance": "您的 Uptime Kuma 實例的基礎 URL",
+    "Based on up to 30 days of balance history. Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.": "依最近最多 30 天的餘額歷史統計。將相鄰有效餘額讀數的下降量累計，再除以有效觀測天數。儲值上漲不計下降，缺失資料與帳戶變更會中斷區間；需至少 24 小時有效觀測。共用餘額不能衡量單一 Key 的支出。",
     "Basic Authentication": "基本身份驗證",
     "Basic Configuration": "基本設定",
     "Basic Info": "基本資訊",

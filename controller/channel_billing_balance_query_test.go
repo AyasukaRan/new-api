@@ -1497,6 +1497,83 @@ func TestChannelBalanceDatabaseMatrix(t *testing.T) {
 	}
 }
 
+func TestChannelMonitoringDailyBalanceHistory(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			database := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			require.NoError(t, database.AutoMigrate(&model.ChannelBalanceSample{}, &model.ChannelPerfMetric{}, &model.Log{}))
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: "daily balance history", Key: "private-balance-history-key"}
+			empty := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: "no balance history", Key: "private-empty-balance-key"}
+			require.NoError(t, database.Create(channel).Error)
+			require.NoError(t, database.Create(empty).Error)
+			now := time.Now().Unix()
+			samples := make([]model.ChannelBalanceSample, 0, 6)
+			for index, age := range []int64{31 * 86400, 29 * 86400, 4 * 86400, 49 * 3600, 23 * 3600, 60} {
+				sample := model.ChannelBalanceSample{
+					StartedAt: (now - age) * int64(time.Second), CheckedAt: now - age, Success: true,
+					KeyBalances: []model.ChannelKeyBalance{{Index: 0, Balance: common.GetPointer(100.0 - float64(index))}},
+				}
+				require.NoError(t, model.RecordChannelBalanceSample(channel, &sample))
+				if index < 2 {
+					require.NoError(t, database.Model(&sample).Update("configuration_hash", "previous-account").Error)
+				}
+				samples = append(samples, sample)
+			}
+			engine := gin.New()
+			engine.GET("/api/channel/monitoring/:id", GetChannelMonitoring)
+			for _, test := range []struct {
+				name    string
+				channel *model.Channel
+				hours   int
+				count   int
+			}{
+				{"24h curve keeps older daily observations", channel, 24, 2},
+				{"30d curve and daily history share a boundary", channel, 720, 5},
+				{"empty history remains an empty array", empty, 24, 0},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					recorder := httptest.NewRecorder()
+					engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/channel/monitoring/%d?hours=%d", test.channel.Id, test.hours), nil))
+					require.Equal(t, http.StatusOK, recorder.Code)
+					var response struct {
+						Success bool `json:"success"`
+						Data    struct {
+							History      []model.ChannelBalanceSample `json:"balance_history"`
+							DailyHistory []model.ChannelBalanceSample `json:"balance_daily_history"`
+						} `json:"data"`
+					}
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+					require.True(t, response.Success, recorder.Body.String())
+					require.NotNil(t, response.Data.History)
+					require.NotNil(t, response.Data.DailyHistory)
+					require.Len(t, response.Data.History, test.count)
+					if test.channel == empty {
+						assert.Empty(t, response.Data.DailyHistory)
+						return
+					}
+					require.Len(t, response.Data.DailyHistory, 5)
+					for index, sample := range response.Data.DailyHistory {
+						assert.Equal(t, samples[index+1].ID, sample.ID, "history remains ordered and excludes samples older than 30 days")
+						assert.Equal(t, []int{1, 2, 2, 2, 2}[index], sample.ConfigurationSegment, "old account readings must remain a separate segment")
+					}
+					if test.hours == 24 {
+						assert.Less(t, response.Data.History[1].CheckedAt-response.Data.History[0].CheckedAt, int64(86400))
+						assert.Equal(t, response.Data.DailyHistory[3:], response.Data.History)
+					} else {
+						assert.Equal(t, response.Data.DailyHistory, response.Data.History)
+					}
+					for _, secret := range []string{channel.Key, empty.Key, samples[5].ConfigurationHash, "configuration_hash", "key_balances_json"} {
+						assert.NotContains(t, recorder.Body.String(), secret)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestChannelMonitoringReadAPIs(t *testing.T) {
 	database := modelManagementDB(t, "sqlite", "")
 	require.NoError(t, database.AutoMigrate(&model.ChannelBalanceSample{}, &model.ChannelPerfMetric{}))
@@ -1612,7 +1689,7 @@ func TestChannelMonitoringReadAPIs(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"bad", "0", "-1", "1?hours=169", "1?hours=0", "1?hours=invalid"} {
+	for _, path := range []string{"bad", "0", "-1", "1?hours=721", "1?hours=0", "1?hours=invalid"} {
 		t.Run("rejects "+path, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/channel/monitoring/"+path, nil))

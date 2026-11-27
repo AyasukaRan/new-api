@@ -1007,6 +1007,7 @@
     "Base URL is required for this channel type": "このチャネルタイプには Base URL が必要です",
     "Base URL is required when an advanced route uses an upstream path": "高度なルートで上流パスを使う場合は Base URL が必要です",
     "Base URL of your Uptime Kuma instance": "Uptime KumaインスタンスのベースURL",
+    "Based on up to 30 days of balance history. Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.": "直近最大30日間の残高履歴に基づきます。連続する有効な残高照会の減少分を合計し、観測日数で割ります。チャージ増加は減少に含めず、欠測やアカウント変更で区間を分けます。24 時間以上の観測が必要です。共有残高では個々のキーの支出を測れません。",
     "Basic Authentication": "基本認証",
     "Basic Configuration": "基本設定",
     "Basic Info": "基本情報",

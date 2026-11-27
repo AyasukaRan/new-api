@@ -1007,6 +1007,7 @@
     "Base URL is required for this channel type": "Для этого типа канала требуется Base URL",
     "Base URL is required when an advanced route uses an upstream path": "Base URL требуется, когда расширенный маршрут использует путь upstream",
     "Base URL of your Uptime Kuma instance": "Базовый URL вашего экземпляра Uptime Kuma",
+    "Based on up to 30 days of balance history. Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.": "Расчёт по истории баланса максимум за последние 30 дней. Сумма снижений между последовательными успешными замерами, делённая на дни наблюдения. Пополнения не считаются снижением; пропуски и смена аккаунта разрывают интервалы. Нужно не менее 24 часов наблюдений. Общий баланс не измеряет расход отдельного ключа.",
     "Basic Authentication": "Базовая аутентификация",
     "Basic Configuration": "Базовая конфигурация",
     "Basic Info": "Основная информация",
