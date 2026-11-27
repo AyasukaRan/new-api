@@ -365,6 +365,7 @@ const SENSITIVE_FORM_FIELDS = [
   'batch_key',
   'tls_insecure_skip_verify',
   'pass_through_body_enabled',
+  'deepseek_stable_tool_schema_groups',
   'responses_websocket_enabled',
   'system_prompt',
   'system_prompt_override',
@@ -5305,6 +5306,51 @@ export function ChannelMutateDrawer({
                 {ollamaOpenAIChatFields}
                 {thinkingFields}
                 {passthroughFields}
+                {currentType === 43 && (
+                  <FormField
+                    control={form.control}
+                    name='deepseek_stable_tool_schema_groups'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Stable tool schema groups')}</FormLabel>
+                        <FormControl>
+                          <MultiSelect
+                            options={groupOptions.filter((option) =>
+                              currentGroups.includes(option.value)
+                            )}
+                            selected={field.value ?? []}
+                            onChange={field.onChange}
+                            placeholder={t('Select groups')}
+                            maxVisibleChips={4}
+                            disabled={
+                              sensitiveLocked ||
+                              isSubmitting ||
+                              formValues.pass_through_body_enabled
+                            }
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          <span className='block'>
+                            {t(
+                              'Stabilize tool schema field order for these groups to improve cache reuse. Leave empty to disable.'
+                            )}
+                          </span>
+                          <span className='block'>
+                            {t(
+                              'Generated argument order may change; tool order and supplied arguments stay unchanged.'
+                            )}
+                          </span>
+                          <span className='block'>
+                            {t(
+                              'Inactive while request body passthrough is enabled; selected groups are retained.'
+                            )}
+                          </span>
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
                 {systemPromptFields}
                 {systemPromptOverrideFields}
               </fieldset>

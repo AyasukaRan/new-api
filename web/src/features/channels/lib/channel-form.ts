@@ -365,6 +365,7 @@ export const channelFormSchema = z
     batch_key: z.string().optional(),
     tls_insecure_skip_verify: z.boolean().optional(),
     pass_through_body_enabled: z.boolean().optional(),
+    deepseek_stable_tool_schema_groups: z.array(z.string()).optional(),
     responses_websocket_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
@@ -657,6 +658,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   batch_key: '',
   tls_insecure_skip_verify: false,
   pass_through_body_enabled: false,
+  deepseek_stable_tool_schema_groups: [],
   responses_websocket_enabled: false,
   system_prompt: '',
   system_prompt_override: false,
@@ -721,6 +723,7 @@ export function transformChannelToFormDefaults(
     batch_key: '',
     tls_insecure_skip_verify: false,
     pass_through_body_enabled: false,
+    deepseek_stable_tool_schema_groups: [] as string[],
     responses_websocket_enabled: false,
     system_prompt: '',
     system_prompt_override: false,
@@ -771,6 +774,13 @@ export function transformChannelToFormDefaults(
         batch_key: parsed.batch_key || '',
         tls_insecure_skip_verify: parsed.tls_insecure_skip_verify === true,
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
+        deepseek_stable_tool_schema_groups: Array.isArray(
+          parsed.deepseek_stable_tool_schema_groups
+        )
+          ? parsed.deepseek_stable_tool_schema_groups.filter(
+              (group: unknown): group is string => typeof group === 'string'
+            )
+          : [],
         responses_websocket_enabled:
           parsed.responses_websocket_enabled === true,
         system_prompt: parsed.system_prompt || '',
@@ -923,6 +933,11 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     thinking_to_content: formData.thinking_to_content || false,
     proxy: formData.proxy?.trim() || '',
     pass_through_body_enabled: formData.pass_through_body_enabled === true,
+    deepseek_stable_tool_schema_groups:
+      formData.type === 43 &&
+      formData.deepseek_stable_tool_schema_groups?.length
+        ? formData.deepseek_stable_tool_schema_groups
+        : undefined,
     // A plugin channel shows the switch only when its plugin can serve it.
     responses_websocket_enabled:
       (supportsResponsesWebSocket(formData.type) ||

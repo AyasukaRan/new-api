@@ -336,7 +336,8 @@ func TestSatelliteConfigurationDatabaseMatrix(t *testing.T) {
 				AutoGroups: `["official","backup"]`, ModelLimitsEnabled: true, ModelLimits: "test-model"}
 			require.NoError(t, db.Create(&token).Error)
 			require.NoError(t, db.Model(&token).Update("expired_time", 0).Error)
-			channel := Channel{Id: 43, Name: "original", Key: "private-upstream-key", Group: "official", Models: "test-model", UsedQuota: 10,
+			channelSetting := `{"deepseek_stable_tool_schema_groups":["official"]}`
+			channel := Channel{Id: 43, Name: "original", Key: "private-upstream-key", Group: "official", Models: "test-model", UsedQuota: 10, Setting: &channelSetting,
 				ChannelInfo: ChannelInfo{KeyWeights: map[string]int{"physical-key": 7}}}
 			require.NoError(t, db.Create(&channel).Error)
 			require.NoError(t, db.Create(&Ability{Group: "official", Model: "test-model", ChannelId: channel.Id, Enabled: true}).Error)
@@ -392,6 +393,7 @@ func TestSatelliteConfigurationDatabaseMatrix(t *testing.T) {
 			var gotChannel Channel
 			require.NoError(t, db.First(&gotChannel, channel.Id).Error)
 			assert.Equal(t, channel.ChannelInfo.KeyWeights, gotChannel.ChannelInfo.KeyWeights)
+			assert.Equal(t, []string{"official"}, gotChannel.GetSetting().DeepSeekStableToolSchemaGroups, "selected tool-schema groups survive storage and satellite configuration sync")
 			var abilities []Ability
 			require.NoError(t, db.Find(&abilities).Error)
 			require.Len(t, abilities, 1)

@@ -187,6 +187,8 @@ export interface ChannelSettings {
   thinking_to_content?: boolean
   proxy?: string
   pass_through_body_enabled?: boolean
+  /** DeepSeek groups whose tool schema object keys are sent in stable order. */
+  deepseek_stable_tool_schema_groups?: string[]
   responses_websocket_enabled?: boolean
   system_prompt?: string
   system_prompt_override?: boolean

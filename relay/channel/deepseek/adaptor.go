@@ -51,7 +51,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 	if err := applyDeepSeekV4ClaudeThinkingSuffix(info, req); err != nil {
 		return nil, err
 	}
-	if req.Model == "deepseek-flash" && req.Tools != nil {
+	if req.Tools != nil && (req.Model == "deepseek-flash" || stableToolSchemasEnabled(info)) {
 		tools, err := common.Marshal(req.Tools)
 		if err != nil {
 			return nil, err
@@ -59,6 +59,9 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, info *relaycommon.RelayIn
 		tools, err = normalizeWebTools(req.Model, tools, true)
 		if err != nil {
 			return nil, err
+		}
+		if stableToolSchemasEnabled(info) {
+			tools = stabilizeNativeToolSchemas(tools, true)
 		}
 		req.Tools = common.RawMessage(tools)
 	}
@@ -192,6 +195,14 @@ func (a *Adaptor) ConvertOpenAIRequest(c *gin.Context, info *relaycommon.RelayIn
 		}
 	}
 	completeDeepSeekThinkingHistory(info, request)
+	if stableToolSchemasEnabled(info) {
+		for i := range request.Tools {
+			tool := &request.Tools[i]
+			if tool.Type == "function" && len(tool.Native) == 0 {
+				tool.Function.Parameters = stabilizeToolSchema(tool.Function.Parameters)
+			}
+		}
+	}
 
 	return request, nil
 }
@@ -343,6 +354,9 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(_ *gin.Context, info *relaycommo
 		return nil, err
 	}
 	request.Tools = tools
+	if stableToolSchemasEnabled(info) {
+		request.Tools = stabilizeNativeToolSchemas(request.Tools, false)
+	}
 	return request, nil
 }
 

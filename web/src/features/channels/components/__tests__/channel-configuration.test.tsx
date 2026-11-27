@@ -3714,6 +3714,115 @@ test('model group scopes prune removed models and groups without opening an empt
   expect(saved.group_models).toEqual({ Gemini: [] })
 })
 
+test('DeepSeek stable tool schemas default off and preserve selected groups through settings round trips', () => {
+  const empty = transformChannelToFormDefaults({ ...editingChannel, type: 43 })
+  expect(empty.deepseek_stable_tool_schema_groups).toEqual([])
+  expect(JSON.parse(buildSettingJSON(empty))).not.toHaveProperty(
+    'deepseek_stable_tool_schema_groups'
+  )
+  const groups = ['DeepSeek OpenLux', 'premium']
+  const defaults = transformChannelToFormDefaults({
+    ...editingChannel,
+    type: 43,
+    setting: JSON.stringify({ deepseek_stable_tool_schema_groups: groups }),
+  })
+  expect(defaults.deepseek_stable_tool_schema_groups).toEqual(groups)
+  expect(
+    JSON.parse(buildSettingJSON(defaults)).deepseek_stable_tool_schema_groups
+  ).toEqual(groups)
+  expect(
+    JSON.parse(buildSettingJSON({ ...defaults, type: 1 }))
+  ).not.toHaveProperty('deepseek_stable_tool_schema_groups')
+})
+
+test('DeepSeek stable tool schemas allow selecting multiple channel groups and clearing disables the setting', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: 43,
+    group: 'DeepSeek OpenLux,premium',
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const groups = screen.getByRole('combobox', { name: 'Select groups' })
+  await user.click(groups)
+  for (const name of ['DeepSeek OpenLux', 'premium']) {
+    await user.click(screen.getByRole('option', { name }))
+  }
+  await user.keyboard('{Escape}')
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1] as { setting: string }
+  expect(
+    JSON.parse(payload.setting).deepseek_stable_tool_schema_groups
+  ).toEqual(['DeepSeek OpenLux', 'premium'])
+  const defaults = transformChannelToFormDefaults({
+    ...editingChannel,
+    setting: payload.setting,
+  })
+  expect(
+    JSON.parse(
+      buildSettingJSON({ ...defaults, deepseek_stable_tool_schema_groups: [] })
+    )
+  ).not.toHaveProperty('deepseek_stable_tool_schema_groups')
+})
+
+test('DeepSeek stable tool schemas stay selected but inactive while body passthrough is enabled', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: 43,
+    group: 'DeepSeek OpenLux',
+    setting: JSON.stringify({
+      pass_through_body_enabled: true,
+      deepseek_stable_tool_schema_groups: ['DeepSeek OpenLux'],
+    }),
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  const groups = screen.getByRole('combobox', { name: 'Select groups' })
+  expect(groups).toBeDisabled()
+  expect(
+    screen.getByText(
+      'Inactive while request body passthrough is enabled; selected groups are retained.'
+    )
+  ).toBeVisible()
+  const disabledSetting = JSON.parse(
+    buildSettingJSON(transformChannelToFormDefaults(editingChannel))
+  )
+  expect(disabledSetting.deepseek_stable_tool_schema_groups).toEqual([
+    'DeepSeek OpenLux',
+  ])
+  await user.click(screen.getByRole('switch', { name: 'Pass Through Body' }))
+  expect(groups).not.toBeDisabled()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(
+    JSON.parse((put.mock.calls[0][1] as { setting: string }).setting)
+  ).toMatchObject({
+    pass_through_body_enabled: false,
+    deepseek_stable_tool_schema_groups: ['DeepSeek OpenLux'],
+  })
+})
+
+test('DeepSeek stable tool schema controls are absent for other providers', async () => {
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  expect(
+    screen.queryByText('Stable tool schema groups')
+  ).not.toBeInTheDocument()
+})
+
 test('model group scopes are disabled without sensitive channel write permission', async () => {
   editingChannel = {
     ...editingChannel,

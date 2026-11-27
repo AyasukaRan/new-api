@@ -353,15 +353,19 @@ func TestDeepSeekThinkingHistoryKeepsPassthroughAndOtherProvidersUntouched(t *te
 		globalPass  bool
 		channelPass bool
 		wantFilled  bool
+		override    bool
 	}{
 		{name: "DeepSeek converted body", channelType: constant.ChannelTypeDeepSeek, wantFilled: true},
+		{name: "DeepSeek explicit override wins", channelType: constant.ChannelTypeDeepSeek, wantFilled: true, override: true},
 		{name: "global raw passthrough", channelType: constant.ChannelTypeDeepSeek, globalPass: true},
 		{name: "channel raw passthrough", channelType: constant.ChannelTypeDeepSeek, channelPass: true},
 		{name: "OpenAI provider", channelType: constant.ChannelTypeOpenAI},
 		{name: "iFlytek provider", channelType: constant.ChannelTypeIFlytekMaaS},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			payload := `{"model":"application-model","thinking":{"type":"enabled"},"reasoning_effort":"max","messages":[{"role":"assistant","content":"Previous answer"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","content":"Result","tool_call_id":"call_1"}]}`
+			const originalSchema = `{"type":"object","properties":{"z":{"type":"string"},"a":{"type":"number"}}}`
+			const stableSchema = `{"properties":{"a":{"type":"number"},"z":{"type":"string"}},"type":"object"}`
+			payload := `{"model":"application-model","thinking":{"type":"enabled"},"reasoning_effort":"max","tools":[{"type":"function","function":{"name":"lookup","parameters":` + originalSchema + `}}],"messages":[{"role":"assistant","content":"Previous answer"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","content":"Result","tool_call_id":"call_1"}]}`
 			received := make(chan []byte, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
@@ -379,11 +383,14 @@ func TestDeepSeekThinkingHistoryKeepsPassthroughAndOtherProvidersUntouched(t *te
 			common.SetContextKey(c, constant.ContextKeyChannelType, test.channelType)
 			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
 			common.SetContextKey(c, constant.ContextKeyOriginalModel, "application-model")
-			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: test.channelPass})
+			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: test.channelPass, DeepSeekStableToolSchemaGroups: []string{"official"}})
+			if test.override {
+				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{"tools": common.RawMessage(`[{"type":"function","function":{"name":"lookup","parameters":` + originalSchema + `}}]`)})
+			}
 			common.SetContextKey(c, constant.ContextKeyChannelModelMapping, `{"application-model":"deepseek-v4-pro"}`)
 			request := &dto.GeneralOpenAIRequest{}
 			require.NoError(t, common.UnmarshalJsonStr(payload, request))
-			info := &relaycommon.RelayInfo{OriginModelName: "application-model", RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions, RequestURLPath: "/v1/chat/completions", Request: request}
+			info := &relaycommon.RelayInfo{UsingGroup: "official", OriginModelName: "application-model", RelayFormat: types.RelayFormatOpenAI, RelayMode: relayconstant.RelayModeChatCompletions, RequestURLPath: "/v1/chat/completions", Request: request}
 			settings.PassThroughRequestEnabled = test.globalPass
 			apiErr := relay.TextHelper(c, info)
 			require.NotNil(t, apiErr)
@@ -397,6 +404,12 @@ func TestDeepSeekThinkingHistoryKeepsPassthroughAndOtherProvidersUntouched(t *te
 			if test.globalPass || test.channelPass {
 				assert.Equal(t, payload, string(body), "raw passthrough remains byte-identical")
 			}
+			wantSchema := originalSchema
+			if test.wantFilled && !test.override {
+				wantSchema = stableSchema
+			}
+			assert.Equal(t, wantSchema, ojson.GetBytes(body, "tools.0.function.parameters").Raw)
+			assert.Equal(t, originalSchema, string(request.Tools[0].Function.Parameters), "the original schema remains reusable for retry or another channel")
 			var actual struct {
 				Messages []map[string]json.RawMessage `json:"messages"`
 			}
@@ -412,6 +425,75 @@ func TestDeepSeekThinkingHistoryKeepsPassthroughAndOtherProvidersUntouched(t *te
 			}
 			assert.NotContains(t, actual.Messages[2], "reasoning_content")
 		})
+	}
+}
+
+func TestDeepSeekStableToolSchemas(t *testing.T) {
+	const unordered = `{"type":"object","required":["z","a"],"properties":{"z":{"type":"number","minimum":1.00,"maximum":9007199254740993},"a":{"type":"array","items":{"type":"object","properties":{"z":{"const":{"z":2,"a":1}},"a":{"examples":[{"z":2,"a":1}],"type":"string"}}}}},"default":{"z":2,"a":1},"x-extension":{"z":1e3,"a":-0}}`
+	const ordered = `{"default":{"z":2,"a":1},"properties":{"a":{"items":{"properties":{"a":{"examples":[{"z":2,"a":1}],"type":"string"},"z":{"const":{"z":2,"a":1}}},"type":"object"},"type":"array"},"z":{"maximum":9007199254740993,"minimum":1.00,"type":"number"}},"required":["z","a"],"type":"object","x-extension":{"z":1e3,"a":-0}}`
+	for _, protocol := range []string{"chat", "responses", "claude"} {
+		for _, test := range []struct {
+			name, schema, want, group string
+			groups                    []string
+		}{
+			{name: "nested schema only", schema: unordered, want: ordered, group: "official", groups: []string{"official"}},
+			{name: "idempotent", schema: ordered, want: ordered, group: "official", groups: []string{"official"}},
+			{name: "default off", schema: unordered, want: unordered, group: "official"},
+			{name: "empty allowlist", schema: unordered, want: unordered, group: "official", groups: []string{}},
+			{name: "different group", schema: unordered, want: unordered, group: "other", groups: []string{"official"}},
+			{name: "no trusted group", schema: unordered, want: unordered, groups: []string{"official"}},
+			{name: "no wildcard", schema: unordered, want: unordered, group: "official", groups: []string{"*"}},
+			{name: "duplicate member", schema: `{"type":"object","properties":{"z":{"type":"string"},"z":{"type":"number"}}}`, group: "official", groups: []string{"official"}},
+			{name: "escaped duplicate", schema: `{"type":"object","properties":{"a":true,"\u0061":false}}`, group: "official", groups: []string{"official"}},
+			{name: "opaque duplicate", schema: `{"type":"object","default":{"z":1,"z":2}}`, group: "official", groups: []string{"official"}},
+			{name: "invalid nested schema", schema: `{"type":"object","properties":{"z":{"type":"string"}},"items":42}`, group: "official", groups: []string{"official"}},
+			{name: "invalid root", schema: `[]`, group: "official", groups: []string{"official"}},
+			{name: "schema arrays keep order", schema: `{"type":"object","anyOf":[{"type":"number","minimum":1e3},{"type":"string","enum":["z","a"]}],"additionalProperties":false}`, want: `{"additionalProperties":false,"anyOf":[{"minimum":1e3,"type":"number"},{"enum":["z","a"],"type":"string"}],"type":"object"}`, group: "official", groups: []string{"official"}},
+		} {
+			t.Run(protocol+"/"+test.name, func(t *testing.T) {
+				info := &relaycommon.RelayInfo{UsingGroup: test.group, ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeDeepSeek, ChannelSetting: dto.ChannelSettings{DeepSeekStableToolSchemaGroups: test.groups}}}
+				adaptor := &deepseek.Adaptor{}
+				var converted any
+				var err error
+				var tools, schemaPath string
+				switch protocol {
+				case "chat":
+					tools = `[{"type":"function","id":"call_lookup","function":{"name":"lookup","description":"fixture","parameters":` + test.schema + `,"arguments":"{\"z\":2,\"a\":1}","strict":false}},{"type":"deepseek_read_url","name":"untouched","x-extension":{"z":2,"a":1}}]`
+					var request dto.GeneralOpenAIRequest
+					require.NoError(t, common.UnmarshalJsonStr(`{"model":"deepseek-chat","tools":`+tools+`,"messages":[{"role":"tool","tool_call_id":"opaque-call-id","content":"{\"z\":2,\"a\":1}"}]}`, &request))
+					converted, err = adaptor.ConvertOpenAIRequest(nil, info, &request)
+					schemaPath = "tools.0.function.parameters"
+				case "responses":
+					tools = `[{"type":"function","name":"lookup","parameters":` + test.schema + `,"strict":false,"x-extension":{"z":1.00,"a":1e3}},{"type":"custom","name":"untouched","format":{"z":2,"a":1}}]`
+					converted, err = adaptor.ConvertOpenAIResponsesRequest(nil, info, dto.OpenAIResponsesRequest{Model: "deepseek-chat", Tools: common.RawMessage(tools), Input: common.RawMessage(`[{"type":"function_call_output","call_id":"opaque-call-id","output":"result"}]`)})
+					schemaPath = "tools.0.parameters"
+				case "claude":
+					tools = `[{"name":"lookup","input_schema":` + test.schema + `,"x-extension":{"z":1.00,"a":1e3}},{"type":"web_search_20250305","name":"untouched","input_schema":{"type":"object","properties":{"z":true,"a":false}}}]`
+					var request dto.ClaudeRequest
+					require.NoError(t, common.UnmarshalJsonStr(`{"model":"deepseek-chat","tools":`+tools+`,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"opaque-call-id","content":"result"}]}]}`, &request))
+					converted, err = adaptor.ConvertClaudeRequest(nil, info, &request)
+					schemaPath = "tools.0.input_schema"
+				}
+				require.NoError(t, err)
+				wire, err := common.Marshal(converted)
+				require.NoError(t, err)
+				want := test.want
+				if want == "" {
+					want = test.schema
+				}
+				assert.Equal(t, want, ojson.GetBytes(wire, schemaPath).Raw)
+				assert.Equal(t, ojson.Get(tools, "1").Raw, ojson.GetBytes(wire, "tools.1").Raw, "other tool types and their array position are preserved")
+				switch protocol {
+				case "chat":
+					assert.Equal(t, "opaque-call-id", ojson.GetBytes(wire, "messages.0.tool_call_id").String())
+					assert.Equal(t, `{"z":2,"a":1}`, ojson.GetBytes(wire, "tools.0.function.arguments").String())
+					assert.Equal(t, "call_lookup", ojson.GetBytes(wire, "tools.0.id").String())
+					assert.Equal(t, "false", ojson.GetBytes(wire, "tools.0.function.strict").Raw)
+				case "responses", "claude":
+					assert.Equal(t, `{"z":1.00,"a":1e3}`, ojson.GetBytes(wire, "tools.0.x-extension").Raw)
+				}
+			})
+		}
 	}
 }
 

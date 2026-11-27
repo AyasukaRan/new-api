@@ -20,17 +20,20 @@ type ChannelSettings struct {
 	// GroupModels restricts a configured group to a subset of this channel's
 	// client-facing model names. Missing groups inherit all models; an explicit
 	// empty list provides no models to that group.
-	GroupModels               map[string][]string `json:"group_models,omitempty"`
-	TaskPluginKey             string              `json:"task_plugin_key,omitempty"`
-	ForceFormat               bool                `json:"force_format,omitempty"`
-	ThinkingToContent         bool                `json:"thinking_to_content,omitempty"`
-	Proxy                     string              `json:"proxy"`
-	EndpointMode              string              `json:"endpoint_mode,omitempty"`
-	AdditionalBaseURLs        []string            `json:"additional_base_urls,omitempty"`
-	PassThroughBodyEnabled    bool                `json:"pass_through_body_enabled,omitempty"`
-	ResponsesWebSocketEnabled bool                `json:"responses_websocket_enabled,omitempty"`
-	SystemPrompt              string              `json:"system_prompt,omitempty"`
-	SystemPromptOverride      bool                `json:"system_prompt_override,omitempty"`
+	GroupModels map[string][]string `json:"group_models,omitempty"`
+	// DeepSeekStableToolSchemaGroups opts selected routing groups into stable
+	// tool schema field ordering. This can change generated argument ordering.
+	DeepSeekStableToolSchemaGroups []string `json:"deepseek_stable_tool_schema_groups,omitempty"`
+	TaskPluginKey                  string   `json:"task_plugin_key,omitempty"`
+	ForceFormat                    bool     `json:"force_format,omitempty"`
+	ThinkingToContent              bool     `json:"thinking_to_content,omitempty"`
+	Proxy                          string   `json:"proxy"`
+	EndpointMode                   string   `json:"endpoint_mode,omitempty"`
+	AdditionalBaseURLs             []string `json:"additional_base_urls,omitempty"`
+	PassThroughBodyEnabled         bool     `json:"pass_through_body_enabled,omitempty"`
+	ResponsesWebSocketEnabled      bool     `json:"responses_websocket_enabled,omitempty"`
+	SystemPrompt                   string   `json:"system_prompt,omitempty"`
+	SystemPromptOverride           bool     `json:"system_prompt_override,omitempty"`
 	// TaskExtendPluginKeys lists the task plugins a New API channel (type 60)
 	// is extended with. The upstream gateway may host many plugins, so the
 	// channel serves every listed plugin's models while the request still pins
