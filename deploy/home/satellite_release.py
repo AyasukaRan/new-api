@@ -240,6 +240,7 @@ class SatelliteRollout:
         existing = inspect(target['name'], optional=True)
         if existing is None:
             with socket.socket() as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(('127.0.0.1', PORTS[target['slot']]))
             config = candidate_config(read_json(self.private / 'app.before.json'), target['image_id'],
                                       target['slot'], self.args.state)

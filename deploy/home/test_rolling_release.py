@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import socket
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -769,6 +770,19 @@ class SatelliteReleaseTests(unittest.TestCase):
                 self.assertEqual(satellite.current_slot(), 'blue')
                 satellite.route('green')
                 self.assertEqual(satellite.current_slot(), 'green')
+                command.assert_not_called()
+
+    def test_satellite_candidate_refuses_a_port_with_a_real_listener(self):
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            flow = object.__new__(satellite.SatelliteRollout)
+            flow.state = {'new': {'name': 'candidate', 'slot': 'green'}}
+            with patch.object(satellite, 'PORTS', {'green': listener.getsockname()[1]}), \
+                    patch.object(satellite, 'inspect', return_value=None), patch.object(satellite, 'command') as command:
+                with self.assertRaises(OSError):
+                    flow.create()
                 command.assert_not_called()
 
     def test_satellite_drain_requires_proxy_and_application_both_quiet(self):
