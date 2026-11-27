@@ -3,6 +3,7 @@ package router
 import (
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/service/authz"
@@ -16,6 +17,10 @@ import (
 
 func SetApiRouter(router *gin.Engine) {
 	apiRouter := router.Group("/api")
+	if common.IsSatellite() {
+		apiRouter.GET("/status", controller.GetStatus)
+		return
+	}
 	apiRouter.Use(middleware.RouteTag("api"))
 	// This gzip version does not flush compressed streams incrementally.
 	apiRouter.Use(gzip.Gzip(gzip.DefaultCompression, gzip.WithExcludedPathsRegexs([]string{`^/api/log/trace/body$`, `^/api/log/(self/)?stream$`})))

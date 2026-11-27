@@ -1387,6 +1387,10 @@ func IncreaseUserQuota(id int, quota int, db bool) (err error) {
 	if err := common.ValidateWalletQuota(quota); err != nil {
 		return err
 	}
+	if common.IsSatellite() {
+		_, err := mutateSatelliteAccounting("user", id, int64(quota), 0, 0, false)
+		return err
+	}
 	if !db && common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
 		gopool.Go(func() {
@@ -1430,6 +1434,10 @@ func increaseUserQuota(id int, quota int) (err error) {
 func DecreaseUserQuota(id int, quota int, db bool) (err error) {
 	if quota < 0 {
 		return errors.New("quota cannot be negative")
+	}
+	if common.IsSatellite() {
+		_, err := mutateSatelliteAccounting("user", id, -int64(quota), 0, 0, false)
+		return err
 	}
 	gopool.Go(func() {
 		err := cacheDecrUserQuota(id, int64(quota))
@@ -1475,6 +1483,12 @@ func UpdateUserLastLoginAt(id int) {
 }
 
 func UpdateUserUsedQuotaAndRequestCount(id int, quota int) {
+	if common.IsSatellite() {
+		if _, err := mutateSatelliteAccounting("user", id, 0, int64(quota), 1, false); err != nil {
+			common.SysError("satellite user usage accounting failed: " + err.Error())
+		}
+		return
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUsedQuota, id, quota)
 		addNewRecord(BatchUpdateTypeRequestCount, id, 1)
@@ -1485,6 +1499,12 @@ func UpdateUserUsedQuotaAndRequestCount(id int, quota int) {
 
 // UpdateUserUsedQuota adjusts accumulated usage without changing request count.
 func UpdateUserUsedQuota(id int, quota int) {
+	if common.IsSatellite() {
+		if _, err := mutateSatelliteAccounting("user", id, 0, int64(quota), 0, false); err != nil {
+			common.SysError("satellite user usage accounting failed: " + err.Error())
+		}
+		return
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUsedQuota, id, quota)
 		return
@@ -1514,6 +1534,12 @@ func updateUserUsedQuotaAndRequestCount(id int, quota int, count int) {
 
 func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) {
 	if quota == 0 && usedQuota == 0 && requestCount == 0 {
+		return
+	}
+	if common.IsSatellite() {
+		if _, err := mutateSatelliteAccounting("user", id, int64(quota), int64(usedQuota), int64(requestCount), false); err != nil {
+			common.SysError("satellite user accounting failed: " + err.Error())
+		}
 		return
 	}
 

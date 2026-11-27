@@ -105,6 +105,10 @@ func cacheApplyTokenQuotaDelta(id int, key string, delta int64) (cacheQuotaResul
 // persistUserQuotaDelta 把已在缓存侧预扣成功的增量落库；批量模式下入队，
 // 直写模式下要求行存在（用户已删除时报错，交由调用方补偿缓存）。
 func persistUserQuotaDelta(id int, delta int) error {
+	if common.IsSatellite() {
+		_, err := mutateSatelliteAccounting("user", id, int64(delta), 0, 0, false)
+		return err
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeUserQuota, id, delta)
 		return nil
@@ -120,6 +124,10 @@ func persistUserQuotaDelta(id int, delta int) error {
 }
 
 func persistTokenQuotaDelta(id int, delta int) error {
+	if common.IsSatellite() {
+		_, err := mutateSatelliteAccounting("token", id, int64(delta), -int64(delta), 0, false)
+		return err
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeTokenQuota, id, delta)
 		return nil
@@ -141,6 +149,9 @@ func persistTokenQuotaDelta(id int, delta int) error {
 }
 
 func reserveUserQuotaDB(id int, quota int) (bool, error) {
+	if common.IsSatellite() {
+		return mutateSatelliteAccounting("user", id, -int64(quota), 0, 0, true)
+	}
 	result := DB.Model(&User{}).
 		Where("id = ? AND quota >= ?", id, quota).
 		Update("quota", gorm.Expr("quota - ?", quota))
@@ -148,6 +159,9 @@ func reserveUserQuotaDB(id int, quota int) (bool, error) {
 }
 
 func reserveTokenQuotaDB(id int, quota int) (bool, error) {
+	if common.IsSatellite() {
+		return mutateSatelliteAccounting("token", id, -int64(quota), int64(quota), 0, true)
+	}
 	result := DB.Model(&Token{}).
 		Where("id = ? AND remain_quota >= ?", id, quota).
 		Updates(map[string]any{
@@ -168,7 +182,7 @@ func TryReserveUserQuota(id int, quota int) (bool, error) {
 	if quota == 0 {
 		return true, nil
 	}
-	if !common.RedisEnabled {
+	if common.IsSatellite() || !common.RedisEnabled {
 		return reserveUserQuotaDB(id, quota)
 	}
 
@@ -209,7 +223,7 @@ func TryReserveTokenQuota(id int, key string, quota int, unlimited bool) (bool, 
 	if unlimited {
 		return true, DecreaseTokenQuota(id, key, quota)
 	}
-	if !common.RedisEnabled {
+	if common.IsSatellite() || !common.RedisEnabled {
 		return reserveTokenQuotaDB(id, quota)
 	}
 

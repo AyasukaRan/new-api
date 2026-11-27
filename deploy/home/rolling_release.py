@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -69,6 +70,35 @@ def environment(values):
         check(separator and key and key not in result, 'duplicate_or_invalid_environment')
         result[key] = value
     return result
+
+
+def satellite_sync_environment(path):
+    if path is None:
+        return {}, None
+    path = Path(path).absolute()
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        check(stat.S_ISREG(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o600
+              and metadata.st_uid == os.geteuid(), 'unsafe_satellite_sync_environment_file')
+        raw = stream.read(16385)
+    check(len(raw) <= 16384, 'satellite_sync_environment_too_large')
+    lines = raw.decode('utf-8').splitlines()
+    check(len(lines) == 1, 'invalid_satellite_sync_environment')
+    key, separator, value = lines[0].partition('=')
+    check(separator and key == 'SATELLITE_SYNC_NODES' and value.lstrip().startswith('{'),
+          'invalid_satellite_sync_environment')
+    pairs = json.loads(value, object_pairs_hook=list)
+    check(isinstance(pairs, list) and pairs, 'invalid_satellite_sync_nodes')
+    peers = {}
+    for node, secret in pairs:
+        check(isinstance(node, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,48}', node)
+              and node not in peers and isinstance(secret, str)
+              and len(secret.encode('utf-8')) >= 32 and not any(c in secret for c in '\r\n\0'),
+              'invalid_satellite_sync_nodes')
+        peers[node] = secret
+    return {'SATELLITE_SYNC_NODES': json.dumps(peers, sort_keys=True, separators=(',', ':'))}, {
+        'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest()}
 
 
 def runtime_fingerprint(info):
@@ -337,6 +367,8 @@ class Rollout:
               'trusted_https_proxy_changed')
         check(self.state.get('allow_http_sub2api_management', False) == self.args.allow_http_sub2api_management,
               'http_sub2api_management_changed')
+        _, sync_binding = satellite_sync_environment(getattr(self.args, 'satellite_sync_env', None))
+        check(self.state.get('satellite_sync_env') == sync_binding, 'satellite_sync_environment_changed')
         check(digest(self.args.release) == self.state['release_sha256']
               and digest(self.args.backup) == self.state['backup_sha256'], 'receipt_changed')
         check(digest(self.args.release.parent / 'gates.json') == self.state['gates_sha256']
@@ -371,6 +403,9 @@ class Rollout:
         values = environment(expected['Config']['Env'])
         if not old:
             values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
+            sync_values, sync_binding = satellite_sync_environment(getattr(self.args, 'satellite_sync_env', None))
+            check(self.state.get('satellite_sync_env') == sync_binding, 'satellite_sync_environment_changed')
+            values.update(sync_values)
             if self.state.get('trusted_https_proxy'):
                 values['SUB2API_TRUSTED_HTTPS_PROXIES'] = self.state['trusted_https_proxy']
             if self.state.get('allow_http_sub2api_management'):
@@ -607,9 +642,11 @@ class Rollout:
 
 
 def initialize(args):
+    sync_values, sync_binding = satellite_sync_environment(getattr(args, 'satellite_sync_env', None))
     release, original, app, state = preflight(args.release, args.backup)
     state['trusted_https_proxy'] = args.trusted_https_proxy
     state['allow_http_sub2api_management'] = args.allow_http_sub2api_management
+    state['satellite_sync_env'] = sync_binding
     private = args.state.with_suffix('.private')
     private.mkdir(mode=0o700)
     for name, content in {'compose.before': original, 'env.before': ENV.read_bytes(), 'app.before.json': json_bytes(app),
@@ -622,6 +659,7 @@ def initialize(args):
     service = final['services']['new-api']
     values = environment(service['environment'])
     values['AUTH_CACHE_LEGACY_FENCE_KEYS'] = 'true'
+    values.update(sync_values)
     if args.trusted_https_proxy:
         values['SUB2API_TRUSTED_HTTPS_PROXIES'] = args.trusted_https_proxy
     if args.allow_http_sub2api_management:
@@ -662,11 +700,14 @@ def main(argv=None):
     parser.add_argument('--trusted-https-proxy', help='Explicitly trust only the current home edge peer for HTTPS metadata')
     parser.add_argument('--allow-http-sub2api-management', action='store_true',
                         help='Explicitly allow Sub2API management over HTTP in the new home app and bridge')
+    parser.add_argument('--satellite-sync-env', type=Path,
+                        help='Owner-only 0600 file containing only SATELLITE_SYNC_NODES for the new app and bridge')
     args = parser.parse_args(argv)
     args.release, args.backup, args.state = args.release.resolve(), args.backup.resolve(), args.state.resolve()
     os.umask(0o077)
     try:
         check(0 < args.drain_timeout <= 30, 'invalid_drain_timeout')
+        satellite_sync_environment(args.satellite_sync_env)
         if args.trusted_https_proxy is not None:
             edge_ip = inspect(EDGE)['NetworkSettings']['Networks'][NETWORK]['IPAddress']
             check(args.trusted_https_proxy == edge_ip + '/32', 'untrusted_https_proxy')

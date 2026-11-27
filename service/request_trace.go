@@ -966,6 +966,14 @@ func cleanupExpiredRequestTraces() {
 		return
 	}
 	cutoff := time.Now().AddDate(0, 0, -days).Unix()
+	if common.IsSatellite() {
+		var err error
+		cutoff, err = model.SatelliteTraceCleanupCutoff(context.Background(), cutoff)
+		if err != nil {
+			common.SysError("satellite request trace cleanup deferred until delivery state is available")
+			return
+		}
+	}
 	// Objects first: a row deleted before its payload would leave the payload
 	// with nothing pointing at it, and object storage has no other index.
 	if ObjectStoreEnabled() {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -139,6 +140,7 @@ func main() {
 		service.RegisterSyncTopic(model.SyncTopicSubscriptionPlans, func(context.Context) error { return model.PurgeSubscriptionPlanCache() })
 	}
 	service.StartNodeSync()
+	service.StartSatelliteSync(context.Background())
 
 	// 热更新配置
 	go model.SyncOptions(common.SyncFrequency)
@@ -205,7 +207,7 @@ func main() {
 	service.StartSystemTaskRunner()
 
 	var stopBatchUpdater func(context.Context) error
-	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" {
+	if os.Getenv("BATCH_UPDATE_ENABLED") == "true" && !common.IsSatellite() {
 		common.BatchUpdateEnabled = true
 		common.SysLog(common.LogText("batch update enabled with interval %ss", strconv.Itoa(common.BatchUpdateInterval)))
 		stopBatchUpdater = model.InitBatchUpdater()
@@ -361,6 +363,26 @@ func InitResources() error {
 		common.FatalLog(common.LogText("failed to initialize database: %s", err.Error()))
 		return err
 	}
+	// Configuration reconciliation invalidates quota and credential caches.
+	// Initialize Redis before the first satellite snapshot is applied.
+	err = common.InitRedisClient()
+	if err != nil {
+		return err
+	}
+	if common.IsSatellite() {
+		if err := service.ValidateSatelliteSyncConfiguration(); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+		err := service.SyncSatelliteOnce(ctx, false)
+		cancel()
+		if err != nil {
+			if !model.SatelliteHasConfiguration(context.Background()) {
+				return fmt.Errorf("initial satellite synchronization failed: %w", err)
+			}
+			common.SysError("satellite starting with its last committed configuration; synchronization will retry")
+		}
+	}
 	// Before the loads below: a write made while they run is reloaded later.
 	service.ReadStartupSyncRevisions()
 	if err = authz.Init(model.DB); err != nil {
@@ -373,9 +395,11 @@ func InitResources() error {
 	}
 	// Channel credentials use the same browser envelope even when password-login
 	// encryption is disabled. Replicas must load the shared key in either case.
-	if err = model.InitPasswordEncryption(); err != nil {
-		common.FatalLog(common.LogText("failed to initialize password encryption: %s", err.Error()))
-		return err
+	if !common.IsSatellite() {
+		if err = model.InitPasswordEncryption(); err != nil {
+			common.FatalLog(common.LogText("failed to initialize password encryption: %s", err.Error()))
+			return err
+		}
 	}
 
 	model.CheckSetup()
@@ -396,12 +420,6 @@ func InitResources() error {
 
 	// Initialize SQL Database
 	err = model.InitLogDB()
-	if err != nil {
-		return err
-	}
-
-	// Initialize Redis
-	err = common.InitRedisClient()
 	if err != nil {
 		return err
 	}

@@ -88,7 +88,7 @@ func InitEnv() {
 	// Initialize variables from constants.go that were using environment variables
 	DebugEnabled = os.Getenv("DEBUG") == "true"
 	MemoryCacheEnabled = os.Getenv("MEMORY_CACHE_ENABLED") == "true"
-	IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
+	IsMasterNode = os.Getenv("NODE_TYPE") != "slave" && !IsSatellite()
 	AuthCacheLegacyFenceKeys = GetEnvOrDefaultBool("AUTH_CACHE_LEGACY_FENCE_KEYS", false)
 	PasswordLoginEncryptionEnabled = GetEnvOrDefaultBool("PASSWORD_LOGIN_ENCRYPTION_ENABLED", false)
 	initNodeNameIdentity()

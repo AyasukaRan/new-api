@@ -112,6 +112,7 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	tokenConsumed := s.tokenConsumed
 	extraReserved := s.extraReserved
 	subscriptionId := s.relayInfo.SubscriptionId
+	requestID := s.relayInfo.RequestId
 	funding := s.funding
 
 	gopool.Go(func() {
@@ -120,7 +121,7 @@ func (s *BillingSession) Refund(c *gin.Context) {
 			common.SysLog(common.LogText("error refunding billing source: %s", err.Error()))
 		}
 		if extraReserved > 0 && funding.Source() == BillingSourceSubscription && subscriptionId > 0 {
-			if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {
+			if err := model.PostConsumeUserSubscriptionDeltaForRequest(subscriptionId, requestID, -int64(extraReserved)); err != nil {
 				common.SysLog(common.LogText("error refunding subscription extra reserved quota: %s", err.Error()))
 			}
 		}
@@ -298,7 +299,7 @@ func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) e
 		funding.consumed += delta
 		return nil
 	case *SubscriptionFunding:
-		if err := model.PostConsumeUserSubscriptionDelta(funding.subscriptionId, int64(delta)); err != nil {
+		if err := model.PostConsumeUserSubscriptionDeltaForRequest(funding.subscriptionId, funding.requestId, int64(delta)); err != nil {
 			return types.NewErrorWithStatusCode(
 				errors.New(i18n.Translate(s.lang, i18n.MsgQuotaSubscriptionInsufficient, map[string]any{"Error": err.Error()})),
 				types.ErrorCodeInsufficientUserQuota,
@@ -326,7 +327,7 @@ func (s *BillingSession) rollbackFundingReserve(delta int) {
 			funding.consumed -= delta
 		}
 	case *SubscriptionFunding:
-		if err := model.PostConsumeUserSubscriptionDelta(funding.subscriptionId, -int64(delta)); err != nil {
+		if err := model.PostConsumeUserSubscriptionDeltaForRequest(funding.subscriptionId, funding.requestId, -int64(delta)); err != nil {
 			common.SysLog(common.LogText("error rolling back subscription funding reserve: %s", err.Error()))
 		}
 	}
@@ -344,6 +345,11 @@ func (s *BillingSession) reserveToken(delta int) error {
 
 // shouldTrust 统一信任额度检查，适用于钱包和订阅。
 func (s *BillingSession) shouldTrust(c *gin.Context) bool {
+	// Satellite reservations and their sync ledger must commit together.
+	// A cached primary balance is never authority to bypass the reservation.
+	if common.IsSatellite() {
+		return false
+	}
 	// 异步任务（ForcePreConsume=true）必须预扣全额，不允许信任旁路
 	if s.relayInfo.ForcePreConsume {
 		return false

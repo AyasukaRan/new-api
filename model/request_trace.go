@@ -151,7 +151,11 @@ func SaveRequestTraces(traces []*RequestTrace) error {
 			size += rowSize
 		}
 		batch := traces[:rows]
-		if err := LOG_DB.Create(&batch).Error; err != nil {
+		if common.IsSatellite() {
+			if err := createSatelliteTraces(batch); err != nil {
+				return err
+			}
+		} else if err := LOG_DB.Create(&batch).Error; err != nil {
 			return err
 		}
 		traces = traces[rows:]

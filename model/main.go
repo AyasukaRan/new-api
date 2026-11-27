@@ -212,7 +212,7 @@ func InitDB() (err error) {
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
-		if !common.IsMasterNode {
+		if !common.IsMasterNode && !common.IsSatellite() {
 			detectSub2APIStorage(DB)
 			// Only the master node migrates. A node that cannot read the deadline
 			// keeps rejecting legacy access tokens instead of refusing to start.
@@ -238,7 +238,7 @@ func InitLogDB() (err error) {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
-		if common.IsMasterNode {
+		if common.IsMasterNode || common.IsSatellite() {
 			return migrateLogSideTables()
 		}
 		detectDashboardFinanceRollup()
@@ -266,7 +266,7 @@ func InitLogDB() (err error) {
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
-		if !common.IsMasterNode {
+		if !common.IsMasterNode && !common.IsSatellite() {
 			detectDashboardFinanceRollup()
 			return nil
 		}
@@ -343,6 +343,10 @@ func migrateDB() error {
 	}
 
 	err := DB.AutoMigrate(
+		&SatelliteAccountingState{},
+		&SatelliteReplicaState{},
+		&SatelliteSyncNonce{},
+		&SatelliteLogReceipt{},
 		&Channel{},
 		&Token{},
 		&User{},
@@ -418,6 +422,9 @@ func migrateDB() error {
 // reaching that function when LOG_SQL_DSN is unset, and these tables must exist
 // in that default deployment too.
 func migrateLogSideTables() error {
+	if err := MigrateSatelliteLogSync(); err != nil {
+		return err
+	}
 	if err := MigrateLogFilterIndexes(); err != nil {
 		return err
 	}

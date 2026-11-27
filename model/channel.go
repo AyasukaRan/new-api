@@ -1580,6 +1580,12 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {
+	if common.IsSatellite() {
+		if _, err := mutateSatelliteAccounting("channel", id, 0, int64(quota), 0, false); err != nil {
+			common.SysError("satellite channel usage accounting failed: " + err.Error())
+		}
+		return
+	}
 	if common.BatchUpdateEnabled {
 		addNewRecord(BatchUpdateTypeChannelUsedQuota, id, quota)
 		return

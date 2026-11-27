@@ -170,7 +170,11 @@ func StoreRequestTraceBody(trace *RequestTrace, body string, userID int) error {
 		// duplicates are harmless immutable rows until ReplacingMergeTree merges.
 		for start := 0; start < len(missing); start += 32 {
 			batch := missing[start:min(start+32, len(missing))]
-			if err := query.Create(&batch).Error; err != nil {
+			if common.IsSatellite() {
+				if err := createSatelliteTraceChunks(batch); err != nil {
+					return err
+				}
+			} else if err := query.Create(&batch).Error; err != nil {
 				return err
 			}
 		}

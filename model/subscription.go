@@ -1418,6 +1418,9 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 		}
 		return nil
 	}
+	if common.IsSatellite() {
+		return errors.New("subscription period is awaiting primary synchronization")
+	}
 	sub.AmountUsed = 0
 	sub.ResetGeneration++
 	sub.LastResetTime = base.Unix()
@@ -1499,6 +1502,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 				PreConsumed:        amount,
 				Status:             "consumed",
 			}
+			if common.IsSatellite() {
+				record.PeriodStart, record.PeriodGeneration = sub.LastResetTime, sub.ResetGeneration
+			}
 			if err := tx.Create(record).Error; err != nil {
 				var dup SubscriptionPreConsumeRecord
 				if err2 := tx.Where("request_id = ?", requestId).First(&dup).Error; err2 == nil {
@@ -1513,6 +1519,12 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 					return nil
 				}
 				return err
+			}
+			if common.IsSatellite() {
+				before := SatelliteAccountingAnchor{Entity: "subscription", EntityID: sub.Id, Generation: sub.ResetGeneration, UsedQuota: sub.AmountUsed}
+				if err := recordSatelliteAccountingMutation(tx, before, 0, amount, 0); err != nil {
+					return err
+				}
 			}
 			sub.AmountUsed += amount
 			if err := tx.Save(&sub).Error; err != nil {
@@ -1537,6 +1549,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 func RefundSubscriptionPreConsume(requestId string) error {
 	if strings.TrimSpace(requestId) == "" {
 		return errors.New("requestId is empty")
+	}
+	if common.IsSatellite() {
+		return refundSatelliteSubscription(requestId)
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var record SubscriptionPreConsumeRecord
@@ -1643,6 +1658,9 @@ func GetSubscriptionPlanInfoByUserSubscriptionId(userSubscriptionId int) (*Subsc
 
 // Update subscription used amount by delta (positive consume more, negative refund).
 func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error {
+	if common.IsSatellite() {
+		return errors.New("satellite subscription settlement requires its original request")
+	}
 	if userSubscriptionId <= 0 {
 		return errors.New("invalid userSubscriptionId")
 	}

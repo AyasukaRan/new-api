@@ -76,6 +76,9 @@ func registeredSystemTaskHandlers() []SystemTaskHandler {
 	defer systemTaskHandlersMu.RUnlock()
 	handlers := make([]SystemTaskHandler, 0, len(systemTaskHandlers))
 	for _, h := range systemTaskHandlers {
+		if common.IsSatellite() && h.Type() != model.SystemTaskTypeMidjourneyPoll && h.Type() != model.SystemTaskTypeAsyncTaskPoll {
+			continue
+		}
 		handlers = append(handlers, h)
 	}
 	return handlers
@@ -130,7 +133,7 @@ func notifySystemTaskRunner() {
 
 func StartSystemTaskRunner() {
 	systemTaskRunnerOnce.Do(func() {
-		if !common.IsMasterNode {
+		if !common.IsMasterNode && !common.IsSatellite() {
 			return
 		}
 

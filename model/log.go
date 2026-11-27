@@ -192,6 +192,13 @@ func createLog(log *Log) error {
 			log.Id = int(binary.BigEndian.Uint64(b[:])) & math.MaxInt
 		}
 	}
+	if common.IsSatellite() {
+		if err := createSatelliteLog(log); err != nil {
+			return err
+		}
+		usageLiveFeed.committed(log)
+		return nil
+	}
 	if err := LOG_DB.Create(log).Error; err != nil {
 		return err
 	}

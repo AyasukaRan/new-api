@@ -97,7 +97,7 @@ func UpdateFreeAllowanceFunding(requestID string, userID int, modelName string, 
 	if action == "refund" {
 		target = 0
 	}
-	if common.RedisEnabled {
+	if common.RedisEnabled && !common.IsSatellite() {
 		if _, err := GetUserCache(userID); err != nil {
 			return nil, err
 		}
@@ -107,7 +107,7 @@ func UpdateFreeAllowanceFunding(requestID string, userID int, modelName string, 
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		// Match the user -> subscription lock order used by grant/revoke operations.
 		var user User
-		if err := lockForUpdate(tx).Select("id", "quota").First(&user, userID).Error; err != nil {
+		if err := lockForUpdate(tx).Select("id", "quota", "used_quota", "request_count").First(&user, userID).Error; err != nil {
 			return err
 		}
 		var record SubscriptionPreConsumeRecord
@@ -190,8 +190,10 @@ func UpdateFreeAllowanceFunding(requestID string, userID int, modelName string, 
 			return err
 		}
 		result.SubscriptionID, result.PlanID, result.PlanTitle = sub.Id, sub.PlanId, plan.Title
-		if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
-			return err
+		if !common.IsSatellite() || action == "reserve" {
+			if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
+				return err
+			}
 		}
 		samePeriod := record.PeriodStart == sub.LastResetTime && record.PeriodGeneration == sub.ResetGeneration
 		available := record.PreConsumed
@@ -206,7 +208,7 @@ func UpdateFreeAllowanceFunding(requestID string, userID int, modelName string, 
 		walletDelta := wallet - record.WalletQuota
 		if walletDelta > 0 {
 			cached := false
-			if common.RedisEnabled {
+			if common.RedisEnabled && !common.IsSatellite() {
 				var result cacheQuotaResult
 				if action == "reserve" {
 					result, err = cacheTryReserveUserQuota(userID, walletDelta)
@@ -246,11 +248,22 @@ func UpdateFreeAllowanceFunding(requestID string, userID int, modelName string, 
 			}
 			cacheCredit = credit
 		}
+		if common.IsSatellite() {
+			before := SatelliteAccountingAnchor{Entity: "user", EntityID: userID, Quota: int64(user.Quota), UsedQuota: int64(user.UsedQuota), RequestCount: int64(user.RequestCount)}
+			if err := recordSatelliteAccountingMutation(tx, before, -walletDelta, 0, 0); err != nil {
+				return err
+			}
+			before = SatelliteAccountingAnchor{Entity: "subscription", EntityID: sub.Id, Generation: record.PeriodGeneration, UsedQuota: sub.AmountUsed}
+			if err := recordSatelliteAccountingMutation(tx, before, 0, free-record.PreConsumed, 0); err != nil {
+				return err
+			}
+		}
 		if samePeriod {
-			sub.AmountUsed = max(sub.AmountUsed-record.PreConsumed+free, 0)
-			if sub.AmountUsed > sub.AmountTotal {
+			used := max(sub.AmountUsed-record.PreConsumed+free, 0)
+			if used > sub.AmountTotal && (!common.IsSatellite() || used > sub.AmountUsed) {
 				return errors.New("free allowance exceeds total")
 			}
+			sub.AmountUsed = used
 			if err := tx.Save(&sub).Error; err != nil {
 				return err
 			}
@@ -275,7 +288,10 @@ func UpdateFreeAllowanceFunding(requestID string, userID int, modelName string, 
 		result.Settled = action == "settle"
 		return nil
 	})
-	if common.RedisEnabled {
+	if common.IsSatellite() && err == nil {
+		invalidateSatelliteAccountingCache("user", userID, "")
+	}
+	if common.RedisEnabled && !common.IsSatellite() {
 		delta := cacheCredit
 		outcome := "database committed"
 		if err != nil {

@@ -88,3 +88,19 @@ func assertChannelRoutePermission(t *testing.T, method string, path string, perm
 	}
 	t.Fatalf("route %s %s not found", method, path)
 }
+
+func TestSatelliteDoesNotExposePrimaryManagementOrLogin(t *testing.T) {
+	t.Setenv("SATELLITE_ROLE", "satellite")
+	engine := gin.New()
+	SetApiRouter(engine)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/api/setup"}, {http.MethodPost, "/api/user/login"},
+		{http.MethodPost, "/api/user/register"}, {http.MethodPut, "/api/user/self"},
+		{http.MethodPut, "/api/channel/"}, {http.MethodGet, "/api/option/"},
+		{http.MethodPost, "/api/stripe/webhook"},
+	} {
+		result := httptest.NewRecorder()
+		engine.ServeHTTP(result, httptest.NewRequest(route.method, route.path, nil))
+		assert.Equal(t, http.StatusNotFound, result.Code, route.path)
+	}
+}

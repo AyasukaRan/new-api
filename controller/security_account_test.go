@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -902,6 +903,74 @@ func TestSecurityAccountUnbindPreservesUsableLoginMethod(t *testing.T) {
 				assert.ErrorIs(t, err, model.ErrLastLoginMethod)
 				var binding model.UserOAuthBinding
 				require.NoError(t, model.DB.Where("user_id = ? AND provider_id = ?", user.Id, 31).First(&binding).Error)
+			}
+		})
+	}
+}
+
+func TestSatelliteSyncRequiresScopedFreshSignedRequests(t *testing.T) {
+	setupSecurityEnrollmentTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.SatelliteSyncNonce{}))
+	t.Setenv("SATELLITE_ROLE", "primary")
+	secret := strings.Repeat("test-secret-", 4)
+	peers, err := common.Marshal(map[string]string{"test-us2": secret})
+	require.NoError(t, err)
+	t.Setenv("SATELLITE_SYNC_NODES", string(peers))
+	// An unsupported protocol is enough to prove authentication succeeded without
+	// exporting any real configuration or mutating accounting in this auth test.
+	body := `{"version":0}`
+	for _, scenario := range []string{"missing credential", "wrong node", "expired", "future", "tampered body", "wrong key", "valid then replay", "receiver disabled"} {
+		t.Run(scenario, func(t *testing.T) {
+			node, stamp := "test-us2", time.Now().Unix()
+			payload, signingKey := body, secret
+			nonce := strings.Repeat("ab", 24)
+			if scenario == "wrong node" {
+				node = "other-node"
+			}
+			if scenario == "expired" {
+				stamp -= 1000
+			}
+			if scenario == "future" {
+				stamp += 1000
+			}
+			if scenario == "wrong key" {
+				signingKey = strings.Repeat("wrong", 9)
+			}
+			timestamp := fmt.Sprint(stamp)
+			signature := service.SatelliteSyncSignature(signingKey, "request", node, timestamp, nonce, []byte(body))
+			if scenario == "tampered body" {
+				payload = `{"version":1}`
+			}
+			if scenario == "receiver disabled" {
+				t.Setenv("SATELLITE_ROLE", "satellite")
+			}
+			engine := gin.New()
+			engine.POST(service.SatelliteSyncPath, SatelliteSync)
+			request := httptest.NewRequest(http.MethodPost, service.SatelliteSyncPath, strings.NewReader(payload))
+			request.Header.Set("X-Satellite-Node", node)
+			request.Header.Set("X-Satellite-Time", timestamp)
+			request.Header.Set("X-Satellite-Nonce", nonce)
+			request.Header.Set("X-Satellite-Authorization", service.SatelliteSyncSignature(signingKey, "admission", node, timestamp, nonce, nil))
+			if scenario != "missing credential" {
+				request.Header.Set("X-Satellite-Signature", signature)
+			}
+			result := httptest.NewRecorder()
+			engine.ServeHTTP(result, request)
+			expected := http.StatusUnauthorized
+			if scenario == "receiver disabled" {
+				expected = http.StatusNotFound
+			}
+			if scenario == "valid then replay" {
+				expected = http.StatusBadRequest
+			}
+			assert.Equal(t, expected, result.Code)
+			assert.NotContains(t, result.Body.String(), secret)
+			if scenario == "valid then replay" {
+				replay := httptest.NewRequest(http.MethodPost, service.SatelliteSyncPath, strings.NewReader(payload))
+				replay.Header = request.Header.Clone()
+				result = httptest.NewRecorder()
+				engine.ServeHTTP(result, replay)
+				assert.Equal(t, http.StatusConflict, result.Code)
 			}
 		})
 	}

@@ -385,16 +385,26 @@ class RollingReleaseTests(unittest.TestCase):
                                                    '--state', str(root / 'state.json'), *options]), 0)
             self.assertEqual(list(root.iterdir()), [])
 
-    def test_http_sub2api_option_only_changes_candidate_and_preserves_rollback(self):
+    def test_candidate_environment_options_preserve_rollback(self):
         key = 'SUB2API_ALLOW_HTTP_MANAGEMENT'
-        for enabled, existing in ((False, None), (True, None), (False, 'true'), (True, 'false')):
-            with self.subTest(enabled=enabled, existing=existing), tempfile.TemporaryDirectory() as directory:
+        for enabled, existing, sync_mode in ((False, None, None), (True, None, None),
+                                             (False, 'true', None), (True, 'false', None),
+                                             (False, None, 'new'), (True, None, 'rotate')):
+            with self.subTest(enabled=enabled, existing=existing, sync_mode=sync_mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 old = app('old', 'old-container')
                 old['Config']['Env'].append('NODE_NAME=fixture')
                 old['State']['Health'] = {'Status': 'healthy'}
                 if existing is not None:
                     old['Config']['Env'].append(key + '=' + existing)
+                if sync_mode == 'rotate':
+                    old['Config']['Env'].append('SATELLITE_SYNC_NODES=' + json.dumps({'fixture': 'old-' * 12}))
+                sync_path = None
+                sync_value = json.dumps({'fixture': 'new-' * 12}, separators=(',', ':'))
+                if sync_mode:
+                    sync_path = root / 'satellite.env'
+                    sync_path.write_text('SATELLITE_SYNC_NODES=' + sync_value + '\n')
+                    sync_path.chmod(0o600)
                 old_env = release.environment(old['Config']['Env'])
                 original = {'name': 'fixture', 'services': {'new-api': {'environment': old_env, 'image': 'old'}}}
                 compose, env, template = (root / name for name in ('compose', 'env', 'template'))
@@ -402,7 +412,8 @@ class RollingReleaseTests(unittest.TestCase):
                 env.write_bytes(b'UNCHANGED=fixture\n')
                 template.write_bytes(b'fixture')
                 args = argparse.Namespace(state=root / 'state.json', release=root / 'release/release.json', backup=root / 'backup.json',
-                                          trusted_https_proxy=None, allow_http_sub2api_management=enabled)
+                                          trusted_https_proxy=None, allow_http_sub2api_management=enabled,
+                                          satellite_sync_env=sync_path)
                 raw_index = b'<html>fixture</html>'
                 dist = root / 'candidate/web/dist'
                 dist.mkdir(parents=True)
@@ -416,6 +427,8 @@ class RollingReleaseTests(unittest.TestCase):
                         patch.object(release, 'EDGE_TEMPLATE', template), patch.object(release, 'command', return_value=''):
                     state = release.initialize(args)
                 self.assertIs(state['allow_http_sub2api_management'], enabled)
+                self.assertEqual(state['satellite_sync_env'], {'path': str(sync_path), 'sha256': release.digest(sync_path)} if sync_path else None)
+                self.assertNotIn('new-' * 12, json.dumps(state))
                 self.assertEqual(release.read_json(compose), original)
                 self.assertEqual(env.read_bytes(), b'UNCHANGED=fixture\n')
                 flow = release.Rollout(args, state)
@@ -424,6 +437,7 @@ class RollingReleaseTests(unittest.TestCase):
                                                                  ('compose.bridge', 'new-api-bridge', release.BRIDGE)):
                     saved = release.read_json(flow.private / filename)['services'][service_name]['environment']
                     self.assertEqual(saved.get(key), 'true' if enabled else existing)
+                    self.assertEqual(saved.get('SATELLITE_SYNC_NODES'), sync_value if sync_mode else None)
                     self.assertEqual(saved.get('DASHBOARD_CONFIG_READ_ONLY'), 'true' if container_name == release.BRIDGE else None)
                     candidate = copy.deepcopy(old)
                     candidate['Image'] = 'new'
@@ -438,6 +452,59 @@ class RollingReleaseTests(unittest.TestCase):
                     flow.ready(release.APP, old=True)
                 self.assertEqual(release.read_json(flow.private / 'app.before.json'), old)
                 self.assertEqual(release.read_json(flow.private / 'compose.before'), original)
+
+    def test_satellite_environment_rejects_extra_keys_weak_secrets_and_unsafe_files(self):
+        secret = 'test-secret-' * 4
+        valid = 'SATELLITE_SYNC_NODES=' + json.dumps({'ran-us2': secret}) + '\n'
+        invalid = [
+            '', 'OTHER=' + json.dumps({'ran-us2': secret}), valid + 'SQL_DSN=forbidden\n',
+            'SATELLITE_SYNC_NODES={}', 'SATELLITE_SYNC_NODES=[]',
+            'SATELLITE_SYNC_NODES=' + json.dumps({'bad node': secret}),
+            'SATELLITE_SYNC_NODES=' + json.dumps({'ran-us2': 'short'}),
+            'SATELLITE_SYNC_NODES=' + json.dumps({'ran-us2': secret + '\n'}),
+            'SATELLITE_SYNC_NODES=' + json.dumps({'ran-us2': ['not a secret']}),
+            'SATELLITE_SYNC_NODES={"ran-us2":"' + secret + '","ran-us2":"' + secret + '"}',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sync.env'
+            for contents in invalid:
+                with self.subTest(contents=contents):
+                    path.write_text(contents)
+                    path.chmod(0o600)
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        release.satellite_sync_environment(path)
+            path.write_text(valid)
+            path.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeError, 'unsafe_satellite_sync_environment_file'):
+                release.satellite_sync_environment(path)
+            path.chmod(0o600)
+            link = path.with_suffix('.link')
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                release.satellite_sync_environment(link)
+
+    def test_satellite_environment_resume_binds_content_path_and_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sync.env'
+            path.write_text('SATELLITE_SYNC_NODES=' + json.dumps({'ran-us2': 'a' * 32}) + '\n')
+            path.chmod(0o600)
+            _, binding = release.satellite_sync_environment(path)
+            flow = object.__new__(release.Rollout)
+            flow.state = {'trusted_https_proxy': None, 'satellite_sync_env': binding}
+            flow.args = argparse.Namespace(trusted_https_proxy=None, allow_http_sub2api_management=False,
+                                           satellite_sync_env=None)
+            with self.assertRaisesRegex(RuntimeError, 'satellite_sync_environment_changed'):
+                flow.guard()
+            duplicate = path.with_name('same-content.env')
+            duplicate.write_bytes(path.read_bytes())
+            duplicate.chmod(0o600)
+            flow.args.satellite_sync_env = duplicate
+            with self.assertRaisesRegex(RuntimeError, 'satellite_sync_environment_changed'):
+                flow.guard()
+            path.write_text('SATELLITE_SYNC_NODES=' + json.dumps({'ran-us2': 'b' * 32}) + '\n')
+            flow.args.satellite_sync_env = path
+            with self.assertRaisesRegex(RuntimeError, 'satellite_sync_environment_changed'):
+                flow.guard()
 
     def test_different_journals_share_one_exclusive_release_lock(self):
         with tempfile.TemporaryDirectory() as directory:
