@@ -278,6 +278,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			usage.CompletionTokens = imageCount * 1400
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 			common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
+			service.MarkKeyRoutingTokensEstimated(c)
 		}
 		attachEstimatedGeminiBillingUsage(usage)
 	} else {

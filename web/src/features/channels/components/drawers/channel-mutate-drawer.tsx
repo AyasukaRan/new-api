@@ -143,6 +143,7 @@ import {
 } from '../../api'
 import {
   ADD_MODE_OPTIONS,
+  WEIGHTED_USAGE_UNSUPPORTED_CHANNEL_TYPES,
   CLAUDE_FIELD_PASSTHROUGH_TYPES,
   CHANNEL_STATUS_LABELS,
   CHANNEL_TYPE_NEW_API,
@@ -988,6 +989,18 @@ export function ChannelMutateDrawer({
           form.setValue('name', label ? t(label) : `#${target.type}`)
         }
       }
+      const selectedType =
+        target.kind === 'plugin' ? CHANNEL_TYPE_TASK_PLUGIN : target.type
+      if (
+        WEIGHTED_USAGE_UNSUPPORTED_CHANNEL_TYPES.includes(selectedType) &&
+        form.getValues('multi_key_type') === 'weighted_usage'
+      ) {
+        form.setValue(
+          'multi_key_type',
+          target.kind === 'plugin' ? 'random' : 'failover',
+          { shouldDirty: true }
+        )
+      }
       setProviderTarget(target)
       setChoosingProvider(false)
     },
@@ -1790,6 +1803,7 @@ export function ChannelMutateDrawer({
             key_identity: '',
             key_preview: '',
             groups: [],
+            routing_weight: 1,
             upstream_cost_ratio: null,
             effective_upstream_cost_ratio: null,
             status: 1,
@@ -4811,6 +4825,7 @@ export function ChannelMutateDrawer({
                           formValues.balance_recharge_multiplier ?? 1
                         }
                         channel={channelData?.data}
+                        channelType={currentType}
                         disabled={sensitiveLocked || isSubmitting}
                         sensitiveVisible={sensitiveVisible}
                         keyPlaceholder={t(getKeyPromptForType(currentType))}

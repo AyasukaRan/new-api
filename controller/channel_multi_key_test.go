@@ -2,8 +2,10 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -19,13 +21,19 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/keyusage"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	hosttypes "github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -112,6 +120,10 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 		require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", invalid.Name).Count(&invalidCount).Error)
 		assert.Zero(t, invalidCount, "invalid settings must not create a partial channel")
 	}
+	for _, channelType := range []int{constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus, constant.ChannelTypeSunoAPI} {
+		nested := &model.Channel{Name: t.Name() + " nested " + fmt.Sprint(channelType), Type: channelType, Models: "task-model", Group: "default", Key: keyA + "\n" + keyB, ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModeWeightedUsage}}
+		assert.False(t, request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "single", Channel: nested}).Success, "nested channel metadata cannot bypass unsupported-mode validation")
+	}
 	for _, channelType := range []int{constant.ChannelTypeCodex, constant.ChannelTypeVertexAi, constant.ChannelTypeTaskPlugin} {
 		structured := &model.Channel{Type: channelType, Key: "{\n  \"private_key\": \"fixture-only\"\n}", Group: "default"}
 		original := structured.Key
@@ -121,18 +133,30 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 	}
 	newAPI := &model.Channel{Type: constant.ChannelTypeNewAPI, Group: "default"}
 	require.NoError(t, newAPI.ApplyKeyConfigs([]model.ChannelKeyConfig{{Key: "gateway-api-key"}}, true), "New API wrappers still use simple API keys")
+	for _, channelType := range []int{constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus, constant.ChannelTypeSunoAPI, constant.ChannelTypeTaskPlugin} {
+		unsupported := &model.Channel{Name: t.Name() + fmt.Sprint(channelType), Type: channelType, Models: "task-model", Group: "default", Key: keyA + "\n" + keyB}
+		assert.False(t, request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeWeightedUsage, Channel: unsupported}).Success, "asynchronous-only channels cannot save weighted routing")
+		var count int64
+		require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", unsupported.Name).Count(&count).Error)
+		assert.Zero(t, count)
+	}
 	channel.SetSetting(kitdto.ChannelSettings{UpstreamCostRatio: common.GetPointer(1.5)})
 	created := request(AddChannel, http.MethodPost, 0, AddChannelRequest{Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeFailover, Channel: channel, KeyConfigs: []model.ChannelKeyConfig{
-		{Key: keyA, Groups: []string{"default"}, UpstreamCostRatio: common.GetPointer(0.0)},
-		{Key: keyB},
+		{Key: keyA, Groups: []string{"default"}, UpstreamCostRatio: common.GetPointer(0.0), RoutingWeight: common.GetPointer(2)},
+		{Key: keyB, RoutingWeight: common.GetPointer(3)},
 	}})
 	require.True(t, created.Success)
 	require.Positive(t, created.Data.ID)
 	id := created.Data.ID
 	t.Cleanup(func() { require.NoError(t, (&model.Channel{Id: id}).Delete()) })
+	for _, channelType := range []int{constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus, constant.ChannelTypeSunoAPI} {
+		assert.False(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "type": channelType, "multi_key_mode": constant.MultiKeyModeWeightedUsage}).Success)
+	}
 	view := request(GetChannel, http.MethodGet, id, nil)
 	require.True(t, view.Success)
 	require.Len(t, view.Data.KeyConfigs, 2)
+	assert.Equal(t, 2, view.Data.KeyConfigs[0].RoutingWeight)
+	assert.Equal(t, 3, view.Data.KeyConfigs[1].RoutingWeight)
 	assert.Empty(t, view.Data.Key)
 	require.NotEmpty(t, view.Data.Revision)
 	assert.Equal(t, (&model.Channel{Id: id}).KeyIdentity(keyA), view.Data.KeyConfigs[0].KeyIdentity, "identity must use the allocated channel ID")
@@ -141,7 +165,7 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 	require.NotNil(t, view.Data.KeyConfigs[1].EffectiveUpstreamCostRatio)
 	assert.Equal(t, 1.5, *view.Data.KeyConfigs[1].EffectiveUpstreamCostRatio)
 	items := []model.ChannelKeyConfig{
-		{KeyIdentity: view.Data.KeyConfigs[1].KeyIdentity, KeyIndex: common.GetPointer(1)},
+		{KeyIdentity: view.Data.KeyConfigs[1].KeyIdentity, KeyIndex: common.GetPointer(1), RoutingWeight: common.GetPointer(5)},
 		{KeyIdentity: view.Data.KeyConfigs[0].KeyIdentity, KeyIndex: common.GetPointer(0), Groups: []string{"default"}, UpstreamCostRatio: common.GetPointer(0.0), Enabled: common.GetPointer(false)},
 	}
 	patch := map[string]any{"id": id, "name": "saved ordered config", "multi_key_mode": "failover", "key_configs": items, "key_config_revision": view.Data.Revision}
@@ -167,6 +191,9 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, clone.Delete()) })
 	assert.Equal(t, []string{clone.KeyIdentity(keyB), clone.KeyIdentity(keyA)}, clone.ChannelInfo.KeyOrder)
 	assert.NotEqual(t, stored.ChannelInfo.KeyOrder, clone.ChannelInfo.KeyOrder)
+	assert.Equal(t, 5, clone.RoutingWeightForKey(keyB))
+	assert.Equal(t, 2, clone.RoutingWeightForKey(keyA))
+	require.True(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "weighted_usage"}).Success)
 	require.True(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "random"}).Success)
 	require.True(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "failover"}).Success)
 	assert.False(t, request(UpdateChannel, http.MethodPut, id, map[string]any{"id": id, "multi_key_mode": "unknown"}).Success)
@@ -186,7 +213,7 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 	assert.Equal(t, 0.4, *unchanged.UpstreamCostRatioForKey(keyB))
 
 	current = request(GetChannel, http.MethodGet, id, nil)
-	for _, invalid := range [][]model.ChannelKeyConfig{{}, {items[0], items[0]}, {{Key: keyB}}, {{Key: keyC, Groups: []string{"forbidden"}}}} {
+	for _, invalid := range [][]model.ChannelKeyConfig{{{Key: keyC, RoutingWeight: common.GetPointer(0)}}, {{Key: keyC, RoutingWeight: common.GetPointer(1001)}}, {}, {items[0], items[0]}, {{Key: keyB}}, {{Key: keyC, Groups: []string{"forbidden"}}}} {
 		patch["key_config_revision"], patch["key_configs"] = current.Data.Revision, invalid
 		assert.False(t, request(UpdateChannel, http.MethodPut, id, patch).Success)
 	}
@@ -198,6 +225,9 @@ func TestMultiKeyConfigurationAtomicSave(t *testing.T) {
 	assert.NotContains(t, stored.ChannelInfo.KeyGroups, stored.KeyIdentity(keyA))
 	assert.NotContains(t, stored.ChannelInfo.KeyCostRatios, stored.KeyIdentity(keyA))
 	assert.NotContains(t, stored.ChannelInfo.KeyOrder, stored.KeyIdentity(keyA))
+	assert.NotContains(t, stored.ChannelInfo.KeyWeights, stored.KeyIdentity(keyA))
+	assert.Equal(t, 5, stored.RoutingWeightForKey(keyB))
+	assert.Equal(t, 1, stored.RoutingWeightForKey(keyC))
 	assert.True(t, stored.KeyAllowedForGroup(keyC, "vip"))
 	assert.False(t, stored.KeyAllowedForGroup(keyC, "default"))
 
@@ -1317,5 +1347,292 @@ func TestChannelStatusFailureDoesNotReportSuccess(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestWeightedKeyConfigurationDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("database not configured")
+			}
+			t.Setenv("TEST_CHANNEL_SQL_DSN", os.Getenv(dialect.env))
+			TestMultiKeyConfigurationAtomicSave(t)
+		})
+	}
+}
+
+func weightedKeyRoutingContext(t *testing.T, channel *model.Channel, key, text, session string) (*gin.Context, *relaycommon.RelayInfo) {
+	t.Helper()
+	body, err := common.Marshal(map[string]any{"model": channel.Models, "messages": []map[string]string{{"role": "user", "content": text}}, "max_completion_tokens": 64})
+	require.NoError(t, err)
+	var request kitdto.GeneralOpenAIRequest
+	require.NoError(t, common.Unmarshal(body, &request))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	c.Request.Header.Set("X-Weighted-Session", session)
+	c.Set("id", 1)
+	c.Set("token_id", 1)
+	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
+	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, channel.Models)
+	if session != "" {
+		service.GetPreferredChannelByAffinity(c, channel.Models, "default")
+	}
+	info := &relaycommon.RelayInfo{
+		Request: &request, OriginModelName: channel.Models, RelayFormat: kittypes.RelayFormatOpenAI,
+		UsingGroup: "default", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channel.Id, ChannelType: channel.Type, ApiKey: key},
+		PricingTokenCountMeta: &kittypes.TokenCountMeta{},
+		PriceData:             hosttypes.PriceData{ModelRatio: 1, CompletionRatio: 1, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 9}},
+	}
+	t.Cleanup(func() { service.FinishChannelKeyUsage(c, info) })
+	return c, info
+}
+
+func TestWeightedKeyRoutingDatabaseMatrix(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	address := os.Getenv("TEST_REDIS_ADDR")
+	if address == "" {
+		t.Skip("TEST_REDIS_ADDR is required for shared weighted routing")
+	}
+	client := redis.NewClient(&redis.Options{Addr: address, Password: os.Getenv("TEST_REDIS_PASSWORD"), MaxRetries: -1})
+	require.NoError(t, client.Ping(context.Background()).Err())
+	oldRedis, oldRDB := common.RedisEnabled, common.RDB
+	t.Cleanup(func() { common.RedisEnabled, common.RDB = oldRedis, oldRDB; require.NoError(t, client.Close()) })
+	for _, dialect := range []struct{ name, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.name, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.name, os.Getenv(dialect.env))
+			common.RedisEnabled, common.RDB = true, client
+			settings := operation_setting.GetChannelAffinitySetting()
+			previousSettings := *settings
+			*settings = operation_setting.ChannelAffinitySetting{Enabled: true, DefaultTTLSeconds: 60, MaxEntries: 100, Rules: []operation_setting.ChannelAffinityRule{{
+				Name: t.Name(), ModelRegex: []string{"^weighted-fixture$"}, PathRegex: []string{"^/v1/chat/completions$"}, SessionMode: "prefer",
+				KeySources: []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Weighted-Session"}},
+			}}}
+			t.Cleanup(func() { *settings = previousSettings })
+			suffix := common.NewRequestId()
+			keys := []string{"weighted-a-" + suffix, "weighted-b-" + suffix, "weighted-vip-" + suffix, "weighted-disabled-" + suffix}
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: t.Name(), Models: "weighted-fixture", Group: "default,vip", Status: common.ChannelStatusEnabled, Key: strings.Join(keys, "\n")}
+			channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModeWeightedUsage, MultiKeySize: 4, MultiKeyStatusList: map[int]int{3: common.ChannelStatusManuallyDisabled}}
+			channel.SetSetting(kitdto.ChannelSettings{UpstreamCostRatio: common.GetPointer(1.0)})
+			require.NoError(t, db.Create(channel).Error)
+			channel.ChannelInfo.KeyWeights = map[string]int{channel.KeyIdentity(keys[0]): 1, channel.KeyIdentity(keys[1]): 3, channel.KeyIdentity(keys[2]): 1000, channel.KeyIdentity(keys[3]): 1000}
+			channel.ChannelInfo.KeyGroups = map[string][]string{channel.KeyIdentity(keys[2]): {"vip"}}
+			require.NoError(t, db.Model(channel).Update("channel_info", channel.ChannelInfo).Error)
+
+			for _, kind := range []string{"task", "batch", "plugin"} {
+				c, info := weightedKeyRoutingContext(t, channel, keys[0], "short", "")
+				unsupported := *channel
+				switch kind {
+				case "task":
+					info.TaskRelayInfo = &relaycommon.TaskRelayInfo{}
+				case "batch":
+					service.GetChannelConstraints(c).AddFilter(dto.ChannelFilter{Kind: dto.FilterBatchCapable})
+				case "plugin":
+					unsupported.Type = constant.ChannelTypeTaskPlugin
+				}
+				_, apiErr := service.PrepareChannelKeyUsage(c, info, &unsupported, false)
+				require.NotNil(t, apiErr, kind)
+				assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode, kind)
+				assert.Nil(t, info.KeyUsageReservation, kind)
+			}
+			for _, entry := range []string{"task", "midjourney", "swapface"} {
+				c, info := weightedKeyRoutingContext(t, channel, keys[0], "short", "")
+				common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
+				switch entry {
+				case "task":
+					result, taskErr := relay.RelayTaskSubmit(c, info)
+					assert.Nil(t, result)
+					require.NotNil(t, taskErr)
+					assert.Equal(t, "weighted_key_usage_unsupported", taskErr.Code)
+					assert.True(t, taskErr.NoRetry)
+				case "midjourney":
+					mjErr := relay.RelayMidjourneySubmit(c, info)
+					require.NotNil(t, mjErr)
+					assert.Equal(t, i18n.T(c, i18n.MsgRelayWeightedKeyUsageUnsupported), mjErr.Description)
+				case "swapface":
+					mjErr := relay.RelaySwapFace(c, info)
+					require.NotNil(t, mjErr)
+					assert.Equal(t, i18n.T(c, i18n.MsgRelayWeightedKeyUsageUnsupported), mjErr.Description)
+				}
+				assert.Nil(t, info.Billing, "unsupported requests must never reserve customer quota")
+			}
+
+			largeContext, largeInfo := weightedKeyRoutingContext(t, channel, keys[0], strings.Repeat("long context ", 4096), "")
+			_, apiErr := service.PrepareChannelKeyUsage(largeContext, largeInfo, channel, false)
+			require.Nil(t, apiErr)
+			require.NotNil(t, largeInfo.KeyUsageReservation)
+			assert.Equal(t, channel.KeyIdentity(keys[1]), largeInfo.KeyUsageReservation.KeyIdentity, "configured weight applies after permission and disabled-key filtering")
+			assert.Equal(t, keys[1], largeInfo.ApiKey)
+			estimate, err := service.EstimateKeyRoutingUsage(largeContext, largeInfo, largeInfo.Request)
+			require.NoError(t, err)
+			require.NotNil(t, estimate.BaseCostUSD)
+			assert.InDelta(t, float64(estimate.InputTokens+estimate.OutputTokens)/common.QuotaPerUnit, *estimate.BaseCostUSD, 1e-12, "routing cost excludes the customer group multiplier")
+
+			smallContext, smallInfo := weightedKeyRoutingContext(t, channel, keys[0], "short", "")
+			_, apiErr = service.PrepareChannelKeyUsage(smallContext, smallInfo, channel, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, channel.KeyIdentity(keys[0]), smallInfo.KeyUsageReservation.KeyIdentity, "the large pending request must already affect selection")
+			service.FinishChannelKeyUsage(largeContext, largeInfo)
+			service.FinishChannelKeyUsage(smallContext, smallInfo)
+			releasedContext, releasedInfo := weightedKeyRoutingContext(t, channel, keys[0], "short", "")
+			_, apiErr = service.PrepareChannelKeyUsage(releasedContext, releasedInfo, channel, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, channel.KeyIdentity(keys[1]), releasedInfo.KeyUsageReservation.KeyIdentity, "failed attempts release their estimates")
+			service.FinishChannelKeyUsage(releasedContext, releasedInfo)
+
+			for _, forbiddenKey := range []string{keys[2], keys[3]} {
+				c, info := weightedKeyRoutingContext(t, channel, forbiddenKey, "short", "")
+				_, apiErr := service.PrepareChannelKeyUsage(c, info, channel, true)
+				assert.NotNil(t, apiErr, "a forced credential cannot bypass group permissions or disablement")
+				assert.Nil(t, info.KeyUsageReservation)
+			}
+
+			pinnedContext, pinnedInfo := weightedKeyRoutingContext(t, channel, keys[0], "short", suffix)
+			_, apiErr = service.PrepareChannelKeyUsage(pinnedContext, pinnedInfo, channel, true)
+			require.Nil(t, apiErr)
+			assert.Equal(t, channel.KeyIdentity(keys[0]), pinnedInfo.KeyUsageReservation.KeyIdentity, "an established transport keeps its credential")
+			service.MarkRequestPolicySuccess(pinnedContext, nil)
+			service.RecordChannelKeyAffinity(pinnedContext)
+			service.FinishChannelKeyUsage(pinnedContext, pinnedInfo)
+			affinityContext, affinityInfo := weightedKeyRoutingContext(t, channel, keys[1], "short", suffix)
+			_, apiErr = service.PrepareChannelKeyUsage(affinityContext, affinityInfo, channel, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, channel.KeyIdentity(keys[0]), affinityInfo.KeyUsageReservation.KeyIdentity, "a healthy session binding wins over the consumption score")
+			service.FinishChannelKeyUsage(affinityContext, affinityInfo)
+			require.NoError(t, model.RecordChannelKeyObservation(channel, channel.Models, keys[0], time.Now().UnixMilli(), common.GetPointer(false), http.StatusBadGateway, "fixture unavailable", "probe"))
+			fallbackContext, fallbackInfo := weightedKeyRoutingContext(t, channel, keys[0], "short", suffix)
+			_, apiErr = service.PrepareChannelKeyUsage(fallbackContext, fallbackInfo, channel, false)
+			require.Nil(t, apiErr)
+			assert.Equal(t, channel.KeyIdentity(keys[1]), fallbackInfo.KeyUsageReservation.KeyIdentity, "an unavailable affinity key must fall back to an eligible key")
+			service.FinishChannelKeyUsage(fallbackContext, fallbackInfo)
+			report, err := keyusage.Query(context.Background(), channel.Id, 24)
+			require.NoError(t, err)
+			for _, stat := range report.Keys {
+				if stat.KeyIdentity == channel.KeyIdentity(keys[0]) || stat.KeyIdentity == channel.KeyIdentity(keys[1]) {
+					assert.Zero(t, stat.PendingRequests)
+					assert.Zero(t, stat.InputTokens, "failed requests do not become actual usage")
+				}
+			}
+			for index, cost := range []float64{0, 0.0125} {
+				ticket, reserveErr := keyusage.Reserve(context.Background(), channel.Id, common.NewRequestId(), []keyusage.Candidate{{Identity: channel.KeyIdentity(keys[index]), Weight: 1, InputTokens: 500, OutputTokens: 50, CostUSD: &cost}}, "")
+				require.NoError(t, reserveErr)
+				require.NoError(t, keyusage.Finish(context.Background(), ticket, &keyusage.Observation{InputTokens: 80, OutputTokens: 20, CostUSD: &cost, CostActual: true}))
+			}
+			require.NoError(t, db.AutoMigrate(&model.ChannelPerfMetric{}, &model.ChannelBalanceSample{}, &model.Log{}))
+			recorder := httptest.NewRecorder()
+			monitor, _ := gin.CreateTestContext(recorder)
+			monitor.Request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/channel/%d/monitoring?hours=24", channel.Id), nil)
+			monitor.Params = gin.Params{{Key: "id", Value: fmt.Sprint(channel.Id)}}
+			GetChannelMonitoring(monitor)
+			var response struct {
+				Success bool `json:"success"`
+				Data    struct {
+					KeyUsage channelKeyUsageReport `json:"key_usage"`
+				} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			require.True(t, response.Success, recorder.Body.String())
+			assert.Empty(t, response.Data.KeyUsage.Error)
+			assert.Positive(t, response.Data.KeyUsage.ObservedSince)
+			assert.LessOrEqual(t, response.Data.KeyUsage.ObservedSince, response.Data.KeyUsage.WindowEnd)
+			require.GreaterOrEqual(t, len(response.Data.KeyUsage.Keys), len(keys))
+			for _, row := range response.Data.KeyUsage.Keys {
+				if row.KeyIndex < 0 {
+					continue
+				}
+				assert.NotEmpty(t, row.KeyPreview)
+				if row.KeyIndex < 2 {
+					require.NotNil(t, row.CostUSD)
+					assert.Equal(t, []float64{0, 0.0125}[row.KeyIndex], *row.CostUSD)
+					assert.EqualValues(t, 80, row.InputTokens)
+					assert.EqualValues(t, 1, row.ActualCostRequests)
+				}
+			}
+			for _, key := range keys {
+				assert.NotContains(t, recorder.Body.String(), key, "monitoring must never disclose usable credentials")
+			}
+
+			for _, failure := range []int{http.StatusServiceUnavailable, http.StatusUnauthorized} {
+				t.Run(fmt.Sprintf("HTTP retry %d", failure), func(t *testing.T) {
+					oldRetries, oldCount := common.RetryTimes, constant.CountToken
+					oldDisable, oldLogs, oldErrors := common.AutomaticDisableChannelEnabled, common.LogConsumeEnabled, constant.ErrorLogEnabled
+					previousConfig := config.GlobalConfig.ExportAllConfigs()
+					common.RetryTimes, constant.CountToken = 3, false
+					common.AutomaticDisableChannelEnabled, common.LogConsumeEnabled, constant.ErrorLogEnabled = false, false, false
+					require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": "false", "quota_setting.enable_free_model_pre_consume": "false"}))
+					t.Cleanup(func() {
+						common.RetryTimes, constant.CountToken = oldRetries, oldCount
+						common.AutomaticDisableChannelEnabled, common.LogConsumeEnabled, constant.ErrorLogEnabled = oldDisable, oldLogs, oldErrors
+						require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"perf_metrics_setting.enabled": previousConfig["perf_metrics_setting.enabled"], "quota_setting.enable_free_model_pre_consume": previousConfig["quota_setting.enable_free_model_pre_consume"]}))
+					})
+					modelName := fmt.Sprintf("weighted-http-%d", failure)
+					require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(fmt.Sprintf(`{"%s":0}`, modelName)))
+					require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+					user := &model.User{Username: modelName, Password: "unused", Group: "default", Status: common.UserStatusEnabled, Quota: 1000, AffCode: fmt.Sprint(failure)}
+					require.NoError(t, db.Create(user).Error)
+					attemptSuffix := suffix + fmt.Sprint(failure)
+					credentials := []string{"weighted-http-a-" + attemptSuffix, "weighted-http-b-" + attemptSuffix, "weighted-http-c-" + attemptSuffix}
+					used := make(chan string, 8)
+					attempts := 0
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+						used <- key
+						attempts++
+						w.Header().Set("Content-Type", "application/json")
+						if attempts == 1 {
+							w.WriteHeader(failure)
+							_, _ = io.WriteString(w, `{"error":{"message":"fixture rejected","type":"api_error"}}`)
+							return
+						}
+						_, _ = io.WriteString(w, `{"id":"weighted-response","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+					}))
+					t.Cleanup(upstream.Close)
+					httpChannel := &model.Channel{Name: modelName, Type: constant.ChannelTypeOpenAI, Key: strings.Join(credentials, "\n"), Models: modelName, Group: "default", Status: common.ChannelStatusEnabled, BaseURL: common.GetPointer(upstream.URL), ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModeWeightedUsage}}
+					require.NoError(t, httpChannel.Insert())
+					t.Cleanup(func() { require.NoError(t, httpChannel.Delete()) })
+					httpChannel.ChannelInfo.KeyOrder = []string{httpChannel.KeyIdentity(credentials[0]), httpChannel.KeyIdentity(credentials[1]), httpChannel.KeyIdentity(credentials[2])}
+					httpChannel.ChannelInfo.KeyWeights = map[string]int{httpChannel.KeyIdentity(credentials[0]): 100, httpChannel.KeyIdentity(credentials[1]): 1, httpChannel.KeyIdentity(credentials[2]): 10}
+					require.NoError(t, db.Model(httpChannel).Update("channel_info", httpChannel.ChannelInfo).Error)
+					service.InitHttpClient()
+					requestContext, responseRecorder := probeRoutingContext(modelName, "default")
+					requestContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, modelName)))
+					requestContext.Request.Header.Set("Content-Type", "application/json")
+					common.SetContextKey(requestContext, constant.ContextKeyUserId, user.Id)
+					common.SetContextKey(requestContext, constant.ContextKeyTokenGroup, "default")
+					selected, _, selectErr := service.SelectChannelForRequest(requestContext, modelName, &service.RetryParam{Ctx: requestContext, TokenGroup: "default", ModelName: modelName})
+					require.Nil(t, selectErr)
+					require.NotNil(t, selected)
+					require.Nil(t, middleware.SetupContextForSelectedChannel(requestContext, selected, modelName))
+					Relay(requestContext, kittypes.RelayFormatOpenAI)
+					require.Equal(t, http.StatusOK, responseRecorder.Code, responseRecorder.Body.String())
+					var actualKeys []string
+					for len(used) > 0 {
+						actualKeys = append(actualKeys, <-used)
+					}
+					second := credentials[0]
+					if failure == http.StatusUnauthorized {
+						second = credentials[2]
+					}
+					assert.Equal(t, []string{credentials[0], second}, actualKeys, "same-key retries stay pinned; invalid credentials rerun weighted selection instead of pinning the provisional fallback")
+					report, reportErr := keyusage.Query(context.Background(), httpChannel.Id, 24)
+					require.NoError(t, reportErr)
+					var measured int64
+					for _, key := range report.Keys {
+						for _, credential := range credentials {
+							if key.KeyIdentity == httpChannel.KeyIdentity(credential) {
+								assert.Zero(t, key.PendingRequests)
+								measured += key.InputTokens + key.OutputTokens
+							}
+						}
+					}
+					assert.EqualValues(t, 12, measured, "only the successful attempt contributes measured usage")
+				})
+			}
+		})
 	}
 }

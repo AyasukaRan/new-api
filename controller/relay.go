@@ -222,6 +222,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}()
 
+	defer service.FinishChannelKeyUsage(c, relayInfo)
+
 	generalSettings := operation_setting.GetGeneralSetting()
 	if relayFormat == types.RelayFormatClaude && relayInfo.IsStream && generalSettings.PingIntervalEnabled {
 		stopKeepAlive := helper.StartStreamKeepAlive(c, time.Duration(generalSettings.PingIntervalSeconds)*time.Second)
@@ -259,12 +261,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.LastError = nil
 	var observation *bool
 	var sameChannelRetry *model.Channel
+	var pinKeyRetry bool
 	sameKeyRetried := make(map[string]bool)
 	keyDeadlines := make(map[string]time.Time)
 	initialChannelKeys := make(map[int]map[string]bool)
 	rejectedChannelKeys := make(map[int]map[string]bool)
 
 	for retryParam.GetRetry() <= common.RetryTimes {
+		service.FinishChannelKeyUsage(c, relayInfo)
+		relayInfo.KeyUsageReservation, relayInfo.KeyUsageObservation = nil, nil
 		relayInfo.ResetFirstResponseTime()
 		relayInfo.UpstreamRequestTimedOut = false
 		relayInfo.StreamStatus = nil
@@ -286,6 +291,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				channel = selected
 			}
 		}
+		channel, channelErr = service.PrepareChannelKeyUsage(c, relayInfo, channel, pinKeyRetry)
+		if channelErr != nil {
+			newAPIError = channelErr
+			break
+		}
+		pinKeyRetry = false
 		usingKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
 		keyIdentity := channel.KeyIdentity(usingKey)
 
@@ -349,6 +360,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = relayHandler(c, relayInfo)
 		}
 		finishReply()
+		service.FinishChannelKeyUsage(c, relayInfo)
 		observation = perfmetrics.RelayObservation(c.Request.Context(), relayInfo, newAPIError)
 		finishActivity(observation)
 		if observation != nil {
@@ -399,7 +411,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			if sameChannelRetry != nil {
 				// Keep this first transient failure request-local until its one
 				// retry finishes. Concurrent disables and probes still apply.
-				sameKeyRetried[keyIdentity], retryingSameKey = true, true
+				sameKeyRetried[keyIdentity], retryingSameKey, pinKeyRetry = true, true, true
 				decision = service.PolicyDecision{Action: "retry", Reason: "same_key_transient_retry", Source: "channel"}
 			}
 		}
@@ -440,8 +452,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			var retryEndpoint bool
 			endpointFailed, retryEndpoint = service.FailChannelEndpoint(c, channel, newAPIError)
 			if retryEndpoint {
+				pinKeyRetry = true
 				sameChannelRetry = channel
-				if service.HasGroupKeyRouting(c) {
+				if service.HasGroupKeyRouting(c) || channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeWeightedUsage {
 					// Mirrors share credentials; retry this exact key without
 					// advancing the tier or resurrecting an invalid credential.
 					snapshot := *channel

@@ -411,7 +411,7 @@ func testChannelModel(ctx context.Context, channel *model.Channel, testUserID in
 			if status, configured := current.ChannelInfo.MultiKeyStatusList[key.index]; key.index >= 0 && configured && status != common.ChannelStatusEnabled {
 				continue
 			}
-			if recovery && (current.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover || current.RelayCredentialProbeError(testModel, key.value) == nil) {
+			if recovery && (!current.ChannelInfo.MultiKeyMode.UsesKeyFailover() || current.RelayCredentialProbeError(testModel, key.value) == nil) {
 				continue
 			}
 		}

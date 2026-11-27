@@ -257,6 +257,24 @@ func ApplyOriginTaskAffinity(c *gin.Context, info *relaycommon.RelayInfo) *dto.T
 	return ApplyChannelPin(c, info)
 }
 
+// validateTaskKeyRouting rejects unsupported scheduling before submitting any
+// upstream work. Fetching existing tasks remains available after a mode change.
+func validateTaskKeyRouting(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError {
+	if info.ChannelMeta == nil || !info.ChannelIsMultiKey {
+		return nil
+	}
+	channel, err := model.CacheGetChannel(info.ChannelId)
+	if err != nil {
+		return service.TaskErrorWrapperLocal(err, "get_channel_failed", http.StatusServiceUnavailable)
+	}
+	if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeWeightedUsage {
+		err := service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelayWeightedKeyUsageUnsupported)), "weighted_key_usage_unsupported", http.StatusBadRequest)
+		err.NoRetry = true
+		return err
+	}
+	return nil
+}
+
 // RelayTaskSubmit 完成 task 提交的全部流程（每次尝试调用一次）：
 // 刷新渠道元数据 → 确定 platform/adaptor → 验证请求 →
 // 估算计费(EstimateBilling) → 计算价格 → 预扣费（重试时补足差额）→
@@ -264,6 +282,9 @@ func ApplyOriginTaskAffinity(c *gin.Context, info *relaycommon.RelayInfo) *dto.T
 // 共享控制器编排负责未落库退款、最终额度预留、落库和结算。
 func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitResult, *dto.TaskError) {
 	info.InitChannelMeta(c)
+	if taskErr := validateTaskKeyRouting(c, info); taskErr != nil {
+		return nil, taskErr
+	}
 
 	// The attempt's late request plugins see the client body before it is
 	// validated and priced; a changed body is decoded again.

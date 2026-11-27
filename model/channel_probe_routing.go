@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/pkg/modelmapping"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -165,7 +164,7 @@ func channelProbeFailureForKey(channel *Channel, modelName, key string, rows map
 	if err != nil {
 		return nil
 	}
-	if state, exists := rows[channelProbeStateID(id)]; exists && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+	if state, exists := rows[channelProbeStateID(id)]; exists && channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 		// The state uses the start of successful attempts; a later diagnostic
 		// completion timestamp must not bypass its recovery ordering.
 		if state.Success {
@@ -211,7 +210,7 @@ func GetChannelKeyRecoveryCandidates(now time.Time, interval time.Duration) ([]C
 	}
 	ids := make([]int, 0)
 	for _, channel := range channels {
-		if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+		if channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 			ids = append(ids, channel.Id)
 		}
 	}
@@ -237,7 +236,7 @@ func GetChannelKeyRecoveryCandidates(now time.Time, interval time.Duration) ([]C
 	}
 	var candidates []ChannelKeyRecoveryCandidate
 	for _, channel := range channels {
-		if len(byChannel[channel.Id]) == 0 || !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+		if len(byChannel[channel.Id]) == 0 || !channel.ChannelInfo.IsMultiKey || !channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 			continue
 		}
 		for _, name := range channel.GetModels() {

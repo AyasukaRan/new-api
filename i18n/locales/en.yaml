@@ -105,3 +105,7 @@ channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
 
 channel.notify_scheduled_subject: "Channel \"{{.Name}}\" (#{{.Id}}) plugin notification"
+relay.weighted_key_usage_unsupported: "Weighted key usage is unavailable for asynchronous tasks and batch requests"
+relay.weighted_key_usage_estimate_failed: "Unable to estimate request size for weighted key routing"
+relay.weighted_key_usage_channel_unavailable: "The channel is unavailable for weighted key routing"
+relay.weighted_key_usage_stats_unavailable: "Weighted key usage statistics are unavailable"

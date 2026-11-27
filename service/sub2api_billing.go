@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/keyusage"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
@@ -95,7 +96,18 @@ func SyncSub2APIBills(ctx context.Context, channelID int) (int, error) {
 		return 0, nil
 	}
 	matched := 0
-	err := model.WithSub2APISyncLock(ctx, 0, "ledger", func() error { var err error; matched, err = syncSub2APIBills(ctx, channelID); return err })
+	err := model.WithSub2APISyncLock(ctx, 0, "ledger", func() error {
+		if err := model.RepairSub2APIKeyUsage(ctx, channelID); err != nil {
+			if errors.Is(err, keyusage.ErrCostOutOfRange) {
+				common.SysError("Sub2API routing cost projection out of range; supplier bills retained")
+			} else {
+				common.SysError("Sub2API routing cost reconciliation deferred; supplier bills unchanged")
+			}
+		}
+		var err error
+		matched, err = syncSub2APIBills(ctx, channelID)
+		return err
+	})
 	return matched, err
 }
 

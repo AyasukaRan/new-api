@@ -106,3 +106,7 @@ channel.upstream_update_failed_channels: "失败渠道 ID（展示 {{.Shown}}/{{
 channel.upstream_update_more_omitted: "（其余 {{.Count}} 个已省略）"
 
 channel.notify_scheduled_subject: "渠道“{{.Name}}” (#{{.Id}}) 插件通知"
+relay.weighted_key_usage_unsupported: "加权密钥用量模式不支持异步任务和批量请求"
+relay.weighted_key_usage_estimate_failed: "无法估算加权密钥路由所需的请求用量"
+relay.weighted_key_usage_channel_unavailable: "该渠道当前无法用于加权密钥路由"
+relay.weighted_key_usage_stats_unavailable: "加权密钥用量统计暂不可用"

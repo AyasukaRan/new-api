@@ -32,8 +32,9 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from '@/components/ui/chart'
-import { formatCurrencyFromUSD, formatQuotaWithCurrency } from '@/lib/currency'
-import { formatTimestampToDate } from '@/lib/format'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatQuotaWithCurrency } from '@/lib/currency'
+import { formatNumber, formatTimestampToDate } from '@/lib/format'
 
 import { getChannelMonitoring } from '../../api'
 import {
@@ -41,11 +42,15 @@ import {
   isMultiKeyChannel,
   parseChannelSettings,
 } from '../../lib'
+import { formatChannelBalanceAmount } from '../../lib/channel-balance'
+import { getKeyBalanceHistory } from '../../lib/channel-key-monitoring'
 import type { ChannelMonitoring } from '../../types'
 import {
   ChannelBalanceSummary,
   ChannelKeyBalanceValue,
 } from '../channel-balance-summary'
+import { ChannelKeyBalanceHistory } from '../channel-key-balance-history'
+import { ChannelKeyUsageMonitoring } from '../channel-key-usage-monitoring'
 import { useChannels } from '../channels-provider'
 
 export function ChannelMonitoringContent(props: {
@@ -54,8 +59,11 @@ export function ChannelMonitoringContent(props: {
   multiKey?: boolean
   balanceRechargeMultiplier?: number
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const data = props.data
+  const multiplier =
+    data.balance_recharge_multiplier ?? props.balanceRechargeMultiplier
   const multiKey =
     props.multiKey ||
     (data.balance?.key_accounts?.length ??
@@ -68,7 +76,7 @@ export function ChannelMonitoringContent(props: {
   const stats = [
     {
       label: t('Request attempts'),
-      value: usage.request_count.toLocaleString(),
+      value: formatNumber(usage.request_count, locale),
     },
     {
       label: t('Request success rate'),
@@ -79,7 +87,7 @@ export function ChannelMonitoringContent(props: {
     },
     {
       label: t('Input / output tokens'),
-      value: `${usage.recorded_input_tokens.toLocaleString()} / ${usage.recorded_output_tokens.toLocaleString()}`,
+      value: `${formatNumber(usage.recorded_input_tokens, locale)} / ${formatNumber(usage.recorded_output_tokens, locale)}`,
     },
     {
       label: t('Usage in this period'),
@@ -97,15 +105,13 @@ export function ChannelMonitoringContent(props: {
           : `${usage.availability_rate.toFixed(1)}%`,
     },
   ]
-  const chartData = data.balance_history.map((sample) => ({
-    time: formatTimestampToDate(sample.checked_at),
-    balance:
-      sample.success && !sample.partial
-        ? getChannelDisplayBalance(
-            sample.balance,
-            props.balanceRechargeMultiplier
-          )
-        : null,
+  const chartData = getKeyBalanceHistory(
+    data.balance_history,
+    null,
+    multiplier
+  ).map((point) => ({
+    time: formatTimestampToDate(point.timestamp),
+    balance: point.balance,
   }))
   return (
     <div className='space-y-5'>
@@ -125,9 +131,16 @@ export function ChannelMonitoringContent(props: {
         )}
       </p>
       <ChannelBalanceSummary
-        balanceRechargeMultiplier={props.balanceRechargeMultiplier}
+        balanceRechargeMultiplier={multiplier}
+        detail={data.balance_detail}
+        storedCurrency={data.balance_currency}
         monitor={data.balance}
+        history={data.balance_history}
         queryDisabled={props.balanceQueryDisabled}
+      />
+      <ChannelKeyUsageMonitoring
+        data={data}
+        balanceRechargeMultiplier={multiplier}
       />
       {data.balance_history.length === 0 ? (
         <EmptyState
@@ -147,9 +160,16 @@ export function ChannelMonitoringContent(props: {
         <section className='space-y-3' aria-label={t('Balance history')}>
           <h3 className='text-sm font-medium'>{t('Balance history')}</h3>
           {multiKeyHistory ? (
-            <p className='text-muted-foreground text-xs'>
-              {t('Key numbers reflect the configuration at query time.')}
-            </p>
+            <>
+              <p className='text-muted-foreground text-xs'>
+                {t('Key numbers reflect the configuration at query time.')}
+              </p>
+              <ChannelKeyBalanceHistory
+                history={data.balance_history}
+                balanceRechargeMultiplier={multiplier}
+                currency={data.balance_currency}
+              />
+            </>
           ) : (
             <ChartContainer
               className='h-44 w-full'
@@ -166,14 +186,21 @@ export function ChannelMonitoringContent(props: {
                 <YAxis
                   width={70}
                   tickFormatter={(value: number) =>
-                    formatCurrencyFromUSD(value, { compact: true })
+                    formatChannelBalanceAmount(value, data.balance_currency, {
+                      locale,
+                      compact: true,
+                    })
                   }
                 />
                 <ChartTooltip
                   content={
                     <ChartTooltipContent
                       formatter={(value) =>
-                        formatCurrencyFromUSD(Number(value))
+                        formatChannelBalanceAmount(
+                          Number(value),
+                          data.balance_currency,
+                          { locale }
+                        )
                       }
                     />
                   }
@@ -209,11 +236,15 @@ export function ChannelMonitoringContent(props: {
                     if (!sample.success && !sample.partial) return '—'
                     const balance = getChannelDisplayBalance(
                       sample.known_balance,
-                      props.balanceRechargeMultiplier
+                      multiplier
                     )
                     return balance == null
                       ? t('Not queried')
-                      : formatCurrencyFromUSD(balance)
+                      : formatChannelBalanceAmount(
+                          balance,
+                          data.balance_currency,
+                          { locale }
+                        )
                   }
                   if (!sample.key_balances.length) return t('Not queried')
                   return (
@@ -228,9 +259,8 @@ export function ChannelMonitoringContent(props: {
                           </span>
                           <ChannelKeyBalanceValue
                             row={row}
-                            balanceRechargeMultiplier={
-                              props.balanceRechargeMultiplier
-                            }
+                            currency={data.balance_currency}
+                            balanceRechargeMultiplier={multiplier}
                           />
                         </div>
                       ))}
@@ -303,7 +333,7 @@ export function ChannelMonitoringDialog(props: {
       title={t('Channel monitoring')}
       description={sensitiveVisible ? currentRow.name : '••••'}
       bodyClassName='space-y-4'
-      contentClassName='sm:max-w-3xl'
+      contentClassName='sm:max-w-5xl'
       footer={
         <Button variant='outline' onClick={() => props.onOpenChange(false)}>
           {t('Close')}
@@ -311,7 +341,7 @@ export function ChannelMonitoringDialog(props: {
       }
     >
       <div className='flex flex-wrap items-center gap-2'>
-        {[24, 168].map((value) => (
+        {[24, 168, 720].map((value) => (
           <Button
             key={value}
             variant={hours === value ? 'secondary' : 'outline'}
@@ -319,7 +349,13 @@ export function ChannelMonitoringDialog(props: {
             aria-pressed={hours === value}
             onClick={() => setHours(value)}
           >
-            {value === 24 ? t('Last 24 hours') : t('Last 7 days')}
+            {
+              {
+                24: t('Last 24 hours'),
+                168: t('Last 7 days'),
+                720: t('Last 30 days'),
+              }[value]
+            }
           </Button>
         ))}
         <Button

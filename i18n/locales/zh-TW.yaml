@@ -106,3 +106,7 @@ channel.upstream_update_failed_channels: "失敗管道 ID（顯示 {{.Shown}}/{{
 channel.upstream_update_more_omitted: "（其餘 {{.Count}} 個已省略）"
 
 channel.notify_scheduled_subject: "渠道「{{.Name}}」(#{{.Id}}) 外掛通知"
+relay.weighted_key_usage_unsupported: "加權金鑰用量模式不支援非同步任務和批次請求"
+relay.weighted_key_usage_estimate_failed: "無法估算加權金鑰路由所需的請求用量"
+relay.weighted_key_usage_channel_unavailable: "該渠道目前無法用於加權金鑰路由"
+relay.weighted_key_usage_stats_unavailable: "加權金鑰用量統計暫時無法使用"

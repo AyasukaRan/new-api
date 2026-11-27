@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/keyusage"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -158,7 +159,7 @@ func SettleSub2APIBill(ctx context.Context, pending Sub2APIBill, usageID, apiKey
 	invoiceIdentity := hex.EncodeToString(invoiceHash[:])
 	err = DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&Sub2APIBill{}).Where("id = ? AND account_id = ? AND api_key_id = ? AND request_id = ? AND cost_quota IS NULL", pending.ID, pending.AccountID, apiKeyID, pending.RequestID).
-			Updates(map[string]any{"usage_id": usageID, "invoice_identity": invoiceIdentity, "actual_cost_usd": amount.String(), "cost_quota": cost, "billing_type": billingType, "rate_multiplier": rate, "synced_at": now})
+			Updates(map[string]any{"usage_id": usageID, "invoice_identity": invoiceIdentity, "actual_cost_usd": amount.String(), "cost_quota": cost, "billing_type": billingType, "rate_multiplier": rate, "synced_at": now, "next_sync_at": now})
 		if result.Error != nil {
 			return result.Error
 		}
@@ -186,7 +187,109 @@ func SettleSub2APIBill(ctx context.Context, pending Sub2APIBill, usageID, apiKey
 	if changed {
 		usageLiveFeed.committed(&log)
 	}
+	// Use the persisted invoice on replay; a changed caller payload must never
+	// replace an already reconciled supplier amount in routing statistics.
+	var settled Sub2APIBill
+	if err := DB.WithContext(ctx).First(&settled, pending.ID).Error; err != nil {
+		common.SysError("Sub2API routing cost reconciliation deferred; supplier bill retained")
+	} else if err := correctSub2APIKeyUsage(ctx, settled, &log); err != nil {
+		if errors.Is(err, keyusage.ErrCostOutOfRange) {
+			common.SysError("Sub2API routing cost projection out of range; supplier bill retained")
+		} else {
+			common.SysError("Sub2API routing cost reconciliation deferred; supplier bill retained")
+		}
+	}
 	return nil
+}
+
+// correctSub2APIKeyUsage is idempotent and only runs after the invoice commits.
+// NextSyncAt also retains failed routing projections of already settled bills.
+func correctSub2APIKeyUsage(ctx context.Context, bill Sub2APIBill, log *Log) error {
+	if bill.CostQuota == nil {
+		return nil
+	}
+	if !bill.matches(log) {
+		return errors.New("upstream routing bill source no longer matches")
+	}
+	var metadata struct {
+		AdminInfo struct {
+			Routing struct {
+				ID          string `json:"id"`
+				ChannelID   int    `json:"channel_id"`
+				KeyIdentity string `json:"key_identity"`
+			} `json:"key_routing"`
+		} `json:"admin_info"`
+	}
+	if err := common.UnmarshalJsonStr(log.Other, &metadata); err != nil {
+		return err
+	}
+	routing := metadata.AdminInfo.Routing
+	if routing.ID != "" && routing.ChannelID == bill.ChannelID && routing.KeyIdentity == bill.KeyIdentity {
+		actualUSD, err := strconv.ParseFloat(bill.ActualCostUSD, 64)
+		if err != nil || math.IsNaN(actualUSD) || math.IsInf(actualUSD, 0) || actualUSD < 0 {
+			return errors.New("invalid stored upstream bill amount")
+		}
+		if err := keyusage.CorrectCost(ctx, bill.ChannelID, routing.ID, actualUSD); err != nil {
+			if errors.Is(err, keyusage.ErrCostOutOfRange) {
+				// The durable invoice remains authoritative. Its amount cannot
+				// fit the routing ledger, and retrying cannot change that limit.
+				if clearErr := DB.WithContext(ctx).Model(&Sub2APIBill{}).Where("id = ?", bill.ID).Update("next_sync_at", 0).Error; clearErr != nil {
+					return clearErr
+				}
+				return err
+			}
+			if errors.Is(err, keyusage.ErrNotFound) {
+				common.SysError("Sub2API routing history unavailable; supplier bill retained")
+				return DB.WithContext(ctx).Model(&Sub2APIBill{}).Where("id = ?", bill.ID).Update("next_sync_at", 0).Error
+			}
+			// A replay may have previously cleared this marker before Redis
+			// became unavailable, so retain it again for the next sync pass.
+			_ = DB.WithContext(ctx).Model(&Sub2APIBill{}).Where("id = ?", bill.ID).Update("next_sync_at", common.GetTimestamp()).Error
+			return err
+		}
+	}
+	return DB.WithContext(ctx).Model(&Sub2APIBill{}).Where("id = ? AND cost_quota IS NOT NULL", bill.ID).Update("next_sync_at", 0).Error
+}
+
+// RepairSub2APIKeyUsage retries a failed cache projection without fetching or
+// changing the supplier invoice, including the transaction-to-cache crash gap.
+func RepairSub2APIKeyUsage(ctx context.Context, channelID int) error {
+	if !Sub2APIStorageReady() {
+		return nil
+	}
+	var cursor int64
+	var firstErr error
+	for {
+		var bills []Sub2APIBill
+		query := DB.WithContext(ctx).Where("cost_quota IS NOT NULL AND next_sync_at > 0 AND created_at >= ? AND id > ?", time.Now().Add(-30*24*time.Hour).Unix(), cursor)
+		if channelID > 0 {
+			query = query.Where("channel_id = ?", channelID)
+		}
+		if err := query.Order("id").Limit(300).Find(&bills).Error; err != nil {
+			return err
+		}
+		for _, bill := range bills {
+			cursor = bill.ID
+			var log Log
+			if err := LOG_DB.WithContext(ctx).Where("id = ? AND request_id = ? AND channel_id = ?", bill.LogID, bill.LogRequestID, bill.ChannelID).Take(&log).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					err = DB.WithContext(ctx).Model(&Sub2APIBill{}).Where("id = ?", bill.ID).Update("next_sync_at", 0).Error
+				}
+				if err != nil && firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if err := correctSub2APIKeyUsage(ctx, bill, &log); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		if len(bills) < 300 {
+			return firstErr
+		}
+	}
 }
 
 func (bill Sub2APIBill) matches(log *Log) bool {

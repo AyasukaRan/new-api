@@ -101,6 +101,7 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	if ctx == nil || other == nil {
 		return
 	}
+	AppendKeyRoutingMetadata(relayInfo, other)
 	other.SetAdmin("use_channel", ctx.GetStringSlice("use_channel"))
 	if ref, ok := ctx.Get(sub2APIBillingContextKey); ok {
 		if billing, valid := ref.(*model.Sub2APIBillingRef); valid && billing != nil && (billing.RequestID != "" || billing.ResponseID != "") {

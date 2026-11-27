@@ -429,7 +429,7 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
-func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message) {
+func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message, measuredUsage ...*dto.Usage) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
 	if usage == nil {
@@ -609,6 +609,21 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 			appendUpstreamCostInfo(relayInfo, other, base, summary.Quota)
 		}
 	}
+	var routingBaseQuota *float64
+	if snap == nil {
+		base := summary.BaseQuota.InexactFloat64()
+		routingBaseQuota = &base
+	} else if tieredResult != nil {
+		base := tieredResult.ActualQuotaBeforeGroup + summary.ToolCallBaseQuota.InexactFloat64()
+		routingBaseQuota = &base
+	}
+	// Some image handlers preserve a synthetic token for legacy charging. Key
+	// routing receives the upstream quantities before that billing adjustment.
+	routingUsage := originUsage
+	if len(measuredUsage) > 0 {
+		routingUsage = measuredUsage[0]
+	}
+	observeKeyRoutingUsage(ctx, relayInfo, routingUsage, routingBaseQuota)
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 

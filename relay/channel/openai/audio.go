@@ -55,6 +55,7 @@ func OpenaiTTSHandler(c *gin.Context, resp *http.Response, info *relaycommon.Rel
 		})
 	} else {
 		common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
+		service.MarkKeyRoutingTokensEstimated(c)
 		// 读取响应体到缓冲区
 		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {

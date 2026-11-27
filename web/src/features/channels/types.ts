@@ -29,7 +29,10 @@ export const channelInfoSchema = z.object({
   multi_key_disabled_reason: z.record(z.string(), z.string()).optional(),
   multi_key_disabled_time: z.record(z.string(), z.number()).optional(),
   multi_key_polling_index: z.number().default(0),
-  multi_key_mode: z.enum(['random', 'polling', 'failover']).default('random'),
+  key_weights: z.record(z.string(), z.number()).optional(),
+  multi_key_mode: z
+    .enum(['random', 'polling', 'failover', 'weighted_usage'])
+    .default('random'),
 })
 
 export type ChannelInfo = z.infer<typeof channelInfoSchema>
@@ -67,6 +70,7 @@ export const channelKeyConfigSchema = z.object({
   key_identity: z.string(),
   key_index: z.number(),
   key_preview: z.string(),
+  routing_weight: z.number().int().min(1).max(1000).default(1),
   groups: z.array(z.string()),
   upstream_cost_ratio: z.number().nullable(),
   effective_upstream_cost_ratio: z.number().nullable(),
@@ -81,6 +85,7 @@ export type ChannelKeyConfigInput = {
   key?: string
   groups: string[]
   upstream_cost_ratio: number | null
+  routing_weight?: number
   enabled?: boolean
 }
 
@@ -160,7 +165,7 @@ export type Channel = z.infer<typeof channelSchema>
 
 export type UpdateChannelRequest = Omit<Partial<Channel>, 'key_configs'> & {
   key_configs?: ChannelKeyConfigInput[]
-  multi_key_mode?: 'random' | 'polling' | 'failover'
+  multi_key_mode?: 'random' | 'polling' | 'failover' | 'weighted_usage'
 }
 
 // ============================================================================
@@ -349,12 +354,46 @@ export interface ChannelBalanceSample {
   success: boolean
   used_quota: number
   key_balances: ChannelKeyBalance[]
+  configuration_segment?: number
+}
+
+export interface ChannelKeyUsageTotals {
+  key_identity: string
+  input_tokens: number
+  output_tokens: number
+  request_count: number
+  cost_usd: number | null
+  actual_cost_requests: number
+  estimated_cost_requests: number
+  unknown_cost_requests: number
+  pending_requests: number
+  tokens_estimated_requests?: number
+}
+
+export interface ChannelKeyUsage extends ChannelKeyUsageTotals {
+  key_index: number
+  key_preview: string
+  weight: number
+  target_share: number
+}
+
+export interface ChannelKeyUsageMonitoring {
+  observed_since?: number
+  window_start: number
+  window_end: number
+  keys: ChannelKeyUsage[]
+  series: { timestamp: number; keys: ChannelKeyUsageTotals[] }[]
+  error?: string
 }
 
 export interface ChannelMonitoring {
   used_quota: number
   balance: ChannelBalanceMonitor | null
   balance_history: ChannelBalanceSample[]
+  balance_detail?: ChannelBalanceDetail | null
+  balance_currency?: string
+  balance_recharge_multiplier?: number
+  key_usage?: ChannelKeyUsageMonitoring
   usage: {
     channel_id: number
     hours: number
@@ -582,7 +621,7 @@ export interface ChannelFormData {
   other?: string
   // Multi-key specific
   multi_key_mode?: 'single' | 'batch' | 'multi_to_single'
-  multi_key_type?: 'random' | 'polling' | 'failover'
+  multi_key_type?: 'random' | 'polling' | 'failover' | 'weighted_usage'
   batch_add_set_key_prefix_2_name?: boolean
 }
 
@@ -592,7 +631,7 @@ export interface ChannelFormData {
 
 export interface AddChannelRequest {
   mode: 'single' | 'batch' | 'multi_to_single'
-  multi_key_mode?: 'random' | 'polling' | 'failover'
+  multi_key_mode?: 'random' | 'polling' | 'failover' | 'weighted_usage'
   key_configs?: ChannelKeyConfigInput[]
   batch_add_set_key_prefix_2_name?: boolean
   channel: Partial<Channel>

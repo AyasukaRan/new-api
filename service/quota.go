@@ -283,6 +283,11 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	if settleErr == nil && totalTokens > 0 && (!tieredOk || tieredResult != nil) && !common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
 		appendUpstreamCostInfo(relayInfo, other, costBase, quota)
 	}
+	var routingCostBase *float64
+	if !tieredOk || tieredResult != nil {
+		routingCostBase = &costBase
+	}
+	observeKeyRoutingUsage(ctx, relayInfo, tokenUsage, routingCostBase)
 	attachQuotaSaturation(ctx, relayInfo, other)
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
@@ -328,6 +333,7 @@ func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData)
 }
 
 func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message) {
+	originUsage := usage
 	hasUpstreamUsage := usage != nil && (usage.BillingUsage == nil || !usage.BillingUsage.Estimated)
 	if relayInfo.PriceData.ChannelPricing && !relayInfo.PriceData.UsePrice {
 		PostTextConsumeQuota(ctx, relayInfo, usage, extraContent)
@@ -442,6 +448,11 @@ func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, u
 	if settleErr == nil && hasUpstreamUsage && (totalTokens > 0 || fixedPriceBilling) && (!tieredOk || tieredResult != nil) && !common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens) {
 		appendUpstreamCostInfo(relayInfo, other, costBase, quota)
 	}
+	var routingCostBase *float64
+	if !tieredOk || tieredResult != nil {
+		routingCostBase = &costBase
+	}
+	observeKeyRoutingUsage(ctx, relayInfo, originUsage, routingCostBase)
 	attachQuotaSaturation(ctx, relayInfo, other)
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

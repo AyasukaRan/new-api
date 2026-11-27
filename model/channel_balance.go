@@ -67,21 +67,22 @@ func (channel *Channel) BalanceKeyAccounts() []ChannelKeyAccount {
 // configuration and routing state. Balance carries the last complete reading;
 // KnownBalance aggregates the keys that answered this particular check.
 type ChannelBalanceSample struct {
-	EmailState         *channelBalanceEmailState `json:"-" gorm:"type:text;serializer:json"`
-	Scheduled          bool                      `json:"-" gorm:"-"`
-	ID                 int64                     `json:"id" gorm:"primaryKey"`
-	ChannelID          int                       `json:"channel_id" gorm:"index:idx_channel_balance_time,priority:1"`
-	CheckedAt          int64                     `json:"checked_at" gorm:"bigint;index:idx_channel_balance_time,priority:2"`
-	StartedAt          int64                     `json:"-" gorm:"bigint"`
-	ConfigurationHash  string                    `json:"-" gorm:"type:varchar(64)"`
-	Balance            *float64                  `json:"balance"`
-	BalanceUpdatedTime int64                     `json:"balance_updated_time" gorm:"bigint"`
-	KnownBalance       float64                   `json:"known_balance"`
-	Partial            bool                      `json:"partial"`
-	Success            bool                      `json:"success"`
-	UsedQuota          int64                     `json:"used_quota" gorm:"bigint"`
-	KeyBalances        []ChannelKeyBalance       `json:"key_balances" gorm:"-"`
-	KeyBalancesJSON    string                    `json:"-" gorm:"type:text"`
+	ConfigurationSegment int                       `json:"configuration_segment" gorm:"-"`
+	EmailState           *channelBalanceEmailState `json:"-" gorm:"type:text;serializer:json"`
+	Scheduled            bool                      `json:"-" gorm:"-"`
+	ID                   int64                     `json:"id" gorm:"primaryKey"`
+	ChannelID            int                       `json:"channel_id" gorm:"index:idx_channel_balance_time,priority:1"`
+	CheckedAt            int64                     `json:"checked_at" gorm:"bigint;index:idx_channel_balance_time,priority:2"`
+	StartedAt            int64                     `json:"-" gorm:"bigint"`
+	ConfigurationHash    string                    `json:"-" gorm:"type:varchar(64)"`
+	Balance              *float64                  `json:"balance"`
+	BalanceUpdatedTime   int64                     `json:"balance_updated_time" gorm:"bigint"`
+	KnownBalance         float64                   `json:"known_balance"`
+	Partial              bool                      `json:"partial"`
+	Success              bool                      `json:"success"`
+	UsedQuota            int64                     `json:"used_quota" gorm:"bigint"`
+	KeyBalances          []ChannelKeyBalance       `json:"key_balances" gorm:"-"`
+	KeyBalancesJSON      string                    `json:"-" gorm:"type:text"`
 }
 
 var ErrChannelBalanceConfigurationChanged = errors.New("channel balance configuration changed; retry the balance query")
@@ -661,8 +662,8 @@ func PopulateChannelBalanceMonitors(channels []*Channel) error {
 // chronological order. It deliberately includes failed checks and old channel
 // configurations so the historical chart does not erase outages or edits.
 func ListChannelBalanceSamples(channelID int, start, end int64, limit int) ([]ChannelBalanceSample, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 1000
+	if limit <= 0 || limit > 10000 {
+		limit = 10000
 	}
 	samples := make([]ChannelBalanceSample, 0)
 	query := DB.Where("channel_id = ?", channelID)

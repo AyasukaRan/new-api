@@ -274,6 +274,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	var finishActivity func(*bool)
 	var observation *bool
 	finishAttempt := func(attemptErr *types.NewAPIError) {
+		service.FinishChannelKeyUsage(c, info)
 		if finishActivity == nil {
 			return
 		}
@@ -363,6 +364,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return apiErr
 		}
 		billingPrepared = true
+		attemptChannel, apiErr = service.PrepareChannelKeyUsage(c, info, attemptChannel, true)
+		if apiErr != nil {
+			return apiErr
+		}
 		var payload []byte
 		payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
 		if apiErr != nil {
@@ -403,6 +408,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				if apiErr = service.PrepareBillingForSelectedChannel(c, info); apiErr != nil {
 					return apiErr
 				}
+			}
+			channel, apiErr = service.PrepareChannelKeyUsage(c, info, channel, false)
+			if apiErr != nil {
+				return apiErr
 			}
 			info.RetryIndex = retry.GetRetry()
 			service.ResetRequestToolObservation(c)

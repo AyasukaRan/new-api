@@ -1017,7 +1017,12 @@ test.each(['create', 'edit'])(
           '/api/channel',
           expect.objectContaining({
             key_configs: [
-              { key: 'channel-key', groups: [], upstream_cost_ratio: null },
+              {
+                key: 'channel-key',
+                groups: [],
+                upstream_cost_ratio: null,
+                routing_weight: 1,
+              },
             ],
             channel: expect.objectContaining({
               type: 1,
@@ -2419,6 +2424,7 @@ test('an operator without sensitive write permission can discover saved models a
       groups: [],
       upstream_cost_ratio: null,
       effective_upstream_cost_ratio: null,
+      routing_weight: 1,
       status: 1,
     },
   ]
@@ -3841,6 +3847,7 @@ test('key entry opens channel editing and preserves drafts while testing an exac
       groups: ['default'],
       upstream_cost_ratio: 0.3,
       effective_upstream_cost_ratio: 0.3,
+      routing_weight: 1,
       status: 1,
     },
     {
@@ -3850,6 +3857,7 @@ test('key entry opens channel editing and preserves drafts while testing an exac
       groups: [],
       upstream_cost_ratio: 1.1,
       effective_upstream_cost_ratio: 1.1,
+      routing_weight: 1,
       status: 1,
     },
   ]

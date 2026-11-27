@@ -33,6 +33,7 @@ const keys: ChannelKeyDraft[] = [
     key_index: 0,
     key_preview: 'masked-a',
     groups: [],
+    routing_weight: 1,
     upstream_cost_ratio: 1.1,
     effective_upstream_cost_ratio: 1.1,
     status: 1,
@@ -42,6 +43,7 @@ const keys: ChannelKeyDraft[] = [
     key_index: 1,
     key_preview: 'masked-b',
     groups: [],
+    routing_weight: 1,
     upstream_cost_ratio: 0.3,
     effective_upstream_cost_ratio: 0.3,
     status: 1,
@@ -51,6 +53,7 @@ const keys: ChannelKeyDraft[] = [
     key_index: 2,
     key_preview: 'masked-c',
     groups: [],
+    routing_weight: 1,
     upstream_cost_ratio: null,
     effective_upstream_cost_ratio: null,
     status: 1,
@@ -59,11 +62,14 @@ const keys: ChannelKeyDraft[] = [
 function Harness(props: {
   saved?: boolean
   balanceRechargeMultiplier?: number
+  initialMode?: 'random' | 'polling' | 'failover' | 'weighted_usage'
+  disabled?: boolean
+  channelType?: number
 }) {
   const [value, setValue] = useState(keys)
-  const [mode, setMode] = useState<'random' | 'polling' | 'failover'>(
-    'failover'
-  )
+  const [mode, setMode] = useState<
+    'random' | 'polling' | 'failover' | 'weighted_usage'
+  >(props.initialMode ?? 'failover')
   const [pendingKeys, setPendingKeys] = useState('')
   const [channelCost, setChannelCost] = useState<number | null>(null)
   const channel = props.saved
@@ -94,6 +100,8 @@ function Harness(props: {
     <>
       <ChannelKeyEditor
         value={value}
+        disabled={props.disabled}
+        channelType={props.channelType}
         onChange={setValue}
         mode={mode}
         onModeChange={setMode}
@@ -189,3 +197,56 @@ test('key removal requires confirmation and enabled changes remain local channel
   await user.click(within(dialog).getByRole('button', { name: 'Remove' }))
   expect(orderedKeys()).toEqual(['masked-b', 'masked-c'])
 })
+
+test('weighted usage exposes per-key weights and switching strategies retains the draft', async () => {
+  const user = userEvent.setup()
+  render(<Harness saved initialMode='weighted_usage' />)
+  const weight = row('a').getByRole('spinbutton', { name: 'Key weight' })
+  expect(weight).toHaveValue(1)
+  await user.clear(weight)
+  await user.type(weight, '3')
+  expect(weight).toHaveValue(3)
+  expect(
+    screen.getByRole('button', { name: 'Move Key #1 down' })
+  ).toBeDisabled()
+  await user.click(screen.getByRole('combobox', { name: 'Multi-Key Strategy' }))
+  await user.click(screen.getByRole('option', { name: 'Random' }))
+  expect(
+    screen.queryByRole('spinbutton', { name: 'Key weight' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('combobox', { name: 'Multi-Key Strategy' }))
+  await user.click(screen.getByRole('option', { name: 'Weighted usage' }))
+  expect(row('a').getByRole('spinbutton', { name: 'Key weight' })).toHaveValue(
+    3
+  )
+})
+
+test('weighted usage shows invalid input and honors a locked editor', async () => {
+  const user = userEvent.setup()
+  const { rerender } = render(<Harness saved initialMode='weighted_usage' />)
+  const weight = row('a').getByRole('spinbutton', { name: 'Key weight' })
+  await user.clear(weight)
+  await user.type(weight, '0')
+  expect(weight).toHaveAttribute('aria-invalid', 'true')
+  expect(
+    row('a').getByText('Key weight must be an integer between 1 and 1000')
+  ).toBeVisible()
+  rerender(<Harness saved initialMode='weighted_usage' disabled />)
+  expect(weight).toBeDisabled()
+})
+
+test.each([2, 5, 36, 61])(
+  'async-only channel type %s does not offer weighted usage',
+  async (channelType) => {
+    const user = userEvent.setup()
+    render(<Harness channelType={channelType} initialMode='random' />)
+    await user.click(
+      screen.getByRole('combobox', { name: 'Multi-Key Strategy' })
+    )
+    expect(
+      screen.queryByRole('option', { name: 'Weighted usage' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Random' })).toBeVisible()
+    expect(screen.getByRole('option', { name: 'Polling' })).toBeVisible()
+  }
+)

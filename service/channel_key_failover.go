@@ -2,7 +2,6 @@ package service
 
 import (
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
@@ -16,7 +15,7 @@ func SelectSameChannelKeyRetry(c *gin.Context, previous *model.Channel, modelNam
 		return nil
 	}
 	channel, err := model.GetChannelById(previous.Id, true)
-	if err != nil || channel.Status != common.ChannelStatusEnabled || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+	if err != nil || channel.Status != common.ChannelStatusEnabled || !channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 		return nil
 	}
 	group := GetSelectedRequestGroup(c)
@@ -61,7 +60,7 @@ func markChannelKeyAttempt(c *gin.Context, channel *model.Channel, key string) {
 	}
 	value, _ := c.Get(channelKeyFailoverContext)
 	state, _ := value.(*channelKeyFailover)
-	if channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+	if !channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 		if state != nil {
 			state.ChannelID = 0
 		}
@@ -109,7 +108,7 @@ func SelectChannelKeyRetry(c *gin.Context, modelName string) (*model.Channel, er
 	if err != nil {
 		return nil, err
 	}
-	if channel.Status != common.ChannelStatusEnabled || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+	if channel.Status != common.ChannelStatusEnabled || !channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 		state.Exhausted[state.Group][channel.Id] = true
 		return nil, nil
 	}

@@ -50,6 +50,7 @@ func SelectGroupKeyRetry(c *gin.Context, modelName string) (*model.Channel, erro
 }
 
 func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, preferredID int) (*model.Channel, bool, error) {
+	c.Set("weighted_key_tier", nil)
 	var state *groupKeyRoute
 	if value, exists := c.Get(groupKeyRouteContext); exists && value != nil {
 		state = value.(*groupKeyRoute)
@@ -145,6 +146,11 @@ func selectGroupKeyTier(c *gin.Context, group, modelName string, channelID, pref
 			keys = append(keys, candidate)
 		}
 	}
+	identities := make(map[string]bool, len(keys))
+	for _, candidate := range keys {
+		identities[candidate.RelayCredentialIdentity] = true
+	}
+	c.Set("weighted_key_tier", identities)
 	slices.SortFunc(keys, func(a, b *model.Channel) int { return a.RelayKeyIndex - b.RelayKeyIndex })
 	selected := keys[0]
 	if selected.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
@@ -178,13 +184,13 @@ func selectGroupKeyAffinityCandidate(c *gin.Context, eligible []*model.Channel, 
 	}
 	for _, candidate := range eligible {
 		if candidate.Id != channelID || candidate.RelayCredentialIdentity != binding.Expected ||
-			candidate.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover || hasExact && !candidate.RelayModelExact {
+			!candidate.ChannelInfo.MultiKeyMode.UsesKeyFailover() || hasExact && !candidate.RelayModelExact {
 			continue
 		}
 		// A recovered higher tier serves new sessions. A known channel binding
 		// keeps its healthy key after current permissions and health are checked.
 		selected, err := candidate.SelectRelayKeyForModel(modelName, GetChannelConstraints(c).HasFilter(dto.FilterBatchCapable), group)
-		if err == nil && selected.Channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+		if err == nil && selected.Channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 			if common.GetContextKeyString(c, constant.ContextKeyUsingGroup) == "auto" {
 				common.SetContextKey(c, constant.ContextKeyAutoGroup, group)
 			}

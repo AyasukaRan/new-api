@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/keyusage"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -28,6 +29,124 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func TestKeyRoutingEstimateDoesNotChangeBilling(t *testing.T) {
+	oldCount := constant.CountToken
+	constant.CountToken = false
+	t.Cleanup(func() { constant.CountToken = oldCount })
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	common.SetContextKey(ctx, constant.ContextKeyOriginalModel, "gpt-4o")
+	common.SetContextKey(ctx, constant.ContextKeyPromptTokens, 777)
+	var request dto.GeneralOpenAIRequest
+	require.NoError(t, common.UnmarshalJsonStr(`{"model":"gpt-4o","messages":[{"role":"system","content":"Keep the answer concise."},{"role":"user","content":"Explain the moon."}],"max_completion_tokens":64}`, &request))
+	expression := `tier("base", p * 2 + c * 4)`
+	snapshot := &billingexpr.BillingSnapshot{ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 9, EstimatedQuotaAfterGroup: 456}
+	info := &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAI, TieredBillingSnapshot: snapshot, FinalPreConsumedQuota: 123}
+	info.SetEstimatePromptTokens(333)
+	estimate, err := EstimateKeyRoutingUsage(ctx, info, &request)
+	require.NoError(t, err)
+	assert.Positive(t, estimate.InputTokens)
+	assert.EqualValues(t, 64, estimate.OutputTokens)
+	require.NotNil(t, estimate.BaseCostUSD)
+	assert.InDelta(t, (float64(estimate.InputTokens)*2+64*4)/1_000_000, *estimate.BaseCostUSD, 1e-12)
+	assert.Equal(t, 777, common.GetContextKeyInt(ctx, constant.ContextKeyPromptTokens))
+	assert.Equal(t, 333, info.GetEstimatePromptTokens())
+	assert.Equal(t, 123, info.FinalPreConsumedQuota)
+	assert.Equal(t, 456, snapshot.EstimatedQuotaAfterGroup)
+	assert.Nil(t, estimate.CostUSD(nil))
+	assert.Nil(t, (KeyRoutingEstimate{BaseCostUSD: common.GetPointer(float64(keyusage.MaxCostUSD + 1))}).CostUSD(common.GetPointer(1.0)), "over-limit costs must remain unknown without dropping token estimates")
+	zeroCost := estimate.CostUSD(common.GetPointer(0.0))
+	require.NotNil(t, zeroCost)
+	assert.Zero(t, *zeroCost)
+	assert.InDelta(t, *estimate.BaseCostUSD*0.5, *estimate.CostUSD(common.GetPointer(0.5)), 1e-12)
+
+	// Retrying reuses the token estimate while recomputing the new channel's
+	// price. This request mutation stands in for an already consumed media body.
+	request.Messages = nil
+	info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{ExprString: `tier("request", fixed(0.25))`, ExprHash: billingexpr.ExprHashString(`tier("request", fixed(0.25))`)}
+	retry, err := EstimateKeyRoutingUsage(ctx, info, &request)
+	require.NoError(t, err)
+	assert.Equal(t, estimate.InputTokens, retry.InputTokens)
+	require.NotNil(t, retry.BaseCostUSD)
+	assert.Equal(t, 0.25, *retry.BaseCostUSD)
+
+	info.TieredBillingSnapshot = nil
+	unknown, err := EstimateKeyRoutingUsage(ctx, info, &request)
+	require.NoError(t, err)
+	assert.Nil(t, unknown.BaseCostUSD, "an uninitialized price is unknown, not free")
+	zeroLimit := request
+	zeroLimit.MaxCompletionTokens = common.GetPointer(uint(0))
+	zeroOutput, err := EstimateKeyRoutingUsage(ctx, info, &zeroLimit)
+	require.NoError(t, err)
+	assert.Zero(t, zeroOutput.OutputTokens)
+}
+
+func TestKeyRoutingUsagePreservesPhysicalTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		usage         *dto.Usage
+		input, output int64
+	}{
+		{"OpenAI cache and image subsets", &dto.Usage{PromptTokens: 1000, CompletionTokens: 20, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 800, ImageTokens: 300, CachedCreationTokens: 100}}, 1000, 20},
+		{"Anthropic independent cache counts", &dto.Usage{PromptTokens: 9999, BillingUsage: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 300, CacheCreationInputTokens: 50, CacheCreation: &dto.ClaudeCacheCreationUsage{Ephemeral5mInputTokens: 10, Ephemeral1hInputTokens: 20}})}, 450, 20},
+		{"Anthropic split-only writes", &dto.Usage{UsageSemantic: dto.BillingUsageSemanticAnthropic, PromptTokens: 100, CompletionTokens: 20, ClaudeCacheCreation5mTokens: 10, ClaudeCacheCreation1hTokens: 20}, 130, 20},
+		{"Responses input output aliases", &dto.Usage{InputTokens: 40, OutputTokens: 5}, 40, 5},
+		{"Explicit zero usage", &dto.Usage{}, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{KeyUsageReservation: &keyusage.Reservation{ID: "fixture"}, UpstreamCostRatio: common.GetPointer(0.5), FinalPreConsumedQuota: 777}
+			base := 100.0
+			observeKeyRoutingUsage(ctx, info, tc.usage, &base)
+			require.NotNil(t, info.KeyUsageObservation)
+			assert.Equal(t, tc.input, info.KeyUsageObservation.InputTokens)
+			assert.Equal(t, tc.output, info.KeyUsageObservation.OutputTokens)
+			require.NotNil(t, info.KeyUsageObservation.CostUSD)
+			assert.InDelta(t, 50/common.QuotaPerUnit, *info.KeyUsageObservation.CostUSD, 1e-12)
+			assert.False(t, info.KeyUsageObservation.CostActual)
+			assert.False(t, info.KeyUsageObservation.TokensEstimated)
+			assert.Equal(t, 777, info.FinalPreConsumedQuota)
+			MarkKeyRoutingTokensEstimated(ctx)
+			observeKeyRoutingUsage(ctx, info, tc.usage, nil)
+			assert.Equal(t, tc.input*2, info.KeyUsageObservation.InputTokens)
+			assert.Equal(t, tc.output*2, info.KeyUsageObservation.OutputTokens)
+			assert.True(t, info.KeyUsageObservation.TokensEstimated)
+			assert.Nil(t, info.KeyUsageObservation.CostUSD, "one unpriced event makes the attempt total unknown")
+		})
+	}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{KeyUsageReservation: &keyusage.Reservation{ID: "fixture"}, UpstreamCostRatio: common.GetPointer(0.0)}
+	observeKeyRoutingUsage(ctx, info, nil, common.GetPointer(100.0))
+	assert.Nil(t, info.KeyUsageObservation, "missing upstream usage must not become measured zero usage")
+	observeKeyRoutingUsage(ctx, info, &dto.Usage{PromptTokens: 10}, common.GetPointer(100.0))
+	require.NotNil(t, info.KeyUsageObservation.CostUSD)
+	assert.Zero(t, *info.KeyUsageObservation.CostUSD)
+
+	info.KeyUsageObservation = nil
+	info.UpstreamCostRatio = common.GetPointer(1.0)
+	previousQuotaPerUnit := common.QuotaPerUnit
+	common.QuotaPerUnit = 1
+	t.Cleanup(func() { common.QuotaPerUnit = previousQuotaPerUnit })
+	base := float64(keyusage.MaxCostUSD) * common.QuotaPerUnit * 0.75
+	observeKeyRoutingUsage(ctx, info, &dto.Usage{PromptTokens: 10}, &base)
+	require.NotNil(t, info.KeyUsageObservation.CostUSD)
+	observeKeyRoutingUsage(ctx, info, &dto.Usage{PromptTokens: 20}, &base)
+	assert.EqualValues(t, 30, info.KeyUsageObservation.InputTokens)
+	assert.Nil(t, info.KeyUsageObservation.CostUSD, "an accumulated out-of-range cost cannot discard measured tokens")
+
+	common.SetContextKey(ctx, constant.ContextKeyLocalCountTokens, true)
+	MarkKeyRoutingTokensEstimated(ctx)
+	_, apiErr := PrepareChannelKeyUsage(ctx, info, nil, false)
+	require.Nil(t, apiErr)
+	info.KeyUsageReservation = &keyusage.Reservation{ID: "next-attempt"}
+	observeKeyRoutingUsage(ctx, info, &dto.Usage{PromptTokens: 40}, nil)
+	assert.False(t, info.KeyUsageObservation.TokensEstimated, "a previous attempt's billing flag must not relabel new upstream usage")
+	assert.True(t, common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens), "routing must not alter the billing flag")
+	MarkKeyRoutingTokensEstimated(ctx)
+	observeKeyRoutingUsage(ctx, info, &dto.Usage{PromptTokens: 5}, nil)
+	assert.True(t, info.KeyUsageObservation.TokensEstimated)
+}
 
 // The configured DSNs must point at isolated test databases. Each dialect runs
 // the real reservation, settlement and log paths with the same billing cases.
@@ -534,6 +653,7 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		claude, audio, realtime, stream, tool, small      bool
 		unset, missing, local, probe, unknown, zeroUsage  bool
 		estimated, settlementFailed, interrupted, keyCost bool
+		imagePlaceholder                                  bool
 	}{
 		{name: "legacy cache base", group: 2, ratio: 1.3, base: 2865, quota: 5730},
 		{name: "expression cache stream", expression: expression, stream: true, group: 2, ratio: 1.3, base: 2865, quota: 5730},
@@ -543,6 +663,7 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 		{name: "explicit free upstream", expression: expression, group: 2, ratio: 0, base: 2865, quota: 5730},
 		{name: "unconfigured cost stays unknown", group: 2, quota: 5730, unset: true, unknown: true},
 		{name: "tiny request preserves fractional cost", group: 2, ratio: 1.3, small: true, base: 0.1, quota: 1},
+		{name: "image placeholder never becomes measured tokens", group: 2, ratio: 1.3, small: true, base: 0.1, quota: 1, imagePlaceholder: true},
 		{name: "request price and tool surcharge", expression: `tier("request", fixed(0.01))`, group: 2, ratio: 1.3, tool: true, base: 7000, quota: 14000},
 		{name: "free group tool-only request retains cost", group: 0, ratio: 1.3, tool: true, zeroUsage: true, base: 2000},
 		{name: "audio actual usage", group: 2, ratio: 1.3, audio: true, base: 3000, quota: 6000},
@@ -649,7 +770,17 @@ func runUpstreamCostAccountingCases(t *testing.T, db, logDB *gorm.DB) {
 			case tc.audio:
 				PostAudioConsumeQuota(ctx, info, usage, nil)
 			default:
-				PostTextConsumeQuota(ctx, info, usage, nil)
+				if tc.imagePlaceholder {
+					info.KeyUsageReservation = &keyusage.Reservation{ID: "image-routing-fixture", ChannelID: channel.Id, KeyIdentity: channel.KeyIdentity(channel.Key)}
+					PostTextConsumeQuota(ctx, info, usage, nil, &dto.Usage{})
+					require.NotNil(t, info.KeyUsageObservation)
+					assert.Zero(t, info.KeyUsageObservation.InputTokens)
+					assert.Zero(t, info.KeyUsageObservation.OutputTokens)
+					require.NotNil(t, info.KeyUsageObservation.CostUSD)
+					assert.InDelta(t, tc.base*tc.ratio/common.QuotaPerUnit, *info.KeyUsageObservation.CostUSD, 1e-12)
+				} else {
+					PostTextConsumeQuota(ctx, info, usage, nil)
+				}
 			}
 			var log model.Log
 			require.NoError(t, logDB.Where("user_id = ?", user.Id).Take(&log).Error)

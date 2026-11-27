@@ -14,7 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/modelmapping"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	sqlitedriver "github.com/glebarez/go-sqlite"
@@ -258,7 +257,7 @@ func RecordChannelKeyObservation(channel *Channel, modelName, key string, observ
 // changing its enabled status. Only the relay's upstream-failure classifier
 // calls this, after exhausting same-credential endpoint retries.
 func RecordChannelKeyRoutingFailure(channel *Channel, modelName, key string, observedAt int64, statusCode int, errorMessage string) error {
-	if channel == nil || !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+	if channel == nil || !channel.ChannelInfo.IsMultiKey || !channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 		return nil
 	}
 	modelName = channel.probeModelName(modelName)
@@ -311,12 +310,12 @@ func (target channelKeyObservationTarget) persist(channel *Channel, probeModel, 
 				stateExists = true
 				break
 			}
-			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover && existing.Success {
+			if channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() && existing.Success {
 				// Legacy successes have no attempt start and cannot prove recovery
 				// from a concurrently established failover quarantine.
 				continue
 			}
-			if existing.Source != "probe" && !(existing.Source == "request" && existing.Success && channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover) {
+			if existing.Source != "probe" && !(existing.Source == "request" && existing.Success && !channel.ChannelInfo.MultiKeyMode.UsesKeyFailover()) {
 				continue
 			}
 			if legacyState == nil || existing.ObservedAt > legacyState.ObservedAt || existing.ObservedAt == legacyState.ObservedAt && !existing.Success {

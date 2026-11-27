@@ -13,6 +13,7 @@ import (
 )
 
 type ChannelKeyConfig struct {
+	RoutingWeight     *int     `json:"routing_weight,omitempty"`
 	KeyIdentity       string   `json:"key_identity,omitempty"`
 	KeyIndex          *int     `json:"key_index,omitempty"`
 	Key               string   `json:"key,omitempty"`
@@ -22,6 +23,7 @@ type ChannelKeyConfig struct {
 }
 
 type ChannelKeyConfigView struct {
+	RoutingWeight              int      `json:"routing_weight"`
 	KeyIdentity                string   `json:"key_identity"`
 	KeyIndex                   int      `json:"key_index"`
 	KeyPreview                 string   `json:"key_preview"`
@@ -73,6 +75,14 @@ func (channel *Channel) retainKeyConfiguration() {
 	channel.retainKeyGroups(channel.GetKeys())
 	keys := channel.relayKeys()
 	channel.retainKeyCostRatios(keys)
+	presentWeights := make(map[string]int)
+	for _, key := range keys {
+		identity := channel.KeyIdentity(key)
+		if weight, ok := channel.ChannelInfo.KeyWeights[identity]; ok {
+			presentWeights[identity] = weight
+		}
+	}
+	channel.ChannelInfo.KeyWeights = presentWeights
 	channel.retainKeyGroupPriorities(keys)
 	if len(channel.ChannelInfo.KeyOrder) > 0 {
 		present := make(map[string]bool, len(keys))
@@ -93,6 +103,9 @@ func (channel *Channel) MoveKeyConfiguration(previous, next string) {
 	info := &channel.ChannelInfo
 	if groups, ok := info.KeyGroups[from]; ok {
 		info.KeyGroups[to] = groups
+	}
+	if weight, ok := info.KeyWeights[from]; ok {
+		info.KeyWeights[to] = weight
 	}
 	if ratio, ok := info.KeyCostRatios[from]; ok {
 		info.KeyCostRatios[to] = ratio
@@ -141,7 +154,7 @@ func (channel *Channel) KeyConfiguration() ([]ChannelKeyConfigView, string, erro
 		if costSetting.ValidateUpstreamCostRatio() != nil {
 			effectiveCost = nil
 		}
-		items = append(items, ChannelKeyConfigView{identity, index, preview, append([]string{}, channel.ChannelInfo.KeyGroups[identity]...), cost, effectiveCost, status})
+		items = append(items, ChannelKeyConfigView{channel.RoutingWeightForKey(key), identity, index, preview, append([]string{}, channel.ChannelInfo.KeyGroups[identity]...), cost, effectiveCost, status})
 	}
 	encoded, err := common.Marshal([]any{channel.Id, channel.Type, channel.Group, channel.Status, channel.ChannelInfo.IsMultiKey, channel.ChannelInfo.MultiKeyMode, channel.ChannelInfo.KeyOrder, channel.ChannelInfo.MultiKeyStatusList, identities, items, setting.UpstreamCostRatio})
 	if err != nil {
@@ -196,6 +209,9 @@ func (channel *Channel) ApplyKeyConfigs(configs []ChannelKeyConfig, creating boo
 		if _, exists := selected[identity]; exists {
 			return common.NewMessage("Invalid parameters")
 		}
+		if config.RoutingWeight != nil && (*config.RoutingWeight < 1 || *config.RoutingWeight > 1000) {
+			return common.NewMessage("Invalid parameters")
+		}
 		costSetting := dto.ChannelSettings{UpstreamCostRatio: config.UpstreamCostRatio}
 		if err := costSetting.ValidateUpstreamCostRatio(); err != nil {
 			return common.NewMessage("Invalid parameters")
@@ -235,11 +251,18 @@ func (channel *Channel) ApplyKeyConfigs(configs []ChannelKeyConfig, creating boo
 	}
 	keys = append(keys, newKeys...)
 	channel.ChannelInfo.KeyGroups = make(map[string][]string)
+	previousWeights := channel.ChannelInfo.KeyWeights
+	channel.ChannelInfo.KeyWeights = make(map[string]int)
 	channel.ChannelInfo.KeyCostRatios = make(map[string]float64)
 	channel.ChannelInfo.KeyGroupPriorities = maps.Clone(channel.ChannelInfo.KeyGroupPriorities)
 	for index, key := range keys {
 		identity := channel.KeyIdentity(key)
 		config := selected[identity]
+		if config.RoutingWeight != nil {
+			channel.ChannelInfo.KeyWeights[identity] = *config.RoutingWeight
+		} else if weight, ok := previousWeights[identity]; ok {
+			channel.ChannelInfo.KeyWeights[identity] = weight
+		}
 		if len(config.Groups) > 0 {
 			channel.ChannelInfo.KeyGroups[identity] = config.Groups
 		}
@@ -281,4 +304,12 @@ func (channel *Channel) ApplyKeyConfigs(configs []ChannelKeyConfig, creating boo
 		channel.SetOtherInfo(info)
 	}
 	return nil
+}
+
+func (channel *Channel) RoutingWeightForKey(key string) int {
+	weight := channel.ChannelInfo.KeyWeights[channel.KeyIdentity(key)]
+	if weight < 1 || weight > 1000 {
+		return 1
+	}
+	return weight
 }

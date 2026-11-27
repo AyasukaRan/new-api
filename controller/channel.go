@@ -862,7 +862,7 @@ func AddChannel(c *gin.Context) {
 			return
 		}
 	}
-	if addChannelRequest.MultiKeyMode != "" && addChannelRequest.MultiKeyMode != constant.MultiKeyModeRandom && addChannelRequest.MultiKeyMode != constant.MultiKeyModePolling && addChannelRequest.MultiKeyMode != constant.MultiKeyModeFailover {
+	if addChannelRequest.MultiKeyMode != "" && addChannelRequest.MultiKeyMode != constant.MultiKeyModeRandom && addChannelRequest.MultiKeyMode != constant.MultiKeyModePolling && addChannelRequest.MultiKeyMode != constant.MultiKeyModeFailover && addChannelRequest.MultiKeyMode != constant.MultiKeyModeWeightedUsage {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
@@ -949,6 +949,11 @@ func AddChannel(c *gin.Context) {
 		inputIndices = []int{0}
 	default:
 		common.ApiErrorT(c, "Unsupported add mode")
+		return
+	}
+
+	if addChannelRequest.Channel.ChannelInfo.IsMultiKey && addChannelRequest.Channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeWeightedUsage && slices.Contains([]int{constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus, constant.ChannelTypeSunoAPI, constant.ChannelTypeTaskPlugin}, addChannelRequest.Channel.Type) {
+		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
 
@@ -1380,7 +1385,7 @@ func UpdateChannel(c *gin.Context) {
 
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
 	if channel.MultiKeyMode != nil && *channel.MultiKeyMode != "" {
-		if *channel.MultiKeyMode != string(constant.MultiKeyModeRandom) && *channel.MultiKeyMode != string(constant.MultiKeyModePolling) && *channel.MultiKeyMode != string(constant.MultiKeyModeFailover) {
+		if *channel.MultiKeyMode != string(constant.MultiKeyModeRandom) && *channel.MultiKeyMode != string(constant.MultiKeyModePolling) && *channel.MultiKeyMode != string(constant.MultiKeyModeFailover) && *channel.MultiKeyMode != string(constant.MultiKeyModeWeightedUsage) {
 			common.ApiErrorT(c, "Invalid parameters")
 			return
 		}
@@ -1500,6 +1505,10 @@ func UpdateChannel(c *gin.Context) {
 	}
 	if !settingProvided {
 		keptPluginKey = originChannel.GetSetting().TaskPluginKey
+	}
+	if (channel.ChannelInfo.IsMultiKey || channel.KeyConfigs != nil) && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeWeightedUsage && slices.Contains([]int{constant.ChannelTypeMidjourney, constant.ChannelTypeMidjourneyPlus, constant.ChannelTypeSunoAPI, constant.ChannelTypeTaskPlugin}, keptType) {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
 	}
 	if err := service.CheckSubmittedPluginCredentials(keptType, keptPluginKey, keptKey, originChannel.Key); err != nil {
 		common.ApiError(c, err)
@@ -2051,6 +2060,7 @@ func CopyChannel(c *gin.Context) {
 
 	// Rebind credential scopes to the new channel ID inside the same commit.
 	clone.ChannelInfo.KeyGroups = nil
+	clone.ChannelInfo.KeyWeights = nil
 	clone.ChannelInfo.KeyCostRatios = nil
 	clone.ChannelInfo.KeyGroupPriorities = nil
 	clone.ChannelInfo.KeyOrder = nil
@@ -2059,6 +2069,7 @@ func CopyChannel(c *gin.Context) {
 			return err
 		}
 		clone.ChannelInfo.KeyGroups = make(map[string][]string)
+		clone.ChannelInfo.KeyWeights = make(map[string]int)
 		clone.ChannelInfo.KeyCostRatios = make(map[string]float64)
 		clone.ChannelInfo.KeyGroupPriorities = make(map[string]map[string]int64)
 		keys := []string{origin.Key}
@@ -2066,6 +2077,9 @@ func CopyChannel(c *gin.Context) {
 			keys = origin.GetKeys()
 		}
 		for _, key := range keys {
+			if weight, exists := origin.ChannelInfo.KeyWeights[origin.KeyIdentity(key)]; exists {
+				clone.ChannelInfo.KeyWeights[clone.KeyIdentity(key)] = weight
+			}
 			if ratio, exists := origin.ChannelInfo.KeyCostRatios[origin.KeyIdentity(key)]; exists {
 				clone.ChannelInfo.KeyCostRatios[clone.KeyIdentity(key)] = ratio
 			}

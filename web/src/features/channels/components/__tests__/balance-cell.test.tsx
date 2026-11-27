@@ -31,6 +31,7 @@ import type {
   ChannelMonitoring,
 } from '../../types'
 import { ChannelBalanceSummary } from '../channel-balance-summary'
+import { ChannelKeyUsageMonitoring } from '../channel-key-usage-monitoring'
 import { ChannelRowActionsLayoutContext } from '../channel-row-actions-context'
 import { BalanceCell } from '../channels-columns'
 import { ChannelsProvider, useChannels } from '../channels-provider'
@@ -695,13 +696,13 @@ describe('channel balance monitoring', () => {
       expect(screen.getByText('75.0%')).toBeVisible()
       if (withHistory) {
         const history = screen.getByRole('region', { name: 'Balance history' })
-        expect(within(history).getByText('Key #1')).toBeVisible()
+        expect(within(history).getAllByText('Key #1').length).toBeGreaterThan(0)
         expect(within(history).getByText(`$${3 / multiplier}`)).toBeVisible()
         expect(
           within(history).getByText(`Last known balance: $${4 / multiplier}`)
         ).toBeVisible()
         expect(within(history).queryByText('Premium')).not.toBeInTheDocument()
-        expect(history.querySelector('svg')).toBeNull()
+        expect(history.querySelector('[data-slot="chart"]')).not.toBeNull()
         expect(screen.getByText(`$${7 / multiplier}`)).toBeVisible()
         expect(
           screen.getByText(
@@ -714,4 +715,146 @@ describe('channel balance monitoring', () => {
       }
     }
   )
+})
+
+test('key usage distinguishes zero and unknown costs, changes metric and keeps raw balance units', async () => {
+  const user = userEvent.setup()
+  const zero = {
+    key_identity: 'zero',
+    key_index: 0,
+    key_preview: 'masked-zero',
+    weight: 3,
+    target_share: 0.75,
+    input_tokens: 300,
+    output_tokens: 100,
+    request_count: 2,
+    cost_usd: 0,
+    actual_cost_requests: 2,
+    estimated_cost_requests: 0,
+    unknown_cost_requests: 0,
+    pending_requests: 0,
+  }
+  const unknown = {
+    ...zero,
+    key_identity: 'unknown',
+    key_index: 1,
+    key_preview: 'masked-unknown',
+    weight: 1,
+    target_share: 0.25,
+    input_tokens: 100,
+    output_tokens: 0,
+    cost_usd: null,
+    actual_cost_requests: 0,
+    unknown_cost_requests: 2,
+    pending_requests: 1,
+  }
+  const data: ChannelMonitoring = {
+    used_quota: 0,
+    balance: complete,
+    balance_history: [],
+    balance_currency: 'CNY',
+    balance_recharge_multiplier: 2,
+    usage: {
+      channel_id: 1,
+      hours: 24,
+      request_count: 4,
+      success_count: 4,
+      probe_count: 0,
+      input_tokens: 400,
+      output_tokens: 100,
+      used_quota: 0,
+      recorded_used_quota: 0,
+      recorded_input_tokens: 400,
+      recorded_output_tokens: 100,
+      billing_record_count: 0,
+      avg_latency_ms: 0,
+      series: [],
+    },
+    key_usage: {
+      observed_since: 100,
+      window_start: 100,
+      window_end: 86500,
+      keys: [zero, unknown],
+      series: [{ timestamp: 100, keys: [zero, unknown] }],
+    },
+  }
+  const { rerender } = render(<ChannelKeyUsageMonitoring data={data} />)
+  const table = screen.getByRole('table', { name: 'Key usage statistics' })
+  const rows = within(table).getAllByRole('row')
+  expect(within(rows[1]).getByText('3 / 75%')).toBeVisible()
+  expect(within(rows[1]).getByText('80%')).toBeVisible()
+  expect(within(rows[1]).getAllByText('$0').length).toBeGreaterThan(0)
+  expect(within(rows[1]).getByText(/1.5/)).toBeVisible()
+  expect(within(rows[2]).getAllByText('Unknown').length).toBeGreaterThan(0)
+  expect(within(rows[2]).getByText('Pending: 1')).toBeVisible()
+  expect(
+    within(rows[2]).getByText('Actual: 0 · Estimated: 0 · Unknown: 2')
+  ).toBeVisible()
+  const costButton = screen.getByRole('button', { name: 'Upstream cost (USD)' })
+  await user.click(costButton)
+  expect(costButton).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByRole('button', { name: 'Tokens' })).toHaveAttribute(
+    'aria-pressed',
+    'false'
+  )
+  await user.click(screen.getByRole('combobox', { name: 'Usage history key' }))
+  await user.click(screen.getByRole('option', { name: 'Key #2' }))
+  expect(
+    screen.getByRole('combobox', { name: 'Usage history key' })
+  ).toHaveTextContent('Key #2')
+  if (!data.key_usage) throw new Error('Missing usage fixture')
+  rerender(
+    <ChannelKeyUsageMonitoring
+      data={{
+        ...data,
+        key_usage: { ...data.key_usage, observed_since: 82900 },
+      }}
+    />
+  )
+  expect(within(table).getAllByText('Less than 1 day recorded')).toHaveLength(2)
+  expect(within(table).queryByText('400 tokens')).not.toBeInTheDocument()
+})
+
+test('missing historical key usage is an empty state rather than zero spending', () => {
+  render(
+    <ChannelKeyUsageMonitoring
+      data={{ key_usage: undefined } as ChannelMonitoring}
+    />
+  )
+  expect(screen.getByText('No key usage recorded yet')).toBeVisible()
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  expect(screen.queryByText('$0')).not.toBeInTheDocument()
+})
+
+test('balance monitoring shows daily declines from existing history before key usage recording is available', async () => {
+  const user = userEvent.setup()
+  const history = [6, 4].map((balance, index) => ({
+    ...complete,
+    id: index + 1,
+    channel_id: 1,
+    checked_at: 100 + index * 86400,
+    used_quota: 0,
+    configuration_segment: 1,
+    key_balances: [{ index: 0, balance }],
+  }))
+  render(
+    <ChannelBalanceSummary
+      monitor={complete}
+      history={history}
+      storedCurrency='CNY'
+      balanceRechargeMultiplier={2}
+    />
+  )
+  const daily = screen.getAllByRole('button', {
+    name: /Daily balance decrease:/,
+  })
+  expect(daily[0]).toHaveTextContent('CN¥1')
+  expect(daily[1]).toHaveTextContent('—')
+  await user.tab()
+  expect(daily[0]).toHaveFocus()
+  expect(
+    await screen.findByText(
+      /Shared balances do not measure individual key spending/
+    )
+  ).toBeVisible()
 })

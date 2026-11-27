@@ -303,6 +303,9 @@ export const MULTI_KEY_STATUS_CONFIG = {
 // Multi-Key Modes
 // ============================================================================
 
+// Async-only providers cannot settle the synchronous key usage ledger.
+export const WEIGHTED_USAGE_UNSUPPORTED_CHANNEL_TYPES = [2, 5, 36, 61]
+
 export const MULTI_KEY_MODES = [
   { value: 'random', label: 'Random' },
   { value: 'polling', label: 'Polling' },

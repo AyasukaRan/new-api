@@ -9,6 +9,57 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
+// RelayKeyCandidatesForModel applies one balance/probe snapshot to every
+// credential. The caller applies request-local constraints and pricing, then
+// revalidates its chosen identity with SelectRelayKeyForModel before sending.
+func (channel *Channel) RelayKeyCandidatesForModel(modelName, group string) []RelayKeySelection {
+	if channel == nil || channel.Status != common.ChannelStatusEnabled || !slices.Contains(channel.GetGroups(), group) {
+		return nil
+	}
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	snapshot := *channel
+	snapshot.ChannelInfo.MultiKeyStatusList = maps.Clone(channel.ChannelInfo.MultiKeyStatusList)
+	lock.Unlock()
+	keys := snapshot.relayKeys()
+	if snapshot.ChannelInfo.IsMultiKey {
+		snapshot.Keys = keys
+	}
+	negative := channelNegativeBalanceKeysForRelay(&snapshot, false)
+	failures := snapshot.probeKeyFailures(modelName)
+	eligible := make(map[string]int, len(keys))
+	for index, key := range keys {
+		if negative[index] || failures[index] != nil || !snapshot.KeyAllowedForGroup(key, group) {
+			continue
+		}
+		if snapshot.ChannelInfo.IsMultiKey {
+			if status, explicit := snapshot.ChannelInfo.MultiKeyStatusList[index]; explicit && status != common.ChannelStatusEnabled {
+				continue
+			}
+		}
+		identity := snapshot.KeyIdentity(key)
+		if _, exists := eligible[identity]; !exists {
+			// Identity selection uses the first eligible physical occurrence,
+			// including when an earlier duplicate has a negative balance.
+			eligible[identity] = index
+		}
+	}
+	result := make([]RelayKeySelection, 0, len(eligible))
+	for _, ordered := range snapshot.OrderedKeyIndices() {
+		identity := snapshot.KeyIdentity(keys[ordered])
+		index, ok := eligible[identity]
+		if !ok {
+			continue
+		}
+		candidate := snapshot
+		candidate.RelayKeyIdentity = identity
+		candidate.RelayKeyIndex = index
+		result = append(result, RelayKeySelection{Channel: &candidate, Key: keys[index], Index: index})
+		delete(eligible, identity)
+	}
+	return result
+}
+
 // GetGroupKeyCandidates is a runtime view only: permissions, credential health
 // and request constraints are applied before comparing effective priorities.
 // Catalog/ability rows continue to describe configured access, not health.

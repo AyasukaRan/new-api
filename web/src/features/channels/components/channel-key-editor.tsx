@@ -45,6 +45,7 @@ import { toIntlLocale } from '@/i18n/languages'
 import { formatCurrencyFromUSD } from '@/lib/currency'
 import { formatNumber } from '@/lib/format'
 
+import { WEIGHTED_USAGE_UNSUPPORTED_CHANNEL_TYPES } from '../constants'
 import {
   getChannelDisplayBalance,
   getMultiKeyStatusConfig,
@@ -57,12 +58,15 @@ import { ChannelTestDialog } from './dialogs/channel-test-dialog'
 type ChannelKeyEditorProps = {
   value: ChannelKeyDraft[]
   onChange: (value: ChannelKeyDraft[]) => void
-  mode: 'random' | 'polling' | 'failover'
-  onModeChange: (mode: 'random' | 'polling' | 'failover') => void
+  mode: 'random' | 'polling' | 'failover' | 'weighted_usage'
+  onModeChange: (
+    mode: 'random' | 'polling' | 'failover' | 'weighted_usage'
+  ) => void
   channelGroups: string[]
   channelCost: number | null
   balanceRechargeMultiplier?: number
   channel?: Channel
+  channelType?: number
   disabled?: boolean
   sensitiveVisible?: boolean
   pendingKeys: string
@@ -106,10 +110,17 @@ export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
     props.value.map((key, index) => [identities[index], key])
   )
   const failover = props.mode === 'failover'
+  const supportsWeightedUsage =
+    !WEIGHTED_USAGE_UNSUPPORTED_CHANNEL_TYPES.includes(
+      props.channelType ?? props.channel?.type ?? 0
+    )
   const modeOptions = [
     { value: 'failover', label: t('Key failover') },
     { value: 'random', label: t('Random') },
     { value: 'polling', label: t('Polling') },
+    ...(supportsWeightedUsage
+      ? [{ value: 'weighted_usage', label: t('Weighted usage') }]
+      : []),
   ]
   const reorder = (next: string[]) => {
     if (props.disabled || !failover) return
@@ -163,10 +174,12 @@ export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
               if (
                 mode !== 'random' &&
                 mode !== 'polling' &&
-                mode !== 'failover'
+                mode !== 'failover' &&
+                mode !== 'weighted_usage'
               ) {
                 return
               }
+              if (mode === 'weighted_usage' && !supportsWeightedUsage) return
               props.onModeChange(mode)
               if (mode === 'failover') sortByCost()
             }}
@@ -195,15 +208,24 @@ export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
           </Button>
         )}
       </div>
-      <FieldDescription>
-        {failover
-          ? t(
-              'Use the first available key; try the next only after failure. Drag to set the fallback order, or sort from lowest to highest cost.'
-            )
-          : t(
-              'Key order applies only to failover mode. Existing random and polling strategies remain unchanged.'
-            )}
-      </FieldDescription>
+      {props.mode === 'weighted_usage' && (
+        <FieldDescription>
+          {t(
+            'Balance each key’s share using tokens and upstream cost equally over a rolling 24 hours. Session affinity, key permissions and health take precedence.'
+          )}
+        </FieldDescription>
+      )}
+      {props.mode !== 'weighted_usage' && (
+        <FieldDescription>
+          {failover
+            ? t(
+                'Use the first available key; try the next only after failure. Drag to set the fallback order, or sort from lowest to highest cost.'
+              )
+            : t(
+                'Key order applies only to failover mode. Existing random and polling strategies remain unchanged.'
+              )}
+        </FieldDescription>
+      )}
       <FieldDescription>
         {t(
           'Key changes take effect when you save the channel. Unconfigured costs are sorted last.'
@@ -378,6 +400,48 @@ export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
                     </FieldDescription>
                   </Field>
                 </div>
+                {props.mode === 'weighted_usage' && (
+                  <Field>
+                    <FieldLabel htmlFor={`${id}-${identity}-weight`}>
+                      {t('Key weight')}
+                    </FieldLabel>
+                    <Input
+                      id={`${id}-${identity}-weight`}
+                      type='number'
+                      min={1}
+                      max={1000}
+                      step={1}
+                      value={
+                        Number.isNaN(key.routing_weight)
+                          ? ''
+                          : (key.routing_weight ?? 1)
+                      }
+                      disabled={props.disabled}
+                      aria-invalid={
+                        !Number.isInteger(key.routing_weight ?? 1) ||
+                        (key.routing_weight ?? 1) < 1 ||
+                        (key.routing_weight ?? 1) > 1000
+                      }
+                      onChange={(event) =>
+                        update(index, {
+                          routing_weight: event.target.valueAsNumber,
+                        })
+                      }
+                    />
+                    {(!Number.isInteger(key.routing_weight ?? 1) ||
+                      (key.routing_weight ?? 1) < 1 ||
+                      (key.routing_weight ?? 1) > 1000) && (
+                      <FieldError>
+                        {t('Key weight must be an integer between 1 and 1000')}
+                      </FieldError>
+                    )}
+                    <FieldDescription>
+                      {t(
+                        'Relative share of usage; a weight of 2 receives twice the target share of a weight of 1.'
+                      )}
+                    </FieldDescription>
+                  </Field>
+                )}
                 <div className='flex flex-wrap items-center gap-3'>
                   <Field className='w-auto flex-row items-center gap-2'>
                     <Switch
@@ -447,19 +511,18 @@ export function ChannelKeyEditor(props: ChannelKeyEditorProps) {
               .split(/\r?\n/)
               .map((key) => key.trim())
               .filter(Boolean)
-              .map(
-                (key): ChannelKeyDraft => ({
-                  draft_id: crypto.randomUUID(),
-                  key,
-                  key_index: -1,
-                  key_identity: '',
-                  key_preview: '',
-                  groups: [],
-                  upstream_cost_ratio: null,
-                  effective_upstream_cost_ratio: null,
-                  status: 1,
-                })
-              )
+              .map((key): ChannelKeyDraft => ({
+                draft_id: crypto.randomUUID(),
+                key,
+                key_index: -1,
+                key_identity: '',
+                key_preview: '',
+                groups: [],
+                routing_weight: 1,
+                upstream_cost_ratio: null,
+                effective_upstream_cost_ratio: null,
+                status: 1,
+              }))
             props.onChange([...props.value, ...added])
             props.onPendingKeysChange('')
           }}

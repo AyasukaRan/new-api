@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/keyusage"
 	"github.com/QuantumNous/new-api/pkg/requestpatch"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -170,6 +171,8 @@ type RelayInfo struct {
 	// ChannelAttemptStartTime scopes channel performance to the current
 	// upstream attempt; StartTime remains the client's end-to-end request time.
 	ChannelAttemptStartTime   time.Time
+	KeyUsageReservation       *keyusage.Reservation
+	KeyUsageObservation       *keyusage.Observation
 	LastError                 *types.NewAPIError
 	RuntimeHeadersOverride    map[string]any
 	UseRuntimeHeadersOverride bool

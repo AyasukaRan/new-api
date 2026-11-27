@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -93,12 +92,12 @@ func SelectChannelKeyForRequest(c *gin.Context, channel *model.Channel, modelNam
 		return candidate.SelectRelayKeyForModel(modelName, false, group)
 	}
 	var state *channelKeyAffinityState
-	if !batch && channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover && RequestPolicy(c).Attempts == 0 && channel.RelayKeyIdentity == "" {
+	if !batch && channel.ChannelInfo.IsMultiKey && channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() && RequestPolicy(c).Attempts == 0 && channel.RelayKeyIdentity == "" {
 		state = prepareChannelKeyAffinity(c, channel.Id, group)
 		if state != nil && state.Expected != "" {
 			candidate := *channel
 			candidate.RelayKeyIdentity = state.Expected
-			if selected, err := candidate.SelectRelayKeyForModel(modelName, false, group); err == nil && selected.Channel.ChannelInfo.IsMultiKey && selected.Channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+			if selected, err := candidate.SelectRelayKeyForModel(modelName, false, group); err == nil && selected.Channel.ChannelInfo.IsMultiKey && selected.Channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 				state.Selected = selected.Channel.KeyIdentity(selected.Key)
 				if state.InitialSelected == "" {
 					state.InitialSelected = state.Selected
@@ -108,7 +107,7 @@ func SelectChannelKeyForRequest(c *gin.Context, channel *model.Channel, modelNam
 		}
 	}
 	selected, apiErr := channel.SelectRelayKeyForModel(modelName, batch, group)
-	if apiErr != nil || batch || selected.Channel == nil || !selected.Channel.ChannelInfo.IsMultiKey || selected.Channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeFailover {
+	if apiErr != nil || batch || selected.Channel == nil || !selected.Channel.ChannelInfo.IsMultiKey || !selected.Channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 		c.Set(channelKeyAffinityContext, nil)
 		return selected, apiErr
 	}
@@ -117,7 +116,7 @@ func SelectChannelKeyForRequest(c *gin.Context, channel *model.Channel, modelNam
 		if state != nil && RequestPolicy(c).Attempts == 0 && channel.RelayKeyIdentity == "" && state.Expected != "" {
 			candidate := *selected.Channel
 			candidate.RelayKeyIdentity = state.Expected
-			if preferred, err := candidate.SelectRelayKeyForModel(modelName, false, group); err == nil && preferred.Channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModeFailover {
+			if preferred, err := candidate.SelectRelayKeyForModel(modelName, false, group); err == nil && preferred.Channel.ChannelInfo.MultiKeyMode.UsesKeyFailover() {
 				selected = preferred
 			}
 		}

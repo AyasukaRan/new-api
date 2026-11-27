@@ -82,6 +82,7 @@ const ErrorCodeChannelGroupUnavailable types.ErrorCode = "channel_no_group_key"
 var ErrChannelDisabled = errors.New("channel is disabled")
 
 type ChannelInfo struct {
+	KeyWeights             map[string]int              `json:"key_weights,omitempty"`
 	KeyOrder               []string                    `json:"key_order,omitempty"`
 	KeyGroupPriorities     map[string]map[string]int64 `json:"key_group_priorities,omitempty"`
 	KeyCostRatios          map[string]float64          `json:"key_cost_ratios,omitempty"`
@@ -461,6 +462,7 @@ func (channel *Channel) SaveChannelInfo() error {
 		}
 		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
 		channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
+		channel.ChannelInfo.KeyWeights = current.ChannelInfo.KeyWeights
 		channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
 		channel.ChannelInfo.KeyOrder = current.ChannelInfo.KeyOrder
 		return tx.Model(channel).Update("channel_info", channel.ChannelInfo).Error
@@ -648,6 +650,7 @@ func (channel *Channel) saveStatusStateWithDB(tx *gorm.DB) error {
 			}
 			channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
 			channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
+			channel.ChannelInfo.KeyWeights = current.ChannelInfo.KeyWeights
 			channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
 			channel.ChannelInfo.KeyOrder = current.ChannelInfo.KeyOrder
 			updates["channel_info"] = channel.ChannelInfo
@@ -968,6 +971,7 @@ func (channel *Channel) UpdateWithKeyConfigs(configuration *ChannelKeyConfigUpda
 		}
 		channel.ChannelInfo.KeyGroups = current.ChannelInfo.KeyGroups
 		channel.ChannelInfo.KeyCostRatios = current.ChannelInfo.KeyCostRatios
+		channel.ChannelInfo.KeyWeights = current.ChannelInfo.KeyWeights
 		channel.ChannelInfo.KeyGroupPriorities = current.ChannelInfo.KeyGroupPriorities
 		channel.ChannelInfo.KeyOrder = current.ChannelInfo.KeyOrder
 		if configuration != nil {

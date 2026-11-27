@@ -187,6 +187,22 @@ func TestFailoverKeyRecoveryDatabaseMatrix(t *testing.T) {
 			due, err = (channelTestHandler{}).ShouldSchedule(time.Now(), nil)
 			require.NoError(t, err)
 			assert.False(t, due, "disabled full monitoring cannot enqueue healthy-key probes")
+			// Weighted routing uses the same recovery gate, even when the full
+			// channel test schedule is disabled.
+			weighted := *channel
+			weighted.Id = 0
+			weighted.ChannelInfo.MultiKeyMode = constant.MultiKeyModeWeightedUsage
+			require.NoError(t, db.Create(&weighted).Error)
+			require.NoError(t, model.RecordChannelKeyRoutingFailure(&weighted, weighted.Models, "recovery-primary", failedAt, 503, "weighted recovery"))
+			model.InvalidateChannelProbeRouting(weighted.Id)
+			summary, err = runChannelTestTask(context.Background(), "", false, nil, true)
+			require.NoError(t, err)
+			assert.Equal(t, channelTestSummary{Tested: 1, Succeeded: 1}, summary)
+			require.Len(t, requests, 1)
+			assert.Equal(t, "recovery-primary", <-requests)
+			model.InvalidateChannelProbeRouting(weighted.Id)
+			assert.Nil(t, weighted.RelayCredentialProbeError(weighted.Models, "recovery-primary"))
+			require.NoError(t, db.Delete(&weighted).Error)
 			// Use newer synthetic failures after the completed recovery above.
 			fairAt := time.Now().Add(time.Second).UnixMilli()
 			require.NoError(t, model.RecordChannelKeyRoutingFailure(channel, channel.Models, "recovery-primary", fairAt, 503, "first"))

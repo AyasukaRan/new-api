@@ -1048,6 +1048,7 @@ export function useChannelsColumns(
             random: t('Multi-key: Random rotation'),
             polling: t('Multi-key: Polling rotation'),
             failover: t('Key failover'),
+            weighted_usage: t('Weighted usage'),
           }[multiKeyMode]
 
           const ionetMeta = parseIonetMeta(channel.other_info)

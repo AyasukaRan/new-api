@@ -206,7 +206,9 @@ function MultiKeyManageContent({
   }
   const getConfirmFinalFocus = () => {
     const opener = confirmOpenerRef.current
-    return opener && bodyRef.current?.contains(opener) ? opener : bodyRef.current
+    return opener && bodyRef.current?.contains(opener)
+      ? opener
+      : bodyRef.current
   }
   const keys = data?.keys ?? []
   const enabledCount = data?.enabled_count ?? 0
@@ -220,7 +222,9 @@ function MultiKeyManageContent({
     data?.balance_detail === undefined
       ? channel.balance_detail
       : data.balance_detail
-  const keyBalances = monitor?.configuration_changed ? undefined : balanceDetail?.keys
+  const keyBalances = monitor?.configuration_changed
+    ? undefined
+    : balanceDetail?.keys
   const busy = isPerformingAction || isUpdatingBalance || statusQuery.isFetching
   const actionsUnavailable = busy || !data || statusQuery.isError
   const balances = new Map(
@@ -293,7 +297,9 @@ function MultiKeyManageContent({
   }
 
   const refreshBalances = async () => {
-    if (!canShowBalance || actionsUnavailable || data?.balance_query_disabled) return
+    if (!canShowBalance || actionsUnavailable || data?.balance_query_disabled) {
+      return
+    }
     setIsUpdatingBalance(true)
     try {
       const response = await updateChannelBalance(channel.id)
@@ -330,6 +336,7 @@ function MultiKeyManageContent({
                     random: t('Random'),
                     polling: t('Polling'),
                     failover: t('Key failover'),
+                    weighted_usage: t('Weighted usage'),
                   }[channel.channel_info.multi_key_mode]
                 }
                 variant='neutral'
@@ -413,7 +420,11 @@ function MultiKeyManageContent({
                 variant='outline'
                 size='sm'
                 onClick={refreshBalances}
-                disabled={!canShowBalance || actionsUnavailable || data?.balance_query_disabled}
+                disabled={
+                  !canShowBalance ||
+                  actionsUnavailable ||
+                  data?.balance_query_disabled
+                }
               >
                 {t('Update Balance')}
               </Button>
@@ -589,7 +600,8 @@ function MultiKeyManageContent({
                               className='text-muted-foreground'
                             />
                           )}
-                          {!currentResult && balance?.balance == null &&
+                          {!currentResult &&
+                            balance?.balance == null &&
                             balance?.last_known_balance != null && (
                               <p className='text-muted-foreground text-xs'>
                                 {t('Last known balance: {{balance}}', {

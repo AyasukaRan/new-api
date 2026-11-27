@@ -22,6 +22,13 @@ import { StaticDataTable } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampToDate } from '@/lib/format'
 
@@ -37,7 +44,12 @@ import {
   formatChannelBalanceSummary,
   getReportedChannelBalance,
 } from '../lib/channel-balance'
-import type { ChannelBalanceDetail, ChannelBalanceMonitor } from '../types'
+import { getKeyDailyBalanceDecrease } from '../lib/channel-key-monitoring'
+import type {
+  ChannelBalanceDetail,
+  ChannelBalanceMonitor,
+  ChannelBalanceSample,
+} from '../types'
 import { ChannelBalanceDetails } from './channel-balance-details'
 
 export function ChannelKeyBalanceValue({
@@ -125,6 +137,7 @@ function KeyBalanceGroups(props: { groups?: string[] }) {
 }
 
 export function ChannelBalanceSummary(props: {
+  history?: ChannelBalanceSample[]
   monitor: ChannelBalanceMonitor | null | undefined
   detail?: ChannelBalanceDetail | null
   storedCurrency?: string | null
@@ -240,20 +253,66 @@ export function ChannelBalanceSummary(props: {
                         undefined,
                         props.balanceRechargeMultiplier
                       )
-                if (keyResult) {
-                  return (
-                    <div>
-                      {formatChannelBalanceSummary(keyResult, 0, { locale })}
-                      <ChannelBalanceDetails result={keyDetail} />
-                    </div>
-                  )
-                }
+                const dailyDecrease = monitor?.configuration_changed
+                  ? null
+                  : getKeyDailyBalanceDecrease(
+                      props.history ?? [],
+                      row.index,
+                      props.balanceRechargeMultiplier
+                    )
                 return (
-                  <ChannelKeyBalanceValue
-                    row={row}
-                    currency={props.storedCurrency}
-                    balanceRechargeMultiplier={props.balanceRechargeMultiplier}
-                  />
+                  <div className='space-y-1'>
+                    {keyResult ? (
+                      <div>
+                        {formatChannelBalanceSummary(keyResult, 0, { locale })}
+                        <ChannelBalanceDetails result={keyDetail} />
+                      </div>
+                    ) : (
+                      <ChannelKeyBalanceValue
+                        row={row}
+                        currency={props.storedCurrency}
+                        balanceRechargeMultiplier={
+                          props.balanceRechargeMultiplier
+                        }
+                      />
+                    )}
+                    {props.history && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <Button
+                                type='button'
+                                variant='link'
+                                size='sm'
+                                className='text-muted-foreground h-auto p-0 text-left text-xs font-normal whitespace-normal'
+                              />
+                            }
+                          >
+                            {t('Daily balance decrease: {{amount}}', {
+                              amount:
+                                dailyDecrease === null
+                                  ? '—'
+                                  : formatChannelBalanceAmount(
+                                      dailyDecrease,
+                                      props.storedCurrency,
+                                      {
+                                        locale,
+                                        digitsSmall: 6,
+                                        abbreviate: false,
+                                      }
+                                    ),
+                            })}
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t(
+                              'Positive declines between consecutive successful balance readings, divided by their observed days. Recharges, gaps and account changes are excluded; at least 24 hours are required. Shared balances do not measure individual key spending.'
+                            )}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
+                  </div>
                 )
               },
             },

@@ -58,6 +58,11 @@ const (
 	MsgRelayRequestRejected              = "relay.request_rejected"
 	MsgRelayRequestPluginFailed          = "relay.request_plugin_failed"
 	MsgRelayResponseRejected             = "relay.response_rejected"
+
+	MsgRelayWeightedKeyUsageUnsupported        = "relay.weighted_key_usage_unsupported"
+	MsgRelayWeightedKeyUsageEstimateFailed     = "relay.weighted_key_usage_estimate_failed"
+	MsgRelayWeightedKeyUsageChannelUnavailable = "relay.weighted_key_usage_channel_unavailable"
+	MsgRelayWeightedKeyUsageStatsUnavailable   = "relay.weighted_key_usage_stats_unavailable"
 )
 
 // Emails and the name of the token created at registration, in the

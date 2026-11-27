@@ -247,6 +247,14 @@ export const channelFormSchema = z
           draft_id: z.string().optional(),
           key: z.string().optional(),
           enabled: z.boolean().optional(),
+          routing_weight: z
+            .number({
+              error: 'Key weight must be an integer between 1 and 1000',
+            })
+            .int('Key weight must be an integer between 1 and 1000')
+            .min(1, 'Key weight must be an integer between 1 and 1000')
+            .max(1000, 'Key weight must be an integer between 1 and 1000')
+            .optional(),
           upstream_cost_ratio: z
             .number({
               error: 'Upstream cost multiplier must be between 0 and 10000',
@@ -310,7 +318,9 @@ export const channelFormSchema = z
     other: z.string().optional(),
     // Multi-key options (not sent to backend directly)
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
-    multi_key_type: z.enum(['random', 'polling', 'failover']).optional(),
+    multi_key_type: z
+      .enum(['random', 'polling', 'failover', 'weighted_usage'])
+      .optional(),
     batch_add_set_key_prefix_2_name: z.boolean().optional(),
     key_mode: z.enum(['append', 'replace']).optional(), // For editing multi-key channels
     // Channel extra settings (stored in setting JSON, not sent directly)
@@ -1305,6 +1315,7 @@ function serializeChannelKeyConfigs(
       : { key: key.key?.trim() || '' }),
     groups: key.groups,
     upstream_cost_ratio: key.upstream_cost_ratio,
+    routing_weight: key.routing_weight ?? 1,
     ...(key.enabled === undefined ? {} : { enabled: key.enabled }),
   }))
 }

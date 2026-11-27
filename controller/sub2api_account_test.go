@@ -32,11 +32,14 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/keyusage"
 	relayopenai "github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -695,6 +698,100 @@ func TestSub2APIAccountDatabaseMatrix(t *testing.T) {
 					assert.Nil(t, bill.CostQuota)
 				}
 			}
+			t.Run("routing invoice repair never changes customer charges", func(t *testing.T) {
+				options := &redis.Options{Addr: os.Getenv("TEST_REDIS_ADDR"), Password: os.Getenv("TEST_REDIS_PASSWORD"), MaxRetries: -1}
+				if options.Addr == "" {
+					options.Addr = miniredis.RunT(t).Addr()
+				}
+				client := redis.NewClient(options)
+				require.NoError(t, client.Ping(ctx).Err())
+				oldRedis, oldEnabled := common.RDB, common.RedisEnabled
+				common.RDB, common.RedisEnabled = client, true
+				t.Cleanup(func() { common.RDB, common.RedisEnabled = oldRedis, oldEnabled; require.NoError(t, client.Close()) })
+				beforeReport, err := keyusage.Query(ctx, channel.Id, 24)
+				require.NoError(t, err)
+				var before keyusage.KeyStats
+				for _, stat := range beforeReport.Keys {
+					if stat.KeyIdentity == keyIdentity {
+						before = stat
+					}
+				}
+				var walletBefore model.User
+				require.NoError(t, db.First(&walletBefore, user.Id).Error)
+				var paidBill, freeBill model.Sub2APIBill
+				for _, bill := range bills {
+					if bill.ResponseID == "resp_http" {
+						paidBill = bill
+					}
+					if bill.RequestID == "client:exact" {
+						freeBill = bill
+					}
+				}
+				require.Positive(t, paidBill.ID)
+				require.Positive(t, freeBill.ID)
+				for _, bill := range []model.Sub2APIBill{paidBill, freeBill} {
+					reservation, err := keyusage.Reserve(ctx, channel.Id, common.NewRequestId(), []keyusage.Candidate{{Identity: keyIdentity, Weight: 1, InputTokens: 40, OutputTokens: 10, CostUSD: common.GetPointer(0.005)}}, "")
+					require.NoError(t, err)
+					require.NoError(t, keyusage.Finish(ctx, reservation, &keyusage.Observation{InputTokens: 40, OutputTokens: 10, CostUSD: common.GetPointer(0.005)}))
+					var source model.Log
+					require.NoError(t, db.First(&source, bill.LogID).Error)
+					var metadata map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(source.Other, &metadata))
+					metadata["admin_info"].(map[string]any)["key_routing"] = reservation
+					encoded, err := common.Marshal(metadata)
+					require.NoError(t, err)
+					require.NoError(t, db.Model(&source).Update("other", string(encoded)).Error)
+					// The invoice is already durable. A projection outage must only
+					// schedule repair, including when settlement itself is replayed.
+					common.RedisEnabled = false
+					require.NoError(t, model.SettleSub2APIBill(ctx, bill, bill.UsageID, bill.APIKeyID, bill.RequestID, "9", bill.BillingType, bill.RateMultiplier))
+					var queued model.Sub2APIBill
+					require.NoError(t, db.First(&queued, bill.ID).Error)
+					assert.Positive(t, queued.NextSyncAt)
+					assert.Equal(t, bill.ActualCostUSD, queued.ActualCostUSD, "replay must retain the committed supplier amount")
+					common.RedisEnabled = true
+				}
+				require.NoError(t, model.RepairSub2APIKeyUsage(ctx, channel.Id))
+				require.NoError(t, model.RepairSub2APIKeyUsage(ctx, channel.Id))
+				report, err := keyusage.Query(ctx, channel.Id, 24)
+				require.NoError(t, err)
+				var found *keyusage.KeyStats
+				for i := range report.Keys {
+					if report.Keys[i].KeyIdentity == keyIdentity {
+						found = &report.Keys[i]
+					}
+				}
+				require.NotNil(t, found)
+				require.NotNil(t, found.CostUSD)
+				beforeCost := 0.0
+				if before.CostUSD != nil {
+					beforeCost = *before.CostUSD
+				}
+				assert.InDelta(t, 0.000001, *found.CostUSD-beforeCost, 1e-12)
+				assert.EqualValues(t, 2, found.ActualCostRequests-before.ActualCostRequests, "zero-cost invoices are known actual costs")
+				assert.EqualValues(t, 80, found.InputTokens-before.InputTokens)
+				assert.EqualValues(t, 20, found.OutputTokens-before.OutputTokens)
+				var walletAfter model.User
+				require.NoError(t, db.First(&walletAfter, user.Id).Error)
+				assert.Equal(t, walletBefore.Quota, walletAfter.Quota)
+				var source model.Log
+				require.NoError(t, db.First(&source, paidBill.LogID).Error)
+				assert.Equal(t, 17, source.Quota)
+				// A durable supplier amount may exceed the bounded routing
+				// projection. Retain the invoice and stop retrying that amount.
+				originalActualUSD, originalCostQuota := paidBill.ActualCostUSD, *paidBill.CostQuota
+				tooLarge := float64(keyusage.MaxCostUSD + 1)
+				require.NoError(t, db.Model(&paidBill).Updates(map[string]any{"actual_cost_usd": fmt.Sprint(tooLarge), "cost_quota": tooLarge * common.QuotaPerUnit, "next_sync_at": common.GetTimestamp()}).Error)
+				assert.ErrorIs(t, model.RepairSub2APIKeyUsage(ctx, channel.Id), keyusage.ErrCostOutOfRange)
+				var unprojectable model.Sub2APIBill
+				require.NoError(t, db.First(&unprojectable, paidBill.ID).Error)
+				assert.Equal(t, fmt.Sprint(tooLarge), unprojectable.ActualCostUSD)
+				assert.Zero(t, unprojectable.NextSyncAt)
+				require.NoError(t, model.RepairSub2APIKeyUsage(ctx, channel.Id))
+				require.NoError(t, db.First(&walletAfter, user.Id).Error)
+				assert.Equal(t, walletBefore.Quota, walletAfter.Quota)
+				require.NoError(t, db.Model(&paidBill).Updates(map[string]any{"actual_cost_usd": originalActualUSD, "cost_quota": originalCostQuota, "next_sync_at": 0}).Error)
+			})
 			incompleteRate.Store(true)
 			require.NoError(t, model.UpdateSub2APIInventory(ctx, account.ID, nil, func(state *model.Sub2APISyncState) error { state.NextAttemptAt = 0; return nil }))
 			err = service.SyncSub2APIChannel(ctx, channel.Id, account.ID)
