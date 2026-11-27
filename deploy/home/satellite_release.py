@@ -271,6 +271,10 @@ class SatelliteRollout:
               and self.state['new']['version'] == self.args.version, 'release_arguments_changed')
         check(inspect(CADDY)['Id'] == self.state['caddy_id'], 'caddy_container_changed')
         check(inspect(self.args.image, image=True)['Id'] == self.state['new']['image_id'], 'image_tag_changed')
+        check(self.state['bootstrap'] or REGISTRY.exists(), 'active_registry_missing')
+        if REGISTRY.exists():
+            check(read_json(REGISTRY)['id'] in (self.state['old']['id'], self.state['new'].get('id')),
+                  'superseded_release_journal')
         if self.state['phase'] not in ('prepared', 'bootstrap_maintenance', 'bootstrap_stop', 'bootstrap_start', 'bootstrap_config', 'bootstrap_rollback') and not (
                 self.state['bootstrap'] and self.state['phase'] == 'rolled_back'):
             check(CONFIG.read_bytes() == caddy_config(), 'caddy_configuration_changed')
@@ -343,6 +347,9 @@ class SatelliteRollout:
         if self.state['phase'] == 'rolled_back':
             return True
         if self.state['bootstrap']:
+            participants = {old['id'], new.get('id')}
+            for identity in command('docker', 'ps', '--filter', 'label=io.new-api.satellite-rollout', '--format', '{{.ID}}').splitlines():
+                check(inspect(identity)['Id'] in participants, 'another_satellite_worker_is_running')
             if new.get('id'):
                 if self.item(new)['State']['Running']:
                     if not self.drained(new):

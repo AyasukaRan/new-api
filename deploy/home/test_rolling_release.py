@@ -834,6 +834,31 @@ class SatelliteReleaseTests(unittest.TestCase):
                 self.assertEqual(flow.state['phase'], 'prepared')
                 load.assert_not_called()
 
+    def test_satellite_rejects_a_journal_superseded_by_a_later_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / 'active.json'
+            registry.write_text(json.dumps({'id': 'later-green'}))
+            flow = object.__new__(satellite.SatelliteRollout)
+            flow.args = argparse.Namespace(commit='commit', image='image', version='version')
+            flow.state = {'commit': 'commit', 'image': 'image', 'bootstrap': True, 'caddy_id': 'caddy',
+                          'old': {'id': 'legacy'}, 'new': {'id': 'first-blue', 'image_id': 'image', 'version': 'version'}}
+            with patch.object(satellite, 'REGISTRY', registry), patch.object(satellite, 'inspect',
+                    side_effect=lambda name, **_: {'Id': 'image' if name == 'image' else 'caddy'}):
+                with self.assertRaisesRegex(RuntimeError, 'superseded_release_journal'):
+                    flow.guard()
+
+    def test_satellite_legacy_rollback_refuses_another_running_sync_worker(self):
+        flow = object.__new__(satellite.SatelliteRollout)
+        flow.state = {'phase': 'complete', 'bootstrap': True, 'old': {'id': 'legacy'}, 'new': {'id': 'blue'}}
+        flow.guard = lambda: None
+        with patch.object(satellite, 'command', return_value='unexpected-green') as command, \
+                patch.object(satellite, 'inspect', return_value={'Id': 'unexpected-green'}), \
+                patch.object(satellite, 'load_caddy') as load:
+            with self.assertRaisesRegex(RuntimeError, 'another_satellite_worker_is_running'):
+                flow.rollback()
+            self.assertEqual(len(command.call_args_list), 1)
+            load.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
