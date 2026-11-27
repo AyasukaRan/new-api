@@ -30,6 +30,7 @@ import {
   formatFirstResponseTime,
   getFirstResponseTimeColor,
 } from '../lib/format'
+import { getLongContextBilling } from '../lib/long-context-billing'
 import { isDisplayableLogType, isTimingLogType } from '../lib/utils'
 import type { LogOtherData } from '../types'
 import { CacheHitRing } from './cache-hit-rate'
@@ -37,6 +38,7 @@ import { LogDurationPopover } from './log-duration-popover'
 import { renderLogMetricTerm } from './log-metric-icons'
 import { LogMetricPopover } from './log-metric-popover'
 import { LogTokenBreakdown } from './log-token-breakdown'
+import { LongContextBillingTag } from './long-context-billing-tag'
 
 const metricGroup =
   'grid auto-rows-[1.15rem] grid-cols-[max-content_max-content] content-center items-center justify-start gap-x-[5px] [&>dt]:text-muted-foreground [&>dd]:justify-self-start [&>dd]:text-start [&>dd]:font-mono [&>dd]:text-xs [&>dd]:font-semibold'
@@ -60,6 +62,7 @@ export function TokenPerformanceCell(props: {
     ? { total: null, read: null, write: null, percent: null }
     : totals.cache
   const hasTokens = !log.in_progress && totals.hasUsage
+  const longContext = log.in_progress ? null : getLongContextBilling(other)
   const metered = log.in_progress ? undefined : other?.metered_usage
   const tokenlessTask =
     !log.in_progress &&
@@ -114,7 +117,7 @@ export function TokenPerformanceCell(props: {
         !tokenlessTask && (
           <dl className={cn(metricGroup, 'relative')}>
             {renderLogMetricTerm('Total input tokens', t)}
-            <dd className='text-emerald-700 dark:text-emerald-300'>
+            <dd className='inline-flex items-center gap-0.5 text-emerald-700 dark:text-emerald-300'>
               {hasTokens ? (
                 <LogMetricPopover
                   label={t('Token Breakdown')}
@@ -133,6 +136,11 @@ export function TokenPerformanceCell(props: {
                 </LogMetricPopover>
               ) : (
                 '—'
+              )}
+              {longContext && (
+                <span className='relative z-10 inline-flex'>
+                  <LongContextBillingTag billing={longContext} />
+                </span>
               )}
             </dd>
             {renderLogMetricTerm('Output Tokens', t)}

@@ -33,11 +33,9 @@ import { cn } from '@/lib/utils'
 
 import type { UsageLog } from '../data/schema'
 import { formatModelName, getLogMetadata, logTokenName } from '../lib/format'
-import { getLongContextBilling } from '../lib/long-context-billing'
 import { isDisplayableLogType, isTimingLogType } from '../lib/utils'
 import { LogGroupLabel } from './log-identity-cells'
 import { useLogValueFilter } from './log-value-filter'
-import { LongContextBillingTag } from './long-context-billing-tag'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { RequestMetadataTags } from './request-metadata-tags'
 import { TokenPerformanceCell } from './token-performance-cell'
@@ -66,7 +64,6 @@ export function CommonLogMobileCard<TData>(props: {
   const displayable = log.in_progress || isDisplayableLogType(log.type)
   const timing = log.in_progress || isTimingLogType(log.type)
   const model = formatModelName(log)
-  const longContext = log.in_progress ? null : getLongContextBilling(other)
   const group = log.group || other?.group || ''
   const fields: Record<FieldName, LogField> = {
     model: {
@@ -160,7 +157,6 @@ export function CommonLogMobileCard<TData>(props: {
                 wrapText
                 onInspect={() => setSelectedField('model')}
               />
-              <LongContextBillingTag billing={longContext} />
             </div>
           )}
           {fields.cost.visible && costCell && (

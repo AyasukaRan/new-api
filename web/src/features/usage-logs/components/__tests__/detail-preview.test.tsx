@@ -244,7 +244,7 @@ test.each(['desktop', 'mobile', 'receipt'] as const)(
             <DetailPreview
               isAdmin={false}
               other={longContextOther}
-              columnId='model_name'
+              columnId='prompt_tokens'
               mobile={surface === 'mobile'}
             />
           )}
@@ -253,6 +253,12 @@ test.each(['desktop', 'mobile', 'receipt'] as const)(
     )
     const tag = screen.getByRole('note', { name: 'Long context' })
     expect(tag).toBeVisible()
+    if (surface !== 'receipt') {
+      expect(tag.closest('dd')).toBe(
+        screen.getByRole('term', { name: 'Total input tokens' })
+          .nextElementSibling
+      )
+    }
     if (surface === 'receipt') await user.hover(tag)
     else act(() => tag.focus())
     const tooltip = await screen.findByRole('tooltip')
@@ -295,7 +301,7 @@ test.each([
         <DetailPreview
           isAdmin
           other={other}
-          columnId='model_name'
+          columnId='prompt_tokens'
           inProgress={inProgress}
         />
       </QueryClientProvider>

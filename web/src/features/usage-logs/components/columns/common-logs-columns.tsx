@@ -74,7 +74,6 @@ import {
   getRetryDecisionReason,
   isFailedStreamResponse,
 } from '../../lib/format'
-import { getLongContextBilling } from '../../lib/long-context-billing'
 import { summarizeRequestFailure } from '../../lib/request-failure-summary'
 import {
   isDisplayableLogType,
@@ -93,7 +92,6 @@ import { LogCostDisplay } from '../log-cost-display'
 import { LogHeaderFilter } from '../log-header-filter'
 import { LogAccountCell, LogSourceCell } from '../log-identity-cells'
 import { LogFilterValue, useLogValueFilter } from '../log-value-filter'
-import { LongContextBillingTag } from '../long-context-billing-tag'
 import { ModelBadge } from '../model-badge'
 import { RequestMetadataTags } from '../request-metadata-tags'
 import { RequestPluginLogMarker } from '../request-plugin-record'
@@ -731,9 +729,6 @@ export function useCommonLogsColumns(
         const model = formatModelName(row.original)
         const other = getLogMetadata(row.original)
         const requestPlugins = other?.request_plugins
-        const longContext = row.original.in_progress
-          ? null
-          : getLongContextBilling(other)
         return (
           <div className='flex w-max max-w-44 min-w-0 flex-col items-start gap-1'>
             <ModelBadge
@@ -743,14 +738,9 @@ export function useCommonLogsColumns(
               actualModel={model.actualModel}
               responseModel={model.responseModel}
             />
-            {(longContext || requestPlugins?.length) && (
-              <div className='flex max-w-full flex-wrap items-center gap-1'>
-                <LongContextBillingTag billing={longContext} />
-                {requestPlugins?.length ? (
-                  <RequestPluginLogMarker items={requestPlugins} />
-                ) : null}
-              </div>
-            )}
+            {requestPlugins?.length ? (
+              <RequestPluginLogMarker items={requestPlugins} />
+            ) : null}
             {compact && (
               <div className='flex w-full max-w-full flex-wrap items-center gap-1 [contain:inline-size] empty:hidden'>
                 {table.getState().columnVisibility.reasoning_effort !==

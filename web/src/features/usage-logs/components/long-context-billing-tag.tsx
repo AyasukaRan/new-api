@@ -16,9 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Layers } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { StatusBadge } from '@/components/status-badge'
 import {
   Tooltip,
   TooltipContent,
@@ -40,16 +40,9 @@ export function LongContextBillingTag(props: {
       <TooltipTrigger
         render={<span role='note' tabIndex={0} />}
         aria-label={t('Long context')}
-        className='focus-visible:ring-ring inline-flex w-fit shrink-0 cursor-help rounded-sm focus-visible:ring-2 focus-visible:outline-none'
+        className='focus-visible:ring-ring inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-sm text-amber-700 hover:text-amber-800 focus-visible:text-amber-800 focus-visible:ring-2 focus-visible:outline-none dark:text-amber-400/85 dark:hover:text-amber-300 dark:focus-visible:text-amber-300'
       >
-        <StatusBadge
-          label={t('Long context')}
-          variant='amber'
-          size='sm'
-          copyable={false}
-          showDot={false}
-          className='text-[11px]'
-        />
+        <Layers className='size-3.5' aria-hidden='true' />
       </TooltipTrigger>
       <TooltipContent role='tooltip' className='max-w-xs'>
         <dl className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1'>
