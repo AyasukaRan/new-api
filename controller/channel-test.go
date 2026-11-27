@@ -1682,6 +1682,11 @@ func runChannelTestTask(ctx context.Context, _ string, notify bool, report func(
 	if err != nil {
 		return channelTestSummary{}, err
 	}
+	if common.IsSatellite() {
+		// Only recover failed local credentials, even for a queued manual task.
+		// Shared monitoring settings must not duplicate full upstream probes.
+		return runChannelKeyRecoveryTests(ctx, testUserID)
+	}
 	_, automatic := ctx.Value(channelIdleProbeIntervalKey{}).(time.Duration)
 	var summary channelTestSummary
 	if automatic {

@@ -81,6 +81,8 @@ func channelKeyObservationID(channel *Channel, modelName, key string, legacy boo
 			return "", errors.New("invalid channel key configuration")
 		}
 	}
+	// Health follows the actual node route; billing identities retain stored settings.
+	setting.Proxy = channel.GetSetting().Proxy
 	setting.BalanceQueryDisabled = false
 	setting.BalanceRechargeMultiplier = nil
 	setting.BalanceEmailEnabled = false

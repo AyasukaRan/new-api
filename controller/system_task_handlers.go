@@ -74,7 +74,7 @@ func (channelTestHandler) ShouldSchedule(now time.Time, latest *model.SystemTask
 	if len(recovery) > 0 && (latest == nil || now.Sub(time.Unix(latest.UpdatedAt, 0)) >= channelKeyRecoveryInterval) {
 		return true, nil
 	}
-	if !operation_setting.GetMonitorSetting().AutoTestChannelEnabled {
+	if common.IsSatellite() || !operation_setting.GetMonitorSetting().AutoTestChannelEnabled {
 		return false, nil
 	}
 	var channels []model.Channel

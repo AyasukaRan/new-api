@@ -182,6 +182,31 @@ func TestSystemTaskClaimPassDispatchesByType(t *testing.T) {
 		latest, err := model.GetLatestSystemTask(handler.taskType)
 		return err == nil && latest != nil && latest.Status == model.SystemTaskStatusSucceeded
 	}, 2*time.Second, 20*time.Millisecond)
+
+	t.Run("satellite_recovers_without_enabling_primary_jobs", func(t *testing.T) {
+		t.Setenv("SATELLITE_ROLE", "satellite")
+		recovery := *handler
+		recovery.taskType = model.SystemTaskTypeChannelTest
+		blocked := &stubScheduledHandler{taskType: model.SystemTaskTypeChannelBalance, enabled: true, interval: time.Minute}
+		withSystemTaskRegistry(t, &recovery, blocked)
+		runSystemTaskScheduler()
+		require.EqualValues(t, 1, countSystemTasks(t, recovery.taskType), "recovery must reach the satellite scheduler")
+		require.Zero(t, countSystemTasks(t, blocked.taskType), "primary-only jobs remain unscheduled")
+		_, err := model.CreateSystemTask(blocked.taskType, nil, nil)
+		require.NoError(t, err)
+		runSystemTaskClaimPass("satellite-recovery")
+		select {
+		case got := <-ran:
+			require.NoError(t, got.err)
+			assert.Equal(t, recovery.taskType, got.taskType)
+		case <-time.After(2 * time.Second):
+			t.Fatal("satellite did not execute the recovery task")
+		}
+		pending, err := model.GetLatestSystemTask(blocked.taskType)
+		require.NoError(t, err)
+		require.NotNil(t, pending)
+		assert.Equal(t, model.SystemTaskStatusPending, pending.Status, "pre-existing primary work must not run on a satellite")
+	})
 }
 
 func TestSystemTaskClaimPassDispatchesEarliestPendingByType(t *testing.T) {

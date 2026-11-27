@@ -76,7 +76,7 @@ func registeredSystemTaskHandlers() []SystemTaskHandler {
 	defer systemTaskHandlersMu.RUnlock()
 	handlers := make([]SystemTaskHandler, 0, len(systemTaskHandlers))
 	for _, h := range systemTaskHandlers {
-		if common.IsSatellite() && h.Type() != model.SystemTaskTypeMidjourneyPoll && h.Type() != model.SystemTaskTypeAsyncTaskPoll {
+		if common.IsSatellite() && h.Type() != model.SystemTaskTypeMidjourneyPoll && h.Type() != model.SystemTaskTypeAsyncTaskPoll && h.Type() != model.SystemTaskTypeChannelTest {
 			continue
 		}
 		handlers = append(handlers, h)
